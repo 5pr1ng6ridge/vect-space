@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContentManifest",
+  "type": "object",
+  "properties": {
+    "assets": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/AssetDefinition"
+      }
+    },
+    "content_version": {
+      "type": "string"
+    },
+    "default_locale": {
+      "type": "string",
+      "default": "zh-CN"
+    },
+    "entry_scene": {
+      "type": "string"
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "content_version",
+    "entry_scene",
+    "assets",
+    "scenes"
+  ],
+  "$defs": {
+    "AssetDefinition": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/AssetKind"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "path"
+      ]
+    },
+    "AssetKind": {
+      "type": "string",
+      "enum": [
+        "background",
+        "sprite",
+        "gui",
+        "bgm",
+        "sfx",
+        "font"
+      ]
+    }
+  }
+}

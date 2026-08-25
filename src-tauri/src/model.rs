@@ -1,0 +1,465 @@
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+pub type VariableMap = BTreeMap<String, ScalarValue>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ScalarValue {
+    Boolean(bool),
+    Integer(i64),
+    Number(f64),
+    Text(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContentManifest {
+    pub schema_version: u32,
+    pub content_version: String,
+    pub entry_scene: String,
+    #[serde(default = "default_locale")]
+    pub default_locale: String,
+    pub assets: BTreeMap<String, AssetDefinition>,
+    pub scenes: Vec<String>,
+}
+
+fn default_locale() -> String {
+    "zh-CN".to_owned()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssetDefinition {
+    pub kind: AssetKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKind {
+    Background,
+    Sprite,
+    Gui,
+    Bgm,
+    Sfx,
+    Font,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SceneDefinition {
+    pub schema_version: u32,
+    pub id: String,
+    pub entry: String,
+    pub nodes: BTreeMap<String, SceneNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SceneNode {
+    Background {
+        background: Option<String>,
+        #[serde(default)]
+        transition: BackgroundTransition,
+        #[serde(default = "default_medium_duration")]
+        duration_ms: u64,
+        #[serde(default)]
+        easing: Easing,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    Sprite {
+        sprite_id: String,
+        action: SpriteAction,
+        asset: Option<String>,
+        x: Option<f32>,
+        y: Option<f32>,
+        scale: Option<f32>,
+        opacity: Option<f32>,
+        z: Option<i32>,
+        #[serde(default = "default_medium_duration")]
+        duration_ms: u64,
+        #[serde(default)]
+        easing: Easing,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    Say {
+        speaker: Option<String>,
+        text: String,
+        #[serde(default)]
+        speed_cps: Option<f32>,
+        next: String,
+    },
+    Choice {
+        choices: Vec<ChoiceDefinition>,
+    },
+    Set {
+        variable: String,
+        value: ScalarValue,
+        next: String,
+    },
+    Branch {
+        variable: String,
+        equals: ScalarValue,
+        then: String,
+        otherwise: String,
+    },
+    Jump {
+        #[serde(default)]
+        scene: Option<String>,
+        target: String,
+    },
+    Wait {
+        duration_ms: u64,
+        next: String,
+    },
+    Bgm {
+        action: AudioAction,
+        asset: Option<String>,
+        #[serde(default = "default_volume")]
+        volume: f32,
+        #[serde(default = "default_medium_duration")]
+        duration_ms: u64,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    Sfx {
+        asset: String,
+        #[serde(default = "default_volume")]
+        volume: f32,
+        next: String,
+    },
+    Camera {
+        x: f32,
+        y: f32,
+        zoom: f32,
+        #[serde(default = "default_medium_duration")]
+        duration_ms: u64,
+        #[serde(default)]
+        easing: Easing,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    ScreenEffect {
+        effect: ScreenEffectKind,
+        #[serde(default = "default_short_duration")]
+        duration_ms: u64,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    DialogueUi {
+        visible: bool,
+        #[serde(default = "default_short_duration")]
+        duration_ms: u64,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    End,
+}
+
+fn default_short_duration() -> u64 {
+    200
+}
+
+fn default_medium_duration() -> u64 {
+    500
+}
+
+fn default_volume() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceDefinition {
+    pub id: String,
+    pub label: String,
+    pub next: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpriteAction {
+    Show,
+    Move,
+    Hide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioAction {
+    Start,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundTransition {
+    Cut,
+    #[default]
+    CrossFade,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Easing {
+    Linear,
+    EaseIn,
+    EaseOut,
+    #[default]
+    EaseInOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenEffectKind {
+    Shake,
+    Flash,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshot {
+    pub revision: u64,
+    pub location: StoryLocation,
+    pub variables: VariableMap,
+    pub world: WorldSnapshot,
+    pub audio: AudioSnapshot,
+    pub prompt: PromptSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoryLocation {
+    pub scene_id: String,
+    pub node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorldSnapshot {
+    pub background: Option<String>,
+    pub sprites: BTreeMap<String, SpriteSnapshot>,
+    pub camera: CameraSnapshot,
+    pub dialogue_ui_visible: bool,
+    pub persistent_effects: Vec<String>,
+}
+
+impl Default for WorldSnapshot {
+    fn default() -> Self {
+        Self {
+            background: None,
+            sprites: BTreeMap::new(),
+            camera: CameraSnapshot::default(),
+            dialogue_ui_visible: true,
+            persistent_effects: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpriteSnapshot {
+    pub asset: String,
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub opacity: f32,
+    pub z: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CameraSnapshot {
+    pub x: f32,
+    pub y: f32,
+    pub zoom: f32,
+}
+
+impl Default for CameraSnapshot {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AudioSnapshot {
+    pub bgm: Option<LoopingAudioSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoopingAudioSnapshot {
+    pub asset: String,
+    pub volume: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PromptSnapshot {
+    #[default]
+    None,
+    Dialogue {
+        prompt_id: String,
+        speaker: Option<String>,
+        text: String,
+    },
+    Choice {
+        prompt_id: String,
+        choices: Vec<ChoiceSnapshot>,
+    },
+    End {
+        prompt_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceSnapshot {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeUpdate {
+    pub update_id: u64,
+    pub snapshot: RuntimeSnapshot,
+    pub cues: Vec<PresentationCue>,
+    pub requires_ack: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PresentationCue {
+    pub cue_id: u64,
+    pub gate: CueGate,
+    #[serde(flatten)]
+    pub kind: PresentationCueKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CueGate {
+    None,
+    PlayerAdvance,
+    Runtime,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PresentationCueKind {
+    BackgroundTransition {
+        background: Option<String>,
+        transition: BackgroundTransition,
+        duration_ms: u64,
+        easing: Easing,
+    },
+    SpriteTween {
+        sprite_id: String,
+        from: Option<SpriteSnapshot>,
+        to: Option<SpriteSnapshot>,
+        duration_ms: u64,
+        easing: Easing,
+    },
+    CameraTween {
+        from: CameraSnapshot,
+        to: CameraSnapshot,
+        duration_ms: u64,
+        easing: Easing,
+    },
+    ScreenEffect {
+        effect: ScreenEffectKind,
+        duration_ms: u64,
+    },
+    DialogueReveal {
+        prompt_id: String,
+        speed_cps: f32,
+    },
+    DialogueUiTransition {
+        visible: bool,
+        duration_ms: u64,
+    },
+    PlaySfx {
+        asset: String,
+        volume: f32,
+    },
+    BgmTransition {
+        from: Option<LoopingAudioSnapshot>,
+        to: Option<LoopingAudioSnapshot>,
+        duration_ms: u64,
+    },
+    Delay {
+        duration_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapPayload {
+    pub update: RuntimeUpdate,
+    pub asset_ids: Vec<String>,
+    pub content_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedAsset {
+    pub id: String,
+    pub kind: AssetKind,
+    pub absolute_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveSlotSummary {
+    pub slot: String,
+    pub exists: bool,
+    pub saved_at_unix_ms: Option<u64>,
+    pub scene_id: Option<String>,
+    pub prompt_preview: Option<String>,
+    pub thumbnail_data_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    pub master_volume: f32,
+    pub bgm_volume: f32,
+    pub sfx_volume: f32,
+    pub text_speed_cps: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            master_volume: 1.0,
+            bgm_volume: 0.7,
+            sfx_volume: 0.8,
+            text_speed_cps: 30.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveSlotRequest {
+    pub slot: String,
+    pub thumbnail_data_url: Option<String>,
+}

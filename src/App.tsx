@@ -1,0 +1,708 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+} from "react";
+
+import "katex/dist/katex.min.css";
+import "./App.css";
+
+import { DialogueBox, type DialogueBoxHandle } from "./components/DialogueBox";
+import { MarkupText } from "./components/MarkupText";
+import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
+import { engineApi, resolvedAssetsToUrls } from "./engine/api";
+import type {
+  AssetUrlMap,
+  BootstrapPayload,
+  ChoicePrompt,
+  DialoguePrompt,
+  RuntimeUpdate,
+  SaveSlotSummary,
+  Settings,
+} from "./engine/types";
+import { useViewportMetrics } from "./viewport/viewport";
+
+const DEFAULT_SETTINGS: Settings = {
+  master_volume: 1,
+  bgm_volume: 0.7,
+  sfx_volume: 0.8,
+  text_speed_cps: 30,
+};
+
+type Phase = "booting" | "title" | "playing";
+type Panel = "none" | "saves" | "settings";
+
+interface InitialAppState {
+  bootstrap: BootstrapPayload;
+  settings: Settings;
+  slots: SaveSlotSummary[];
+  assets: AssetUrlMap;
+}
+
+let initialAppStatePromise: Promise<InitialAppState> | null = null;
+
+export default function App(): ReactElement {
+  const { style: viewportStyle } = useViewportMetrics();
+  const sceneRef = useRef<SceneCanvasHandle>(null);
+  const dialogueRef = useRef<DialogueBoxHandle>(null);
+  const phaseRef = useRef<Phase>("booting");
+  const busyRef = useRef(false);
+  const acknowledgedUpdates = useRef(new Set<number>());
+  const autosavedRevisions = useRef(new Set<number>());
+
+  const [phase, setPhase] = useState<Phase>("booting");
+  const [panel, setPanel] = useState<Panel>("none");
+  const [update, setUpdate] = useState<RuntimeUpdate | null>(null);
+  const [assets, setAssets] = useState<AssetUrlMap>({});
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [draftSettings, setDraftSettings] =
+    useState<Settings>(DEFAULT_SETTINGS);
+  const [saveSlots, setSaveSlots] = useState<SaveSlotSummary[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [contentVersion, setContentVersion] = useState("");
+  const [typingSfxActive, setTypingSfxActive] = useState(false);
+
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  useEffect(() => {
+    let active = true;
+    void getInitialAppState()
+      .then(({ bootstrap, settings: loadedSettings, slots, assets }) => {
+        if (!active) {
+          return;
+        }
+        setAssets(assets);
+        setSettings(loadedSettings);
+        setDraftSettings(loadedSettings);
+        setSaveSlots(slots);
+        setUpdate(bootstrap.update);
+        setContentVersion(bootstrap.content_version);
+        setPhase("title");
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setError(errorMessage(reason));
+          setPhase("title");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const fontUrl = assets["font.fusion_pixel"];
+    if (fontUrl === undefined) {
+      return;
+    }
+    let active = true;
+    const face = new FontFace("VECT Pixel", `url("${fontUrl}")`, {
+      display: "swap",
+    });
+    document.fonts.add(face);
+    void face.load().catch((reason: unknown) => {
+      if (active) {
+        setError(`中文字体加载失败：${errorMessage(reason)}`);
+      }
+    });
+    return () => {
+      active = false;
+      document.fonts.delete(face);
+    };
+  }, [assets]);
+
+  const refreshSlots = useCallback(async (): Promise<void> => {
+    setSaveSlots(await engineApi.listSaveSlots());
+  }, []);
+
+  const applyUpdate = useCallback((next: RuntimeUpdate): void => {
+    setUpdate(next);
+  }, []);
+
+  const runStoryCommand = useCallback(
+    async (command: () => Promise<RuntimeUpdate>): Promise<void> => {
+      if (busyRef.current) {
+        return;
+      }
+      busyRef.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        applyUpdate(await command());
+      } catch (reason) {
+        setError(errorMessage(reason));
+      } finally {
+        busyRef.current = false;
+        setBusy(false);
+      }
+    },
+    [applyUpdate],
+  );
+
+  const handlePresentationSettled = useCallback(
+    (settled: RuntimeUpdate): void => {
+      if (settled.requires_ack) {
+        if (acknowledgedUpdates.current.has(settled.update_id)) {
+          return;
+        }
+        acknowledgedUpdates.current.add(settled.update_id);
+        void runStoryCommand(() =>
+          engineApi.presentationComplete(settled.update_id),
+        );
+        return;
+      }
+
+      const prompt = settled.snapshot.prompt;
+      const isStable = prompt.kind !== "none" && phaseRef.current === "playing";
+      if (
+        !isStable ||
+        autosavedRevisions.current.has(settled.snapshot.revision)
+      ) {
+        return;
+      }
+      autosavedRevisions.current.add(settled.snapshot.revision);
+      const thumbnail = sceneRef.current?.captureThumbnail() ?? null;
+      void engineApi
+        .saveSlot("auto", thumbnail)
+        .then(() => refreshSlots())
+        .catch((reason: unknown) => console.error("Autosave failed", reason));
+    },
+    [refreshSlots, runStoryCommand],
+  );
+
+  const startNewGame = (): void => {
+    setPhase("playing");
+    phaseRef.current = "playing";
+    setPanel("none");
+    void sceneRef.current?.unlockAudio();
+    void runStoryCommand(engineApi.startNewGame);
+  };
+
+  const advance = useCallback((): void => {
+    const snapshot = update?.snapshot;
+    if (snapshot === undefined || snapshot.prompt.kind !== "dialogue") {
+      return;
+    }
+    void runStoryCommand(() => engineApi.advance(snapshot.revision));
+  }, [runStoryCommand, update]);
+
+  const choose = (choiceId: string): void => {
+    const snapshot = update?.snapshot;
+    if (snapshot === undefined || snapshot.prompt.kind !== "choice") {
+      return;
+    }
+    void runStoryCommand(() => engineApi.choose(choiceId, snapshot.revision));
+  };
+
+  const saveManual = async (slot: string): Promise<void> => {
+    if (busyRef.current) {
+      return;
+    }
+    setError(null);
+    try {
+      await engineApi.saveSlot(
+        slot,
+        sceneRef.current?.captureThumbnail() ?? null,
+      );
+      await refreshSlots();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  };
+
+  const load = (slot: string): void => {
+    setPhase("playing");
+    phaseRef.current = "playing";
+    setPanel("none");
+    void sceneRef.current?.unlockAudio();
+    void runStoryCommand(() => engineApi.loadSlot(slot));
+  };
+
+  const persistSettings = async (): Promise<void> => {
+    try {
+      const saved = await engineApi.saveSettings(draftSettings);
+      setSettings(saved);
+      setDraftSettings(saved);
+      setPanel("none");
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  };
+
+  const toggleFullscreen = async (): Promise<void> => {
+    try {
+      const window = getCurrentWindow();
+      await window.setFullscreen(!(await window.isFullscreen()));
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  };
+
+  const dialogue =
+    update?.snapshot.prompt.kind === "dialogue" ? update.snapshot.prompt : null;
+  const choice =
+    update?.snapshot.prompt.kind === "choice" ? update.snapshot.prompt : null;
+  const revealCps = useMemo(
+    () => dialogueRevealSpeed(update, dialogue) ?? settings.text_speed_cps,
+    [dialogue, settings.text_speed_cps, update],
+  );
+  const runtimeLocked = update?.requires_ack ?? false;
+  const autoSlot = saveSlots.find((slot) => slot.slot === "auto");
+  const handleTypingChange = useCallback((typing: boolean): void => {
+    setTypingSfxActive(typing);
+  }, []);
+  const handlePlayerAdvance = useCallback((): void => {
+    if (
+      phaseRef.current !== "playing" ||
+      panel !== "none" ||
+      busyRef.current ||
+      runtimeLocked ||
+      dialogue === null ||
+      !update?.snapshot.world.dialogue_ui_visible
+    ) {
+      return;
+    }
+
+    void sceneRef.current?.unlockAudio();
+    if (!dialogueRef.current?.isComplete()) {
+      dialogueRef.current?.complete();
+      return;
+    }
+    advance();
+  }, [advance, dialogue, panel, runtimeLocked, update]);
+
+  useEffect(() => {
+    const handleClick = (event: MouseEvent): void => {
+      if (
+        event.button === 0 &&
+        !event.defaultPrevented &&
+        !isInteractiveTarget(event.target)
+      ) {
+        handlePlayerAdvance();
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (
+        event.key === "Enter" &&
+        !event.repeat &&
+        !event.defaultPrevented &&
+        !isInteractiveTarget(event.target)
+      ) {
+        event.preventDefault();
+        handlePlayerAdvance();
+      }
+    };
+    window.addEventListener("click", handleClick);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("click", handleClick);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handlePlayerAdvance]);
+
+  return (
+    <main className="app-shell">
+      <section className="game-viewport" style={viewportStyle}>
+        <SceneCanvas
+          assets={assets}
+          onDiagnostic={setError}
+          onSettled={handlePresentationSettled}
+          ref={sceneRef}
+          settings={settings}
+          typingSfxActive={typingSfxActive}
+          update={update}
+        />
+
+        {phase === "booting" && (
+          <div className="boot-screen">
+            <div className="loader" />
+            <p>正在校验内容与启动运行时…</p>
+          </div>
+        )}
+
+        {phase === "title" && (
+          <div className="title-screen">
+            <div className="title-card">
+              <p className="eyebrow">A MATHEMATICAL VISUAL NOVEL</p>
+              <h1>VECTSPACE</h1>
+              <p className="title-formula">
+                <MarkupText source="$V=U\oplus W$" />
+              </p>
+              <div className="title-actions">
+                <button
+                  disabled={update === null || busy}
+                  onClick={startNewGame}
+                  type="button"
+                >
+                  开始演示
+                </button>
+                <button
+                  disabled={!autoSlot?.exists || busy}
+                  onClick={() => load("auto")}
+                  type="button"
+                >
+                  继续
+                </button>
+                <button onClick={() => setPanel("saves")} type="button">
+                  读取存档
+                </button>
+                <button onClick={() => setPanel("settings")} type="button">
+                  设置
+                </button>
+              </div>
+              <small>内容版本 {contentVersion || "未载入"}</small>
+            </div>
+          </div>
+        )}
+
+        {phase === "playing" && update !== null && (
+          <>
+            <nav className="game-toolbar" aria-label="游戏菜单">
+              <button onClick={() => setPanel("saves")} type="button">
+                存档 / 读档
+              </button>
+              <button onClick={() => setPanel("settings")} type="button">
+                设置
+              </button>
+              <button onClick={() => void toggleFullscreen()} type="button">
+                全屏
+              </button>
+              <button onClick={() => setPhase("title")} type="button">
+                标题
+              </button>
+            </nav>
+
+            {dialogue !== null && (
+              <DialogueBox
+                defaultCps={settings.text_speed_cps}
+                dialogueBoxUrl={assets["gui.dialogue_box"] ?? ""}
+                disabled={busy || runtimeLocked}
+                initialCps={revealCps}
+                nameBoxUrl={assets["gui.name_box"] ?? ""}
+                onTypingChange={handleTypingChange}
+                prompt={dialogue}
+                ref={dialogueRef}
+                visible={update.snapshot.world.dialogue_ui_visible}
+              />
+            )}
+
+            {choice !== null && (
+              <ChoicePanel
+                disabled={busy || runtimeLocked}
+                onChoose={choose}
+                prompt={choice}
+              />
+            )}
+
+            {update.snapshot.prompt.kind === "end" && (
+              <div className="end-card">
+                <p>演示场景结束</p>
+                <button onClick={() => setPhase("title")} type="button">
+                  返回标题
+                </button>
+              </div>
+            )}
+
+            {runtimeLocked && <div className="runtime-lock">表现同步中…</div>}
+          </>
+        )}
+
+        {panel === "saves" && (
+          <SavePanel
+            canSave={phase === "playing" && !runtimeLocked}
+            onClose={() => setPanel("none")}
+            onLoad={load}
+            onSave={(slot) => void saveManual(slot)}
+            slots={saveSlots}
+          />
+        )}
+
+        {panel === "settings" && (
+          <SettingsPanel
+            onChange={setDraftSettings}
+            onClose={() => {
+              setDraftSettings(settings);
+              setPanel("none");
+            }}
+            onSave={() => void persistSettings()}
+            settings={draftSettings}
+          />
+        )}
+
+        {error !== null && (
+          <div className="error-toast" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              关闭
+            </button>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+interface ChoicePanelProps {
+  prompt: ChoicePrompt;
+  disabled: boolean;
+  onChoose(choiceId: string): void;
+}
+
+function ChoicePanel({
+  prompt,
+  disabled,
+  onChoose,
+}: ChoicePanelProps): ReactElement {
+  return (
+    <div className="choice-panel">
+      {prompt.choices.map((choice) => (
+        <button
+          disabled={disabled || !choice.enabled}
+          key={choice.id}
+          onClick={() => onChoose(choice.id)}
+          type="button"
+        >
+          <MarkupText source={choice.label} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+interface SavePanelProps {
+  slots: SaveSlotSummary[];
+  canSave: boolean;
+  onSave(slot: string): void;
+  onLoad(slot: string): void;
+  onClose(): void;
+}
+
+function SavePanel({
+  slots,
+  canSave,
+  onSave,
+  onLoad,
+  onClose,
+}: SavePanelProps): ReactElement {
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-panel save-panel" aria-label="存档">
+        <header>
+          <div>
+            <p className="eyebrow">SNAPSHOT ONLY</p>
+            <h2>存档与读档</h2>
+          </div>
+          <button onClick={onClose} type="button">
+            关闭
+          </button>
+        </header>
+        <div className="slot-grid">
+          {slots.map((slot) => (
+            <article className="save-slot" key={slot.slot}>
+              {slot.thumbnail_data_url !== null ? (
+                <img alt="场景缩略图" src={slot.thumbnail_data_url} />
+              ) : (
+                <div className="empty-thumbnail">NO DATA</div>
+              )}
+              <div className="slot-copy">
+                <strong>
+                  {slot.slot === "auto" ? "自动存档" : `手动槽 ${slot.slot}`}
+                </strong>
+                <span>{formatTimestamp(slot.saved_at_unix_ms)}</span>
+                <p>{slot.prompt_preview ?? "空存档"}</p>
+              </div>
+              <div className="slot-actions">
+                {slot.slot !== "auto" && (
+                  <button
+                    disabled={!canSave}
+                    onClick={() => onSave(slot.slot)}
+                    type="button"
+                  >
+                    保存
+                  </button>
+                )}
+                <button
+                  disabled={!slot.exists}
+                  onClick={() => onLoad(slot.slot)}
+                  type="button"
+                >
+                  读取
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+interface SettingsPanelProps {
+  settings: Settings;
+  onChange(settings: Settings): void;
+  onSave(): void;
+  onClose(): void;
+}
+
+function SettingsPanel({
+  settings,
+  onChange,
+  onSave,
+  onClose,
+}: SettingsPanelProps): ReactElement {
+  const rows: {
+    key: keyof Settings;
+    label: string;
+    min: number;
+    max: number;
+    step: number;
+  }[] = [
+    { key: "master_volume", label: "主音量", min: 0, max: 1, step: 0.01 },
+    { key: "bgm_volume", label: "BGM", min: 0, max: 1, step: 0.01 },
+    { key: "sfx_volume", label: "音效", min: 0, max: 1, step: 0.01 },
+    { key: "text_speed_cps", label: "文字速度", min: 5, max: 80, step: 1 },
+  ];
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-panel settings-panel" aria-label="设置">
+        <header>
+          <div>
+            <p className="eyebrow">LOCAL SETTINGS</p>
+            <h2>设置</h2>
+          </div>
+          <button onClick={onClose} type="button">
+            关闭
+          </button>
+        </header>
+        {rows.map((row) => (
+          <label className="setting-row" key={row.key}>
+            <span>{row.label}</span>
+            <input
+              max={row.max}
+              min={row.min}
+              onChange={(event) =>
+                onChange({
+                  ...settings,
+                  [row.key]: Number(event.currentTarget.value),
+                })
+              }
+              step={row.step}
+              type="range"
+              value={settings[row.key]}
+            />
+            <output>{formatSetting(settings[row.key], row.key)}</output>
+          </label>
+        ))}
+        <button className="primary-action" onClick={onSave} type="button">
+          保存设置
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function dialogueRevealSpeed(
+  update: RuntimeUpdate | null,
+  prompt: DialoguePrompt | null,
+): number | null {
+  if (update === null || prompt === null) {
+    return null;
+  }
+  const cue = update.cues.find(
+    (candidate) =>
+      candidate.type === "dialogue_reveal" &&
+      candidate.prompt_id === prompt.prompt_id,
+  );
+  return cue?.type === "dialogue_reveal" ? cue.speed_cps : null;
+}
+
+function getInitialAppState(): Promise<InitialAppState> {
+  initialAppStatePromise ??= loadInitialAppState().catch((reason: unknown) => {
+    initialAppStatePromise = null;
+    throw reason instanceof Error ? reason : new Error(String(reason));
+  });
+  return initialAppStatePromise;
+}
+
+async function loadInitialAppState(attempt = 1): Promise<InitialAppState> {
+  try {
+    return await withStartupTimeout(loadInitialAppStateAttempt(), 6_000);
+  } catch (reason) {
+    if (attempt >= 3) {
+      throw reason;
+    }
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, attempt * 250);
+    });
+    return loadInitialAppState(attempt + 1);
+  }
+}
+
+async function loadInitialAppStateAttempt(): Promise<InitialAppState> {
+  const [bootstrap, settings, slots] = await Promise.all([
+    engineApi.bootstrap(),
+    engineApi.loadSettings(),
+    engineApi.listSaveSlots(),
+  ]);
+  const resolved = await engineApi.resolveAssets(bootstrap.asset_ids);
+  return {
+    bootstrap,
+    settings,
+    slots,
+    assets: resolvedAssetsToUrls(resolved),
+  };
+}
+
+function withStartupTimeout<T>(
+  promise: Promise<T>,
+  durationMs: number,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error("连接 Rust 运行时超时，正在重试")),
+      durationMs,
+    );
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (reason: unknown) => {
+        window.clearTimeout(timer);
+        reject(reason instanceof Error ? reason : new Error(String(reason)));
+      },
+    );
+  });
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+function formatTimestamp(value: number | null): string {
+  return value === null
+    ? "—"
+    : new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatSetting(value: number, key: keyof Settings): string {
+  return key === "text_speed_cps"
+    ? `${Math.round(value)} cps`
+    : `${Math.round(value * 100)}%`;
+}
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(
+      "button, input, select, textarea, a, label, [contenteditable='true'], [data-block-story-advance]",
+    ) !== null
+  );
+}

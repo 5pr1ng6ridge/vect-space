@@ -1,0 +1,579 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SceneDefinition",
+  "type": "object",
+  "properties": {
+    "entry": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/SceneNode"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "entry",
+    "nodes"
+  ],
+  "$defs": {
+    "AudioAction": {
+      "type": "string",
+      "enum": [
+        "start",
+        "stop"
+      ]
+    },
+    "BackgroundTransition": {
+      "type": "string",
+      "enum": [
+        "cut",
+        "cross_fade"
+      ]
+    },
+    "ChoiceDefinition": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "next"
+      ]
+    },
+    "Easing": {
+      "type": "string",
+      "enum": [
+        "linear",
+        "ease_in",
+        "ease_out",
+        "ease_in_out"
+      ]
+    },
+    "ScalarValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "SceneNode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "background": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 500,
+              "minimum": 0
+            },
+            "easing": {
+              "$ref": "#/$defs/Easing",
+              "default": "ease_in_out"
+            },
+            "next": {
+              "type": "string"
+            },
+            "transition": {
+              "$ref": "#/$defs/BackgroundTransition",
+              "default": "cross_fade"
+            },
+            "type": {
+              "type": "string",
+              "const": "background"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/SpriteAction"
+            },
+            "asset": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 500,
+              "minimum": 0
+            },
+            "easing": {
+              "$ref": "#/$defs/Easing",
+              "default": "ease_in_out"
+            },
+            "next": {
+              "type": "string"
+            },
+            "opacity": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "scale": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "sprite_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "sprite"
+            },
+            "x": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "y": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "z": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "sprite_id",
+            "action",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "next": {
+              "type": "string"
+            },
+            "speaker": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "speed_cps": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "say"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ChoiceDefinition"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "choice"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "choices"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "set"
+            },
+            "value": {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            "variable": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "variable",
+            "value",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "equals": {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            "otherwise": {
+              "type": "string"
+            },
+            "then": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "branch"
+            },
+            "variable": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "variable",
+            "equals",
+            "then",
+            "otherwise"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scene": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "target": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "jump"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "wait"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "duration_ms",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/AudioAction"
+            },
+            "asset": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 500,
+              "minimum": 0
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "bgm"
+            },
+            "volume": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "action",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "sfx"
+            },
+            "volume": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "asset",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 500,
+              "minimum": 0
+            },
+            "easing": {
+              "$ref": "#/$defs/Easing",
+              "default": "ease_in_out"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "camera"
+            },
+            "x": {
+              "type": "number",
+              "format": "float"
+            },
+            "y": {
+              "type": "number",
+              "format": "float"
+            },
+            "zoom": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "x",
+            "y",
+            "zoom",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 200,
+              "minimum": 0
+            },
+            "effect": {
+              "$ref": "#/$defs/ScreenEffectKind"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "screen_effect"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "effect",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 200,
+              "minimum": 0
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "dialogue_ui"
+            },
+            "visible": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "visible",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "end"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ScreenEffectKind": {
+      "type": "string",
+      "enum": [
+        "shake",
+        "flash"
+      ]
+    },
+    "SpriteAction": {
+      "type": "string",
+      "enum": [
+        "show",
+        "move",
+        "hide"
+      ]
+    }
+  }
+}
