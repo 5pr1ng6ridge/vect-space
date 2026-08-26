@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AssetKind,
+  AdvanceSource,
   EditorDiagnostic,
   EditorProject,
   ImportedAsset,
@@ -31,8 +32,8 @@ export const editorApi = {
       request: { id, kind, source_path: sourcePath },
     }),
   previewStart: () => command<RuntimeUpdate>("preview_start"),
-  previewAdvance: (expectedRevision: number) =>
-    command<RuntimeUpdate>("preview_advance", { expectedRevision }),
+  previewAdvance: (expectedRevision: number, source: AdvanceSource) =>
+    command<RuntimeUpdate>("preview_advance", { expectedRevision, source }),
   previewChoose: (choiceId: string, expectedRevision: number) =>
     command<RuntimeUpdate>("preview_choose", { choiceId, expectedRevision }),
   previewPresentationComplete: (updateId: number) =>

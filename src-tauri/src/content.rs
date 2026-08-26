@@ -422,6 +422,9 @@ fn validate_scenes(
                     require_node(scene, then, scene_id, node_id)?;
                     require_node(scene, otherwise, scene_id, node_id)?;
                 }
+                SceneNode::Playback { next, .. } => {
+                    require_node(scene, next, scene_id, node_id)?;
+                }
                 SceneNode::Jump {
                     scene: target_scene,
                     target,

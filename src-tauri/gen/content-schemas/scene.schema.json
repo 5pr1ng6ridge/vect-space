@@ -270,6 +270,13 @@
         }
       ]
     },
+    "CtrlFastForwardMode": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "block"
+      ]
+    },
     "Easing": {
       "type": "string",
       "enum": [
@@ -299,6 +306,13 @@
         {
           "$ref": "#/$defs/ScalarValue"
         }
+      ]
+    },
+    "PlaybackAutoMode": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "forced"
       ]
     },
     "ScalarValue": {
@@ -555,6 +569,31 @@
             "condition",
             "then",
             "otherwise"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "auto": {
+              "$ref": "#/$defs/PlaybackAutoMode"
+            },
+            "ctrl_fast_forward": {
+              "$ref": "#/$defs/CtrlFastForwardMode"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "playback"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "auto",
+            "ctrl_fast_forward",
+            "next"
           ]
         },
         {

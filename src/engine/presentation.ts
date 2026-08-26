@@ -13,6 +13,7 @@ import type {
   Settings,
   SpriteSnapshot,
 } from "./types";
+import { advanceVirtualElapsed } from "./virtualClock";
 
 const WIDTH = 1920;
 const HEIGHT = 1080;
@@ -35,6 +36,8 @@ export class PresentationController {
   #abort = new AbortController();
   #currentUpdateId: number | null = null;
   #currentPromise: Promise<void> | null = null;
+  #playbackRate = 1;
+  #suppressOneShots = false;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -76,6 +79,12 @@ export class PresentationController {
 
   setTypingSfx(active: boolean, assets: AssetUrlMap): Promise<void> {
     return this.#audio.setTypingSfx(active, assets);
+  }
+
+  setPlaybackMode(rate: number, suppressOneShots: boolean): void {
+    this.#playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    this.#suppressOneShots = suppressOneShots;
+    this.#audio.setPlaybackRate(this.#playbackRate);
   }
 
   present(update: RuntimeUpdate, assets: AssetUrlMap): Promise<void> {
@@ -197,18 +206,31 @@ export class PresentationController {
         if (!oneShotLedger.has(key)) {
           oneShotLedger.add(key);
           trimLedger();
-          await this.#audio.playSfx(cue.asset, cue.volume, assets);
+          if (!this.#suppressOneShots) {
+            await this.#audio.playSfx(cue.asset, cue.volume, assets);
+          }
         }
         break;
       case "bgm_transition":
         if (!oneShotLedger.has(key)) {
           oneShotLedger.add(key);
           trimLedger();
-          await this.#audio.transitionBgm(cue.to, cue.duration_ms, assets);
+          await this.#audio.transitionBgm(
+            cue.to,
+            cue.duration_ms,
+            assets,
+            signal,
+          );
         }
         break;
       case "delay":
-        await animate(cue.duration_ms, "linear", () => undefined, signal);
+        await animate(
+          cue.duration_ms,
+          "linear",
+          () => undefined,
+          signal,
+          () => this.#playbackRate,
+        );
         break;
       case "dialogue_reveal":
       case "dialogue_ui_transition":
@@ -502,6 +524,7 @@ export class PresentationController {
         this.#application.render();
       },
       signal,
+      () => this.#playbackRate,
     );
   }
 }
@@ -536,6 +559,7 @@ function animate(
   easing: Easing,
   apply: (progress: number) => void,
   signal: AbortSignal,
+  getRate: () => number = () => 1,
 ): Promise<void> {
   if (durationMs <= 0 || signal.aborted) {
     if (!signal.aborted) {
@@ -544,7 +568,8 @@ function animate(
     return Promise.resolve();
   }
   return new Promise((resolve) => {
-    const start = performance.now();
+    let previous = performance.now();
+    let virtualElapsed = 0;
     let frame = 0;
     const abort = (): void => {
       cancelAnimationFrame(frame);
@@ -555,7 +580,14 @@ function animate(
       if (signal.aborted) {
         return;
       }
-      const raw = Math.min(1, (now - start) / durationMs);
+      virtualElapsed = advanceVirtualElapsed(
+        virtualElapsed,
+        now - previous,
+        getRate(),
+        durationMs,
+      );
+      previous = now;
+      const raw = Math.min(1, virtualElapsed / durationMs);
       apply(ease(raw, easing));
       if (raw >= 1) {
         signal.removeEventListener("abort", abort);

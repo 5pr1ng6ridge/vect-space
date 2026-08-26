@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    PromptSnapshot, RuntimeSnapshot, SaveSlotSummary, ScalarValue, Settings, VariableDefinition,
-    VariableMap, VariableScope, VariableType,
+    ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary, ScalarValue, Settings,
+    VariableDefinition, VariableMap, VariableScope, VariableType,
 };
 
 const SAVE_SCHEMA_VERSION: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
-const PROFILE_SCHEMA_VERSION: u32 = 1;
+const PROFILE_SCHEMA_VERSION: u32 = 2;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
 const SLOT_IDS: [&str; 4] = ["auto", "1", "2", "3"];
 
@@ -44,6 +44,7 @@ pub struct SaveManager {
 #[derive(Debug)]
 pub struct ProfileManager {
     path: PathBuf,
+    content_version: String,
     definitions: std::collections::BTreeMap<String, VariableDefinition>,
 }
 
@@ -67,6 +68,15 @@ struct SettingsFile {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
+    schema_version: u32,
+    variables: VariableMap,
+    read_content_version: String,
+    read_dialogues: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyProfileFile {
     schema_version: u32,
     variables: VariableMap,
 }
@@ -163,7 +173,8 @@ impl ProfileManager {
     pub fn new(
         root: PathBuf,
         variables: &std::collections::BTreeMap<String, VariableDefinition>,
-    ) -> Result<(Self, VariableMap), SaveError> {
+        content_version: String,
+    ) -> Result<(Self, ProfileState), SaveError> {
         fs::create_dir_all(&root).map_err(|source| SaveError::Io {
             path: root.clone(),
             source,
@@ -175,52 +186,105 @@ impl ProfileManager {
             .collect();
         let manager = Self {
             path: root.join("profile.json"),
+            content_version,
             definitions,
         };
         let values = manager.load_reconciled()?;
         Ok((manager, values))
     }
 
-    pub fn save(&self, variables: &VariableMap) -> Result<(), SaveError> {
-        let normalized = self.reconcile(variables)?;
-        if &normalized != variables {
+    pub fn save(&self, state: &ProfileState) -> Result<(), SaveError> {
+        let normalized = self.reconcile(&state.variables)?;
+        if normalized != state.variables || state.read_content_version != self.content_version {
             return Err(SaveError::InvalidData(
-                "profile 变量缺失、类型不匹配或包含未声明项".to_owned(),
+                "profile 状态与当前内容或变量声明不匹配".to_owned(),
             ));
         }
-        self.write(&normalized)
+        if state.read_dialogues.iter().any(|id| {
+            id.split_once('/')
+                .is_none_or(|(scene, node)| scene.is_empty() || node.is_empty())
+        }) {
+            return Err(SaveError::InvalidData(
+                "profile 包含无效已读节点 ID".to_owned(),
+            ));
+        }
+        self.write(state)
     }
 
-    fn load_reconciled(&self) -> Result<VariableMap, SaveError> {
+    fn load_reconciled(&self) -> Result<ProfileState, SaveError> {
         if !self.path.exists() && !backup_path(&self.path).exists() {
-            let defaults = self.defaults()?;
+            let defaults = self.default_state()?;
             self.write(&defaults)?;
             return Ok(defaults);
         }
 
-        let loaded = read_json_with_backup::<ProfileFile>(&self.path);
-        let (stored, recovered) = match loaded {
-            Ok(file) if file.schema_version == PROFILE_SCHEMA_VERSION => (file.variables, false),
-            Ok(file) => {
+        let loaded = read_json_with_backup::<serde_json::Value>(&self.path);
+        let (stored, mut rewrite) = match loaded {
+            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(2) => {
+                let file: ProfileFile = serde_json::from_value(value)
+                    .map_err(|error| SaveError::InvalidData(error.to_string()))?;
+                (
+                    ProfileState {
+                        variables: file.variables,
+                        read_content_version: file.read_content_version,
+                        read_dialogues: file.read_dialogues,
+                    },
+                    false,
+                )
+            }
+            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(1) => {
+                let file: LegacyProfileFile = serde_json::from_value(value)
+                    .map_err(|error| SaveError::InvalidData(error.to_string()))?;
+                eprintln!("profile v1 已迁移为 v2，已读集合从空集合开始");
+                (
+                    ProfileState {
+                        variables: file.variables,
+                        read_content_version: self.content_version.clone(),
+                        read_dialogues: Default::default(),
+                    },
+                    true,
+                )
+            }
+            Ok(value) => {
                 eprintln!(
-                    "profile schema {} 不受支持，已备份并重建",
-                    file.schema_version
+                    "profile schema {:?} 不受支持，已备份并重建",
+                    value["schema_version"]
                 );
                 self.backup_incompatible()?;
-                (VariableMap::new(), true)
+                (self.default_state()?, true)
             }
             Err(error) => {
                 eprintln!("profile 无法读取，已备份并重建: {error}");
                 self.backup_incompatible()?;
-                (VariableMap::new(), true)
+                (self.default_state()?, true)
             }
         };
-        let reconciled = self.reconcile(&stored)?;
-        if recovered || reconciled != stored {
-            eprintln!("profile 变量声明已变化，已按当前 manifest 调整并保留备份");
+        let variables = self.reconcile(&stored.variables)?;
+        rewrite |= variables != stored.variables;
+        let mut reconciled = ProfileState {
+            variables,
+            ..stored
+        };
+        if reconciled.read_content_version != self.content_version {
+            reconciled
+                .read_content_version
+                .clone_from(&self.content_version);
+            reconciled.read_dialogues.clear();
+            rewrite = true;
+        }
+        if rewrite {
+            eprintln!("profile 已按当前声明与内容版本调整，并保留上一版本备份");
             self.write(&reconciled)?;
         }
         Ok(reconciled)
+    }
+
+    fn default_state(&self) -> Result<ProfileState, SaveError> {
+        Ok(ProfileState {
+            variables: self.defaults()?,
+            read_content_version: self.content_version.clone(),
+            read_dialogues: Default::default(),
+        })
     }
 
     fn defaults(&self) -> Result<VariableMap, SaveError> {
@@ -251,10 +315,12 @@ impl ProfileManager {
             .collect())
     }
 
-    fn write(&self, variables: &VariableMap) -> Result<(), SaveError> {
+    fn write(&self, state: &ProfileState) -> Result<(), SaveError> {
         let file = ProfileFile {
             schema_version: PROFILE_SCHEMA_VERSION,
-            variables: variables.clone(),
+            variables: state.variables.clone(),
+            read_content_version: state.read_content_version.clone(),
+            read_dialogues: state.read_dialogues.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| SaveError::InvalidData(error.to_string()))?;
@@ -463,6 +529,18 @@ mod tests {
     }
 
     #[test]
+    fn old_settings_default_to_read_only_skip() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "master_volume": 1.0,
+            "bgm_volume": 0.7,
+            "sfx_volume": 0.8,
+            "text_speed_cps": 30.0
+        }))
+        .unwrap();
+        assert_eq!(settings.skip_mode, crate::model::SkipMode::ReadOnly);
+    }
+
+    #[test]
     fn profile_values_persist_and_reconcile_with_declarations() {
         let directory = tempdir().unwrap();
         let definitions = std::collections::BTreeMap::from([(
@@ -473,18 +551,31 @@ mod tests {
                 default: ScalarValue::Boolean(false),
             },
         )]);
-        let (manager, mut values) =
-            ProfileManager::new(directory.path().to_path_buf(), &definitions).unwrap();
+        let (manager, mut values) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &definitions,
+            "demo-2".to_owned(),
+        )
+        .unwrap();
         assert_eq!(
-            values.get("ending_seen"),
+            values.variables.get("ending_seen"),
             Some(&ScalarValue::Boolean(false))
         );
-        values.insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        values
+            .variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
         manager.save(&values).unwrap();
 
-        let (_, loaded) =
-            ProfileManager::new(directory.path().to_path_buf(), &definitions).unwrap();
-        assert_eq!(loaded.get("ending_seen"), Some(&ScalarValue::Boolean(true)));
+        let (_, loaded) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &definitions,
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
 
         let changed = std::collections::BTreeMap::from([(
             "ending_seen".to_owned(),
@@ -494,10 +585,14 @@ mod tests {
                 default: ScalarValue::Text("reset".to_owned()),
             },
         )]);
-        let (_, reconciled) =
-            ProfileManager::new(directory.path().to_path_buf(), &changed).unwrap();
+        let (_, reconciled) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &changed,
+            "demo-2".to_owned(),
+        )
+        .unwrap();
         assert_eq!(
-            reconciled.get("ending_seen"),
+            reconciled.variables.get("ending_seen"),
             Some(&ScalarValue::Text("reset".to_owned()))
         );
         assert!(directory.path().join("profile.json.bak").exists());
@@ -514,10 +609,67 @@ mod tests {
                 default: ScalarValue::Boolean(false),
             },
         )]);
-        let (manager, mut values) =
-            ProfileManager::new(directory.path().to_path_buf(), &definitions).unwrap();
-        values.insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        let (manager, mut values) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &definitions,
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        values
+            .variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
         fs::remove_dir_all(directory.path()).unwrap();
         assert!(manager.save(&values).is_err());
+    }
+
+    #[test]
+    fn profile_v1_migrates_and_content_changes_only_clear_read_history() {
+        let directory = tempdir().unwrap();
+        let definitions = std::collections::BTreeMap::from([(
+            "ending_seen".to_owned(),
+            VariableDefinition {
+                scope: VariableScope::Profile,
+                value_type: VariableType::Boolean,
+                default: ScalarValue::Boolean(false),
+            },
+        )]);
+        fs::write(
+            directory.path().join("profile.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "variables": { "ending_seen": true }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (manager, mut migrated) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &definitions,
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            migrated.variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
+        assert!(migrated.read_dialogues.is_empty());
+        migrated
+            .read_dialogues
+            .insert("prologue/introduction".to_owned());
+        manager.save(&migrated).unwrap();
+
+        let (_, changed) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &definitions,
+            "demo-3".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            changed.variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
+        assert_eq!(changed.read_content_version, "demo-3");
+        assert!(changed.read_dialogues.is_empty());
     }
 }

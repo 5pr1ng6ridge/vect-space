@@ -22,7 +22,7 @@ nodes:
     duration_ms: 500
     easing: ease_in_out
     await: true
-    next: conclusion
+    next: ctrl_block
   choose_algebra:
     type: set
     variable: route
@@ -46,6 +46,16 @@ nodes:
     speaker: 系统
     text: 分支已经汇合。读档只恢复这个最终世界，不会重放刚才的转场、音效、闪光或镜头运动。
     speed_cps: 32.0
+    next: ctrl_restore
+  ctrl_block:
+    type: playback
+    auto: normal
+    ctrl_fast_forward: block
+    next: conclusion
+  ctrl_restore:
+    type: playback
+    auto: normal
+    ctrl_fast_forward: allow
     next: mark_ending
   ending:
     type: jump
@@ -72,7 +82,7 @@ nodes:
     duration_ms: 700
     easing: ease_in_out
     await: true
-    next: say
+    next: forced_begin
   flash_result:
     type: screen_effect
     effect: flash
@@ -92,6 +102,16 @@ nodes:
       这里是固定的$1920\times1080$舞台。公式$V=\operatorname{span}\{v_1,v_2\}$会先完成排版，再逐个显示。当前分数为
       $[var=score]$。
     speed_cps: 28.0
+    next: forced_end
+  forced_begin:
+    type: playback
+    auto: forced
+    ctrl_fast_forward: block
+    next: say
+  forced_end:
+    type: playback
+    auto: normal
+    ctrl_fast_forward: allow
     next: move_jelly
   mark_ending:
     type: set

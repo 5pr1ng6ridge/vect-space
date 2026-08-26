@@ -1,9 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub type VariableMap = BTreeMap<String, ScalarValue>;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileState {
+    pub variables: VariableMap,
+    pub read_content_version: String,
+    pub read_dialogues: BTreeSet<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -228,6 +236,11 @@ pub enum SceneNode {
         then: String,
         otherwise: String,
     },
+    Playback {
+        auto: PlaybackAutoMode,
+        ctrl_fast_forward: CtrlFastForwardMode,
+        next: String,
+    },
     Jump {
         #[serde(default)]
         scene: Option<String>,
@@ -357,7 +370,41 @@ pub struct RuntimeSnapshot {
     pub variables: VariableMap,
     pub world: WorldSnapshot,
     pub audio: AudioSnapshot,
+    #[serde(default)]
+    pub playback: PlaybackSnapshot,
     pub prompt: PromptSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackAutoMode {
+    #[default]
+    Normal,
+    Forced,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CtrlFastForwardMode {
+    #[default]
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlaybackSnapshot {
+    pub auto: PlaybackAutoMode,
+    pub ctrl_fast_forward: CtrlFastForwardMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvanceSource {
+    Manual,
+    Auto,
+    FastForward,
+    ForcedAuto,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -446,6 +493,8 @@ pub enum PromptSnapshot {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_color: Option<String>,
         text: String,
+        #[serde(default)]
+        is_read: bool,
     },
     Choice {
         prompt_id: String,
@@ -572,6 +621,17 @@ pub struct Settings {
     pub bgm_volume: f32,
     pub sfx_volume: f32,
     pub text_speed_cps: f32,
+    #[serde(default)]
+    pub skip_mode: SkipMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipMode {
+    Disabled,
+    #[default]
+    ReadOnly,
+    All,
 }
 
 impl Default for Settings {
@@ -581,6 +641,7 @@ impl Default for Settings {
             bgm_volume: 0.7,
             sfx_volume: 0.8,
             text_speed_cps: 30.0,
+            skip_mode: SkipMode::ReadOnly,
         }
     }
 }

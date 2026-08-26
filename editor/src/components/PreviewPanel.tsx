@@ -1,6 +1,7 @@
-import { useState, type ReactElement } from "react";
+import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { assetUrl, editorApi } from "../api";
 import type { EditorAsset, RuntimeUpdate } from "../types";
+import { autoReadingDelay } from "../playback";
 import { MarkupPreview } from "./MarkupPreview";
 
 export function PreviewPanel({
@@ -18,25 +19,45 @@ export function PreviewPanel({
   const urls = Object.fromEntries(
     assets.map((asset) => [asset.id, assetUrl(asset.absolute_path)]),
   );
-  const run = async (
-    operation: () => Promise<RuntimeUpdate>,
-  ): Promise<void> => {
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await operation();
-      setUpdate(next);
-      onNavigate(
-        next.snapshot.location.scene_id,
-        next.snapshot.location.node_id,
-      );
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const run = useCallback(
+    async (operation: () => Promise<RuntimeUpdate>): Promise<void> => {
+      setBusy(true);
+      setError(null);
+      try {
+        const next = await operation();
+        setUpdate(next);
+        onNavigate(
+          next.snapshot.location.scene_id,
+          next.snapshot.location.node_id,
+        );
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onNavigate],
+  );
   const prompt = update?.snapshot.prompt;
+  useEffect(() => {
+    if (
+      update === null ||
+      busy ||
+      update.requires_ack ||
+      prompt?.kind !== "dialogue" ||
+      update.snapshot.playback.auto !== "forced"
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(
+      () =>
+        void run(() =>
+          editorApi.previewAdvance(update.snapshot.revision, "forced_auto"),
+        ),
+      autoReadingDelay(prompt.text),
+    );
+    return () => window.clearTimeout(timer);
+  }, [busy, prompt, run, update]);
   return (
     <div className="preview-panel">
       <div className="preview-controls">
@@ -49,10 +70,22 @@ export function PreviewPanel({
         </button>
         {dirty && <span>保存更改后才能试玩最新内容</span>}
         {update !== null && (
-          <code>
-            {update.snapshot.location.scene_id}/
-            {update.snapshot.location.node_id} · rev {update.snapshot.revision}
-          </code>
+          <>
+            <code>
+              {update.snapshot.location.scene_id}/
+              {update.snapshot.location.node_id} · rev{" "}
+              {update.snapshot.revision}
+            </code>
+            <span>
+              {update.snapshot.playback.auto === "forced"
+                ? "强制自动"
+                : "普通自动"}
+              {" · Ctrl "}
+              {update.snapshot.playback.ctrl_fast_forward === "block"
+                ? "禁止"
+                : "允许"}
+            </span>
+          </>
         )}
       </div>
       {error !== null && <div className="preview-error">{error}</div>}
@@ -100,11 +133,18 @@ export function PreviewPanel({
                 <MarkupPreview source={prompt.text} />
               </div>
               <button
-                disabled={busy || update?.requires_ack}
+                disabled={
+                  busy ||
+                  (update?.requires_ack ?? false) ||
+                  update?.snapshot.playback.auto === "forced"
+                }
                 onClick={() => {
                   if (update !== null)
                     void run(() =>
-                      editorApi.previewAdvance(update.snapshot.revision),
+                      editorApi.previewAdvance(
+                        update.snapshot.revision,
+                        "manual",
+                      ),
                     );
                 }}
                 type="button"

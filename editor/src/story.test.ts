@@ -3,6 +3,7 @@ import {
   countVariableReferences,
   countCharacterReferences,
   outputPorts,
+  defaultNode,
   renameNode,
   renameCharacter,
   renameVariable,
@@ -76,6 +77,19 @@ describe("story graph mapping", () => {
     ]);
     const changed = setPortTarget(node, "choice:left", "end");
     expect(changed.type === "choice" && changed.choices[0].next).toBe("end");
+  });
+
+  it("creates playback nodes with an explicit two-field policy", () => {
+    const node = defaultNode("playback", "end");
+    expect(node).toEqual({
+      type: "playback",
+      auto: "normal",
+      ctrl_fast_forward: "allow",
+      next: "end",
+    });
+    expect(outputPorts(node)).toEqual([
+      { id: "next", label: "下一步", target: "end", targetScene: null },
+    ]);
   });
 
   it("renames a node and all local and jump references atomically", () => {

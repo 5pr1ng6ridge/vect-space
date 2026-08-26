@@ -178,6 +178,27 @@ export function visibleUnits(units: MarkupUnit[]): VisibleUnit[] {
   );
 }
 
+export function autoReadingDelay(source: string): number {
+  let characters = 0;
+  let inlineMath = 0;
+  let blockMath = 0;
+  for (const unit of parseMarkup(source)) {
+    if (unit.kind === "character") {
+      characters += 1;
+    } else if (unit.kind === "math") {
+      if (unit.display) {
+        blockMath += 1;
+      } else {
+        inlineMath += 1;
+      }
+    }
+  }
+  return Math.min(
+    5_000,
+    Math.max(800, 600 + characters * 35 + inlineMath * 350 + blockMath * 700),
+  );
+}
+
 function character(value: string, effects: TextEffect[]): CharacterUnit {
   return { kind: "character", value, effect: currentEffect(effects) };
 }

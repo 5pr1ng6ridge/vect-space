@@ -8,8 +8,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use content::ContentCatalog;
 use model::{
-    BootstrapPayload, ResolvedAsset, RuntimeSnapshot, RuntimeUpdate, SaveSlotRequest,
-    SaveSlotSummary, Settings,
+    AdvanceSource, BootstrapPayload, ResolvedAsset, RuntimeSnapshot, RuntimeUpdate,
+    SaveSlotRequest, SaveSlotSummary, Settings,
 };
 use runtime::RuntimeEngine;
 use save::{ProfileManager, SaveManager};
@@ -36,9 +36,10 @@ impl EngineState {
         let mut runtime = self.runtime()?;
         let mut candidate = runtime.clone();
         let update = operation(&mut candidate).map_err(|error| error.to_string())?;
-        if candidate.profile_variables() != runtime.profile_variables() {
+        let candidate_profile = candidate.profile_state(&self.content);
+        if candidate_profile != runtime.profile_state(&self.content) {
             self.profile
-                .save(candidate.profile_variables())
+                .save(&candidate_profile)
                 .map_err(|error| error.to_string())?;
         }
         *runtime = candidate;
@@ -57,8 +58,12 @@ fn start_new_game(state: State<'_, EngineState>) -> Result<RuntimeUpdate, String
 }
 
 #[tauri::command]
-fn advance(expected_revision: u64, state: State<'_, EngineState>) -> Result<RuntimeUpdate, String> {
-    state.transact_runtime(|runtime| runtime.advance(&state.content, expected_revision))
+fn advance(
+    expected_revision: u64,
+    source: AdvanceSource,
+    state: State<'_, EngineState>,
+) -> Result<RuntimeUpdate, String> {
+    state.transact_runtime(|runtime| runtime.advance(&state.content, expected_revision, source))
 }
 
 #[tauri::command]
@@ -181,9 +186,12 @@ pub fn run() {
                 app_data_root.join("saves"),
                 content.manifest.content_version.clone(),
             )?;
-            let (profile, profile_variables) =
-                ProfileManager::new(app_data_root, &content.manifest.variables)?;
-            let runtime = RuntimeEngine::with_profile(&content, profile_variables)?;
+            let (profile, profile_state) = ProfileManager::new(
+                app_data_root,
+                &content.manifest.variables,
+                content.manifest.content_version.clone(),
+            )?;
+            let runtime = RuntimeEngine::with_profile(&content, profile_state)?;
             app.manage(EngineState {
                 content,
                 runtime: Mutex::new(runtime),
@@ -217,7 +225,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::model::{MutationValue, ScalarValue, SceneNode, VariableOperation};
+    use crate::model::{AdvanceSource, MutationValue, ScalarValue, SceneNode, VariableOperation};
 
     #[test]
     fn failed_profile_persistence_rolls_back_the_entire_runtime_command() {
@@ -243,10 +251,13 @@ mod tests {
             content.manifest.content_version.clone(),
         )
         .unwrap();
-        let (profile, profile_variables) =
-            ProfileManager::new(directory.path().to_path_buf(), &content.manifest.variables)
-                .unwrap();
-        let runtime = RuntimeEngine::with_profile(&content, profile_variables).unwrap();
+        let (profile, profile_state) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &content.manifest.variables,
+            content.manifest.content_version.clone(),
+        )
+        .unwrap();
+        let runtime = RuntimeEngine::with_profile(&content, profile_state).unwrap();
         let state = EngineState {
             content,
             runtime: Mutex::new(runtime),
@@ -299,10 +310,13 @@ mod tests {
             content.manifest.content_version.clone(),
         )
         .unwrap();
-        let (profile, profile_variables) =
-            ProfileManager::new(directory.path().to_path_buf(), &content.manifest.variables)
-                .unwrap();
-        let runtime = RuntimeEngine::with_profile(&content, profile_variables).unwrap();
+        let (profile, profile_state) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &content.manifest.variables,
+            content.manifest.content_version.clone(),
+        )
+        .unwrap();
+        let runtime = RuntimeEngine::with_profile(&content, profile_state).unwrap();
         let state = EngineState {
             content,
             runtime: Mutex::new(runtime),
@@ -313,5 +327,58 @@ mod tests {
         let result = state.transact_runtime(|runtime| runtime.start_new_game(&state.content));
         assert!(result.unwrap_err().contains("溢出"));
         assert_eq!(state.runtime().unwrap().snapshot(), &before);
+    }
+
+    #[test]
+    fn failed_read_history_persistence_rolls_back_location_revision_and_read_set() {
+        let content =
+            ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
+                .unwrap();
+        let directory = tempdir().unwrap();
+        let saves = SaveManager::new(
+            directory.path().join("saves"),
+            content.manifest.content_version.clone(),
+        )
+        .unwrap();
+        let (profile, profile_state) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &content.manifest.variables,
+            content.manifest.content_version.clone(),
+        )
+        .unwrap();
+        let runtime = RuntimeEngine::with_profile(&content, profile_state).unwrap();
+        let state = EngineState {
+            content,
+            runtime: Mutex::new(runtime),
+            saves,
+            profile,
+        };
+        let first = state
+            .transact_runtime(|runtime| runtime.start_new_game(&state.content))
+            .unwrap();
+        let dialogue = state
+            .transact_runtime(|runtime| {
+                runtime.presentation_complete(&state.content, first.update_id)
+            })
+            .unwrap();
+        assert!(matches!(
+            dialogue.snapshot.prompt,
+            crate::model::PromptSnapshot::Dialogue { .. }
+        ));
+        let before_snapshot = state.runtime().unwrap().snapshot().clone();
+        let before_profile = state.runtime().unwrap().profile_state(&state.content);
+        fs::remove_dir_all(directory.path()).unwrap();
+
+        let result = state.transact_runtime(|runtime| {
+            runtime.advance(
+                &state.content,
+                dialogue.snapshot.revision,
+                AdvanceSource::ForcedAuto,
+            )
+        });
+        assert!(result.is_err());
+        let runtime = state.runtime().unwrap();
+        assert_eq!(runtime.snapshot(), &before_snapshot);
+        assert_eq!(runtime.profile_state(&state.content), before_profile);
     }
 }

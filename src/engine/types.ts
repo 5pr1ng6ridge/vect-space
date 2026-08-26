@@ -2,6 +2,8 @@ export type AssetKind =
   "background" | "sprite" | "gui" | "bgm" | "sfx" | "font";
 export type CueGate = "none" | "player_advance" | "runtime";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
+export type SkipMode = "disabled" | "read_only" | "all";
 
 export interface StoryLocation {
   scene_id: string;
@@ -40,6 +42,11 @@ export interface AudioSnapshot {
   bgm: LoopingAudioSnapshot | null;
 }
 
+export interface PlaybackSnapshot {
+  auto: "normal" | "forced";
+  ctrl_fast_forward: "allow" | "block";
+}
+
 export interface EmptyPrompt {
   kind: "none";
 }
@@ -52,6 +59,7 @@ export interface DialoguePrompt {
   name_color?: string | null;
   text_color?: string | null;
   text: string;
+  is_read: boolean;
 }
 
 export interface ChoiceSnapshot {
@@ -80,6 +88,7 @@ export interface RuntimeSnapshot {
   variables: Record<string, boolean | number | string>;
   world: WorldSnapshot;
   audio: AudioSnapshot;
+  playback: PlaybackSnapshot;
   prompt: PromptSnapshot;
 }
 
@@ -179,4 +188,5 @@ export interface Settings {
   bgm_volume: number;
   sfx_volume: number;
   text_speed_cps: number;
+  skip_mode: SkipMode;
 }

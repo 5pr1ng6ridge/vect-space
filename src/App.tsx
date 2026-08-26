@@ -15,7 +15,10 @@ import { DialogueBox, type DialogueBoxHandle } from "./components/DialogueBox";
 import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
+import { autoReadingDelay } from "./engine/markup";
+import { canFastForwardPrompt } from "./engine/playback";
 import type {
+  AdvanceSource,
   AssetUrlMap,
   BootstrapPayload,
   ChoicePrompt,
@@ -31,6 +34,7 @@ const DEFAULT_SETTINGS: Settings = {
   bgm_volume: 0.7,
   sfx_volume: 0.8,
   text_speed_cps: 30,
+  skip_mode: "read_only",
 };
 
 type Phase = "booting" | "title" | "playing";
@@ -53,6 +57,7 @@ export default function App(): ReactElement {
   const busyRef = useRef(false);
   const acknowledgedUpdates = useRef(new Set<number>());
   const autosavedRevisions = useRef(new Set<number>());
+  const heldControlKeys = useRef(new Set<string>());
 
   const [phase, setPhase] = useState<Phase>("booting");
   const [panel, setPanel] = useState<Panel>("none");
@@ -66,6 +71,11 @@ export default function App(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [contentVersion, setContentVersion] = useState("");
   const [typingSfxActive, setTypingSfxActive] = useState(false);
+  const [normalAuto, setNormalAuto] = useState(false);
+  const [ctrlHeld, setCtrlHeld] = useState(false);
+  const [completedPromptId, setCompletedPromptId] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     phaseRef.current = phase;
@@ -178,6 +188,7 @@ export default function App(): ReactElement {
   );
 
   const startNewGame = (): void => {
+    setNormalAuto(false);
     setPhase("playing");
     phaseRef.current = "playing";
     setPanel("none");
@@ -185,13 +196,16 @@ export default function App(): ReactElement {
     void runStoryCommand(engineApi.startNewGame);
   };
 
-  const advance = useCallback((): void => {
-    const snapshot = update?.snapshot;
-    if (snapshot === undefined || snapshot.prompt.kind !== "dialogue") {
-      return;
-    }
-    void runStoryCommand(() => engineApi.advance(snapshot.revision));
-  }, [runStoryCommand, update]);
+  const advance = useCallback(
+    (source: AdvanceSource): void => {
+      const snapshot = update?.snapshot;
+      if (snapshot === undefined || snapshot.prompt.kind !== "dialogue") {
+        return;
+      }
+      void runStoryCommand(() => engineApi.advance(snapshot.revision, source));
+    },
+    [runStoryCommand, update],
+  );
 
   const choose = (choiceId: string): void => {
     const snapshot = update?.snapshot;
@@ -218,6 +232,7 @@ export default function App(): ReactElement {
   };
 
   const load = (slot: string): void => {
+    setNormalAuto(false);
     setPhase("playing");
     phaseRef.current = "playing";
     setPanel("none");
@@ -245,6 +260,13 @@ export default function App(): ReactElement {
     }
   };
 
+  const returnToTitle = (): void => {
+    setNormalAuto(false);
+    setPanel("none");
+    setPhase("title");
+    phaseRef.current = "title";
+  };
+
   const dialogue =
     update?.snapshot.prompt.kind === "dialogue" ? update.snapshot.prompt : null;
   const choice =
@@ -254,6 +276,25 @@ export default function App(): ReactElement {
     [dialogue, settings.text_speed_cps, update],
   );
   const runtimeLocked = update?.requires_ack ?? false;
+  const playback = update?.snapshot.playback ?? {
+    auto: "normal" as const,
+    ctrl_fast_forward: "allow" as const,
+  };
+  const forcedAuto = playback.auto === "forced";
+  const ctrlPolicyAllows =
+    !forcedAuto && playback.ctrl_fast_forward === "allow";
+  const fastForwardRequested =
+    ctrlHeld && ctrlPolicyAllows && settings.skip_mode !== "disabled";
+  const fastForwardDialogueAllowed =
+    dialogue !== null &&
+    (settings.skip_mode === "all" ||
+      (settings.skip_mode === "read_only" && dialogue.is_read));
+  const fastForwardActive =
+    phase === "playing" &&
+    panel === "none" &&
+    fastForwardRequested &&
+    update !== null &&
+    canFastForwardPrompt(playback, settings.skip_mode, update.snapshot.prompt);
   const autoSlot = saveSlots.find((slot) => slot.slot === "auto");
   const handleTypingChange = useCallback((typing: boolean): void => {
     setTypingSfxActive(typing);
@@ -271,12 +312,62 @@ export default function App(): ReactElement {
     }
 
     void sceneRef.current?.unlockAudio();
+    if (forcedAuto) {
+      return;
+    }
     if (!dialogueRef.current?.isComplete()) {
       dialogueRef.current?.complete();
       return;
     }
-    advance();
-  }, [advance, dialogue, panel, runtimeLocked, update]);
+    advance("manual");
+  }, [advance, dialogue, forcedAuto, panel, runtimeLocked, update]);
+
+  const handleRevealComplete = useCallback((promptId: string): void => {
+    setCompletedPromptId(promptId);
+  }, []);
+
+  useEffect(() => {
+    if (
+      phase !== "playing" ||
+      panel !== "none" ||
+      busy ||
+      runtimeLocked ||
+      dialogue === null
+    ) {
+      return;
+    }
+
+    let timer = 0;
+    if (forcedAuto) {
+      if (completedPromptId !== dialogue.prompt_id) return;
+      timer = window.setTimeout(
+        () => advance("forced_auto"),
+        autoReadingDelay(dialogue.text),
+      );
+    } else if (fastForwardRequested) {
+      if (!fastForwardDialogueAllowed) return;
+      dialogueRef.current?.complete();
+      timer = window.setTimeout(() => advance("fast_forward"), 50);
+    } else if (normalAuto && completedPromptId === dialogue.prompt_id) {
+      timer = window.setTimeout(
+        () => advance("auto"),
+        autoReadingDelay(dialogue.text),
+      );
+    }
+    return () => window.clearTimeout(timer);
+  }, [
+    advance,
+    busy,
+    completedPromptId,
+    dialogue,
+    fastForwardDialogueAllowed,
+    fastForwardRequested,
+    forcedAuto,
+    normalAuto,
+    panel,
+    phase,
+    runtimeLocked,
+  ]);
 
   useEffect(() => {
     const handleClick = (event: MouseEvent): void => {
@@ -289,6 +380,11 @@ export default function App(): ReactElement {
       }
     };
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.code === "ControlLeft" || event.code === "ControlRight") {
+        heldControlKeys.current.add(event.code);
+        setCtrlHeld(true);
+        return;
+      }
       if (
         event.key === "Enter" &&
         !event.repeat &&
@@ -299,11 +395,29 @@ export default function App(): ReactElement {
         handlePlayerAdvance();
       }
     };
+    const handleKeyUp = (event: KeyboardEvent): void => {
+      if (event.code !== "ControlLeft" && event.code !== "ControlRight") return;
+      heldControlKeys.current.delete(event.code);
+      setCtrlHeld(heldControlKeys.current.size > 0);
+    };
+    const clearControlKeys = (): void => {
+      heldControlKeys.current.clear();
+      setCtrlHeld(false);
+    };
+    const handleVisibility = (): void => {
+      if (document.hidden) clearControlKeys();
+    };
     window.addEventListener("click", handleClick);
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", clearControlKeys);
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       window.removeEventListener("click", handleClick);
       window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", clearControlKeys);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [handlePlayerAdvance]);
 
@@ -314,9 +428,11 @@ export default function App(): ReactElement {
           assets={assets}
           onDiagnostic={setError}
           onSettled={handlePresentationSettled}
+          playbackRate={fastForwardActive ? 8 : 1}
           ref={sceneRef}
           settings={settings}
-          typingSfxActive={typingSfxActive}
+          suppressOneShots={fastForwardActive}
+          typingSfxActive={typingSfxActive && !fastForwardActive}
           update={update}
         />
 
@@ -365,6 +481,18 @@ export default function App(): ReactElement {
         {phase === "playing" && update !== null && (
           <>
             <nav className="game-toolbar" aria-label="游戏菜单">
+              <button
+                aria-pressed={normalAuto}
+                disabled={forcedAuto}
+                onClick={() => setNormalAuto((value) => !value)}
+                type="button"
+              >
+                {forcedAuto
+                  ? "自动（强制）"
+                  : normalAuto
+                    ? "自动：开"
+                    : "自动：关"}
+              </button>
               <button onClick={() => setPanel("saves")} type="button">
                 存档 / 读档
               </button>
@@ -374,7 +502,7 @@ export default function App(): ReactElement {
               <button onClick={() => void toggleFullscreen()} type="button">
                 全屏
               </button>
-              <button onClick={() => setPhase("title")} type="button">
+              <button onClick={returnToTitle} type="button">
                 标题
               </button>
             </nav>
@@ -387,6 +515,7 @@ export default function App(): ReactElement {
                 initialCps={revealCps}
                 nameBoxUrl={assets["gui.name_box"] ?? ""}
                 onTypingChange={handleTypingChange}
+                onRevealComplete={handleRevealComplete}
                 prompt={dialogue}
                 ref={dialogueRef}
                 visible={update.snapshot.world.dialogue_ui_visible}
@@ -404,7 +533,7 @@ export default function App(): ReactElement {
             {update.snapshot.prompt.kind === "end" && (
               <div className="end-card">
                 <p>演示场景结束</p>
-                <button onClick={() => setPhase("title")} type="button">
+                <button onClick={returnToTitle} type="button">
                   返回标题
                 </button>
               </div>
@@ -558,7 +687,7 @@ function SettingsPanel({
   onClose,
 }: SettingsPanelProps): ReactElement {
   const rows: {
-    key: keyof Settings;
+    key: "master_volume" | "bgm_volume" | "sfx_volume" | "text_speed_cps";
     label: string;
     min: number;
     max: number;
@@ -600,6 +729,23 @@ function SettingsPanel({
             <output>{formatSetting(settings[row.key], row.key)}</output>
           </label>
         ))}
+        <label className="setting-row">
+          <span>Ctrl 快进</span>
+          <select
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                skip_mode: event.currentTarget.value as Settings["skip_mode"],
+              })
+            }
+            value={settings.skip_mode}
+          >
+            <option value="disabled">关闭快进</option>
+            <option value="read_only">快进已读内容</option>
+            <option value="all">全部快进</option>
+          </select>
+          <output />
+        </label>
         <button className="primary-action" onClick={onSave} type="button">
           保存设置
         </button>
@@ -692,7 +838,10 @@ function formatTimestamp(value: number | null): string {
     : new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
 
-function formatSetting(value: number, key: keyof Settings): string {
+function formatSetting(
+  value: number,
+  key: "master_volume" | "bgm_volume" | "sfx_volume" | "text_speed_cps",
+): string {
   return key === "text_speed_cps"
     ? `${Math.round(value)} cps`
     : `${Math.round(value * 100)}%`;

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildPauseWindows,
   buildRevealSchedule,
+  autoReadingDelay,
   parseMarkup,
   visibleUnits,
 } from "./markup";
@@ -36,5 +37,13 @@ describe("VN markup", () => {
 
   it("does not treat normal reveal pacing as an explicit pause", () => {
     expect(buildPauseWindows(parseMarkup("ABC"), 20, 30)).toEqual([]);
+  });
+
+  it("calculates auto wait from visible text and atomic formulas only", () => {
+    expect(
+      autoReadingDelay("甲乙$z$[pause=999ms]$$x+y$$[fx=glow]丙[/fx]"),
+    ).toBe(1_755);
+    expect(autoReadingDelay("短")).toBe(800);
+    expect(autoReadingDelay("长".repeat(500))).toBe(5_000);
   });
 });

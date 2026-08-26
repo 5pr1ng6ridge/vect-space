@@ -15,6 +15,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
   { type: "choice", label: "选择", group: "逻辑" },
   { type: "condition", label: "条件分支", group: "逻辑" },
+  { type: "playback", label: "播放控制", group: "流程" },
   { type: "set", label: "设置变量", group: "逻辑" },
   { type: "jump", label: "跳转", group: "逻辑" },
   { type: "background", label: "背景", group: "画面" },
@@ -115,6 +116,8 @@ export function summarizeNode(node: SceneNode): string {
       return `${node.variable} ${node.op ?? "assign"} ${summarizeMutationValue(node.value)}`;
     case "condition":
       return summarizeCondition(node.condition);
+    case "playback":
+      return `${node.auto === "forced" ? "强制自动" : "普通自动"} · Ctrl ${node.ctrl_fast_forward === "block" ? "禁止" : "允许"}`;
     case "jump":
       return `${node.scene ?? "本场景"} / ${node.target}`;
     case "background":
@@ -196,6 +199,13 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         condition: defaultCondition(),
         then: fallback,
         otherwise: fallback,
+      };
+    case "playback":
+      return {
+        type,
+        auto: "normal",
+        ctrl_fast_forward: "allow",
+        next: fallback,
       };
     case "jump":
       return { type, scene: null, target: fallback };

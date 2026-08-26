@@ -4,6 +4,7 @@ import type {
   LoopingAudioSnapshot,
   Settings,
 } from "./types";
+import { advanceVirtualElapsed } from "./virtualClock";
 
 interface PlayingBgm {
   asset: string;
@@ -26,6 +27,7 @@ export class AudioManager {
   #currentBgm: PlayingBgm | null = null;
   #typingSfx: PlayingTypingSfx | null = null;
   #typingGeneration = 0;
+  #playbackRate = 1;
   #settings: Settings;
 
   constructor(settings: Settings) {
@@ -48,6 +50,10 @@ export class AudioManager {
     this.#master?.gain.setValueAtTime(settings.master_volume, now);
     this.#bgmBus?.gain.setValueAtTime(settings.bgm_volume, now);
     this.#sfxBus?.gain.setValueAtTime(settings.sfx_volume, now);
+  }
+
+  setPlaybackRate(rate: number): void {
+    this.#playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
   }
 
   async playSfx(
@@ -99,20 +105,24 @@ export class AudioManager {
     target: LoopingAudioSnapshot | null,
     durationMs: number,
     assets: AssetUrlMap,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (target === null && this.#currentBgm === null) {
       return;
     }
     const context = this.#ensureContext();
-    const duration = Math.max(0, durationMs) / 1000;
     const now = context.currentTime;
     const previous = this.#currentBgm;
 
     if (target !== null && previous?.asset === target.asset) {
-      previous.gain.gain.cancelScheduledValues(now);
-      previous.gain.gain.setValueAtTime(previous.gain.gain.value, now);
-      previous.gain.gain.linearRampToValueAtTime(target.volume, now + duration);
-      await wait(durationMs);
+      const from = previous.gain.gain.value;
+      await dynamicFade(
+        durationMs,
+        () => this.#playbackRate,
+        (progress) =>
+          setGain(previous.gain, from + (target.volume - from) * progress),
+        signal,
+      );
       return;
     }
 
@@ -120,26 +130,34 @@ export class AudioManager {
     if (target !== null) {
       const url = requireAssetUrl(assets, target.asset);
       const buffer = await this.#load(url);
+      if (signal?.aborted) {
+        return;
+      }
       const source = context.createBufferSource();
       const gain = context.createGain();
       source.buffer = buffer;
       source.loop = true;
-      gain.gain.setValueAtTime(duration > 0 ? 0 : target.volume, now);
+      gain.gain.setValueAtTime(durationMs > 0 ? 0 : target.volume, now);
       source.connect(gain).connect(this.#bgmBus as GainNode);
       source.start();
-      if (duration > 0) {
-        gain.gain.linearRampToValueAtTime(target.volume, now + duration);
-      }
       next = { asset: target.asset, source, gain };
     }
 
     this.#currentBgm = next;
-    if (previous !== null) {
-      previous.gain.gain.cancelScheduledValues(now);
-      previous.gain.gain.setValueAtTime(previous.gain.gain.value, now);
-      previous.gain.gain.linearRampToValueAtTime(0, now + duration);
-    }
-    await wait(durationMs);
+    const previousVolume = previous?.gain.gain.value ?? 0;
+    await dynamicFade(
+      durationMs,
+      () => this.#playbackRate,
+      (progress) => {
+        if (next !== null && target !== null) {
+          setGain(next.gain, target.volume * progress);
+        }
+        if (previous !== null) {
+          setGain(previous.gain, previousVolume * (1 - progress));
+        }
+      },
+      signal,
+    );
     if (previous !== null) {
       safelyStop(previous.source);
     }
@@ -227,8 +245,47 @@ function safelyStop(source: AudioBufferSourceNode): void {
   }
 }
 
-function wait(durationMs: number): Promise<void> {
-  return new Promise((resolve) =>
-    window.setTimeout(resolve, Math.max(0, durationMs)),
-  );
+function setGain(node: GainNode, value: number): void {
+  node.gain.setValueAtTime(value, node.context.currentTime);
+}
+
+function dynamicFade(
+  durationMs: number,
+  getRate: () => number,
+  apply: (progress: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (durationMs <= 0 || signal?.aborted) {
+    if (!signal?.aborted) apply(1);
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let previous = performance.now();
+    let elapsed = 0;
+    let frame = 0;
+    const abort = (): void => {
+      cancelAnimationFrame(frame);
+      resolve();
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    const tick = (now: number): void => {
+      if (signal?.aborted) return;
+      elapsed = advanceVirtualElapsed(
+        elapsed,
+        now - previous,
+        getRate(),
+        durationMs,
+      );
+      previous = now;
+      const progress = Math.min(1, elapsed / durationMs);
+      apply(progress);
+      if (progress >= 1) {
+        signal?.removeEventListener("abort", abort);
+        resolve();
+      } else {
+        frame = requestAnimationFrame(tick);
+      }
+    };
+    frame = requestAnimationFrame(tick);
+  });
 }

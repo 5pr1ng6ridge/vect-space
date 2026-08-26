@@ -157,6 +157,12 @@ input:focus-visible {
   transition: 120ms ease;
 }
 
+.game-toolbar button[aria-pressed="true"] {
+  border-color: #9ee7ff;
+  color: #9ee7ff;
+  box-shadow: 0 0 14px rgb(117 200 231 / 24%);
+}
+
 .title-actions button {
   min-height: 56px;
   padding: 0 20px;
@@ -537,6 +543,16 @@ button:disabled {
 
 .setting-row input {
   accent-color: #75c8e7;
+}
+
+.setting-row select {
+  min-height: 40px;
+  border: 1px solid rgb(158 231 255 / 30%);
+  border-radius: 3px;
+  background: #0e1f2c;
+  color: #edfaff;
+  padding: 6px 10px;
+  font: inherit;
 }
 
 .setting-row output {

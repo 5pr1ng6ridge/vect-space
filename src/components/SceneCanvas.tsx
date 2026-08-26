@@ -20,6 +20,8 @@ interface SceneCanvasProps {
   assets: AssetUrlMap;
   settings: Settings;
   typingSfxActive: boolean;
+  playbackRate: number;
+  suppressOneShots: boolean;
   onSettled(update: RuntimeUpdate): void;
   onDiagnostic(message: string): void;
 }
@@ -31,7 +33,16 @@ interface PresentationSession {
 
 export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
   function SceneCanvas(
-    { update, assets, settings, typingSfxActive, onSettled, onDiagnostic },
+    {
+      update,
+      assets,
+      settings,
+      typingSfxActive,
+      playbackRate,
+      suppressOneShots,
+      onSettled,
+      onDiagnostic,
+    },
     ref,
   ): ReactElement {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -109,6 +120,10 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
     useEffect(() => {
       controller?.applySettings(settings);
     }, [controller, settings]);
+
+    useEffect(() => {
+      controller?.setPlaybackMode(playbackRate, suppressOneShots);
+    }, [controller, playbackRate, suppressOneShots]);
 
     useEffect(() => {
       if (controller === null) {

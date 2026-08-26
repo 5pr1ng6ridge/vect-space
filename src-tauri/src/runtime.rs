@@ -1,11 +1,12 @@
 use crate::{
     content::ContentCatalog,
     model::{
-        AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot, ChoiceSnapshot,
-        ConditionExpression, CueGate, LoopingAudioSnapshot, MutationValue, PresentationCue,
-        PresentationCueKind, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue,
-        SceneNode, SpriteAction, SpriteSnapshot, StoryLocation, ValueOperand, VariableMap,
-        VariableOperation, VariableScope, VariableType, WorldSnapshot,
+        AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
+        ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, LoopingAudioSnapshot,
+        MutationValue, PlaybackAutoMode, PlaybackSnapshot, PresentationCue, PresentationCueKind,
+        ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, SceneNode,
+        SpriteAction, SpriteSnapshot, StoryLocation, ValueOperand, VariableMap, VariableOperation,
+        VariableScope, VariableType, WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
@@ -41,6 +42,7 @@ pub enum RuntimeError {
 pub struct RuntimeEngine {
     snapshot: RuntimeSnapshot,
     profile_variables: VariableMap,
+    read_dialogues: std::collections::BTreeSet<String>,
     started: bool,
     next_update_id: u64,
     next_cue_id: u64,
@@ -50,18 +52,26 @@ pub struct RuntimeEngine {
 impl RuntimeEngine {
     #[allow(dead_code)]
     pub fn new(content: &ContentCatalog) -> Result<Self, RuntimeError> {
-        Self::with_profile(content, profile_defaults(content)?)
+        Self::with_profile(
+            content,
+            ProfileState {
+                variables: profile_defaults(content)?,
+                read_content_version: content.manifest.content_version.clone(),
+                read_dialogues: Default::default(),
+            },
+        )
     }
 
     pub fn with_profile(
         content: &ContentCatalog,
-        profile_variables: VariableMap,
+        profile: ProfileState,
     ) -> Result<Self, RuntimeError> {
-        validate_profile_variables(content, &profile_variables)?;
+        validate_profile_variables(content, &profile.variables)?;
         let snapshot = initial_snapshot(content)?;
         Ok(Self {
             snapshot,
-            profile_variables,
+            profile_variables: profile.variables,
+            read_dialogues: profile.read_dialogues,
             started: false,
             next_update_id: 1,
             next_cue_id: 1,
@@ -95,11 +105,15 @@ impl RuntimeEngine {
         &mut self,
         content: &ContentCatalog,
         expected_revision: u64,
+        source: AdvanceSource,
     ) -> Result<RuntimeUpdate, RuntimeError> {
         self.ensure_interactive(expected_revision)?;
-        if !matches!(self.snapshot.prompt, PromptSnapshot::Dialogue { .. }) {
+        self.validate_advance_source(source)?;
+        let PromptSnapshot::Dialogue { prompt_id, .. } = &self.snapshot.prompt else {
             return Err(RuntimeError::AdvanceNotAllowed);
-        }
+        };
+        let prompt_id = prompt_id.clone();
+        self.read_dialogues.insert(prompt_id);
         self.snapshot.prompt = PromptSnapshot::None;
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
@@ -169,8 +183,17 @@ impl RuntimeEngine {
         &self.snapshot
     }
 
+    #[cfg(test)]
     pub fn profile_variables(&self) -> &VariableMap {
         &self.profile_variables
+    }
+
+    pub fn profile_state(&self, content: &ContentCatalog) -> ProfileState {
+        ProfileState {
+            variables: self.profile_variables.clone(),
+            read_content_version: content.manifest.content_version.clone(),
+            read_dialogues: self.read_dialogues.clone(),
+        }
     }
 
     pub fn pending_runtime_update(&self) -> Option<u64> {
@@ -183,6 +206,12 @@ impl RuntimeEngine {
         mut snapshot: RuntimeSnapshot,
     ) -> Result<RuntimeUpdate, RuntimeError> {
         validate_snapshot(content, &snapshot)?;
+        if let PromptSnapshot::Dialogue {
+            prompt_id, is_read, ..
+        } = &mut snapshot.prompt
+        {
+            *is_read = self.read_dialogues.contains(prompt_id);
+        }
         snapshot.revision = self.snapshot.revision.saturating_add(1);
         self.snapshot = snapshot;
         self.started = true;
@@ -204,6 +233,20 @@ impl RuntimeEngine {
             });
         }
         Ok(())
+    }
+
+    fn validate_advance_source(&self, source: AdvanceSource) -> Result<(), RuntimeError> {
+        let allowed = match self.snapshot.playback.auto {
+            PlaybackAutoMode::Forced => source == AdvanceSource::ForcedAuto,
+            PlaybackAutoMode::Normal => match source {
+                AdvanceSource::Manual | AdvanceSource::Auto => true,
+                AdvanceSource::FastForward => {
+                    self.snapshot.playback.ctrl_fast_forward == CtrlFastForwardMode::Allow
+                }
+                AdvanceSource::ForcedAuto => false,
+            },
+        };
+        allowed.then_some(()).ok_or(RuntimeError::AdvanceNotAllowed)
     }
 
     fn run_until_boundary(
@@ -352,6 +395,7 @@ impl RuntimeEngine {
                         name_color,
                         text_color,
                         text,
+                        is_read: self.read_dialogues.contains(&prompt_id),
                     };
                     cues.push(self.cue(
                         CueGate::PlayerAdvance,
@@ -437,6 +481,17 @@ impl RuntimeEngine {
                         } else {
                             otherwise
                         };
+                }
+                SceneNode::Playback {
+                    auto,
+                    ctrl_fast_forward,
+                    next,
+                } => {
+                    self.snapshot.playback = PlaybackSnapshot {
+                        auto,
+                        ctrl_fast_forward,
+                    };
+                    self.snapshot.location.node_id = next;
                 }
                 SceneNode::Jump { scene, target } => {
                     if let Some(scene) = scene {
@@ -966,6 +1021,7 @@ fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, Runtime
         variables: defaults_for_scope(content, VariableScope::Save)?,
         world: WorldSnapshot::default(),
         audio: AudioSnapshot::default(),
+        playback: PlaybackSnapshot::default(),
         prompt: PromptSnapshot::None,
     })
 }
@@ -1222,12 +1278,115 @@ mod tests {
             speaker_id,
             name_color,
             text_color,
+            is_read,
             ..
         } = prompt
         else {
             panic!("expected dialogue")
         };
         assert_eq!((speaker_id, name_color, text_color), (None, None, None));
+        assert!(!is_read);
+    }
+
+    fn interactive_dialogue(content: &ContentCatalog) -> RuntimeEngine {
+        let mut runtime = RuntimeEngine::new(content).unwrap();
+        runtime.started = true;
+        runtime.snapshot.revision = 7;
+        runtime.snapshot.location.node_id = "ending".to_owned();
+        runtime.snapshot.prompt = PromptSnapshot::Dialogue {
+            prompt_id: "prologue/test_line".to_owned(),
+            speaker_id: None,
+            speaker: None,
+            name_color: None,
+            text_color: None,
+            text: "test".to_owned(),
+            is_read: false,
+        };
+        runtime
+    }
+
+    #[test]
+    fn advance_sources_follow_the_authoritative_playback_policy() {
+        let content = catalog();
+        for source in [
+            AdvanceSource::Manual,
+            AdvanceSource::Auto,
+            AdvanceSource::FastForward,
+        ] {
+            let mut runtime = interactive_dialogue(&content);
+            assert!(runtime.advance(&content, 7, source).is_ok(), "{source:?}");
+        }
+        let mut normal = interactive_dialogue(&content);
+        assert!(matches!(
+            normal.advance(&content, 7, AdvanceSource::ForcedAuto),
+            Err(RuntimeError::AdvanceNotAllowed)
+        ));
+
+        for source in [
+            AdvanceSource::Manual,
+            AdvanceSource::Auto,
+            AdvanceSource::FastForward,
+        ] {
+            let mut runtime = interactive_dialogue(&content);
+            runtime.snapshot.playback.auto = PlaybackAutoMode::Forced;
+            assert!(matches!(
+                runtime.advance(&content, 7, source),
+                Err(RuntimeError::AdvanceNotAllowed)
+            ));
+        }
+        let mut forced = interactive_dialogue(&content);
+        forced.snapshot.playback.auto = PlaybackAutoMode::Forced;
+        assert!(forced
+            .advance(&content, 7, AdvanceSource::ForcedAuto)
+            .is_ok());
+
+        let mut blocked = interactive_dialogue(&content);
+        blocked.snapshot.playback.ctrl_fast_forward = CtrlFastForwardMode::Block;
+        assert!(matches!(
+            blocked.advance(&content, 7, AdvanceSource::FastForward),
+            Err(RuntimeError::AdvanceNotAllowed)
+        ));
+    }
+
+    #[test]
+    fn playback_nodes_apply_state_and_read_status_survives_new_game_and_load() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.started = true;
+        runtime.snapshot.location.node_id = "forced_begin".to_owned();
+        runtime.run_until_boundary(&content).unwrap();
+        assert_eq!(runtime.snapshot.playback.auto, PlaybackAutoMode::Forced);
+        assert_eq!(
+            runtime.snapshot.playback.ctrl_fast_forward,
+            CtrlFastForwardMode::Block
+        );
+        let unread_snapshot = runtime.snapshot.clone();
+        let PromptSnapshot::Dialogue { is_read, .. } = runtime.snapshot.prompt else {
+            panic!("expected dialogue")
+        };
+        assert!(!is_read);
+
+        runtime
+            .advance(&content, 0, AdvanceSource::ForcedAuto)
+            .unwrap();
+        assert!(runtime.read_dialogues.contains("prologue/introduction"));
+        runtime.start_new_game(&content).unwrap();
+        let loaded = runtime.load_snapshot(&content, unread_snapshot).unwrap();
+        let PromptSnapshot::Dialogue { is_read, text, .. } = loaded.snapshot.prompt else {
+            panic!("expected loaded dialogue")
+        };
+        assert!(is_read);
+        assert!(text.contains("固定的"));
+    }
+
+    #[test]
+    fn old_runtime_snapshots_default_playback_policy() {
+        let content = catalog();
+        let snapshot = initial_snapshot(&content).unwrap();
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value.as_object_mut().unwrap().remove("playback");
+        let decoded: RuntimeSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.playback, PlaybackSnapshot::default());
     }
 
     #[test]
@@ -1302,7 +1461,7 @@ mod tests {
                 PromptSnapshot::Dialogue { .. }
             ));
             assert!(matches!(
-                runtime.advance(&content, first.snapshot.revision),
+                runtime.advance(&content, first.snapshot.revision, AdvanceSource::Manual,),
                 Err(RuntimeError::StaleRevision { .. })
             ));
         }
@@ -1338,7 +1497,7 @@ mod tests {
         let update = runtime.start_new_game(&content).unwrap();
         assert!(update.requires_ack);
         assert!(matches!(
-            runtime.advance(&content, update.snapshot.revision),
+            runtime.advance(&content, update.snapshot.revision, AdvanceSource::Manual,),
             Err(RuntimeError::PresentationPending(_))
         ));
         assert!(matches!(

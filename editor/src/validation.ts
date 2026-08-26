@@ -243,6 +243,8 @@ function validateNode(
     case "condition":
       validateCondition(project, node.condition, issue);
       break;
+    case "playback":
+      break;
     case "wait":
       checkDuration(node.duration_ms);
       break;

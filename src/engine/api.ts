@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 import type {
   BootstrapPayload,
+  AdvanceSource,
   ResolvedAsset,
   RuntimeSnapshot,
   RuntimeUpdate,
@@ -27,8 +28,8 @@ async function command<T>(
 export const engineApi = {
   bootstrap: () => command<BootstrapPayload>("bootstrap"),
   startNewGame: () => command<RuntimeUpdate>("start_new_game"),
-  advance: (expectedRevision: number) =>
-    command<RuntimeUpdate>("advance", { expectedRevision }),
+  advance: (expectedRevision: number, source: AdvanceSource) =>
+    command<RuntimeUpdate>("advance", { expectedRevision, source }),
   choose: (choiceId: string, expectedRevision: number) =>
     command<RuntimeUpdate>("choose", { choiceId, expectedRevision }),
   presentationComplete: (updateId: number) =>

@@ -608,6 +608,46 @@ function renderFields(
           />
         </>
       );
+    case "playback":
+      return (
+        <>
+          <Field label="自动播放策略">
+            <select
+              value={node.auto}
+              onChange={(event) =>
+                update({
+                  ...node,
+                  auto: event.currentTarget.value as typeof node.auto,
+                })
+              }
+            >
+              <option value="normal">普通（由玩家切换自动）</option>
+              <option value="forced">强制自动，禁止手动推进</option>
+            </select>
+          </Field>
+          <Field label="Ctrl 快进策略">
+            <select
+              value={node.ctrl_fast_forward}
+              onChange={(event) =>
+                update({
+                  ...node,
+                  ctrl_fast_forward: event.currentTarget
+                    .value as typeof node.ctrl_fast_forward,
+                })
+              }
+            >
+              <option value="allow">允许</option>
+              <option value="block">禁止</option>
+            </select>
+          </Field>
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
     case "jump": {
       const targetScene = node.scene === null ? scene : undefined;
       return (

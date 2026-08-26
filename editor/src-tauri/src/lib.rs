@@ -11,7 +11,10 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 use vectspace_core::{
     content::ContentCatalog,
-    model::{AssetKind, ContentManifest, ResolvedAsset, RuntimeUpdate, SceneDefinition, SceneNode},
+    model::{
+        AdvanceSource, AssetKind, ContentManifest, ResolvedAsset, RuntimeUpdate, SceneDefinition,
+        SceneNode,
+    },
     runtime::{RuntimeEngine, RuntimeError},
 };
 
@@ -296,6 +299,7 @@ fn preview_start(state: State<'_, EditorState>) -> Result<RuntimeUpdate, String>
 #[tauri::command]
 fn preview_advance(
     expected_revision: u64,
+    source: AdvanceSource,
     state: State<'_, EditorState>,
 ) -> Result<RuntimeUpdate, String> {
     let mut guard = state
@@ -304,7 +308,7 @@ fn preview_advance(
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_mut().ok_or("尚未打开项目")?;
     transact_preview(session, |runtime, catalog| {
-        runtime.advance(catalog, expected_revision)
+        runtime.advance(catalog, expected_revision, source)
     })
 }
 
@@ -645,6 +649,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::Sprite { next, .. }
         | SceneNode::Say { next, .. }
         | SceneNode::Set { next, .. }
+        | SceneNode::Playback { next, .. }
         | SceneNode::Wait { next, .. }
         | SceneNode::Bgm { next, .. }
         | SceneNode::Sfx { next, .. }
@@ -691,6 +696,7 @@ fn is_immediate(node: &SceneNode) -> bool {
         } => !await_completion,
         SceneNode::Set { .. }
         | SceneNode::Condition { .. }
+        | SceneNode::Playback { .. }
         | SceneNode::Jump { .. }
         | SceneNode::Sfx { .. } => true,
     }

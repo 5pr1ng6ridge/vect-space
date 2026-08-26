@@ -5,6 +5,7 @@ export type ScalarValue = boolean | number | string;
 export type VariableScope = "save" | "profile";
 export type VariableType = "boolean" | "integer" | "number" | "string";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
 export type NodeType = SceneNode["type"];
 
 export interface VariableDefinition {
@@ -114,6 +115,12 @@ export interface ConditionNode {
   otherwise: string;
 }
 
+export interface PlaybackNode extends NextNode {
+  type: "playback";
+  auto: "normal" | "forced";
+  ctrl_fast_forward: "allow" | "block";
+}
+
 export interface JumpNode {
   type: "jump";
   scene: string | null;
@@ -167,6 +174,7 @@ export type SceneNode =
   | ChoiceNode
   | SetNode
   | ConditionNode
+  | PlaybackNode
   | JumpNode
   | WaitNode
   | BgmNode
@@ -267,6 +275,7 @@ export type PromptSnapshot =
       name_color?: string | null;
       text_color?: string | null;
       text: string;
+      is_read: boolean;
     }
   | {
       kind: "choice";
@@ -287,6 +296,10 @@ export interface RuntimeSnapshot {
     persistent_effects: string[];
   };
   audio: { bgm: { asset: string; volume: number } | null };
+  playback: {
+    auto: "normal" | "forced";
+    ctrl_fast_forward: "allow" | "block";
+  };
   prompt: PromptSnapshot;
 }
 

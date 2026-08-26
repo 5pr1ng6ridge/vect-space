@@ -30,6 +30,7 @@ interface DialogueBoxProps {
   dialogueBoxUrl: string;
   nameBoxUrl: string;
   onTypingChange(typing: boolean): void;
+  onRevealComplete(promptId: string): void;
 }
 
 export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
@@ -43,6 +44,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       dialogueBoxUrl,
       nameBoxUrl,
       onTypingChange,
+      onRevealComplete,
     },
     ref,
   ): ReactElement {
@@ -61,6 +63,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     const visibleRef = useRef(0);
     const complete = visibleCount >= schedule.length;
     const completeRef = useRef(complete);
+    const reportedPromptRef = useRef<string | null>(null);
 
     useEffect(() => {
       visibleRef.current = 0;
@@ -106,6 +109,13 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       }),
       [schedule.length],
     );
+
+    useEffect(() => {
+      if (complete && reportedPromptRef.current !== prompt.prompt_id) {
+        reportedPromptRef.current = prompt.prompt_id;
+        onRevealComplete(prompt.prompt_id);
+      }
+    }, [complete, onRevealComplete, prompt.prompt_id]);
 
     const effectivePaused =
       promptIdRef.current === prompt.prompt_id
