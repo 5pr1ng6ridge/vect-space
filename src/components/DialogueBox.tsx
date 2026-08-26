@@ -133,7 +133,10 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           width={1920}
         />
         {prompt.speaker !== null && (
-          <span className="speaker-name">
+          <span
+            className="speaker-name"
+            style={{ color: prompt.name_color ?? undefined }}
+          >
             <img
               alt=""
               aria-hidden="true"
@@ -145,7 +148,10 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
             <span>{prompt.speaker}</span>
           </span>
         )}
-        <span className="dialogue-text">
+        <span
+          className="dialogue-text"
+          style={{ color: prompt.text_color ?? undefined }}
+        >
           <MarkupText source={prompt.text} visibleCount={visibleCount} />
         </span>
         <span className={`advance-indicator${complete ? " is-ready" : ""}`}>

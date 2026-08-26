@@ -2,6 +2,7 @@ mod content;
 mod model;
 mod runtime;
 mod save;
+mod text_template;
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -216,7 +217,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::model::{ScalarValue, SceneNode};
+    use crate::model::{MutationValue, ScalarValue, SceneNode, VariableOperation};
 
     #[test]
     fn failed_profile_persistence_rolls_back_the_entire_runtime_command() {
@@ -230,7 +231,8 @@ mod tests {
             scene.entry.clone(),
             SceneNode::Set {
                 variable: "ending_seen".to_owned(),
-                value: ScalarValue::Boolean(true),
+                op: VariableOperation::Assign,
+                value: Some(MutationValue::Literal(ScalarValue::Boolean(true))),
                 next: original_entry,
             },
         );
@@ -262,5 +264,54 @@ mod tests {
             runtime.profile_variables().get("ending_seen"),
             Some(&ScalarValue::Boolean(false))
         );
+    }
+
+    #[test]
+    fn failed_variable_operation_rolls_back_the_entire_runtime_command() {
+        let mut content =
+            ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
+                .unwrap();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        let original_entry = scene.entry.clone();
+        scene.entry = "prepare_overflow".to_owned();
+        scene.nodes.insert(
+            "prepare_overflow".to_owned(),
+            SceneNode::Set {
+                variable: "score".to_owned(),
+                op: VariableOperation::Assign,
+                value: Some(MutationValue::Literal(ScalarValue::Integer(i64::MAX))),
+                next: "overflow".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "overflow".to_owned(),
+            SceneNode::Set {
+                variable: "score".to_owned(),
+                op: VariableOperation::Add,
+                value: Some(MutationValue::Literal(ScalarValue::Integer(1))),
+                next: original_entry,
+            },
+        );
+
+        let directory = tempdir().unwrap();
+        let saves = SaveManager::new(
+            directory.path().join("saves"),
+            content.manifest.content_version.clone(),
+        )
+        .unwrap();
+        let (profile, profile_variables) =
+            ProfileManager::new(directory.path().to_path_buf(), &content.manifest.variables)
+                .unwrap();
+        let runtime = RuntimeEngine::with_profile(&content, profile_variables).unwrap();
+        let state = EngineState {
+            content,
+            runtime: Mutex::new(runtime),
+            saves,
+            profile,
+        };
+        let before = state.runtime().unwrap().snapshot().clone();
+        let result = state.transact_runtime(|runtime| runtime.start_new_game(&state.content));
+        assert!(result.unwrap_err().contains("溢出"));
+        assert_eq!(state.runtime().unwrap().snapshot(), &before);
     }
 }

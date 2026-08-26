@@ -9,6 +9,13 @@
         "$ref": "#/$defs/AssetDefinition"
       }
     },
+    "characters": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/CharacterDefinition"
+      },
+      "default": {}
+    },
     "content_version": {
       "type": "string"
     },
@@ -72,6 +79,30 @@
         "bgm",
         "sfx",
         "font"
+      ]
+    },
+    "CharacterDefinition": {
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "name_color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "display_name"
       ]
     },
     "ScalarValue": {

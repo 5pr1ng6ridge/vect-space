@@ -1,20 +1,16 @@
 import { useMemo, useState, type ReactElement, type ReactNode } from "react";
-import {
-  NODE_TYPES,
-  defaultCondition,
-  defaultNode,
-  nodeLabel,
-  parseScalar,
-  scalarKind,
-} from "../story";
+import { NODE_TYPES, defaultCondition, defaultNode, nodeLabel } from "../story";
+import { interpolateTemplate } from "../textTemplate";
 import type {
   AssetKind,
   ConditionExpression,
   ContentManifest,
+  MutationValue,
   ScalarValue,
   SceneDefinition,
   SceneNode,
   ValueOperand,
+  VariableOperation,
   VariableType,
 } from "../types";
 import { MarkupPreview } from "./MarkupPreview";
@@ -254,17 +250,78 @@ function renderFields(
           />
         </>
       );
-    case "say":
+    case "say": {
+      const speakerMode =
+        node.speaker === null
+          ? "narrator"
+          : manifest.characters[node.speaker] !== undefined
+            ? "character"
+            : "temporary";
+      const character =
+        speakerMode === "character" && node.speaker !== null
+          ? manifest.characters[node.speaker]
+          : undefined;
       return (
         <>
-          <TextField
-            allowEmpty
-            label="说话人"
-            onChange={(speaker) =>
-              update({ ...node, speaker: speaker === "" ? null : speaker })
-            }
-            value={node.speaker ?? ""}
-          />
+          <Field label="说话人模式">
+            <select
+              value={speakerMode}
+              onChange={(event) => {
+                const mode = event.currentTarget.value;
+                update({
+                  ...node,
+                  speaker:
+                    mode === "narrator"
+                      ? null
+                      : mode === "character"
+                        ? (Object.keys(manifest.characters)[0] ?? "")
+                        : "临时角色",
+                });
+              }}
+            >
+              <option value="narrator">旁白</option>
+              <option
+                disabled={Object.keys(manifest.characters).length === 0}
+                value="character"
+              >
+                已定义角色
+              </option>
+              <option value="temporary">临时名字</option>
+            </select>
+          </Field>
+          {speakerMode === "character" && (
+            <Field label="角色">
+              <select
+                value={node.speaker ?? ""}
+                onChange={(event) =>
+                  update({ ...node, speaker: event.currentTarget.value })
+                }
+              >
+                {Object.entries(manifest.characters).map(([id, definition]) => (
+                  <option key={id} value={id}>
+                    {definition.display_name} · {id}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {speakerMode === "temporary" && (
+            <TextField
+              label="临时显示名"
+              onChange={(speaker) => update({ ...node, speaker })}
+              value={node.speaker ?? ""}
+            />
+          )}
+          {character !== undefined && (
+            <div className="character-style-preview">
+              <span style={{ color: character.name_color ?? undefined }}>
+                {character.display_name}
+              </span>
+              <span style={{ color: character.text_color ?? undefined }}>
+                正文颜色预览
+              </span>
+            </div>
+          )}
           <Field label="对话文本" hint="支持 KaTeX、pause、speed 和 fx 标记">
             <textarea
               rows={8}
@@ -275,7 +332,7 @@ function renderFields(
             />
           </Field>
           <Field label="实际渲染预览">
-            <MarkupPreview source={node.text} />
+            <MarkupPreview source={interpolatePreview(node.text, manifest)} />
           </Field>
           <OptionalNumber
             label="文字速度 CPS"
@@ -291,6 +348,7 @@ function renderFields(
           />
         </>
       );
+    }
     case "choice":
       return (
         <>
@@ -418,7 +476,9 @@ function renderFields(
                   }
                   value={choice.enabled_if}
                 />
-                <MarkupPreview source={choice.label} />
+                <MarkupPreview
+                  source={interpolatePreview(choice.label, manifest)}
+                />
               </article>
             ))}
           </div>
@@ -451,16 +511,73 @@ function renderFields(
     case "set":
       return (
         <>
-          <TextField
-            label="变量名"
-            onChange={(variable) => update({ ...node, variable })}
-            value={node.variable}
-          />
-          <ScalarEditor
-            label="值"
-            onChange={(value) => update({ ...node, value })}
-            value={node.value}
-          />
+          <Field label="目标变量">
+            <select
+              value={node.variable}
+              onChange={(event) => {
+                const variable = event.currentTarget.value;
+                const targetType =
+                  manifest.variables[variable]?.type ?? "boolean";
+                update({
+                  ...node,
+                  variable,
+                  op: "assign",
+                  value: defaultScalar(targetType),
+                });
+              }}
+            >
+              {!manifest.variables[node.variable] && (
+                <option value={node.variable}>
+                  {node.variable || "— 未声明 —"}
+                </option>
+              )}
+              {Object.entries(manifest.variables).map(([id, definition]) => (
+                <option key={id} value={id}>
+                  {id} · {definition.type}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="操作">
+            <select
+              value={node.op ?? "assign"}
+              onChange={(event) => {
+                const op = event.currentTarget.value as NonNullable<
+                  typeof node.op
+                >;
+                update({
+                  ...node,
+                  op,
+                  value:
+                    op === "toggle"
+                      ? undefined
+                      : defaultSetValue(node.variable, op, manifest),
+                });
+              }}
+            >
+              {SET_OPERATIONS.map(({ value, label }) => (
+                <option
+                  disabled={
+                    !operationSupportsTarget(
+                      value,
+                      manifest.variables[node.variable]?.type,
+                    )
+                  }
+                  key={value}
+                  value={value}
+                >
+                  {label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {(node.op ?? "assign") !== "toggle" && (
+            <MutationValueEditor
+              manifest={manifest}
+              node={node}
+              onChange={(value) => update({ ...node, value })}
+            />
+          )}
           <TargetSelect
             label="下一节点"
             onChange={(next) => update({ ...node, next })}
@@ -800,6 +917,139 @@ function AssetSelect({
       </select>
     </Field>
   );
+}
+
+const SET_OPERATIONS: { value: VariableOperation; label: string }[] = [
+  { value: "assign", label: "assign · 赋值" },
+  { value: "add", label: "add · 加" },
+  { value: "sub", label: "sub · 减" },
+  { value: "mul", label: "mul · 乘" },
+  { value: "mod", label: "mod · 取模" },
+  { value: "append", label: "append · 追加文本" },
+  { value: "toggle", label: "toggle · 布尔翻转" },
+];
+
+function operationSupportsTarget(
+  operation: VariableOperation,
+  target: VariableType | undefined,
+): boolean {
+  if (target === undefined || operation === "assign") return true;
+  if (target === "boolean") return operation === "toggle";
+  if (target === "string") return operation === "append";
+  if (target === "integer")
+    return ["add", "sub", "mul", "mod"].includes(operation);
+  return ["add", "sub", "mul"].includes(operation);
+}
+
+function MutationValueEditor({
+  manifest,
+  node,
+  onChange,
+}: {
+  manifest: ContentManifest;
+  node: Extract<SceneNode, { type: "set" }>;
+  onChange(value: MutationValue): void;
+}): ReactElement {
+  const op = node.op ?? "assign";
+  const targetType = manifest.variables[node.variable]?.type ?? "boolean";
+  const value = node.value ?? defaultSetValue(node.variable, op, manifest);
+  const variableValue =
+    typeof value === "object" && value !== null ? value.variable : null;
+  const eligibleVariables = Object.entries(manifest.variables).filter(
+    ([, definition]) =>
+      mutationTypesCompatible(targetType, definition.type, op),
+  );
+  return (
+    <Field label="操作数">
+      <div className="operand-editor">
+        <select
+          value={variableValue === null ? "literal" : "variable"}
+          onChange={(event) =>
+            onChange(
+              event.currentTarget.value === "variable"
+                ? { variable: eligibleVariables[0]?.[0] ?? "" }
+                : defaultScalar(targetType),
+            )
+          }
+        >
+          <option value="literal">字面量</option>
+          <option value="variable">变量</option>
+        </select>
+        {variableValue === null ? (
+          <LiteralEditor
+            expectedType={targetType}
+            onChange={onChange}
+            value={value as ScalarValue}
+          />
+        ) : (
+          <select
+            value={variableValue}
+            onChange={(event) =>
+              onChange({ variable: event.currentTarget.value })
+            }
+          >
+            {!eligibleVariables.some(([id]) => id === variableValue) && (
+              <option value={variableValue}>
+                {variableValue || "— 无兼容变量 —"}
+              </option>
+            )}
+            {eligibleVariables.map(([id, definition]) => (
+              <option key={id} value={id}>
+                {id} · {definition.type}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+function defaultSetValue(
+  variable: string,
+  op: NonNullable<Extract<SceneNode, { type: "set" }>["op"]>,
+  manifest: ContentManifest,
+): MutationValue {
+  const type = manifest.variables[variable]?.type ?? "boolean";
+  if (op === "append") return "";
+  return defaultScalar(type);
+}
+
+function mutationTypesCompatible(
+  target: VariableType,
+  source: VariableType,
+  op: NonNullable<Extract<SceneNode, { type: "set" }>["op"]>,
+): boolean {
+  switch (op) {
+    case "assign":
+      return target === source || (target === "number" && source === "integer");
+    case "add":
+    case "sub":
+    case "mul":
+      return (
+        (target === "integer" || target === "number") &&
+        (source === "integer" || source === "number") &&
+        (target !== "integer" || source === "integer")
+      );
+    case "mod":
+      return target === "integer" && source === "integer";
+    case "append":
+      return target === "string" && source === "string";
+    case "toggle":
+      return false;
+  }
+}
+
+function interpolatePreview(source: string, manifest: ContentManifest): string {
+  try {
+    return interpolateTemplate(source, (id) => {
+      const definition = manifest.variables[id];
+      if (definition === undefined) throw new Error(`未知变量 ${id}`);
+      return definition.default;
+    });
+  } catch {
+    return source;
+  }
 }
 
 const COMPARISON_OPERATORS = ["eq", "ne", "lt", "le", "gt", "ge"] as const;
@@ -1152,56 +1402,6 @@ function defaultScalar(type: VariableType): ScalarValue {
     case "string":
       return "";
   }
-}
-
-function ScalarEditor({
-  label,
-  onChange,
-  value,
-}: {
-  label: string;
-  onChange(value: ScalarValue): void;
-  value: ScalarValue;
-}): ReactElement {
-  const kind = scalarKind(value);
-  return (
-    <Field label={label}>
-      <div className="scalar-editor">
-        <select
-          value={kind}
-          onChange={(event) => {
-            const nextKind = event.currentTarget.value as typeof kind;
-            onChange(
-              nextKind === "boolean" ? false : nextKind === "number" ? 0 : "",
-            );
-          }}
-        >
-          <option value="text">文本</option>
-          <option value="number">数字</option>
-          <option value="boolean">布尔</option>
-        </select>
-        {kind === "boolean" ? (
-          <select
-            value={String(value)}
-            onChange={(event) =>
-              onChange(parseScalar(event.currentTarget.value, kind))
-            }
-          >
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        ) : (
-          <input
-            type={kind === "number" ? "number" : "text"}
-            value={String(value)}
-            onChange={(event) =>
-              onChange(parseScalar(event.currentTarget.value, kind))
-            }
-          />
-        )}
-      </div>
-    </Field>
-  );
 }
 
 function Field({

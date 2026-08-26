@@ -291,6 +291,16 @@
         "value"
       ]
     },
+    "MutationValue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VariableOperand"
+        },
+        {
+          "$ref": "#/$defs/ScalarValue"
+        }
+      ]
+    },
     "ScalarValue": {
       "anyOf": [
         {
@@ -493,12 +503,23 @@
             "next": {
               "type": "string"
             },
+            "op": {
+              "$ref": "#/$defs/VariableOperation",
+              "default": "assign"
+            },
             "type": {
               "type": "string",
               "const": "set"
             },
             "value": {
-              "$ref": "#/$defs/ScalarValue"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MutationValue"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "variable": {
               "type": "string"
@@ -508,7 +529,6 @@
           "required": [
             "type",
             "variable",
-            "value",
             "next"
           ]
         },
@@ -810,6 +830,18 @@
       "additionalProperties": false,
       "required": [
         "variable"
+      ]
+    },
+    "VariableOperation": {
+      "type": "string",
+      "enum": [
+        "assign",
+        "add",
+        "sub",
+        "mul",
+        "mod",
+        "append",
+        "toggle"
       ]
     }
   }

@@ -2,11 +2,12 @@ use crate::{
     content::ContentCatalog,
     model::{
         AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot, ChoiceSnapshot,
-        ConditionExpression, CueGate, LoopingAudioSnapshot, PresentationCue, PresentationCueKind,
-        PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, SceneNode, SpriteAction,
-        SpriteSnapshot, StoryLocation, ValueOperand, VariableMap, VariableScope, VariableType,
-        WorldSnapshot,
+        ConditionExpression, CueGate, LoopingAudioSnapshot, MutationValue, PresentationCue,
+        PresentationCueKind, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue,
+        SceneNode, SpriteAction, SpriteSnapshot, StoryLocation, ValueOperand, VariableMap,
+        VariableOperation, VariableScope, VariableType, WorldSnapshot,
     },
+    text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
 use thiserror::Error;
 
@@ -330,10 +331,26 @@ impl RuntimeEngine {
                     next,
                 } => {
                     let prompt_id = format!("{scene_id}/{node_id}");
+                    let text = self.interpolate_text(content, &text)?;
+                    let (speaker_id, speaker, name_color, text_color) = match speaker {
+                        None => (None, None, None, None),
+                        Some(source) => match content.manifest.characters.get(&source) {
+                            Some(character) => (
+                                Some(source),
+                                Some(character.display_name.clone()),
+                                character.name_color.clone(),
+                                character.text_color.clone(),
+                            ),
+                            None => (None, Some(source), None, None),
+                        },
+                    };
                     self.snapshot.location.node_id = next;
                     self.snapshot.prompt = PromptSnapshot::Dialogue {
                         prompt_id: prompt_id.clone(),
+                        speaker_id,
                         speaker,
+                        name_color,
+                        text_color,
                         text,
                     };
                     cues.push(self.cue(
@@ -362,7 +379,7 @@ impl RuntimeEngine {
                         };
                         visible_choices.push(ChoiceSnapshot {
                             id: choice.id,
-                            label: choice.label,
+                            label: self.interpolate_text(content, &choice.label)?,
                             enabled,
                         });
                     }
@@ -379,6 +396,7 @@ impl RuntimeEngine {
                 }
                 SceneNode::Set {
                     variable,
+                    op,
                     value,
                     next,
                 } => {
@@ -388,7 +406,16 @@ impl RuntimeEngine {
                                 "{scene_id}/{node_id}: 未声明变量 {variable}"
                             ))
                         })?;
-                    let value = normalize_value(value, definition.value_type)?;
+                    let current = self.variable_value(content, &variable)?.clone();
+                    let operand = value
+                        .as_ref()
+                        .map(|value| self.resolve_mutation_value(content, value))
+                        .transpose()?;
+                    let value =
+                        apply_variable_operation(op, definition.value_type, current, operand)
+                            .map_err(|message| {
+                                RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
+                            })?;
                     match definition.scope {
                         VariableScope::Save => {
                             self.snapshot.variables.insert(variable, value);
@@ -608,26 +635,53 @@ impl RuntimeEngine {
     ) -> Result<&'a ScalarValue, RuntimeError> {
         match operand {
             ValueOperand::Literal(literal) => Ok(&literal.value),
-            ValueOperand::Variable(reference) => {
-                let definition = content
-                    .manifest
-                    .variables
-                    .get(&reference.variable)
-                    .ok_or_else(|| {
-                        RuntimeError::Content(format!(
-                            "条件引用了未声明变量 {}",
-                            reference.variable
-                        ))
-                    })?;
-                let variables = match definition.scope {
-                    VariableScope::Save => &self.snapshot.variables,
-                    VariableScope::Profile => &self.profile_variables,
-                };
-                variables.get(&reference.variable).ok_or_else(|| {
-                    RuntimeError::Content(format!("变量 {} 尚未初始化", reference.variable))
-                })
+            ValueOperand::Variable(reference) => self.variable_value(content, &reference.variable),
+        }
+    }
+
+    fn resolve_mutation_value(
+        &self,
+        content: &ContentCatalog,
+        value: &MutationValue,
+    ) -> Result<ScalarValue, RuntimeError> {
+        match value {
+            MutationValue::Literal(value) => Ok(value.clone()),
+            MutationValue::Variable(reference) => {
+                self.variable_value(content, &reference.variable).cloned()
             }
         }
+    }
+
+    fn variable_value<'a>(
+        &'a self,
+        content: &'a ContentCatalog,
+        id: &str,
+    ) -> Result<&'a ScalarValue, RuntimeError> {
+        let definition = content
+            .manifest
+            .variables
+            .get(id)
+            .ok_or_else(|| RuntimeError::Content(format!("引用了未声明变量 {id}")))?;
+        let variables = match definition.scope {
+            VariableScope::Save => &self.snapshot.variables,
+            VariableScope::Profile => &self.profile_variables,
+        };
+        variables
+            .get(id)
+            .ok_or_else(|| RuntimeError::Content(format!("变量 {id} 尚未初始化")))
+    }
+
+    fn interpolate_text(
+        &self,
+        content: &ContentCatalog,
+        source: &str,
+    ) -> Result<String, RuntimeError> {
+        text_template::interpolate(source, |id| {
+            self.variable_value(content, id)
+                .cloned()
+                .map_err(|error| text_template::TemplateError(error.to_string()))
+        })
+        .map_err(|error| RuntimeError::Content(error.to_string()))
     }
 
     fn cue(&mut self, gate: CueGate, kind: PresentationCueKind) -> PresentationCue {
@@ -660,6 +714,101 @@ impl RuntimeEngine {
 
     fn update_without_cues(&mut self) -> RuntimeUpdate {
         self.finish_update(Vec::new(), false)
+    }
+}
+
+fn apply_variable_operation(
+    operation: VariableOperation,
+    target_type: VariableType,
+    current: ScalarValue,
+    operand: Option<ScalarValue>,
+) -> Result<ScalarValue, String> {
+    if operation == VariableOperation::Toggle {
+        return match (target_type, current, operand) {
+            (VariableType::Boolean, ScalarValue::Boolean(value), None) => {
+                Ok(ScalarValue::Boolean(!value))
+            }
+            (_, _, Some(_)) => Err("toggle 不接受 value".to_owned()),
+            _ => Err("toggle 只能用于 boolean 变量".to_owned()),
+        };
+    }
+
+    let operand = operand.ok_or_else(|| format!("{operation:?} 操作缺少 value"))?;
+    match operation {
+        VariableOperation::Assign => {
+            normalize_value(operand, target_type).map_err(|error| error.to_string())
+        }
+        VariableOperation::Add | VariableOperation::Sub | VariableOperation::Mul => {
+            match target_type {
+                VariableType::Integer => {
+                    let (ScalarValue::Integer(left), ScalarValue::Integer(right)) =
+                        (current, operand)
+                    else {
+                        return Err("integer 运算只接受 integer 操作数".to_owned());
+                    };
+                    let result = match operation {
+                        VariableOperation::Add => left.checked_add(right),
+                        VariableOperation::Sub => left.checked_sub(right),
+                        VariableOperation::Mul => left.checked_mul(right),
+                        _ => unreachable!(),
+                    }
+                    .ok_or_else(|| "integer 运算溢出".to_owned())?;
+                    Ok(ScalarValue::Integer(result))
+                }
+                VariableType::Number => {
+                    let left = scalar_to_f64(&current)?;
+                    let right = scalar_to_f64(&operand)?;
+                    let result = match operation {
+                        VariableOperation::Add => left + right,
+                        VariableOperation::Sub => left - right,
+                        VariableOperation::Mul => left * right,
+                        _ => unreachable!(),
+                    };
+                    if !result.is_finite() {
+                        return Err("number 运算结果必须是有限数".to_owned());
+                    }
+                    Ok(ScalarValue::Number(result))
+                }
+                _ => Err("add/sub/mul 只能用于数值变量".to_owned()),
+            }
+        }
+        VariableOperation::Mod => {
+            let (ScalarValue::Integer(left), ScalarValue::Integer(right)) = (current, operand)
+            else {
+                return Err("mod 只能用于 integer 变量和操作数".to_owned());
+            };
+            let result = left.checked_rem(right).ok_or_else(|| {
+                if right == 0 {
+                    "mod 除数不能为零".to_owned()
+                } else {
+                    "integer mod 运算溢出".to_owned()
+                }
+            })?;
+            Ok(ScalarValue::Integer(result))
+        }
+        VariableOperation::Append => {
+            let (ScalarValue::Text(mut left), ScalarValue::Text(right)) = (current, operand) else {
+                return Err("append 只能用于 string 变量和操作数".to_owned());
+            };
+            if left.len().saturating_add(right.len()) > MAX_VARIABLE_STRING_BYTES {
+                return Err(format!(
+                    "append 结果超过 {} 字节上限",
+                    MAX_VARIABLE_STRING_BYTES
+                ));
+            }
+            left.push_str(&right);
+            Ok(ScalarValue::Text(left))
+        }
+        VariableOperation::Toggle => unreachable!(),
+    }
+}
+
+fn scalar_to_f64(value: &ScalarValue) -> Result<f64, String> {
+    match value {
+        ScalarValue::Integer(value) => Ok(*value as f64),
+        ScalarValue::Number(value) if value.is_finite() => Ok(*value),
+        ScalarValue::Number(_) => Err("数值必须有限".to_owned()),
+        _ => Err("number 运算只接受数值操作数".to_owned()),
     }
 }
 
@@ -698,8 +847,16 @@ fn normalize_value(
 ) -> Result<ScalarValue, RuntimeError> {
     match (expected, value) {
         (VariableType::Boolean, value @ ScalarValue::Boolean(_))
-        | (VariableType::Integer, value @ ScalarValue::Integer(_))
-        | (VariableType::String, value @ ScalarValue::Text(_)) => Ok(value),
+        | (VariableType::Integer, value @ ScalarValue::Integer(_)) => Ok(value),
+        (VariableType::String, ScalarValue::Text(value))
+            if value.len() <= MAX_VARIABLE_STRING_BYTES =>
+        {
+            Ok(ScalarValue::Text(value))
+        }
+        (VariableType::String, ScalarValue::Text(_)) => Err(RuntimeError::Content(format!(
+            "字符串超过 {} 字节上限",
+            MAX_VARIABLE_STRING_BYTES
+        ))),
         (VariableType::Number, ScalarValue::Integer(value)) => {
             Ok(ScalarValue::Number(value as f64))
         }
@@ -872,6 +1029,263 @@ mod tests {
         ValueOperand::Variable(VariableOperand {
             variable: id.to_owned(),
         })
+    }
+
+    fn mutate(
+        operation: VariableOperation,
+        target_type: VariableType,
+        current: ScalarValue,
+        operand: Option<ScalarValue>,
+    ) -> Result<ScalarValue, String> {
+        apply_variable_operation(operation, target_type, current, operand)
+    }
+
+    #[test]
+    fn every_variable_operation_and_variable_operand_is_supported() {
+        assert_eq!(
+            mutate(
+                VariableOperation::Assign,
+                VariableType::Number,
+                ScalarValue::Number(0.0),
+                Some(ScalarValue::Integer(4)),
+            )
+            .unwrap(),
+            ScalarValue::Number(4.0)
+        );
+        assert_eq!(
+            mutate(
+                VariableOperation::Add,
+                VariableType::Integer,
+                ScalarValue::Integer(4),
+                Some(ScalarValue::Integer(3)),
+            )
+            .unwrap(),
+            ScalarValue::Integer(7)
+        );
+        assert_eq!(
+            mutate(
+                VariableOperation::Sub,
+                VariableType::Number,
+                ScalarValue::Number(4.5),
+                Some(ScalarValue::Integer(2)),
+            )
+            .unwrap(),
+            ScalarValue::Number(2.5)
+        );
+        assert_eq!(
+            mutate(
+                VariableOperation::Mul,
+                VariableType::Integer,
+                ScalarValue::Integer(6),
+                Some(ScalarValue::Integer(7)),
+            )
+            .unwrap(),
+            ScalarValue::Integer(42)
+        );
+        assert_eq!(
+            mutate(
+                VariableOperation::Mod,
+                VariableType::Integer,
+                ScalarValue::Integer(17),
+                Some(ScalarValue::Integer(5)),
+            )
+            .unwrap(),
+            ScalarValue::Integer(2)
+        );
+        assert_eq!(
+            mutate(
+                VariableOperation::Append,
+                VariableType::String,
+                ScalarValue::Text("向量".to_owned()),
+                Some(ScalarValue::Text("空间".to_owned())),
+            )
+            .unwrap(),
+            ScalarValue::Text("向量空间".to_owned())
+        );
+        assert_eq!(
+            mutate(
+                VariableOperation::Toggle,
+                VariableType::Boolean,
+                ScalarValue::Boolean(false),
+                None,
+            )
+            .unwrap(),
+            ScalarValue::Boolean(true)
+        );
+
+        let content = catalog();
+        let runtime = RuntimeEngine::new(&content).unwrap();
+        assert_eq!(
+            runtime
+                .resolve_mutation_value(
+                    &content,
+                    &MutationValue::Variable(VariableOperand {
+                        variable: "score".to_owned(),
+                    }),
+                )
+                .unwrap(),
+            ScalarValue::Integer(0)
+        );
+    }
+
+    #[test]
+    fn variable_operation_failures_are_explicit() {
+        assert!(mutate(
+            VariableOperation::Add,
+            VariableType::Integer,
+            ScalarValue::Integer(i64::MAX),
+            Some(ScalarValue::Integer(1)),
+        )
+        .unwrap_err()
+        .contains("溢出"));
+        assert!(mutate(
+            VariableOperation::Mod,
+            VariableType::Integer,
+            ScalarValue::Integer(2),
+            Some(ScalarValue::Integer(0)),
+        )
+        .unwrap_err()
+        .contains("零"));
+        assert!(mutate(
+            VariableOperation::Mul,
+            VariableType::Number,
+            ScalarValue::Number(f64::MAX),
+            Some(ScalarValue::Number(2.0)),
+        )
+        .unwrap_err()
+        .contains("有限"));
+        assert!(mutate(
+            VariableOperation::Append,
+            VariableType::String,
+            ScalarValue::Text("a".repeat(MAX_VARIABLE_STRING_BYTES)),
+            Some(ScalarValue::Text("b".to_owned())),
+        )
+        .unwrap_err()
+        .contains("上限"));
+        assert!(mutate(
+            VariableOperation::Toggle,
+            VariableType::Boolean,
+            ScalarValue::Boolean(false),
+            Some(ScalarValue::Boolean(true)),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dialogue_resolves_character_style_and_interpolation() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.snapshot.location.node_id = "introduction".to_owned();
+        runtime.run_until_boundary(&content).unwrap();
+        let PromptSnapshot::Dialogue {
+            speaker,
+            speaker_id,
+            name_color,
+            text_color,
+            text,
+            ..
+        } = &runtime.snapshot.prompt
+        else {
+            panic!("expected dialogue")
+        };
+        assert_eq!(speaker.as_deref(), Some("测试角色"));
+        assert_eq!(speaker_id.as_deref(), Some("test"));
+        assert_eq!(name_color.as_deref(), Some("#1D5C78"));
+        assert_eq!(text_color.as_deref(), Some("#17213A"));
+        assert!(text.contains("当前分数为 $0$"));
+
+        runtime
+            .profile_variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        runtime.snapshot.variables.insert(
+            "route".to_owned(),
+            ScalarValue::Text("$x$[pause=1ms]".to_owned()),
+        );
+        assert_eq!(
+            runtime
+                .interpolate_text(&content, "[var=route] / [var=ending_seen]")
+                .unwrap(),
+            r"\$x\$\[pause=1ms] / true"
+        );
+    }
+
+    #[test]
+    fn old_dialogue_snapshots_default_new_character_fields() {
+        let value = serde_json::json!({
+            "kind": "dialogue",
+            "prompt_id": "scene/line",
+            "speaker": "临时名",
+            "text": "文本"
+        });
+        let prompt: PromptSnapshot = serde_json::from_value(value).unwrap();
+        let PromptSnapshot::Dialogue {
+            speaker_id,
+            name_color,
+            text_color,
+            ..
+        } = prompt
+        else {
+            panic!("expected dialogue")
+        };
+        assert_eq!((speaker_id, name_color, text_color), (None, None, None));
+    }
+
+    #[test]
+    fn narrator_temporary_names_and_resolved_snapshot_text_are_stable() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        let SceneNode::Say { text, .. } = scene.nodes.get_mut("conclusion").unwrap() else {
+            panic!("expected dialogue fixture")
+        };
+        *text = "seen=[var=ending_seen]".to_owned();
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.snapshot.location.node_id = "conclusion".to_owned();
+        runtime.run_until_boundary(&content).unwrap();
+        let before = runtime.snapshot.prompt.clone();
+        let PromptSnapshot::Dialogue {
+            speaker,
+            speaker_id,
+            name_color,
+            text_color,
+            text,
+            ..
+        } = &before
+        else {
+            panic!("expected dialogue")
+        };
+        assert_eq!(speaker.as_deref(), Some("系统"));
+        assert_eq!((speaker_id, name_color, text_color), (&None, &None, &None));
+        assert_eq!(text, "seen=false");
+
+        runtime
+            .profile_variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        assert_eq!(runtime.snapshot.prompt, before);
+
+        let SceneNode::Say { speaker, .. } = content
+            .scenes
+            .get_mut("prologue")
+            .unwrap()
+            .nodes
+            .get_mut("conclusion")
+            .unwrap()
+        else {
+            panic!("expected dialogue fixture")
+        };
+        *speaker = None;
+        let mut narrator = RuntimeEngine::new(&content).unwrap();
+        narrator.snapshot.location.node_id = "conclusion".to_owned();
+        narrator.run_until_boundary(&content).unwrap();
+        let PromptSnapshot::Dialogue {
+            speaker,
+            speaker_id,
+            ..
+        } = &narrator.snapshot.prompt
+        else {
+            panic!("expected dialogue")
+        };
+        assert_eq!((speaker, speaker_id), (&None, &None));
     }
 
     #[test]

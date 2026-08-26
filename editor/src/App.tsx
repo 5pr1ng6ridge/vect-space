@@ -4,6 +4,8 @@ import {
   useEffect,
   useMemo,
   useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from "react";
 import { editorApi } from "./api";
@@ -16,6 +18,7 @@ import { YamlPanel } from "./components/YamlPanel";
 import {
   NODE_TYPES,
   cloneProject,
+  countCharacterReferences,
   countVariableReferences,
   defaultNode,
   ensureSceneLayout,
@@ -23,6 +26,7 @@ import {
   newSceneFile,
   outputPorts,
   projectRequest,
+  renameCharacter,
   renameNode,
   renameScene,
   renameVariable,
@@ -42,6 +46,87 @@ import { validateLive } from "./validation";
 
 type BottomTab = "problems" | "yaml" | "preview";
 
+type ResizeAxis = "left" | "right" | "bottom";
+
+interface PanelSizes {
+  left: number;
+  right: number;
+  bottom: number;
+}
+
+interface ResizeState {
+  axis: ResizeAxis;
+  startX: number;
+  startY: number;
+  initial: number;
+}
+
+const DEFAULT_PANEL_SIZES: PanelSizes = {
+  left: 278,
+  right: 370,
+  bottom: 300,
+};
+
+function clampPanelSize(axis: ResizeAxis, value: number): number {
+  const bounds: Record<ResizeAxis, [number, number]> = {
+    left: [220, 480],
+    right: [300, 560],
+    bottom: [180, 620],
+  };
+  const [minimum, maximum] = bounds[axis];
+  return Math.round(Math.min(maximum, Math.max(minimum, value)));
+}
+
+function ResizeHandle({
+  axis,
+  onStart,
+  onStep,
+}: {
+  axis: ResizeAxis;
+  onStart(axis: ResizeAxis, startX: number, startY: number): void;
+  onStep(axis: ResizeAxis, delta: number): void;
+}): ReactElement {
+  const label =
+    axis === "left"
+      ? "调整左侧栏宽度"
+      : axis === "right"
+        ? "调整右侧栏宽度"
+        : "调整底部面板高度";
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    const step = event.shiftKey ? 32 : 12;
+    let delta: number | null = null;
+    if (axis === "bottom") {
+      if (event.key === "ArrowUp") delta = step;
+      if (event.key === "ArrowDown") delta = -step;
+    } else if (axis === "left") {
+      if (event.key === "ArrowRight") delta = step;
+      if (event.key === "ArrowLeft") delta = -step;
+    } else {
+      if (event.key === "ArrowLeft") delta = step;
+      if (event.key === "ArrowRight") delta = -step;
+    }
+    if (delta === null) return;
+    event.preventDefault();
+    onStep(axis, delta);
+  };
+
+  return (
+    <div
+      aria-label={label}
+      aria-orientation={axis === "bottom" ? "horizontal" : "vertical"}
+      className={`resize-handle resize-handle-${axis}`}
+      onKeyDown={handleKeyDown}
+      onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        onStart(axis, event.clientX, event.clientY);
+      }}
+      role="separator"
+      tabIndex={0}
+    />
+  );
+}
+
 export function App(): ReactElement {
   const [project, setProject] = useState<EditorProject | null>(null);
   const [past, setPast] = useState<EditorProject[]>([]);
@@ -55,6 +140,57 @@ export function App(): ReactElement {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [panelSizes, setPanelSizes] = useState<PanelSizes>(DEFAULT_PANEL_SIZES);
+  const [resizeState, setResizeState] = useState<ResizeState | null>(null);
+
+  const resizeBy = (axis: ResizeAxis, delta: number): void => {
+    setPanelSizes((current) => ({
+      ...current,
+      [axis]: clampPanelSize(axis, current[axis] + delta),
+    }));
+  };
+
+  const startResize = (
+    axis: ResizeAxis,
+    startX: number,
+    startY: number,
+  ): void => {
+    setResizeState({
+      axis,
+      startX,
+      startY,
+      initial: panelSizes[axis],
+    });
+  };
+
+  useEffect(() => {
+    if (resizeState === null) return;
+    const handlePointerMove = (event: globalThis.PointerEvent): void => {
+      const delta =
+        resizeState.axis === "bottom"
+          ? resizeState.startY - event.clientY
+          : event.clientX - resizeState.startX;
+      const signedDelta = resizeState.axis === "right" ? -delta : delta;
+      setPanelSizes((current) => ({
+        ...current,
+        [resizeState.axis]: clampPanelSize(
+          resizeState.axis,
+          resizeState.initial + signedDelta,
+        ),
+      }));
+    };
+    const stopResize = (): void => setResizeState(null);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+    document.body.classList.add("panel-resizing");
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+      document.body.classList.remove("panel-resizing");
+    };
+  }, [resizeState]);
 
   const diagnostics = useMemo(
     () => (project === null ? [] : validateLive(project)),
@@ -412,7 +548,16 @@ export function App(): ReactElement {
   };
 
   return (
-    <main className={`editor-shell${bottomOpen ? " bottom-open" : ""}`}>
+    <main
+      className={`editor-shell${bottomOpen ? " bottom-open" : ""}`}
+      style={
+        {
+          "--left-sidebar-width": `${panelSizes.left}px`,
+          "--right-sidebar-width": `${panelSizes.right}px`,
+          "--bottom-panel-height": `${panelSizes.bottom}px`,
+        } as CSSProperties
+      }
+    >
       <header className="app-toolbar">
         <div className="toolbar-brand">
           <span>V</span>
@@ -525,12 +670,46 @@ export function App(): ReactElement {
           setProject(renameVariable(project, previousId, nextId));
           setDirty(true);
         }}
+        onAddCharacter={(id, definition) =>
+          commit((draft) => {
+            draft.manifest.characters[id] = definition;
+          })
+        }
+        onChangeCharacter={(id, definition) =>
+          commit((draft) => {
+            draft.manifest.characters[id] = definition;
+          })
+        }
+        onDeleteCharacter={(id) => {
+          const references = countCharacterReferences(project, id);
+          if (references > 0) {
+            setError(`角色 ${id} 仍被 ${references} 句对话引用，不能删除。`);
+            return;
+          }
+          commit((draft) => {
+            Reflect.deleteProperty(draft.manifest.characters, id);
+          });
+        }}
+        onRenameCharacter={(previousId, nextId) => {
+          if (
+            !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
+            project.manifest.characters[nextId] !== undefined
+          ) {
+            setError("新角色 ID 非法或已经存在。");
+            return;
+          }
+          setPast((items) => [...items.slice(-99), cloneProject(project)]);
+          setFuture([]);
+          setProject(renameCharacter(project, previousId, nextId));
+          setDirty(true);
+        }}
         onSelectScene={(sceneId) => {
           setActiveSceneId(sceneId);
           setSelectedNodeId(null);
         }}
         project={project}
       />
+      <ResizeHandle axis="left" onStart={startResize} onStep={resizeBy} />
 
       <section className="workspace">
         <div className="workspace-toolbar">
@@ -630,6 +809,7 @@ export function App(): ReactElement {
           scene={activeScene}
         />
       )}
+      <ResizeHandle axis="right" onStart={startResize} onStep={resizeBy} />
 
       <section className={`bottom-panel${bottomOpen ? " open" : " collapsed"}`}>
         <header className="bottom-tabs">
@@ -709,6 +889,7 @@ export function App(): ReactElement {
           </div>
         )}
       </section>
+      <ResizeHandle axis="bottom" onStart={startResize} onStep={resizeBy} />
 
       {error !== null && (
         <div className="error-toast" role="alert">

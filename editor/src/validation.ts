@@ -1,4 +1,5 @@
 import { outputPorts } from "./story";
+import { validateTemplate } from "./textTemplate";
 import type {
   AssetKind,
   ConditionExpression,
@@ -40,6 +41,29 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
           `变量 ${id} 的默认值不符合 ${definition.type} 类型`,
         ),
       );
+    }
+  }
+  for (const [id, definition] of Object.entries(project.manifest.characters)) {
+    if (!ID_PATTERN.test(id)) {
+      diagnostics.push(error("invalid_character", `角色 ID 非法：${id}`));
+    }
+    validateDisplayName(definition.display_name).forEach((message) =>
+      diagnostics.push(
+        error("invalid_character_name", `角色 ${id}：${message}`),
+      ),
+    );
+    for (const [field, color] of [
+      ["姓名色", definition.name_color],
+      ["正文色", definition.text_color],
+    ] as const) {
+      if (
+        color != null &&
+        !/^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$/.test(color)
+      ) {
+        diagnostics.push(
+          error("invalid_character_color", `角色 ${id} 的${field}格式非法`),
+        );
+      }
     }
   }
 
@@ -175,6 +199,15 @@ function validateNode(
     case "say":
       if (node.text.trim() === "") issue("empty_dialogue", "对话文本不能为空");
       if (
+        node.speaker !== null &&
+        project.manifest.characters[node.speaker] === undefined
+      ) {
+        validateDisplayName(node.speaker).forEach((message) =>
+          issue("invalid_temporary_speaker", message),
+        );
+      }
+      validateTextTemplate(project, node.text, issue);
+      if (
         node.speed_cps !== null &&
         (!Number.isFinite(node.speed_cps) || node.speed_cps <= 0)
       ) {
@@ -191,6 +224,7 @@ function validateNode(
           issue("duplicate_choice_id", `选项 ID 重复：${choice.id}`);
         if (choice.label.trim() === "")
           issue("empty_choice_label", "选项文本不能为空");
+        validateTextTemplate(project, choice.label, issue);
         if (choice.visible_if !== undefined)
           validateCondition(project, choice.visible_if, issue);
         if (choice.enabled_if !== undefined)
@@ -204,17 +238,7 @@ function validateNode(
         issue("invalid_variable", "变量名非法");
       if (project.manifest.variables[node.variable] === undefined) {
         issue("unknown_variable", `变量未声明：${node.variable}`);
-      } else if (
-        !valueMatchesType(
-          node.value,
-          project.manifest.variables[node.variable].type,
-        )
-      ) {
-        issue(
-          "variable_type_mismatch",
-          `变量 ${node.variable} 的赋值类型不匹配`,
-        );
-      }
+      } else validateMutation(project, node, issue);
       break;
     case "condition":
       validateCondition(project, node.condition, issue);
@@ -248,6 +272,107 @@ function validateNode(
     case "end":
       break;
   }
+}
+
+function validateMutation(
+  project: EditorProject,
+  node: Extract<SceneNode, { type: "set" }>,
+  issue: (code: string, message: string) => void,
+): void {
+  const target = project.manifest.variables[node.variable];
+  if (target === undefined) return;
+  const op = node.op ?? "assign";
+  if (op === "toggle") {
+    if (target.type !== "boolean") {
+      issue("invalid_toggle", "toggle 只能用于 boolean 变量");
+    }
+    if (node.value !== undefined) {
+      issue("invalid_toggle_value", "toggle 不接受 value");
+    }
+    return;
+  }
+  if (node.value === undefined) {
+    issue("missing_mutation_value", `${op} 必须提供 value`);
+    return;
+  }
+  const sourceType = mutationValueType(project, node.value, issue);
+  if (sourceType === null) return;
+  const compatible = (() => {
+    switch (op) {
+      case "assign":
+        return (
+          target.type === sourceType ||
+          (target.type === "number" && sourceType === "integer")
+        );
+      case "add":
+      case "sub":
+      case "mul":
+        return (
+          isNumericType(target.type) &&
+          isNumericType(sourceType) &&
+          (target.type !== "integer" || sourceType === "integer")
+        );
+      case "mod":
+        return target.type === "integer" && sourceType === "integer";
+      case "append":
+        return target.type === "string" && sourceType === "string";
+    }
+  })();
+  if (!compatible) {
+    issue("variable_operation_type", `${op} 的目标变量与操作数类型不兼容`);
+  }
+  if (op === "mod" && typeof node.value === "number" && node.value === 0) {
+    issue("modulo_by_zero", "mod 的除数不能为零");
+  }
+}
+
+function mutationValueType(
+  project: EditorProject,
+  value: NonNullable<Extract<SceneNode, { type: "set" }>["value"]>,
+  issue: (code: string, message: string) => void,
+): VariableType | null {
+  if (typeof value === "object" && value !== null) {
+    const definition = project.manifest.variables[value.variable];
+    if (definition === undefined) {
+      issue("unknown_variable", `操作数引用了未声明变量：${value.variable}`);
+      return null;
+    }
+    return definition.type;
+  }
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    issue("non_finite_literal", "运算数值必须是有限数");
+  }
+  if (
+    typeof value === "string" &&
+    new TextEncoder().encode(value).length > 16 * 1024
+  ) {
+    issue("string_too_long", "字符串不能超过 16 KiB UTF-8");
+  }
+  return scalarType(value);
+}
+
+function validateTextTemplate(
+  project: EditorProject,
+  source: string,
+  issue: (code: string, message: string) => void,
+): void {
+  const types = Object.fromEntries(
+    Object.entries(project.manifest.variables).map(([id, definition]) => [
+      id,
+      definition.type,
+    ]),
+  );
+  for (const message of validateTemplate(source, types)) {
+    issue("invalid_interpolation", message);
+  }
+}
+
+function validateDisplayName(value: string): string[] {
+  const issues: string[] = [];
+  if (value.trim() === "") issues.push("显示名不能为空");
+  if (Array.from(value).length > 64) issues.push("显示名不能超过 64 个字符");
+  if (/\p{Cc}/u.test(value)) issues.push("显示名不能包含控制字符");
+  return issues;
 }
 
 function validateCondition(
@@ -338,7 +463,10 @@ function valueMatchesType(value: ScalarValue, type: VariableType): boolean {
     case "number":
       return typeof value === "number" && Number.isFinite(value);
     case "string":
-      return typeof value === "string";
+      return (
+        typeof value === "string" &&
+        new TextEncoder().encode(value).length <= 16 * 1024
+      );
   }
 }
 

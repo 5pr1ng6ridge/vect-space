@@ -40,6 +40,16 @@ pub struct VariableDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterDefinition {
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ValueOperand {
     Variable(VariableOperand),
@@ -56,6 +66,26 @@ pub struct VariableOperand {
 #[serde(deny_unknown_fields)]
 pub struct LiteralOperand {
     pub value: ScalarValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MutationValue {
+    Variable(VariableOperand),
+    Literal(ScalarValue),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VariableOperation {
+    #[default]
+    Assign,
+    Add,
+    Sub,
+    Mul,
+    Mod,
+    Append,
+    Toggle,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -106,6 +136,8 @@ pub struct ContentManifest {
     pub default_locale: String,
     #[serde(default)]
     pub variables: BTreeMap<String, VariableDefinition>,
+    #[serde(default)]
+    pub characters: BTreeMap<String, CharacterDefinition>,
     pub assets: BTreeMap<String, AssetDefinition>,
     pub scenes: Vec<String>,
 }
@@ -185,7 +217,10 @@ pub enum SceneNode {
     },
     Set {
         variable: String,
-        value: ScalarValue,
+        #[serde(default)]
+        op: VariableOperation,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<MutationValue>,
         next: String,
     },
     Condition {
@@ -403,7 +438,13 @@ pub enum PromptSnapshot {
     None,
     Dialogue {
         prompt_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker_id: Option<String>,
         speaker: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_color: Option<String>,
         text: String,
     },
     Choice {

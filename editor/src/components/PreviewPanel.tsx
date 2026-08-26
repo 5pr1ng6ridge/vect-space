@@ -93,8 +93,12 @@ export function PreviewPanel({
         <div className="preview-prompt">
           {prompt?.kind === "dialogue" && (
             <>
-              <strong>{prompt.speaker ?? "旁白"}</strong>
-              <MarkupPreview source={prompt.text} />
+              <strong style={{ color: prompt.name_color ?? undefined }}>
+                {prompt.speaker ?? "旁白"}
+              </strong>
+              <div style={{ color: prompt.text_color ?? undefined }}>
+                <MarkupPreview source={prompt.text} />
+              </div>
               <button
                 disabled={busy || update?.requires_ack}
                 onClick={() => {

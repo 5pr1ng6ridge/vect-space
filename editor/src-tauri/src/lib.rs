@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager, State};
 use vectspace_core::{
     content::ContentCatalog,
     model::{AssetKind, ContentManifest, ResolvedAsset, RuntimeUpdate, SceneDefinition, SceneNode},
-    runtime::RuntimeEngine,
+    runtime::{RuntimeEngine, RuntimeError},
 };
 
 const LAYOUT_RELATIVE_PATH: &str = ".vectspace/layout-v1.json";
@@ -303,12 +303,9 @@ fn preview_advance(
         .lock()
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_mut().ok_or("尚未打开项目")?;
-    session
-        .preview
-        .as_mut()
-        .ok_or("预览尚未开始")?
-        .advance(&session.catalog, expected_revision)
-        .map_err(display_error)
+    transact_preview(session, |runtime, catalog| {
+        runtime.advance(catalog, expected_revision)
+    })
 }
 
 #[tauri::command]
@@ -322,12 +319,9 @@ fn preview_choose(
         .lock()
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_mut().ok_or("尚未打开项目")?;
-    session
-        .preview
-        .as_mut()
-        .ok_or("预览尚未开始")?
-        .choose(&session.catalog, &choice_id, expected_revision)
-        .map_err(display_error)
+    transact_preview(session, |runtime, catalog| {
+        runtime.choose(catalog, &choice_id, expected_revision)
+    })
 }
 
 #[tauri::command]
@@ -340,12 +334,19 @@ fn preview_presentation_complete(
         .lock()
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_mut().ok_or("尚未打开项目")?;
-    session
-        .preview
-        .as_mut()
-        .ok_or("预览尚未开始")?
-        .presentation_complete(&session.catalog, update_id)
-        .map_err(display_error)
+    transact_preview(session, |runtime, catalog| {
+        runtime.presentation_complete(catalog, update_id)
+    })
+}
+
+fn transact_preview(
+    session: &mut ProjectSession,
+    operation: impl FnOnce(&mut RuntimeEngine, &ContentCatalog) -> Result<RuntimeUpdate, RuntimeError>,
+) -> Result<RuntimeUpdate, String> {
+    let mut candidate = session.preview.as_ref().ok_or("预览尚未开始")?.clone();
+    let update = operation(&mut candidate, &session.catalog).map_err(display_error)?;
+    session.preview = Some(candidate);
+    Ok(update)
 }
 
 fn resolve_content_root(selected: &Path) -> Result<PathBuf, std::io::Error> {
@@ -852,7 +853,7 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use tempfile::tempdir;
-    use vectspace_core::model::{ScalarValue, SceneNode};
+    use vectspace_core::model::{MutationValue, ScalarValue, SceneNode, VariableOperation};
 
     use super::*;
 
@@ -902,7 +903,8 @@ mod tests {
                 "a".to_owned(),
                 SceneNode::Set {
                     variable: "score".to_owned(),
-                    value: ScalarValue::Integer(1),
+                    op: VariableOperation::Assign,
+                    value: Some(MutationValue::Literal(ScalarValue::Integer(1))),
                     next: "b".to_owned(),
                 },
             ),

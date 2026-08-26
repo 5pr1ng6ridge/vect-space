@@ -9,6 +9,7 @@ import type {
   SceneDefinition,
   SceneNode,
 } from "./types";
+import { countTemplateVariable, renameTemplateVariable } from "./textTemplate";
 
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
@@ -111,7 +112,7 @@ export function summarizeNode(node: SceneNode): string {
     case "choice":
       return `${node.choices.length} 个选项`;
     case "set":
-      return `${node.variable} = ${String(node.value)}`;
+      return `${node.variable} ${node.op ?? "assign"} ${summarizeMutationValue(node.value)}`;
     case "condition":
       return summarizeCondition(node.condition);
     case "jump":
@@ -182,7 +183,13 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         ],
       };
     case "set":
-      return { type, variable: "flag", value: true, next: fallback };
+      return {
+        type,
+        variable: "flag",
+        op: "assign",
+        value: true,
+        next: fallback,
+      };
     case "condition":
       return {
         type,
@@ -327,6 +334,17 @@ export function renameVariable(
       if (node.type === "set" && node.variable === previousId) {
         node.variable = nextId;
       }
+      if (
+        node.type === "set" &&
+        typeof node.value === "object" &&
+        node.value !== null &&
+        node.value.variable === previousId
+      ) {
+        node.value.variable = nextId;
+      }
+      if (node.type === "say") {
+        node.text = renameTemplateVariable(node.text, previousId, nextId);
+      }
       if (node.type === "condition") {
         node.condition = mapConditionVariables(
           node.condition,
@@ -336,6 +354,11 @@ export function renameVariable(
       }
       if (node.type === "choice") {
         for (const choice of node.choices) {
+          choice.label = renameTemplateVariable(
+            choice.label,
+            previousId,
+            nextId,
+          );
           if (choice.visible_if !== undefined) {
             choice.visible_if = mapConditionVariables(
               choice.visible_if,
@@ -365,11 +388,23 @@ export function countVariableReferences(
   for (const file of project.scenes) {
     for (const node of Object.values(file.definition.nodes)) {
       if (node.type === "set" && node.variable === variableId) count += 1;
+      if (
+        node.type === "set" &&
+        typeof node.value === "object" &&
+        node.value !== null &&
+        node.value.variable === variableId
+      ) {
+        count += 1;
+      }
+      if (node.type === "say") {
+        count += countTemplateVariable(node.text, variableId);
+      }
       if (node.type === "condition") {
         count += countConditionReferences(node.condition, variableId);
       }
       if (node.type === "choice") {
         for (const choice of node.choices) {
+          count += countTemplateVariable(choice.label, variableId);
           if (choice.visible_if !== undefined) {
             count += countConditionReferences(choice.visible_if, variableId);
           }
@@ -381,6 +416,53 @@ export function countVariableReferences(
     }
   }
   return count;
+}
+
+export function renameCharacter(
+  project: EditorProject,
+  previousId: string,
+  nextId: string,
+): EditorProject {
+  if (
+    project.manifest.characters[previousId] === undefined ||
+    project.manifest.characters[nextId] !== undefined
+  ) {
+    return project;
+  }
+  const updated = cloneProject(project);
+  const definition = updated.manifest.characters[previousId];
+  Reflect.deleteProperty(updated.manifest.characters, previousId);
+  updated.manifest.characters[nextId] = definition;
+  for (const file of updated.scenes) {
+    for (const node of Object.values(file.definition.nodes)) {
+      if (node.type === "say" && node.speaker === previousId) {
+        node.speaker = nextId;
+      }
+    }
+  }
+  return updated;
+}
+
+export function countCharacterReferences(
+  project: EditorProject,
+  characterId: string,
+): number {
+  let count = 0;
+  for (const file of project.scenes) {
+    for (const node of Object.values(file.definition.nodes)) {
+      if (node.type === "say" && node.speaker === characterId) count += 1;
+    }
+  }
+  return count;
+}
+
+function summarizeMutationValue(
+  value: import("./types").MutationValue | undefined,
+): string {
+  if (value === undefined) return "";
+  return typeof value === "object" && value !== null
+    ? value.variable
+    : String(value);
 }
 
 function mapConditionVariables(

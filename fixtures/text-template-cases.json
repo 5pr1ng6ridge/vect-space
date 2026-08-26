@@ -1,0 +1,26 @@
+[
+  {
+    "name": "plain values cannot inject markup",
+    "source": "[var=value]",
+    "variables": { "value": "$x$[pause=1ms]\\" },
+    "expected": "\\$x\\$\\[pause=1ms]\\\\"
+  },
+  {
+    "name": "plain and inline math",
+    "source": "A [var=name], $[var=score]$, \\[var=literal]",
+    "variables": { "name": "Alice", "score": 3 },
+    "expected": "A Alice, $3$, \\[var=literal]"
+  },
+  {
+    "name": "scientific math number",
+    "source": "$[var=value]$",
+    "variables": { "value": 1.2e30 },
+    "expected": "$1.2\\times 10^{30}$"
+  },
+  {
+    "name": "plain boolean",
+    "source": "seen=[var=value]",
+    "variables": { "value": true },
+    "expected": "seen=true"
+  }
+]

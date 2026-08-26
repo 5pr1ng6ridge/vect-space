@@ -9,10 +9,11 @@ use tauri::{path::BaseDirectory, App, Manager};
 use thiserror::Error;
 
 use crate::model::{
-    AssetDefinition, AssetKind, AudioAction, ConditionExpression, ContentManifest, ResolvedAsset,
-    ScalarValue, SceneDefinition, SceneNode, SpriteAction, ValueOperand, VariableDefinition,
-    VariableType,
+    AssetDefinition, AssetKind, AudioAction, CharacterDefinition, ConditionExpression,
+    ContentManifest, MutationValue, ResolvedAsset, ScalarValue, SceneDefinition, SceneNode,
+    SpriteAction, ValueOperand, VariableDefinition, VariableOperation, VariableType,
 };
+use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
 const CONTENT_SCHEMA_VERSION: u32 = 2;
 const MAX_CONDITION_DEPTH: usize = 32;
@@ -65,6 +66,7 @@ impl ContentCatalog {
         }
         validate_identifier("entry_scene", &manifest.entry_scene)?;
         validate_variable_definitions(&manifest.variables)?;
+        validate_character_definitions(&manifest.characters)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
@@ -95,7 +97,12 @@ impl ContentCatalog {
                 manifest.entry_scene
             )));
         }
-        validate_scenes(&scenes, &manifest.assets, &manifest.variables)?;
+        validate_scenes(
+            &scenes,
+            &manifest.assets,
+            &manifest.variables,
+            &manifest.characters,
+        )?;
 
         Ok(Self {
             assets_root,
@@ -123,6 +130,7 @@ impl ContentCatalog {
         }
         validate_identifier("entry_scene", &manifest.entry_scene)?;
         validate_variable_definitions(&manifest.variables)?;
+        validate_character_definitions(&manifest.characters)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
@@ -148,7 +156,12 @@ impl ContentCatalog {
                 manifest.entry_scene
             )));
         }
-        validate_scenes(&scenes, &manifest.assets, &manifest.variables)?;
+        validate_scenes(
+            &scenes,
+            &manifest.assets,
+            &manifest.variables,
+            &manifest.characters,
+        )?;
 
         Ok(Self {
             assets_root,
@@ -263,10 +276,33 @@ fn validate_variable_definitions(
     Ok(())
 }
 
+fn validate_character_definitions(
+    characters: &BTreeMap<String, CharacterDefinition>,
+) -> Result<(), ContentError> {
+    for (id, definition) in characters {
+        validate_identifier("character", id)?;
+        validate_display_name(&definition.display_name).map_err(|message| {
+            ContentError::Validation(format!("角色 {id} 的显示名无效: {message}"))
+        })?;
+        for (label, color) in [
+            ("name_color", &definition.name_color),
+            ("text_color", &definition.text_color),
+        ] {
+            if let Some(color) = color {
+                validate_color(color).map_err(|message| {
+                    ContentError::Validation(format!("角色 {id} 的 {label} 无效: {message}"))
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_scenes(
     scenes: &BTreeMap<String, SceneDefinition>,
     assets: &BTreeMap<String, AssetDefinition>,
     variables: &BTreeMap<String, VariableDefinition>,
+    characters: &BTreeMap<String, CharacterDefinition>,
 ) -> Result<(), ContentError> {
     for (scene_id, scene) in scenes {
         if !scene.nodes.contains_key(&scene.entry) {
@@ -314,11 +350,25 @@ fn validate_scenes(
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
-                SceneNode::Say { text, next, .. } => {
+                SceneNode::Say {
+                    speaker,
+                    text,
+                    next,
+                    ..
+                } => {
                     if text.trim().is_empty() {
                         return node_error(scene_id, node_id, "对话文本不能为空");
                     }
-                    validate_text_markup(text, scene_id, node_id)?;
+                    if let Some(speaker) = speaker {
+                        if !characters.contains_key(speaker) {
+                            validate_display_name(speaker).map_err(|message| {
+                                ContentError::Validation(format!(
+                                    "{scene_id}/{node_id}: 临时说话人无效: {message}"
+                                ))
+                            })?;
+                        }
+                    }
+                    validate_text_markup(text, variables, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Choice { choices } => {
@@ -331,7 +381,7 @@ fn validate_scenes(
                         if !ids.insert(&choice.id) {
                             return node_error(scene_id, node_id, "choice id 重复");
                         }
-                        validate_text_markup(&choice.label, scene_id, node_id)?;
+                        validate_text_markup(&choice.label, variables, scene_id, node_id)?;
                         if let Some(condition) = &choice.visible_if {
                             validate_condition(condition, variables, scene_id, node_id)?;
                         }
@@ -343,6 +393,7 @@ fn validate_scenes(
                 }
                 SceneNode::Set {
                     variable,
+                    op,
                     value,
                     next,
                 } => {
@@ -352,11 +403,14 @@ fn validate_scenes(
                             "{scene_id}/{node_id}: 引用了未声明变量 {variable}"
                         ))
                     })?;
-                    validate_value_for_type(value, definition.value_type).map_err(|message| {
-                        ContentError::Validation(format!(
-                            "{scene_id}/{node_id}: 变量 {variable} 赋值无效: {message}"
-                        ))
-                    })?;
+                    validate_mutation(
+                        *op,
+                        value.as_ref(),
+                        definition.value_type,
+                        variables,
+                        scene_id,
+                        node_id,
+                    )?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Condition {
@@ -529,7 +583,95 @@ fn operand_type(
     }
 }
 
+fn validate_mutation(
+    operation: VariableOperation,
+    value: Option<&MutationValue>,
+    target_type: VariableType,
+    variables: &BTreeMap<String, VariableDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    if operation == VariableOperation::Toggle {
+        if target_type != VariableType::Boolean {
+            return node_error(scene_id, node_id, "toggle 只能用于 boolean 变量");
+        }
+        if value.is_some() {
+            return node_error(scene_id, node_id, "toggle 不接受 value");
+        }
+        return Ok(());
+    }
+
+    let value = value.ok_or_else(|| {
+        ContentError::Validation(format!(
+            "{scene_id}/{node_id}: {operation:?} 操作缺少 value"
+        ))
+    })?;
+    let source_type = mutation_value_type(value, variables, scene_id, node_id)?;
+    let valid = match operation {
+        VariableOperation::Assign => {
+            target_type == source_type
+                || (target_type == VariableType::Number && source_type == VariableType::Integer)
+        }
+        VariableOperation::Add | VariableOperation::Sub | VariableOperation::Mul => {
+            match target_type {
+                VariableType::Integer => source_type == VariableType::Integer,
+                VariableType::Number => is_numeric_type(source_type),
+                _ => false,
+            }
+        }
+        VariableOperation::Mod => {
+            target_type == VariableType::Integer && source_type == VariableType::Integer
+        }
+        VariableOperation::Append => {
+            target_type == VariableType::String && source_type == VariableType::String
+        }
+        VariableOperation::Toggle => unreachable!(),
+    };
+    if !valid {
+        return node_error(
+            scene_id,
+            node_id,
+            &format!("{operation:?} 不支持 {target_type:?} 目标与 {source_type:?} 操作数"),
+        );
+    }
+    Ok(())
+}
+
+fn mutation_value_type(
+    value: &MutationValue,
+    variables: &BTreeMap<String, VariableDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<VariableType, ContentError> {
+    match value {
+        MutationValue::Variable(reference) => {
+            validate_identifier("variable", &reference.variable)?;
+            variables
+                .get(&reference.variable)
+                .map(|definition| definition.value_type)
+                .ok_or_else(|| {
+                    ContentError::Validation(format!(
+                        "{scene_id}/{node_id}: set 引用了未声明变量 {}",
+                        reference.variable
+                    ))
+                })
+        }
+        MutationValue::Literal(value) => {
+            let value_type = scalar_type(value);
+            validate_value_for_type(value, value_type).map_err(|message| {
+                ContentError::Validation(format!("{scene_id}/{node_id}: set 字面量无效: {message}"))
+            })?;
+            Ok(value_type)
+        }
+    }
+}
+
 fn validate_value_for_type(value: &ScalarValue, expected: VariableType) -> Result<(), String> {
+    if let ScalarValue::Text(value) = value {
+        if value.len() > MAX_VARIABLE_STRING_BYTES {
+            return Err(format!("字符串超过 {} 字节上限", MAX_VARIABLE_STRING_BYTES));
+        }
+    }
     let valid = match (expected, value) {
         (VariableType::Boolean, ScalarValue::Boolean(_))
         | (VariableType::Integer, ScalarValue::Integer(_))
@@ -607,7 +749,12 @@ fn validate_volume(value: f32, scene_id: &str, node_id: &str) -> Result<(), Cont
     Ok(())
 }
 
-fn validate_text_markup(text: &str, scene_id: &str, node_id: &str) -> Result<(), ContentError> {
+fn validate_text_markup(
+    text: &str,
+    variables: &BTreeMap<String, VariableDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
     for forbidden in ["<script", "javascript:", "[html", "[/html]"] {
         if text.to_ascii_lowercase().contains(forbidden) {
             return node_error(scene_id, node_id, "文本中包含禁止的 HTML 或脚本标记");
@@ -619,6 +766,45 @@ fn validate_text_markup(text: &str, scene_id: &str, node_id: &str) -> Result<(),
         .sum::<usize>();
     if open_effects != text.matches("[/fx]").count() {
         return node_error(scene_id, node_id, "文本特效标记未闭合");
+    }
+    let references = text_template::references(text)
+        .map_err(|error| ContentError::Validation(format!("{scene_id}/{node_id}: {error}")))?;
+    for reference in references {
+        let definition = variables.get(&reference.id).ok_or_else(|| {
+            ContentError::Validation(format!(
+                "{scene_id}/{node_id}: 插值引用了未声明变量 {}",
+                reference.id
+            ))
+        })?;
+        text_template::validate_reference_type(&reference, definition.value_type)
+            .map_err(|error| ContentError::Validation(format!("{scene_id}/{node_id}: {error}")))?;
+    }
+    Ok(())
+}
+
+fn validate_display_name(value: &str) -> Result<(), String> {
+    let length = value.chars().count();
+    if value.trim().is_empty() {
+        return Err("显示名不能为空".to_owned());
+    }
+    if length > 64 {
+        return Err("显示名不能超过 64 个字符".to_owned());
+    }
+    if value.chars().any(char::is_control) {
+        return Err("显示名不能包含控制字符".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_color(value: &str) -> Result<(), String> {
+    let valid_length = value.len() == 7 || value.len() == 9;
+    if !valid_length
+        || !value.starts_with('#')
+        || !value[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("颜色必须是 #RRGGBB 或 #RRGGBBAA".to_owned());
     }
     Ok(())
 }
@@ -691,6 +877,8 @@ fn node_error<T>(scene_id: &str, node_id: &str, message: &str) -> Result<T, Cont
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::model::{LiteralOperand, VariableOperand};
 
@@ -699,6 +887,14 @@ mod tests {
         assert!(validate_relative_path("../secret.yaml").is_err());
         assert!(validate_relative_path("assets/../../secret").is_err());
         assert!(validate_relative_path("backgrounds/room.png").is_ok());
+    }
+
+    #[test]
+    fn generated_development_schemas_are_current() {
+        let catalog =
+            ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
+                .unwrap();
+        catalog.write_development_schemas().unwrap();
     }
 
     #[test]
@@ -769,5 +965,99 @@ mod tests {
             };
         }
         assert!(validate_condition(&condition, &variables, "scene", "node").is_err());
+    }
+
+    #[test]
+    fn character_names_colors_and_template_types_are_strict() {
+        assert!(validate_display_name("爱丽丝").is_ok());
+        assert!(validate_display_name("").is_err());
+        assert!(validate_display_name("line\nbreak").is_err());
+        assert!(validate_display_name(&"角".repeat(65)).is_err());
+        assert!(validate_color("#80D8FF").is_ok());
+        assert!(validate_color("#80D8FFCC").is_ok());
+        assert!(validate_color("80D8FF").is_err());
+        assert!(validate_color("#XYZXYZ").is_err());
+
+        let variables = BTreeMap::from([
+            (
+                "score".to_owned(),
+                VariableDefinition {
+                    scope: crate::model::VariableScope::Save,
+                    value_type: VariableType::Integer,
+                    default: ScalarValue::Integer(0),
+                },
+            ),
+            (
+                "name".to_owned(),
+                VariableDefinition {
+                    scope: crate::model::VariableScope::Save,
+                    value_type: VariableType::String,
+                    default: ScalarValue::Text(String::new()),
+                },
+            ),
+        ]);
+        assert!(validate_text_markup("[var=name] $[var=score]$", &variables, "s", "n").is_ok());
+        assert!(validate_text_markup("$[var=name]$", &variables, "s", "n").is_err());
+        assert!(validate_text_markup("[var=missing]", &variables, "s", "n").is_err());
+        assert!(validate_text_markup(r"\[var=missing]", &variables, "s", "n").is_ok());
+    }
+
+    #[test]
+    fn mutation_validation_covers_operations_and_operand_variables() {
+        let variables = BTreeMap::from([
+            (
+                "score".to_owned(),
+                VariableDefinition {
+                    scope: crate::model::VariableScope::Save,
+                    value_type: VariableType::Integer,
+                    default: ScalarValue::Integer(0),
+                },
+            ),
+            (
+                "bonus".to_owned(),
+                VariableDefinition {
+                    scope: crate::model::VariableScope::Save,
+                    value_type: VariableType::Integer,
+                    default: ScalarValue::Integer(1),
+                },
+            ),
+            (
+                "flag".to_owned(),
+                VariableDefinition {
+                    scope: crate::model::VariableScope::Save,
+                    value_type: VariableType::Boolean,
+                    default: ScalarValue::Boolean(false),
+                },
+            ),
+        ]);
+        assert!(validate_mutation(
+            VariableOperation::Add,
+            Some(&MutationValue::Variable(VariableOperand {
+                variable: "bonus".to_owned(),
+            })),
+            VariableType::Integer,
+            &variables,
+            "scene",
+            "node",
+        )
+        .is_ok());
+        assert!(validate_mutation(
+            VariableOperation::Toggle,
+            None,
+            VariableType::Boolean,
+            &variables,
+            "scene",
+            "node",
+        )
+        .is_ok());
+        assert!(validate_mutation(
+            VariableOperation::Append,
+            Some(&MutationValue::Literal(ScalarValue::Text("x".to_owned()))),
+            VariableType::Integer,
+            &variables,
+            "scene",
+            "node",
+        )
+        .is_err());
     }
 }

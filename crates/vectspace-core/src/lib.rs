@@ -10,3 +10,5 @@ pub mod content;
 #[path = "../../../src-tauri/src/runtime.rs"]
 pub mod runtime;
 
+#[path = "../../../src-tauri/src/text_template.rs"]
+pub mod text_template;

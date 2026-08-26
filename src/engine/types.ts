@@ -48,6 +48,9 @@ export interface DialoguePrompt {
   kind: "dialogue";
   prompt_id: string;
   speaker: string | null;
+  speaker_id?: string | null;
+  name_color?: string | null;
+  text_color?: string | null;
   text: string;
 }
 

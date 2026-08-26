@@ -1,11 +1,32 @@
-schema_version: 1
-content_version: demo-1
+schema_version: 2
+content_version: demo-2
 entry_scene: prologue
 default_locale: zh-CN
+variables:
+  ending_seen:
+    scope: profile
+    type: boolean
+    default: false
+  route:
+    scope: save
+    type: string
+    default: ""
+  score:
+    scope: save
+    type: integer
+    default: 0
+characters:
+  test:
+    display_name: 测试角色
+    name_color: "#1D5C78"
+    text_color: "#17213A"
 assets:
   bg.vector_space:
     kind: background
     path: backgrounds/bg_vstest.png
+  bgm.test1:
+    kind: bgm
+    path: audio/test_bgm.ogg
   font.fusion_pixel:
     kind: font
     path: fonts/fusion-pixel-12px-monospaced-zh_hans.ttf

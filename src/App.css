@@ -292,7 +292,7 @@ button:disabled {
 .math-unit {
   display: inline-block;
   margin: 0 0.12em;
-  color: #264b78;
+  color: inherit;
   vertical-align: -0.08em;
 }
 

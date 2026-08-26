@@ -13,6 +13,17 @@ export interface VariableDefinition {
   default: ScalarValue;
 }
 
+export interface CharacterDefinition {
+  display_name: string;
+  name_color?: string | null;
+  text_color?: string | null;
+}
+
+export type VariableOperation =
+  "assign" | "add" | "sub" | "mul" | "mod" | "append" | "toggle";
+
+export type MutationValue = ScalarValue | { variable: string };
+
 export type ValueOperand = { variable: string } | { value: ScalarValue };
 
 export type ConditionExpression =
@@ -35,6 +46,7 @@ export interface ContentManifest {
   entry_scene: string;
   default_locale: string;
   variables: Record<string, VariableDefinition>;
+  characters: Record<string, CharacterDefinition>;
   assets: Record<string, AssetDefinition>;
   scenes: string[];
 }
@@ -91,7 +103,8 @@ export interface ChoiceNode {
 export interface SetNode extends NextNode {
   type: "set";
   variable: string;
-  value: ScalarValue;
+  op?: VariableOperation;
+  value?: MutationValue;
 }
 
 export interface ConditionNode {
@@ -250,6 +263,9 @@ export type PromptSnapshot =
       kind: "dialogue";
       prompt_id: string;
       speaker: string | null;
+      speaker_id?: string | null;
+      name_color?: string | null;
+      text_color?: string | null;
       text: string;
     }
   | {

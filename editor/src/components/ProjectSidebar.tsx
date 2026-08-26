@@ -3,6 +3,7 @@ import { useMemo, useState, type ReactElement } from "react";
 import { assetUrl } from "../api";
 import type {
   AssetKind,
+  CharacterDefinition,
   ContentManifest,
   EditorAsset,
   EditorDiagnostic,
@@ -27,6 +28,10 @@ interface ProjectSidebarProps {
   onChangeVariable(id: string, definition: VariableDefinition): void;
   onRenameVariable(previousId: string, nextId: string): void;
   onDeleteVariable(id: string): void;
+  onAddCharacter(id: string, definition: CharacterDefinition): void;
+  onChangeCharacter(id: string, definition: CharacterDefinition): void;
+  onRenameCharacter(previousId: string, nextId: string): void;
+  onDeleteCharacter(id: string): void;
 }
 
 type SidebarTab = "scenes" | "assets" | "project";
@@ -46,6 +51,10 @@ export function ProjectSidebar({
   onChangeVariable,
   onRenameVariable,
   onDeleteVariable,
+  onAddCharacter,
+  onChangeCharacter,
+  onRenameCharacter,
+  onDeleteCharacter,
 }: ProjectSidebarProps): ReactElement {
   const [tab, setTab] = useState<SidebarTab>("scenes");
   return (
@@ -100,6 +109,10 @@ export function ProjectSidebar({
           onChangeVariable={onChangeVariable}
           onDeleteVariable={onDeleteVariable}
           onRenameVariable={onRenameVariable}
+          onAddCharacter={onAddCharacter}
+          onChangeCharacter={onChangeCharacter}
+          onDeleteCharacter={onDeleteCharacter}
+          onRenameCharacter={onRenameCharacter}
           project={project}
         />
       )}
@@ -331,6 +344,10 @@ function ProjectPanel({
   onChangeVariable,
   onDeleteVariable,
   onRenameVariable,
+  onAddCharacter,
+  onChangeCharacter,
+  onDeleteCharacter,
+  onRenameCharacter,
   project,
 }: {
   manifest: ContentManifest;
@@ -339,6 +356,10 @@ function ProjectPanel({
   onChangeVariable(id: string, definition: VariableDefinition): void;
   onDeleteVariable(id: string): void;
   onRenameVariable(previousId: string, nextId: string): void;
+  onAddCharacter(id: string, definition: CharacterDefinition): void;
+  onChangeCharacter(id: string, definition: CharacterDefinition): void;
+  onDeleteCharacter(id: string): void;
+  onRenameCharacter(previousId: string, nextId: string): void;
   project: EditorProject;
 }): ReactElement {
   return (
@@ -380,6 +401,77 @@ function ProjectPanel({
           ))}
         </select>
       </label>
+      <section className="variable-settings character-settings">
+        <header>
+          <strong>角色</strong>
+          <button
+            onClick={() => {
+              const id = window.prompt("新角色 ID", "new_character")?.trim();
+              if (!id || manifest.characters[id] !== undefined) return;
+              onAddCharacter(id, {
+                display_name: "新角色",
+                name_color: "#1D2948",
+                text_color: "#17213A",
+              });
+            }}
+            type="button"
+          >
+            ＋
+          </button>
+        </header>
+        {Object.entries(manifest.characters).map(([id, definition]) => (
+          <article className="variable-card character-card" key={id}>
+            <header>
+              <code>{id}</code>
+              <div>
+                <button
+                  onClick={() => {
+                    const next = window.prompt("新的角色 ID", id)?.trim();
+                    if (next && next !== id) onRenameCharacter(id, next);
+                  }}
+                  type="button"
+                >
+                  ✎
+                </button>
+                <button
+                  className="danger-text"
+                  onClick={() => onDeleteCharacter(id)}
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            </header>
+            <label>
+              <span>显示名</span>
+              <input
+                maxLength={64}
+                value={definition.display_name}
+                onChange={(event) =>
+                  onChangeCharacter(id, {
+                    ...definition,
+                    display_name: event.currentTarget.value,
+                  })
+                }
+              />
+            </label>
+            <CharacterColorInput
+              label="姓名色"
+              onChange={(name_color) =>
+                onChangeCharacter(id, { ...definition, name_color })
+              }
+              value={definition.name_color}
+            />
+            <CharacterColorInput
+              label="正文色"
+              onChange={(text_color) =>
+                onChangeCharacter(id, { ...definition, text_color })
+              }
+              value={definition.text_color}
+            />
+          </article>
+        ))}
+      </section>
       <section className="variable-settings">
         <header>
           <strong>剧情变量</strong>
@@ -484,6 +576,40 @@ function ProjectPanel({
       </dl>
       <code className="project-root">{project.root}</code>
     </div>
+  );
+}
+
+function CharacterColorInput({
+  label,
+  onChange,
+  value,
+}: {
+  label: string;
+  onChange(value: string | null): void;
+  value?: string | null;
+}): ReactElement {
+  const opaqueColor = value?.slice(0, 7) ?? "#FFFFFF";
+  return (
+    <label className="character-color-field">
+      <span>{label}</span>
+      <span>
+        <input
+          aria-label={`${label}选择器`}
+          onChange={(event) =>
+            onChange(event.currentTarget.value.toUpperCase())
+          }
+          type="color"
+          value={
+            /^#[0-9A-Fa-f]{6}$/.test(opaqueColor) ? opaqueColor : "#FFFFFF"
+          }
+        />
+        <input
+          placeholder="#RRGGBB / 留空"
+          value={value ?? ""}
+          onChange={(event) => onChange(event.currentTarget.value || null)}
+        />
+      </span>
+    </label>
   );
 }
 
