@@ -46,6 +46,16 @@
     "ChoiceDefinition": {
       "type": "object",
       "properties": {
+        "enabled_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "id": {
           "type": "string"
         },
@@ -54,6 +64,16 @@
         },
         "next": {
           "type": "string"
+        },
+        "visible_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -63,6 +83,193 @@
         "next"
       ]
     },
+    "ConditionExpression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/ValueOperand"
+            },
+            "op": {
+              "type": "string",
+              "const": "eq"
+            },
+            "right": {
+              "$ref": "#/$defs/ValueOperand"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/ValueOperand"
+            },
+            "op": {
+              "type": "string",
+              "const": "ne"
+            },
+            "right": {
+              "$ref": "#/$defs/ValueOperand"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/ValueOperand"
+            },
+            "op": {
+              "type": "string",
+              "const": "lt"
+            },
+            "right": {
+              "$ref": "#/$defs/ValueOperand"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/ValueOperand"
+            },
+            "op": {
+              "type": "string",
+              "const": "le"
+            },
+            "right": {
+              "$ref": "#/$defs/ValueOperand"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/ValueOperand"
+            },
+            "op": {
+              "type": "string",
+              "const": "gt"
+            },
+            "right": {
+              "$ref": "#/$defs/ValueOperand"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/ValueOperand"
+            },
+            "op": {
+              "type": "string",
+              "const": "ge"
+            },
+            "right": {
+              "$ref": "#/$defs/ValueOperand"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "conditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ConditionExpression"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "and"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "conditions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "conditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ConditionExpression"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "or"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "conditions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/ConditionExpression"
+            },
+            "op": {
+              "type": "string",
+              "const": "not"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "condition"
+          ]
+        }
+      ]
+    },
     "Easing": {
       "type": "string",
       "enum": [
@@ -70,6 +277,18 @@
         "ease_in",
         "ease_out",
         "ease_in_out"
+      ]
+    },
+    "LiteralOperand": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/ScalarValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value"
       ]
     },
     "ScalarValue": {
@@ -296,8 +515,8 @@
         {
           "type": "object",
           "properties": {
-            "equals": {
-              "$ref": "#/$defs/ScalarValue"
+            "condition": {
+              "$ref": "#/$defs/ConditionExpression"
             },
             "otherwise": {
               "type": "string"
@@ -307,17 +526,13 @@
             },
             "type": {
               "type": "string",
-              "const": "branch"
-            },
-            "variable": {
-              "type": "string"
+              "const": "condition"
             }
           },
           "additionalProperties": false,
           "required": [
             "type",
-            "variable",
-            "equals",
+            "condition",
             "then",
             "otherwise"
           ]
@@ -573,6 +788,28 @@
         "show",
         "move",
         "hide"
+      ]
+    },
+    "ValueOperand": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VariableOperand"
+        },
+        {
+          "$ref": "#/$defs/LiteralOperand"
+        }
+      ]
+    },
+    "VariableOperand": {
+      "type": "object",
+      "properties": {
+        "variable": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "variable"
       ]
     }
   }

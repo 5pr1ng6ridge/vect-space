@@ -8,7 +8,11 @@ import {
   type ReactElement,
 } from "react";
 
-import { buildRevealSchedule, parseMarkup } from "../engine/markup";
+import {
+  buildPauseWindows,
+  buildRevealSchedule,
+  parseMarkup,
+} from "../engine/markup";
 import type { DialoguePrompt } from "../engine/types";
 import { MarkupText } from "./MarkupText";
 
@@ -42,12 +46,18 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     },
     ref,
   ): ReactElement {
+    const units = useMemo(() => parseMarkup(prompt.text), [prompt.text]);
     const schedule = useMemo(
-      () =>
-        buildRevealSchedule(parseMarkup(prompt.text), initialCps, defaultCps),
-      [defaultCps, initialCps, prompt.text],
+      () => buildRevealSchedule(units, initialCps, defaultCps),
+      [defaultCps, initialCps, units],
+    );
+    const pauseWindows = useMemo(
+      () => buildPauseWindows(units, initialCps, defaultCps),
+      [defaultCps, initialCps, units],
     );
     const [visibleCount, setVisibleCount] = useState(0);
+    const [paused, setPaused] = useState(() => isPauseAt(0, pauseWindows));
+    const promptIdRef = useRef(prompt.prompt_id);
     const visibleRef = useRef(0);
     const complete = visibleCount >= schedule.length;
     const completeRef = useRef(complete);
@@ -56,10 +66,14 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       visibleRef.current = 0;
       completeRef.current = schedule.length === 0;
       setVisibleCount(0);
+      promptIdRef.current = prompt.prompt_id;
+      setPaused(isPauseAt(0, pauseWindows));
       const startedAt = performance.now();
       let frame = 0;
       const tick = (now: number): void => {
         const elapsed = now - startedAt;
+        const nextPaused = isPauseAt(elapsed, pauseWindows);
+        setPaused((current) => (current === nextPaused ? current : nextPaused));
         let next = visibleRef.current;
         while (
           next < schedule.length &&
@@ -78,7 +92,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       };
       frame = requestAnimationFrame(tick);
       return () => cancelAnimationFrame(frame);
-    }, [prompt.prompt_id, schedule]);
+    }, [pauseWindows, prompt.prompt_id, schedule]);
 
     useImperativeHandle(
       ref,
@@ -93,7 +107,11 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       [schedule.length],
     );
 
-    const typing = visible && !disabled && !complete;
+    const effectivePaused =
+      promptIdRef.current === prompt.prompt_id
+        ? paused
+        : isPauseAt(0, pauseWindows);
+    const typing = visible && !disabled && !complete && !effectivePaused;
     useEffect(() => {
       onTypingChange(typing);
       return () => onTypingChange(false);
@@ -137,3 +155,12 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     );
   },
 );
+
+function isPauseAt(
+  elapsedMs: number,
+  windows: { startMs: number; endMs: number }[],
+): boolean {
+  return windows.some(
+    ({ startMs, endMs }) => elapsedMs >= startMs && elapsedMs < endMs,
+  );
+}

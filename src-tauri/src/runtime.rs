@@ -1,9 +1,10 @@
 use crate::{
     content::ContentCatalog,
     model::{
-        AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot, ChoiceSnapshot, CueGate,
-        LoopingAudioSnapshot, PresentationCue, PresentationCueKind, PromptSnapshot,
-        RuntimeSnapshot, RuntimeUpdate, SceneNode, SpriteAction, SpriteSnapshot, StoryLocation,
+        AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot, ChoiceSnapshot,
+        ConditionExpression, CueGate, LoopingAudioSnapshot, PresentationCue, PresentationCueKind,
+        PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, SceneNode, SpriteAction,
+        SpriteSnapshot, StoryLocation, ValueOperand, VariableMap, VariableScope, VariableType,
         WorldSnapshot,
     },
 };
@@ -35,9 +36,10 @@ pub enum RuntimeError {
     InvalidSnapshot(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeEngine {
     snapshot: RuntimeSnapshot,
+    profile_variables: VariableMap,
     started: bool,
     next_update_id: u64,
     next_cue_id: u64,
@@ -45,10 +47,20 @@ pub struct RuntimeEngine {
 }
 
 impl RuntimeEngine {
+    #[allow(dead_code)]
     pub fn new(content: &ContentCatalog) -> Result<Self, RuntimeError> {
+        Self::with_profile(content, profile_defaults(content)?)
+    }
+
+    pub fn with_profile(
+        content: &ContentCatalog,
+        profile_variables: VariableMap,
+    ) -> Result<Self, RuntimeError> {
+        validate_profile_variables(content, &profile_variables)?;
         let snapshot = initial_snapshot(content)?;
         Ok(Self {
             snapshot,
+            profile_variables,
             started: false,
             next_update_id: 1,
             next_cue_id: 1,
@@ -154,6 +166,10 @@ impl RuntimeEngine {
 
     pub fn snapshot(&self) -> &RuntimeSnapshot {
         &self.snapshot
+    }
+
+    pub fn profile_variables(&self) -> &VariableMap {
+        &self.profile_variables
     }
 
     pub fn pending_runtime_update(&self) -> Option<u64> {
@@ -331,16 +347,33 @@ impl RuntimeEngine {
                 }
                 SceneNode::Choice { choices } => {
                     let prompt_id = format!("{scene_id}/{node_id}");
+                    let mut visible_choices = Vec::new();
+                    for choice in choices {
+                        let visible = match &choice.visible_if {
+                            Some(condition) => self.evaluate_condition(content, condition)?,
+                            None => true,
+                        };
+                        if !visible {
+                            continue;
+                        }
+                        let enabled = match &choice.enabled_if {
+                            Some(condition) => self.evaluate_condition(content, condition)?,
+                            None => true,
+                        };
+                        visible_choices.push(ChoiceSnapshot {
+                            id: choice.id,
+                            label: choice.label,
+                            enabled,
+                        });
+                    }
+                    if !visible_choices.iter().any(|choice| choice.enabled) {
+                        return Err(RuntimeError::Content(format!(
+                            "{scene_id}/{node_id}: 没有任何可见且可用的选项"
+                        )));
+                    }
                     self.snapshot.prompt = PromptSnapshot::Choice {
                         prompt_id,
-                        choices: choices
-                            .into_iter()
-                            .map(|choice| ChoiceSnapshot {
-                                id: choice.id,
-                                label: choice.label,
-                                enabled: true,
-                            })
-                            .collect(),
+                        choices: visible_choices,
                     };
                     return Ok(cues);
                 }
@@ -349,17 +382,30 @@ impl RuntimeEngine {
                     value,
                     next,
                 } => {
-                    self.snapshot.variables.insert(variable, value);
+                    let definition =
+                        content.manifest.variables.get(&variable).ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 未声明变量 {variable}"
+                            ))
+                        })?;
+                    let value = normalize_value(value, definition.value_type)?;
+                    match definition.scope {
+                        VariableScope::Save => {
+                            self.snapshot.variables.insert(variable, value);
+                        }
+                        VariableScope::Profile => {
+                            self.profile_variables.insert(variable, value);
+                        }
+                    }
                     self.snapshot.location.node_id = next;
                 }
-                SceneNode::Branch {
-                    variable,
-                    equals,
+                SceneNode::Condition {
+                    condition,
                     then,
                     otherwise,
                 } => {
                     self.snapshot.location.node_id =
-                        if self.snapshot.variables.get(&variable) == Some(&equals) {
+                        if self.evaluate_condition(content, &condition)? {
                             then
                         } else {
                             otherwise
@@ -497,6 +543,93 @@ impl RuntimeEngine {
         Err(RuntimeError::ImmediateLoop)
     }
 
+    fn evaluate_condition(
+        &self,
+        content: &ContentCatalog,
+        condition: &ConditionExpression,
+    ) -> Result<bool, RuntimeError> {
+        match condition {
+            ConditionExpression::Eq { left, right } => compare_values(
+                self.resolve_operand(content, left)?,
+                self.resolve_operand(content, right)?,
+            )
+            .map(|ordering| ordering == std::cmp::Ordering::Equal),
+            ConditionExpression::Ne { left, right } => compare_values(
+                self.resolve_operand(content, left)?,
+                self.resolve_operand(content, right)?,
+            )
+            .map(|ordering| ordering != std::cmp::Ordering::Equal),
+            ConditionExpression::Lt { left, right } => compare_numeric(
+                self.resolve_operand(content, left)?,
+                self.resolve_operand(content, right)?,
+            )
+            .map(|ordering| ordering == std::cmp::Ordering::Less),
+            ConditionExpression::Le { left, right } => compare_numeric(
+                self.resolve_operand(content, left)?,
+                self.resolve_operand(content, right)?,
+            )
+            .map(|ordering| ordering != std::cmp::Ordering::Greater),
+            ConditionExpression::Gt { left, right } => compare_numeric(
+                self.resolve_operand(content, left)?,
+                self.resolve_operand(content, right)?,
+            )
+            .map(|ordering| ordering == std::cmp::Ordering::Greater),
+            ConditionExpression::Ge { left, right } => compare_numeric(
+                self.resolve_operand(content, left)?,
+                self.resolve_operand(content, right)?,
+            )
+            .map(|ordering| ordering != std::cmp::Ordering::Less),
+            ConditionExpression::And { conditions } => {
+                for child in conditions {
+                    if !self.evaluate_condition(content, child)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            ConditionExpression::Or { conditions } => {
+                for child in conditions {
+                    if self.evaluate_condition(content, child)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            ConditionExpression::Not { condition } => {
+                Ok(!self.evaluate_condition(content, condition)?)
+            }
+        }
+    }
+
+    fn resolve_operand<'a>(
+        &'a self,
+        content: &'a ContentCatalog,
+        operand: &'a ValueOperand,
+    ) -> Result<&'a ScalarValue, RuntimeError> {
+        match operand {
+            ValueOperand::Literal(literal) => Ok(&literal.value),
+            ValueOperand::Variable(reference) => {
+                let definition = content
+                    .manifest
+                    .variables
+                    .get(&reference.variable)
+                    .ok_or_else(|| {
+                        RuntimeError::Content(format!(
+                            "条件引用了未声明变量 {}",
+                            reference.variable
+                        ))
+                    })?;
+                let variables = match definition.scope {
+                    VariableScope::Save => &self.snapshot.variables,
+                    VariableScope::Profile => &self.profile_variables,
+                };
+                variables.get(&reference.variable).ok_or_else(|| {
+                    RuntimeError::Content(format!("变量 {} 尚未初始化", reference.variable))
+                })
+            }
+        }
+    }
+
     fn cue(&mut self, gate: CueGate, kind: PresentationCueKind) -> PresentationCue {
         let cue = PresentationCue {
             cue_id: self.next_cue_id,
@@ -538,6 +671,131 @@ fn gate(await_completion: bool) -> CueGate {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn profile_defaults(content: &ContentCatalog) -> Result<VariableMap, RuntimeError> {
+    defaults_for_scope(content, VariableScope::Profile)
+}
+
+fn defaults_for_scope(
+    content: &ContentCatalog,
+    scope: VariableScope,
+) -> Result<VariableMap, RuntimeError> {
+    content
+        .manifest
+        .variables
+        .iter()
+        .filter(|(_, definition)| definition.scope == scope)
+        .map(|(id, definition)| {
+            normalize_value(definition.default.clone(), definition.value_type)
+                .map(|value| (id.clone(), value))
+        })
+        .collect()
+}
+
+fn normalize_value(
+    value: ScalarValue,
+    expected: VariableType,
+) -> Result<ScalarValue, RuntimeError> {
+    match (expected, value) {
+        (VariableType::Boolean, value @ ScalarValue::Boolean(_))
+        | (VariableType::Integer, value @ ScalarValue::Integer(_))
+        | (VariableType::String, value @ ScalarValue::Text(_)) => Ok(value),
+        (VariableType::Number, ScalarValue::Integer(value)) => {
+            Ok(ScalarValue::Number(value as f64))
+        }
+        (VariableType::Number, ScalarValue::Number(value)) if value.is_finite() => {
+            Ok(ScalarValue::Number(value))
+        }
+        (_, ScalarValue::Number(value)) if !value.is_finite() => {
+            Err(RuntimeError::Content("变量数值必须是有限数".to_owned()))
+        }
+        (expected, actual) => Err(RuntimeError::Content(format!(
+            "变量类型不匹配：期望 {expected:?}，实际 {actual:?}"
+        ))),
+    }
+}
+
+fn validate_profile_variables(
+    content: &ContentCatalog,
+    variables: &VariableMap,
+) -> Result<(), RuntimeError> {
+    validate_variables_for_scope(content, variables, VariableScope::Profile)
+}
+
+fn validate_variables_for_scope(
+    content: &ContentCatalog,
+    variables: &VariableMap,
+    scope: VariableScope,
+) -> Result<(), RuntimeError> {
+    let expected_count = content
+        .manifest
+        .variables
+        .values()
+        .filter(|definition| definition.scope == scope)
+        .count();
+    if variables.len() != expected_count {
+        return Err(RuntimeError::InvalidSnapshot(format!(
+            "{scope:?} 变量数量不匹配"
+        )));
+    }
+    for (id, definition) in &content.manifest.variables {
+        if definition.scope != scope {
+            continue;
+        }
+        let value = variables
+            .get(id)
+            .ok_or_else(|| RuntimeError::InvalidSnapshot(format!("缺少 {scope:?} 变量 {id}")))?;
+        normalize_value(value.clone(), definition.value_type).map_err(|error| {
+            RuntimeError::InvalidSnapshot(format!("变量 {id} 类型错误: {error}"))
+        })?;
+    }
+    for id in variables.keys() {
+        if content
+            .manifest
+            .variables
+            .get(id)
+            .is_none_or(|definition| definition.scope != scope)
+        {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "包含未知或错误作用域的变量 {id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn compare_values(
+    left: &ScalarValue,
+    right: &ScalarValue,
+) -> Result<std::cmp::Ordering, RuntimeError> {
+    match (left, right) {
+        (ScalarValue::Boolean(left), ScalarValue::Boolean(right)) => Ok(left.cmp(right)),
+        (ScalarValue::Text(left), ScalarValue::Text(right)) => Ok(left.cmp(right)),
+        _ => compare_numeric(left, right),
+    }
+}
+
+fn compare_numeric(
+    left: &ScalarValue,
+    right: &ScalarValue,
+) -> Result<std::cmp::Ordering, RuntimeError> {
+    match (left, right) {
+        (ScalarValue::Integer(left), ScalarValue::Integer(right)) => Ok(left.cmp(right)),
+        (ScalarValue::Integer(left), ScalarValue::Number(right)) => (*left as f64)
+            .partial_cmp(right)
+            .ok_or_else(|| RuntimeError::Content("无法比较非有限数值".to_owned())),
+        (ScalarValue::Number(left), ScalarValue::Integer(right)) => left
+            .partial_cmp(&(*right as f64))
+            .ok_or_else(|| RuntimeError::Content("无法比较非有限数值".to_owned())),
+        (ScalarValue::Number(left), ScalarValue::Number(right)) => left
+            .partial_cmp(right)
+            .ok_or_else(|| RuntimeError::Content("无法比较非有限数值".to_owned())),
+        _ => Err(RuntimeError::Content(
+            "Lt/Le/Gt/Ge 只允许比较数值".to_owned(),
+        )),
+    }
+}
+
 fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, RuntimeError> {
     let scene = content
         .scene(&content.manifest.entry_scene)
@@ -548,7 +806,7 @@ fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, Runtime
             scene_id: scene.id.clone(),
             node_id: scene.entry.clone(),
         },
-        variables: Default::default(),
+        variables: defaults_for_scope(content, VariableScope::Save)?,
         world: WorldSnapshot::default(),
         audio: AudioSnapshot::default(),
         prompt: PromptSnapshot::None,
@@ -559,6 +817,7 @@ fn validate_snapshot(
     content: &ContentCatalog,
     snapshot: &RuntimeSnapshot,
 ) -> Result<(), RuntimeError> {
+    validate_variables_for_scope(content, &snapshot.variables, VariableScope::Save)?;
     let scene = content
         .scene(&snapshot.location.scene_id)
         .map_err(|error| RuntimeError::InvalidSnapshot(error.to_string()))?;
@@ -598,10 +857,21 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::model::{LiteralOperand, VariableOperand};
 
     fn catalog() -> ContentCatalog {
         ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
             .expect("demo content must be valid")
+    }
+
+    fn literal(value: ScalarValue) -> ValueOperand {
+        ValueOperand::Literal(LiteralOperand { value })
+    }
+
+    fn variable(id: &str) -> ValueOperand {
+        ValueOperand::Variable(VariableOperand {
+            variable: id.to_owned(),
+        })
     }
 
     #[test]
@@ -681,5 +951,190 @@ mod tests {
         assert_eq!(value["gate"], "player_advance");
         assert_eq!(value["cue_id"], 9);
         assert!(value.get("kind").is_none());
+    }
+
+    #[test]
+    fn every_comparison_and_boolean_operator_is_evaluated() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime
+            .snapshot
+            .variables
+            .insert("score".to_owned(), ScalarValue::Integer(10));
+        runtime
+            .snapshot
+            .variables
+            .insert("route".to_owned(), ScalarValue::Text("algebra".to_owned()));
+
+        let comparisons = [
+            (
+                ConditionExpression::Eq {
+                    left: variable("score"),
+                    right: literal(ScalarValue::Number(10.0)),
+                },
+                true,
+            ),
+            (
+                ConditionExpression::Ne {
+                    left: variable("route"),
+                    right: literal(ScalarValue::Text("geometry".to_owned())),
+                },
+                true,
+            ),
+            (
+                ConditionExpression::Lt {
+                    left: literal(ScalarValue::Integer(9)),
+                    right: variable("score"),
+                },
+                true,
+            ),
+            (
+                ConditionExpression::Le {
+                    left: variable("score"),
+                    right: literal(ScalarValue::Integer(10)),
+                },
+                true,
+            ),
+            (
+                ConditionExpression::Gt {
+                    left: variable("score"),
+                    right: literal(ScalarValue::Integer(1)),
+                },
+                true,
+            ),
+            (
+                ConditionExpression::Ge {
+                    left: variable("score"),
+                    right: literal(ScalarValue::Number(10.0)),
+                },
+                true,
+            ),
+        ];
+        for (condition, expected) in comparisons {
+            assert_eq!(
+                runtime.evaluate_condition(&content, &condition).unwrap(),
+                expected
+            );
+        }
+
+        let nested = ConditionExpression::And {
+            conditions: vec![
+                ConditionExpression::Or {
+                    conditions: vec![
+                        ConditionExpression::Eq {
+                            left: variable("score"),
+                            right: literal(ScalarValue::Integer(0)),
+                        },
+                        ConditionExpression::Eq {
+                            left: variable("score"),
+                            right: literal(ScalarValue::Integer(10)),
+                        },
+                    ],
+                },
+                ConditionExpression::Not {
+                    condition: Box::new(ConditionExpression::Eq {
+                        left: variable("route"),
+                        right: literal(ScalarValue::Text("geometry".to_owned())),
+                    }),
+                },
+            ],
+        };
+        assert!(runtime.evaluate_condition(&content, &nested).unwrap());
+    }
+
+    #[test]
+    fn boolean_conditions_short_circuit_left_to_right() {
+        let content = catalog();
+        let runtime = RuntimeEngine::new(&content).unwrap();
+        let invalid_tail = ConditionExpression::Eq {
+            left: variable("missing"),
+            right: literal(ScalarValue::Boolean(true)),
+        };
+        let and = ConditionExpression::And {
+            conditions: vec![
+                ConditionExpression::Eq {
+                    left: literal(ScalarValue::Integer(1)),
+                    right: literal(ScalarValue::Integer(2)),
+                },
+                invalid_tail.clone(),
+            ],
+        };
+        let or = ConditionExpression::Or {
+            conditions: vec![
+                ConditionExpression::Eq {
+                    left: literal(ScalarValue::Integer(1)),
+                    right: literal(ScalarValue::Integer(1)),
+                },
+                invalid_tail,
+            ],
+        };
+        assert!(!runtime.evaluate_condition(&content, &and).unwrap());
+        assert!(runtime.evaluate_condition(&content, &or).unwrap());
+    }
+
+    #[test]
+    fn profile_values_survive_new_game_and_loading_a_slot() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime
+            .profile_variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        let old_slot = runtime.snapshot.clone();
+        runtime.start_new_game(&content).unwrap();
+        assert_eq!(
+            runtime.profile_variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
+        runtime.load_snapshot(&content, old_slot).unwrap();
+        assert_eq!(
+            runtime.profile_variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn choice_conditions_hide_and_disable_options() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.snapshot.location.node_id = "route_choice".to_owned();
+        runtime.run_until_boundary(&content).unwrap();
+        let PromptSnapshot::Choice { choices, .. } = &runtime.snapshot.prompt else {
+            panic!("expected choice")
+        };
+        assert!(!choices.iter().any(|choice| choice.id == "test"));
+
+        runtime
+            .profile_variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        runtime.snapshot.location.node_id = "route_choice".to_owned();
+        runtime.snapshot.prompt = PromptSnapshot::None;
+        runtime.run_until_boundary(&content).unwrap();
+        let PromptSnapshot::Choice { choices, .. } = &runtime.snapshot.prompt else {
+            panic!("expected choice")
+        };
+        assert!(choices
+            .iter()
+            .any(|choice| choice.id == "test" && choice.enabled));
+    }
+
+    #[test]
+    fn a_choice_without_any_enabled_visible_option_is_an_error() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        let SceneNode::Choice { choices } = scene.nodes.get_mut("route_choice").unwrap() else {
+            panic!("expected choice fixture")
+        };
+        let always_false = ConditionExpression::Eq {
+            left: literal(ScalarValue::Boolean(false)),
+            right: literal(ScalarValue::Boolean(true)),
+        };
+        for choice in choices {
+            choice.visible_if = None;
+            choice.enabled_if = Some(always_false.clone());
+        }
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.snapshot.location.node_id = "route_choice".to_owned();
+        let error = runtime.run_until_boundary(&content).unwrap_err();
+        assert!(error.to_string().contains("没有任何可见且可用的选项"));
     }
 }

@@ -104,15 +104,22 @@ screen-space input intended for Pixi interactions.
 
 ## Scene format
 
-`game/scenes/prologue.yaml` is a two-branch demonstration of background and
+`game/scenes/prologue.yaml` is a two-route demonstration of background and
 sprite transitions, formula dialogue, SFX, choices, variables, branching,
 camera motion, screen effects, Runtime gates, and snapshot-only saves. Supported
 node types are:
 
 ```text
-background  sprite  say  choice  set  branch  jump  wait
+background  sprite  say  choice  set  condition  jump  wait
 bgm  sfx  camera  screen_effect  dialogue_ui  end
 ```
+
+Schema v2 declares every variable in `manifest.yaml` with an explicit type,
+default, and `save` or `profile` scope. Save variables live in slot snapshots;
+profile variables live in `profile.json` and are never rolled back by loading a
+slot. Recursive conditions support `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `and`,
+`or`, and `not`, and the same expressions can hide or disable individual
+choices.
 
 Unknown fields, duplicate YAML keys, missing nodes, wrong asset kinds, invalid
 variables, paths outside the content root, invalid ranges, and unsupported schema

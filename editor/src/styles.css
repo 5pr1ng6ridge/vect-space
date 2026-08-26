@@ -811,7 +811,7 @@ code {
   background: #68d7bb;
 }
 .story-node-choice::before,
-.story-node-branch::before {
+.story-node-condition::before {
   background: #f2bb68;
 }
 .story-node-background::before,
@@ -964,7 +964,7 @@ code {
 }
 
 .story-edge-choice path,
-.story-edge-branch path {
+.story-edge-condition path {
   stroke: #a88754;
 }
 
@@ -1164,6 +1164,70 @@ code {
   min-height: 30px;
   padding: 6px;
   font-size: 10px;
+}
+
+.condition-editor,
+.condition-child,
+.optional-condition {
+  display: grid;
+  gap: 8px;
+}
+
+.condition-editor {
+  padding: 9px;
+  border: 1px solid rgba(116, 194, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(7, 16, 28, 0.48);
+}
+
+.condition-operands,
+.condition-children {
+  display: grid;
+  gap: 8px;
+}
+
+.condition-child {
+  padding-left: 8px;
+  border-left: 2px solid rgba(116, 194, 255, 0.25);
+}
+
+.condition-child-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.operand-editor {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.variable-settings {
+  display: grid;
+  gap: 8px;
+}
+
+.variable-settings > header,
+.variable-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.variable-card {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid rgba(116, 194, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(7, 16, 28, 0.4);
+}
+
+.variable-card > header div {
+  display: flex;
+  gap: 4px;
 }
 
 .wide-button {

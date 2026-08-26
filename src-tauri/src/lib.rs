@@ -11,13 +11,14 @@ use model::{
     SaveSlotSummary, Settings,
 };
 use runtime::RuntimeEngine;
-use save::SaveManager;
+use save::{ProfileManager, SaveManager};
 use tauri::{Manager, State};
 
 struct EngineState {
     content: ContentCatalog,
     runtime: Mutex<RuntimeEngine>,
     saves: SaveManager,
+    profile: ProfileManager,
 }
 
 impl EngineState {
@@ -25,6 +26,22 @@ impl EngineState {
         self.runtime
             .lock()
             .map_err(|_| "运行时互斥锁已损坏".to_owned())
+    }
+
+    fn transact_runtime(
+        &self,
+        operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
+    ) -> Result<RuntimeUpdate, String> {
+        let mut runtime = self.runtime()?;
+        let mut candidate = runtime.clone();
+        let update = operation(&mut candidate).map_err(|error| error.to_string())?;
+        if candidate.profile_variables() != runtime.profile_variables() {
+            self.profile
+                .save(candidate.profile_variables())
+                .map_err(|error| error.to_string())?;
+        }
+        *runtime = candidate;
+        Ok(update)
     }
 }
 
@@ -35,18 +52,12 @@ fn bootstrap(state: State<'_, EngineState>) -> Result<BootstrapPayload, String> 
 
 #[tauri::command]
 fn start_new_game(state: State<'_, EngineState>) -> Result<RuntimeUpdate, String> {
-    state
-        .runtime()?
-        .start_new_game(&state.content)
-        .map_err(|error| error.to_string())
+    state.transact_runtime(|runtime| runtime.start_new_game(&state.content))
 }
 
 #[tauri::command]
 fn advance(expected_revision: u64, state: State<'_, EngineState>) -> Result<RuntimeUpdate, String> {
-    state
-        .runtime()?
-        .advance(&state.content, expected_revision)
-        .map_err(|error| error.to_string())
+    state.transact_runtime(|runtime| runtime.advance(&state.content, expected_revision))
 }
 
 #[tauri::command]
@@ -55,10 +66,7 @@ fn choose(
     expected_revision: u64,
     state: State<'_, EngineState>,
 ) -> Result<RuntimeUpdate, String> {
-    state
-        .runtime()?
-        .choose(&state.content, &choice_id, expected_revision)
-        .map_err(|error| error.to_string())
+    state.transact_runtime(|runtime| runtime.choose(&state.content, &choice_id, expected_revision))
 }
 
 #[tauri::command]
@@ -66,10 +74,7 @@ fn presentation_complete(
     update_id: u64,
     state: State<'_, EngineState>,
 ) -> Result<RuntimeUpdate, String> {
-    state
-        .runtime()?
-        .presentation_complete(&state.content, update_id)
-        .map_err(|error| error.to_string())
+    state.transact_runtime(|runtime| runtime.presentation_complete(&state.content, update_id))
 }
 
 #[tauri::command]
@@ -115,10 +120,7 @@ fn save_slot(
 #[tauri::command]
 fn load_slot(slot: String, state: State<'_, EngineState>) -> Result<RuntimeUpdate, String> {
     let snapshot = state.saves.load(&slot).map_err(|error| error.to_string())?;
-    state
-        .runtime()?
-        .load_snapshot(&state.content, snapshot)
-        .map_err(|error| error.to_string())
+    state.transact_runtime(|runtime| runtime.load_snapshot(&state.content, snapshot))
 }
 
 #[tauri::command]
@@ -134,21 +136,58 @@ fn save_settings(settings: Settings, state: State<'_, EngineState>) -> Result<Se
         .map_err(|error| error.to_string())
 }
 
+#[cfg(windows)]
+fn disable_browser_features<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> tauri::Result<()> {
+    use windows::core::Interface;
+
+    window.with_webview(|webview| unsafe {
+        let controller = webview.controller();
+        let core = controller
+            .CoreWebView2()
+            .expect("WebView2 CoreWebView2 interface is unavailable");
+        let settings = core.Settings().expect("WebView2 settings are unavailable");
+        let _ = settings.SetAreDefaultContextMenusEnabled(false);
+        let _ = settings.SetAreDevToolsEnabled(false);
+        let _ = settings.SetIsZoomControlEnabled(false);
+        if let Ok(settings3) =
+            settings.cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3>()
+        {
+            let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+        }
+    })?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            #[cfg(windows)]
+            {
+                let window = app
+                    .get_webview_window("main")
+                    .expect("main WebView window is missing");
+                disable_browser_features(&window)?;
+            }
             let content = ContentCatalog::load_for_app(app)?;
             content.write_development_schemas()?;
             app.asset_protocol_scope()
                 .allow_directory(content.assets_root(), true)?;
-            let save_root = app.path().app_data_dir()?.join("saves");
-            let saves = SaveManager::new(save_root, content.manifest.content_version.clone())?;
-            let runtime = RuntimeEngine::new(&content)?;
+            let app_data_root = app.path().app_data_dir()?;
+            let saves = SaveManager::new(
+                app_data_root.join("saves"),
+                content.manifest.content_version.clone(),
+            )?;
+            let (profile, profile_variables) =
+                ProfileManager::new(app_data_root, &content.manifest.variables)?;
+            let runtime = RuntimeEngine::with_profile(&content, profile_variables)?;
             app.manage(EngineState {
                 content,
                 runtime: Mutex::new(runtime),
                 saves,
+                profile,
             });
             Ok(())
         })
@@ -168,4 +207,60 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("VECTSPACE failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::model::{ScalarValue, SceneNode};
+
+    #[test]
+    fn failed_profile_persistence_rolls_back_the_entire_runtime_command() {
+        let mut content =
+            ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
+                .unwrap();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        let original_entry = scene.entry.clone();
+        scene.entry = "set_profile_transaction".to_owned();
+        scene.nodes.insert(
+            scene.entry.clone(),
+            SceneNode::Set {
+                variable: "ending_seen".to_owned(),
+                value: ScalarValue::Boolean(true),
+                next: original_entry,
+            },
+        );
+
+        let directory = tempdir().unwrap();
+        let saves = SaveManager::new(
+            directory.path().join("saves"),
+            content.manifest.content_version.clone(),
+        )
+        .unwrap();
+        let (profile, profile_variables) =
+            ProfileManager::new(directory.path().to_path_buf(), &content.manifest.variables)
+                .unwrap();
+        let runtime = RuntimeEngine::with_profile(&content, profile_variables).unwrap();
+        let state = EngineState {
+            content,
+            runtime: Mutex::new(runtime),
+            saves,
+            profile,
+        };
+        let before = state.runtime().unwrap().snapshot().clone();
+        fs::remove_dir_all(directory.path()).unwrap();
+
+        let result = state.transact_runtime(|runtime| runtime.start_new_game(&state.content));
+        assert!(result.is_err());
+        let runtime = state.runtime().unwrap();
+        assert_eq!(runtime.snapshot(), &before);
+        assert_eq!(
+            runtime.profile_variables().get("ending_seen"),
+            Some(&ScalarValue::Boolean(false))
+        );
+    }
 }

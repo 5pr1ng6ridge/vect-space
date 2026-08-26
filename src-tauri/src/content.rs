@@ -9,9 +9,14 @@ use tauri::{path::BaseDirectory, App, Manager};
 use thiserror::Error;
 
 use crate::model::{
-    AssetDefinition, AssetKind, AudioAction, ContentManifest, ResolvedAsset, SceneDefinition,
-    SceneNode, SpriteAction,
+    AssetDefinition, AssetKind, AudioAction, ConditionExpression, ContentManifest, ResolvedAsset,
+    ScalarValue, SceneDefinition, SceneNode, SpriteAction, ValueOperand, VariableDefinition,
+    VariableType,
 };
+
+const CONTENT_SCHEMA_VERSION: u32 = 2;
+const MAX_CONDITION_DEPTH: usize = 32;
+const MAX_CONDITION_NODES: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum ContentError {
@@ -52,13 +57,14 @@ impl ContentCatalog {
         let root = canonical_directory(&root)?;
         let manifest_path = root.join("manifest.yaml");
         let manifest: ContentManifest = read_yaml(&manifest_path)?;
-        if manifest.schema_version != 1 {
+        if manifest.schema_version != CONTENT_SCHEMA_VERSION {
             return Err(ContentError::Validation(format!(
                 "不支持 manifest schema_version {}",
                 manifest.schema_version
             )));
         }
         validate_identifier("entry_scene", &manifest.entry_scene)?;
+        validate_variable_definitions(&manifest.variables)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
@@ -68,7 +74,7 @@ impl ContentCatalog {
             let relative = validate_relative_path(scene_path)?;
             let full_path = canonical_file_within(&root, &root.join(relative))?;
             let scene: SceneDefinition = read_yaml(&full_path)?;
-            if scene.schema_version != 1 {
+            if scene.schema_version != CONTENT_SCHEMA_VERSION {
                 return Err(ContentError::Validation(format!(
                     "场景 {} 使用了不支持的 schema_version {}",
                     scene.id, scene.schema_version
@@ -89,7 +95,7 @@ impl ContentCatalog {
                 manifest.entry_scene
             )));
         }
-        validate_scenes(&scenes, &manifest.assets)?;
+        validate_scenes(&scenes, &manifest.assets, &manifest.variables)?;
 
         Ok(Self {
             assets_root,
@@ -109,19 +115,20 @@ impl ContentCatalog {
         scenes: BTreeMap<String, SceneDefinition>,
     ) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
-        if manifest.schema_version != 1 {
+        if manifest.schema_version != CONTENT_SCHEMA_VERSION {
             return Err(ContentError::Validation(format!(
                 "不支持 manifest schema_version {}",
                 manifest.schema_version
             )));
         }
         validate_identifier("entry_scene", &manifest.entry_scene)?;
+        validate_variable_definitions(&manifest.variables)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
 
         for (scene_id, scene) in &scenes {
-            if scene.schema_version != 1 {
+            if scene.schema_version != CONTENT_SCHEMA_VERSION {
                 return Err(ContentError::Validation(format!(
                     "场景 {} 使用了不支持的 schema_version {}",
                     scene.id, scene.schema_version
@@ -141,7 +148,7 @@ impl ContentCatalog {
                 manifest.entry_scene
             )));
         }
-        validate_scenes(&scenes, &manifest.assets)?;
+        validate_scenes(&scenes, &manifest.assets, &manifest.variables)?;
 
         Ok(Self {
             assets_root,
@@ -244,9 +251,22 @@ fn validate_assets(
     Ok(())
 }
 
+fn validate_variable_definitions(
+    variables: &BTreeMap<String, VariableDefinition>,
+) -> Result<(), ContentError> {
+    for (id, definition) in variables {
+        validate_identifier("variable", id)?;
+        validate_value_for_type(&definition.default, definition.value_type).map_err(|message| {
+            ContentError::Validation(format!("变量 {id} 的默认值无效: {message}"))
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_scenes(
     scenes: &BTreeMap<String, SceneDefinition>,
     assets: &BTreeMap<String, AssetDefinition>,
+    variables: &BTreeMap<String, VariableDefinition>,
 ) -> Result<(), ContentError> {
     for (scene_id, scene) in scenes {
         if !scene.nodes.contains_key(&scene.entry) {
@@ -312,20 +332,39 @@ fn validate_scenes(
                             return node_error(scene_id, node_id, "choice id 重复");
                         }
                         validate_text_markup(&choice.label, scene_id, node_id)?;
+                        if let Some(condition) = &choice.visible_if {
+                            validate_condition(condition, variables, scene_id, node_id)?;
+                        }
+                        if let Some(condition) = &choice.enabled_if {
+                            validate_condition(condition, variables, scene_id, node_id)?;
+                        }
                         require_node(scene, &choice.next, scene_id, node_id)?;
                     }
                 }
-                SceneNode::Set { variable, next, .. } => {
-                    validate_identifier("variable", variable)?;
-                    require_node(scene, next, scene_id, node_id)?;
-                }
-                SceneNode::Branch {
+                SceneNode::Set {
                     variable,
-                    then,
-                    otherwise,
-                    ..
+                    value,
+                    next,
                 } => {
                     validate_identifier("variable", variable)?;
+                    let definition = variables.get(variable).ok_or_else(|| {
+                        ContentError::Validation(format!(
+                            "{scene_id}/{node_id}: 引用了未声明变量 {variable}"
+                        ))
+                    })?;
+                    validate_value_for_type(value, definition.value_type).map_err(|message| {
+                        ContentError::Validation(format!(
+                            "{scene_id}/{node_id}: 变量 {variable} 赋值无效: {message}"
+                        ))
+                    })?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::Condition {
+                    condition,
+                    then,
+                    otherwise,
+                } => {
+                    validate_condition(condition, variables, scene_id, node_id)?;
                     require_node(scene, then, scene_id, node_id)?;
                     require_node(scene, otherwise, scene_id, node_id)?;
                 }
@@ -400,6 +439,130 @@ fn validate_scenes(
         }
     }
     Ok(())
+}
+
+fn validate_condition(
+    condition: &ConditionExpression,
+    variables: &BTreeMap<String, VariableDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    let mut nodes = 0;
+    validate_condition_inner(condition, variables, scene_id, node_id, 1, &mut nodes)
+}
+
+fn validate_condition_inner(
+    condition: &ConditionExpression,
+    variables: &BTreeMap<String, VariableDefinition>,
+    scene_id: &str,
+    node_id: &str,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), ContentError> {
+    *nodes += 1;
+    if depth > MAX_CONDITION_DEPTH {
+        return node_error(scene_id, node_id, "条件表达式嵌套过深");
+    }
+    if *nodes > MAX_CONDITION_NODES {
+        return node_error(scene_id, node_id, "条件表达式节点过多");
+    }
+
+    match condition {
+        ConditionExpression::Eq { left, right } | ConditionExpression::Ne { left, right } => {
+            let left_type = operand_type(left, variables, scene_id, node_id)?;
+            let right_type = operand_type(right, variables, scene_id, node_id)?;
+            if !types_comparable_for_equality(left_type, right_type) {
+                return node_error(scene_id, node_id, "Eq/Ne 两侧类型不兼容");
+            }
+        }
+        ConditionExpression::Lt { left, right }
+        | ConditionExpression::Le { left, right }
+        | ConditionExpression::Gt { left, right }
+        | ConditionExpression::Ge { left, right } => {
+            let left_type = operand_type(left, variables, scene_id, node_id)?;
+            let right_type = operand_type(right, variables, scene_id, node_id)?;
+            if !is_numeric_type(left_type) || !is_numeric_type(right_type) {
+                return node_error(scene_id, node_id, "Lt/Le/Gt/Ge 只允许比较数值");
+            }
+        }
+        ConditionExpression::And { conditions } | ConditionExpression::Or { conditions } => {
+            if conditions.is_empty() {
+                return node_error(scene_id, node_id, "And/Or 至少需要一个子条件");
+            }
+            for child in conditions {
+                validate_condition_inner(child, variables, scene_id, node_id, depth + 1, nodes)?;
+            }
+        }
+        ConditionExpression::Not { condition } => {
+            validate_condition_inner(condition, variables, scene_id, node_id, depth + 1, nodes)?
+        }
+    }
+    Ok(())
+}
+
+fn operand_type(
+    operand: &ValueOperand,
+    variables: &BTreeMap<String, VariableDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<VariableType, ContentError> {
+    match operand {
+        ValueOperand::Variable(reference) => {
+            validate_identifier("variable", &reference.variable)?;
+            variables
+                .get(&reference.variable)
+                .map(|definition| definition.value_type)
+                .ok_or_else(|| {
+                    ContentError::Validation(format!(
+                        "{scene_id}/{node_id}: 条件引用了未声明变量 {}",
+                        reference.variable
+                    ))
+                })
+        }
+        ValueOperand::Literal(literal) => {
+            let value_type = scalar_type(&literal.value);
+            validate_value_for_type(&literal.value, value_type).map_err(|message| {
+                ContentError::Validation(format!("{scene_id}/{node_id}: 条件字面量无效: {message}"))
+            })?;
+            Ok(value_type)
+        }
+    }
+}
+
+fn validate_value_for_type(value: &ScalarValue, expected: VariableType) -> Result<(), String> {
+    let valid = match (expected, value) {
+        (VariableType::Boolean, ScalarValue::Boolean(_))
+        | (VariableType::Integer, ScalarValue::Integer(_))
+        | (VariableType::String, ScalarValue::Text(_)) => true,
+        (VariableType::Number, ScalarValue::Integer(_)) => true,
+        (VariableType::Number, ScalarValue::Number(value)) => value.is_finite(),
+        (_, ScalarValue::Number(value)) if !value.is_finite() => {
+            return Err("数值必须是有限数".to_owned());
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("期望 {expected:?}，实际 {:?}", scalar_type(value)))
+    }
+}
+
+fn scalar_type(value: &ScalarValue) -> VariableType {
+    match value {
+        ScalarValue::Boolean(_) => VariableType::Boolean,
+        ScalarValue::Integer(_) => VariableType::Integer,
+        ScalarValue::Number(_) => VariableType::Number,
+        ScalarValue::Text(_) => VariableType::String,
+    }
+}
+
+fn is_numeric_type(value_type: VariableType) -> bool {
+    matches!(value_type, VariableType::Integer | VariableType::Number)
+}
+
+fn types_comparable_for_equality(left: VariableType, right: VariableType) -> bool {
+    left == right || (is_numeric_type(left) && is_numeric_type(right))
 }
 
 fn require_asset(
@@ -529,6 +692,7 @@ fn node_error<T>(scene_id: &str, node_id: &str, message: &str) -> Result<T, Cont
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{LiteralOperand, VariableOperand};
 
     #[test]
     fn traversal_is_rejected() {
@@ -550,5 +714,60 @@ mod tests {
         let options = serde_saphyr::options! { strict_booleans: true };
         let result = serde_saphyr::from_str_with_options::<ContentManifest>(yaml, options);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn variable_defaults_and_condition_types_are_strict() {
+        let mut variables = BTreeMap::from([(
+            "score".to_owned(),
+            VariableDefinition {
+                scope: crate::model::VariableScope::Save,
+                value_type: VariableType::Integer,
+                default: ScalarValue::Integer(0),
+            },
+        )]);
+        assert!(validate_variable_definitions(&variables).is_ok());
+        variables.get_mut("score").unwrap().default = ScalarValue::Text("0".to_owned());
+        assert!(validate_variable_definitions(&variables).is_err());
+
+        let invalid_order = ConditionExpression::Gt {
+            left: ValueOperand::Variable(VariableOperand {
+                variable: "score".to_owned(),
+            }),
+            right: ValueOperand::Literal(LiteralOperand {
+                value: ScalarValue::Text("ten".to_owned()),
+            }),
+        };
+        variables.get_mut("score").unwrap().default = ScalarValue::Integer(0);
+        assert!(validate_condition(&invalid_order, &variables, "scene", "node").is_err());
+    }
+
+    #[test]
+    fn empty_and_excessively_deep_conditions_are_rejected() {
+        let variables = BTreeMap::new();
+        assert!(validate_condition(
+            &ConditionExpression::And {
+                conditions: Vec::new(),
+            },
+            &variables,
+            "scene",
+            "node",
+        )
+        .is_err());
+
+        let mut condition = ConditionExpression::Eq {
+            left: ValueOperand::Literal(LiteralOperand {
+                value: ScalarValue::Boolean(true),
+            }),
+            right: ValueOperand::Literal(LiteralOperand {
+                value: ScalarValue::Boolean(true),
+            }),
+        };
+        for _ in 0..MAX_CONDITION_DEPTH {
+            condition = ConditionExpression::Not {
+                condition: Box::new(condition),
+            };
+        }
+        assert!(validate_condition(&condition, &variables, "scene", "node").is_err());
     }
 }

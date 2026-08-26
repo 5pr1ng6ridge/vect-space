@@ -615,31 +615,6 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
         }
     }
 
-    let assigned_variables: BTreeSet<&str> = catalog
-        .scenes
-        .values()
-        .flat_map(|scene| scene.nodes.values())
-        .filter_map(|node| match node {
-            SceneNode::Set { variable, .. } => Some(variable.as_str()),
-            _ => None,
-        })
-        .collect();
-    for (scene_id, scene) in &catalog.scenes {
-        for (node_id, node) in &scene.nodes {
-            if let SceneNode::Branch { variable, .. } = node {
-                if !assigned_variables.contains(variable.as_str()) {
-                    diagnostics.push(EditorDiagnostic {
-                        severity: DiagnosticSeverity::Warning,
-                        code: "variable_never_set".to_owned(),
-                        message: format!("变量 {variable} 在项目中从未赋值，分支将总走 otherwise"),
-                        scene_id: Some(scene_id.clone()),
-                        node_id: Some(node_id.clone()),
-                    });
-                }
-            }
-        }
-    }
-
     let mut referenced_assets = BTreeSet::new();
     for scene in catalog.scenes.values() {
         for node in scene.nodes.values() {
@@ -676,7 +651,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::ScreenEffect { next, .. }
         | SceneNode::DialogueUi { next, .. } => vec![local(next)],
         SceneNode::Choice { choices } => choices.iter().map(|choice| local(&choice.next)).collect(),
-        SceneNode::Branch {
+        SceneNode::Condition {
             then, otherwise, ..
         } => vec![local(then), local(otherwise)],
         SceneNode::Jump { scene, target } => {
@@ -714,7 +689,7 @@ fn is_immediate(node: &SceneNode) -> bool {
             await_completion, ..
         } => !await_completion,
         SceneNode::Set { .. }
-        | SceneNode::Branch { .. }
+        | SceneNode::Condition { .. }
         | SceneNode::Jump { .. }
         | SceneNode::Sfx { .. } => true,
     }
@@ -819,10 +794,44 @@ fn display_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+#[cfg(windows)]
+fn disable_browser_features<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> tauri::Result<()> {
+    use windows::core::Interface;
+
+    window.with_webview(|webview| unsafe {
+        let controller = webview.controller();
+        let core = controller
+            .CoreWebView2()
+            .expect("WebView2 CoreWebView2 interface is unavailable");
+        let settings = core.Settings().expect("WebView2 settings are unavailable");
+        let _ = settings.SetAreDefaultContextMenusEnabled(false);
+        let _ = settings.SetAreDevToolsEnabled(false);
+        let _ = settings.SetIsZoomControlEnabled(false);
+        if let Ok(settings3) =
+            settings.cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3>()
+        {
+            let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+        }
+    })?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            #[cfg(windows)]
+            {
+                let window = app
+                    .get_webview_window("main")
+                    .expect("main WebView window is missing");
+                disable_browser_features(&window)?;
+            }
+            Ok(())
+        })
         .manage(EditorState::default())
         .invoke_handler(tauri::generate_handler![
             open_project,
@@ -892,8 +901,8 @@ mod tests {
             (
                 "a".to_owned(),
                 SceneNode::Set {
-                    variable: "looping".to_owned(),
-                    value: ScalarValue::Boolean(true),
+                    variable: "score".to_owned(),
+                    value: ScalarValue::Integer(1),
                     next: "b".to_owned(),
                 },
             ),

@@ -1,4 +1,5 @@
 import type {
+  ConditionExpression,
   ContentManifest,
   EditorLayout,
   EditorProject,
@@ -12,7 +13,7 @@ import type {
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
   { type: "choice", label: "选择", group: "逻辑" },
-  { type: "branch", label: "条件分支", group: "逻辑" },
+  { type: "condition", label: "条件分支", group: "逻辑" },
   { type: "set", label: "设置变量", group: "逻辑" },
   { type: "jump", label: "跳转", group: "逻辑" },
   { type: "background", label: "背景", group: "画面" },
@@ -46,9 +47,9 @@ export function outputPorts(node: SceneNode): OutputPort[] {
         target: choice.next,
         targetScene: null,
       }));
-    case "branch":
+    case "condition":
       return [
-        { id: "then", label: "相等", target: node.then, targetScene: null },
+        { id: "then", label: "成立", target: node.then, targetScene: null },
         {
           id: "otherwise",
           label: "否则",
@@ -82,7 +83,10 @@ export function setPortTarget(
   if (handle === "next" && "next" in node) {
     return { ...node, next: target };
   }
-  if (node.type === "branch" && (handle === "then" || handle === "otherwise")) {
+  if (
+    node.type === "condition" &&
+    (handle === "then" || handle === "otherwise")
+  ) {
     return { ...node, [handle]: target };
   }
   if (node.type === "jump" && handle === "jump") {
@@ -108,8 +112,8 @@ export function summarizeNode(node: SceneNode): string {
       return `${node.choices.length} 个选项`;
     case "set":
       return `${node.variable} = ${String(node.value)}`;
-    case "branch":
-      return `${node.variable} == ${String(node.equals)}`;
+    case "condition":
+      return summarizeCondition(node.condition);
     case "jump":
       return `${node.scene ?? "本场景"} / ${node.target}`;
     case "background":
@@ -179,11 +183,10 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
       };
     case "set":
       return { type, variable: "flag", value: true, next: fallback };
-    case "branch":
+    case "condition":
       return {
         type,
-        variable: "flag",
-        equals: true,
+        condition: defaultCondition(),
         then: fallback,
         otherwise: fallback,
       };
@@ -267,6 +270,189 @@ export function scalarKind(value: ScalarValue): "text" | "number" | "boolean" {
     : typeof value === "boolean"
       ? "boolean"
       : "number";
+}
+
+export function defaultCondition(variable = "flag"): ConditionExpression {
+  return {
+    op: "eq",
+    left: { variable },
+    right: { value: true },
+  };
+}
+
+export function summarizeCondition(condition: ConditionExpression): string {
+  switch (condition.op) {
+    case "eq":
+    case "ne":
+    case "lt":
+    case "le":
+    case "gt":
+    case "ge":
+      return `${summarizeOperand(condition.left)} ${condition.op} ${summarizeOperand(condition.right)}`;
+    case "and":
+    case "or":
+      return condition.conditions
+        .map((child) => `(${summarizeCondition(child)})`)
+        .join(` ${condition.op} `);
+    case "not":
+      return `not (${summarizeCondition(condition.condition)})`;
+  }
+}
+
+function summarizeOperand(
+  operand: { variable: string } | { value: ScalarValue },
+): string {
+  return "variable" in operand
+    ? operand.variable
+    : JSON.stringify(operand.value);
+}
+
+export function renameVariable(
+  project: EditorProject,
+  previousId: string,
+  nextId: string,
+): EditorProject {
+  if (
+    project.manifest.variables[previousId] === undefined ||
+    project.manifest.variables[nextId] !== undefined
+  ) {
+    return project;
+  }
+  const updated = cloneProject(project);
+  const definition = updated.manifest.variables[previousId];
+  Reflect.deleteProperty(updated.manifest.variables, previousId);
+  updated.manifest.variables[nextId] = definition;
+  for (const file of updated.scenes) {
+    for (const node of Object.values(file.definition.nodes)) {
+      if (node.type === "set" && node.variable === previousId) {
+        node.variable = nextId;
+      }
+      if (node.type === "condition") {
+        node.condition = mapConditionVariables(
+          node.condition,
+          previousId,
+          nextId,
+        );
+      }
+      if (node.type === "choice") {
+        for (const choice of node.choices) {
+          if (choice.visible_if !== undefined) {
+            choice.visible_if = mapConditionVariables(
+              choice.visible_if,
+              previousId,
+              nextId,
+            );
+          }
+          if (choice.enabled_if !== undefined) {
+            choice.enabled_if = mapConditionVariables(
+              choice.enabled_if,
+              previousId,
+              nextId,
+            );
+          }
+        }
+      }
+    }
+  }
+  return updated;
+}
+
+export function countVariableReferences(
+  project: EditorProject,
+  variableId: string,
+): number {
+  let count = 0;
+  for (const file of project.scenes) {
+    for (const node of Object.values(file.definition.nodes)) {
+      if (node.type === "set" && node.variable === variableId) count += 1;
+      if (node.type === "condition") {
+        count += countConditionReferences(node.condition, variableId);
+      }
+      if (node.type === "choice") {
+        for (const choice of node.choices) {
+          if (choice.visible_if !== undefined) {
+            count += countConditionReferences(choice.visible_if, variableId);
+          }
+          if (choice.enabled_if !== undefined) {
+            count += countConditionReferences(choice.enabled_if, variableId);
+          }
+        }
+      }
+    }
+  }
+  return count;
+}
+
+function mapConditionVariables(
+  condition: ConditionExpression,
+  previousId: string,
+  nextId: string,
+): ConditionExpression {
+  switch (condition.op) {
+    case "eq":
+    case "ne":
+    case "lt":
+    case "le":
+    case "gt":
+    case "ge":
+      return {
+        ...condition,
+        left: renameOperand(condition.left, previousId, nextId),
+        right: renameOperand(condition.right, previousId, nextId),
+      };
+    case "and":
+    case "or":
+      return {
+        ...condition,
+        conditions: condition.conditions.map((child) =>
+          mapConditionVariables(child, previousId, nextId),
+        ),
+      };
+    case "not":
+      return {
+        ...condition,
+        condition: mapConditionVariables(
+          condition.condition,
+          previousId,
+          nextId,
+        ),
+      };
+  }
+}
+
+function renameOperand(
+  operand: { variable: string } | { value: ScalarValue },
+  previousId: string,
+  nextId: string,
+) {
+  return "variable" in operand && operand.variable === previousId
+    ? { variable: nextId }
+    : operand;
+}
+
+function countConditionReferences(
+  condition: ConditionExpression,
+  variableId: string,
+): number {
+  switch (condition.op) {
+    case "eq":
+    case "ne":
+    case "lt":
+    case "le":
+    case "gt":
+    case "ge":
+      return [condition.left, condition.right].filter(
+        (operand) => "variable" in operand && operand.variable === variableId,
+      ).length;
+    case "and":
+    case "or":
+      return condition.conditions.reduce(
+        (total, child) => total + countConditionReferences(child, variableId),
+        0,
+      );
+    case "not":
+      return countConditionReferences(condition.condition, variableId);
+  }
 }
 
 export function cloneProject(project: EditorProject): EditorProject {
@@ -380,7 +566,7 @@ export function newSceneFile(id: string): EditorSceneFile {
   return {
     path: `scenes/${id}.yaml`,
     definition: {
-      schema_version: 1,
+      schema_version: 2,
       id,
       entry: "start",
       nodes: { start: { type: "end" } },

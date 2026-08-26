@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRevealSchedule, parseMarkup, visibleUnits } from "./markup";
+import {
+  buildPauseWindows,
+  buildRevealSchedule,
+  parseMarkup,
+  visibleUnits,
+} from "./markup";
 
 describe("VN markup", () => {
   it("treats a formula as one atomic reveal unit", () => {
@@ -19,12 +24,17 @@ describe("VN markup", () => {
   });
 
   it("accounts for pause and speed controls", () => {
-    const schedule = buildRevealSchedule(
-      parseMarkup("A[pause=500ms][speed=10cps]B"),
-      20,
-      30,
-    );
+    const units = parseMarkup("A[pause=500ms][speed=10cps]B");
+    const schedule = buildRevealSchedule(units, 20, 30);
     expect(schedule[0]).toBe(50);
     expect(schedule[1]).toBe(650);
+
+    expect(buildPauseWindows(units, 20, 30)).toEqual([
+      { startMs: 50, endMs: 550 },
+    ]);
+  });
+
+  it("does not treat normal reveal pacing as an explicit pause", () => {
+    expect(buildPauseWindows(parseMarkup("ABC"), 20, 30)).toEqual([]);
   });
 });

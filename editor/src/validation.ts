@@ -1,9 +1,13 @@
 import { outputPorts } from "./story";
 import type {
   AssetKind,
+  ConditionExpression,
   EditorDiagnostic,
   EditorProject,
+  ScalarValue,
   SceneNode,
+  ValueOperand,
+  VariableType,
 } from "./types";
 
 const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
@@ -20,9 +24,37 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
     diagnostics.push(error("missing_entry_scene", "项目入口场景不存在"));
   }
 
+  if (project.manifest.schema_version !== 2) {
+    diagnostics.push(
+      error("invalid_manifest_schema", "manifest schema_version 必须为 2"),
+    );
+  }
+  for (const [id, definition] of Object.entries(project.manifest.variables)) {
+    if (!ID_PATTERN.test(id)) {
+      diagnostics.push(error("invalid_variable", `变量名非法：${id}`));
+    }
+    if (!valueMatchesType(definition.default, definition.type)) {
+      diagnostics.push(
+        error(
+          "invalid_variable_default",
+          `变量 ${id} 的默认值不符合 ${definition.type} 类型`,
+        ),
+      );
+    }
+  }
+
   const seenScenes = new Set<string>();
   for (const file of project.scenes) {
     const scene = file.definition;
+    if (scene.schema_version !== 2) {
+      diagnostics.push(
+        error(
+          "invalid_scene_schema",
+          "scene schema_version 必须为 2",
+          scene.id,
+        ),
+      );
+    }
     if (!ID_PATTERN.test(scene.id)) {
       diagnostics.push(
         error("invalid_scene_id", `非法场景 ID：${scene.id}`, scene.id),
@@ -159,6 +191,10 @@ function validateNode(
           issue("duplicate_choice_id", `选项 ID 重复：${choice.id}`);
         if (choice.label.trim() === "")
           issue("empty_choice_label", "选项文本不能为空");
+        if (choice.visible_if !== undefined)
+          validateCondition(project, choice.visible_if, issue);
+        if (choice.enabled_if !== undefined)
+          validateCondition(project, choice.enabled_if, issue);
         ids.add(choice.id);
       }
       break;
@@ -166,10 +202,22 @@ function validateNode(
     case "set":
       if (!ID_PATTERN.test(node.variable))
         issue("invalid_variable", "变量名非法");
+      if (project.manifest.variables[node.variable] === undefined) {
+        issue("unknown_variable", `变量未声明：${node.variable}`);
+      } else if (
+        !valueMatchesType(
+          node.value,
+          project.manifest.variables[node.variable].type,
+        )
+      ) {
+        issue(
+          "variable_type_mismatch",
+          `变量 ${node.variable} 的赋值类型不匹配`,
+        );
+      }
       break;
-    case "branch":
-      if (!ID_PATTERN.test(node.variable))
-        issue("invalid_variable", "变量名非法");
+    case "condition":
+      validateCondition(project, node.condition, issue);
       break;
     case "wait":
       checkDuration(node.duration_ms);
@@ -200,6 +248,108 @@ function validateNode(
     case "end":
       break;
   }
+}
+
+function validateCondition(
+  project: EditorProject,
+  condition: ConditionExpression,
+  issue: (code: string, message: string) => void,
+): void {
+  let nodes = 0;
+  const visit = (candidate: ConditionExpression, depth: number): void => {
+    nodes += 1;
+    if (depth > 32) {
+      issue("condition_too_deep", "条件表达式嵌套不能超过 32 层");
+      return;
+    }
+    if (nodes > 256) {
+      issue("condition_too_large", "条件表达式不能超过 256 个节点");
+      return;
+    }
+    switch (candidate.op) {
+      case "eq":
+      case "ne": {
+        const left = operandType(project, candidate.left, issue);
+        const right = operandType(project, candidate.right, issue);
+        if (
+          left !== null &&
+          right !== null &&
+          left !== right &&
+          !(isNumericType(left) && isNumericType(right))
+        ) {
+          issue("condition_type_mismatch", "Eq/Ne 两侧类型不兼容");
+        }
+        break;
+      }
+      case "lt":
+      case "le":
+      case "gt":
+      case "ge": {
+        const left = operandType(project, candidate.left, issue);
+        const right = operandType(project, candidate.right, issue);
+        if (
+          (left !== null && !isNumericType(left)) ||
+          (right !== null && !isNumericType(right))
+        ) {
+          issue("condition_ordering_type", "Lt/Le/Gt/Ge 只允许比较整数或数值");
+        }
+        break;
+      }
+      case "and":
+      case "or":
+        if (candidate.conditions.length === 0) {
+          issue("empty_condition_group", "And/Or 至少需要一个子条件");
+        }
+        candidate.conditions.forEach((child) => visit(child, depth + 1));
+        break;
+      case "not":
+        visit(candidate.condition, depth + 1);
+        break;
+    }
+  };
+  visit(condition, 1);
+}
+
+function operandType(
+  project: EditorProject,
+  operand: ValueOperand,
+  issue: (code: string, message: string) => void,
+): VariableType | null {
+  if ("variable" in operand) {
+    const definition = project.manifest.variables[operand.variable];
+    if (definition === undefined) {
+      issue("unknown_variable", `条件引用了未声明变量：${operand.variable}`);
+      return null;
+    }
+    return definition.type;
+  }
+  if (typeof operand.value === "number" && !Number.isFinite(operand.value)) {
+    issue("non_finite_literal", "条件数值必须是有限数");
+  }
+  return scalarType(operand.value);
+}
+
+function valueMatchesType(value: ScalarValue, type: VariableType): boolean {
+  switch (type) {
+    case "boolean":
+      return typeof value === "boolean";
+    case "integer":
+      return typeof value === "number" && Number.isSafeInteger(value);
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "string":
+      return typeof value === "string";
+  }
+}
+
+function scalarType(value: ScalarValue): VariableType {
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "string") return "string";
+  return Number.isInteger(value) ? "integer" : "number";
+}
+
+function isNumericType(type: VariableType): boolean {
+  return type === "integer" || type === "number";
 }
 
 function reachabilityWarnings(

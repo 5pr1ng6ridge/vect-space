@@ -28,6 +28,11 @@ export interface SpeedUnit {
 export type MarkupUnit = CharacterUnit | MathUnit | PauseUnit | SpeedUnit;
 export type VisibleUnit = CharacterUnit | MathUnit;
 
+export interface PauseWindow {
+  startMs: number;
+  endMs: number;
+}
+
 const OPEN_FX = /^\[fx=(shake|wave|glow)\]/;
 const PAUSE = /^\[pause=(\d+)ms\]/;
 const SPEED = /^\[speed=(default|\d+(?:\.\d+)?cps)\]/;
@@ -134,6 +139,36 @@ export function buildRevealSchedule(
     }
   }
   return schedule;
+}
+
+/**
+ * Returns the explicit pauses in the same absolute timeline as the reveal
+ * schedule. Character-to-character gaps are intentionally not included: the
+ * typing loop should continue playing during normal reveal pacing.
+ */
+export function buildPauseWindows(
+  units: MarkupUnit[],
+  initialCps: number,
+  defaultCps: number,
+): PauseWindow[] {
+  const windows: PauseWindow[] = [];
+  let elapsed = 0;
+  let cps = validCps(initialCps, defaultCps);
+  for (const unit of units) {
+    if (unit.kind === "pause") {
+      const startMs = elapsed;
+      elapsed += unit.durationMs;
+      windows.push({ startMs, endMs: elapsed });
+    } else if (unit.kind === "speed") {
+      cps =
+        unit.cps === null
+          ? validCps(defaultCps, 30)
+          : validCps(unit.cps, defaultCps);
+    } else {
+      elapsed += 1000 / cps;
+    }
+  }
+  return windows;
 }
 
 export function visibleUnits(units: MarkupUnit[]): VisibleUnit[] {

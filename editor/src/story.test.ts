@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { outputPorts, renameNode, setPortTarget } from "./story";
+import {
+  countVariableReferences,
+  outputPorts,
+  renameNode,
+  renameVariable,
+  setPortTarget,
+} from "./story";
 import type { EditorProject } from "./types";
 import { validateLive } from "./validation";
 
@@ -8,10 +14,13 @@ function project(): EditorProject {
     root: "C:/project/game",
     fingerprint: "test",
     manifest: {
-      schema_version: 1,
+      schema_version: 2,
       content_version: "test",
       entry_scene: "main",
       default_locale: "zh-CN",
+      variables: {
+        score: { scope: "save", type: "integer", default: 0 },
+      },
       assets: {},
       scenes: ["scenes/main.yaml"],
     },
@@ -19,7 +28,7 @@ function project(): EditorProject {
       {
         path: "scenes/main.yaml",
         definition: {
-          schema_version: 1,
+          schema_version: 2,
           id: "main",
           entry: "start",
           nodes: {
@@ -82,5 +91,35 @@ describe("story graph mapping", () => {
         (issue) => issue.code === "missing_target_node",
       ),
     ).toBe(true);
+  });
+
+  it("renames nested condition and choice variable references", () => {
+    const source = project();
+    source.scenes[0].definition.nodes.guard = {
+      type: "condition",
+      condition: {
+        op: "not",
+        condition: {
+          op: "ge",
+          left: { variable: "score" },
+          right: { value: 1 },
+        },
+      },
+      then: "end",
+      otherwise: "end",
+    };
+    const start = source.scenes[0].definition.nodes.start;
+    if (start.type === "choice") {
+      start.choices[0].enabled_if = {
+        op: "eq",
+        left: { variable: "score" },
+        right: { value: 0 },
+      };
+    }
+    expect(countVariableReferences(source, "score")).toBe(2);
+    const renamed = renameVariable(source, "score", "points");
+    expect(renamed.manifest.variables.points).toBeDefined();
+    expect(countVariableReferences(renamed, "score")).toBe(0);
+    expect(countVariableReferences(renamed, "points")).toBe(2);
   });
 });

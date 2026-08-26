@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactElement, type ReactNode } from "react";
 import {
   NODE_TYPES,
+  defaultCondition,
   defaultNode,
   nodeLabel,
   parseScalar,
@@ -8,10 +9,13 @@ import {
 } from "../story";
 import type {
   AssetKind,
+  ConditionExpression,
   ContentManifest,
   ScalarValue,
   SceneDefinition,
   SceneNode,
+  ValueOperand,
+  VariableType,
 } from "../types";
 import { MarkupPreview } from "./MarkupPreview";
 
@@ -384,6 +388,36 @@ function renderFields(
                   targets={targets}
                   value={choice.next}
                 />
+                <OptionalConditionEditor
+                  label="显示条件"
+                  manifest={manifest}
+                  onChange={(visible_if) =>
+                    update({
+                      ...node,
+                      choices: node.choices.map((candidate, candidateIndex) =>
+                        candidateIndex === index
+                          ? { ...candidate, visible_if }
+                          : candidate,
+                      ),
+                    })
+                  }
+                  value={choice.visible_if}
+                />
+                <OptionalConditionEditor
+                  label="可用条件"
+                  manifest={manifest}
+                  onChange={(enabled_if) =>
+                    update({
+                      ...node,
+                      choices: node.choices.map((candidate, candidateIndex) =>
+                        candidateIndex === index
+                          ? { ...candidate, enabled_if }
+                          : candidate,
+                      ),
+                    })
+                  }
+                  value={choice.enabled_if}
+                />
                 <MarkupPreview source={choice.label} />
               </article>
             ))}
@@ -435,21 +469,16 @@ function renderFields(
           />
         </>
       );
-    case "branch":
+    case "condition":
       return (
         <>
-          <TextField
-            label="变量名"
-            onChange={(variable) => update({ ...node, variable })}
-            value={node.variable}
-          />
-          <ScalarEditor
-            label="等于"
-            onChange={(equals) => update({ ...node, equals })}
-            value={node.equals}
+          <ConditionEditor
+            manifest={manifest}
+            onChange={(condition) => update({ ...node, condition })}
+            value={node.condition}
           />
           <TargetSelect
-            label="相等时"
+            label="条件成立"
             onChange={(then) => update({ ...node, then })}
             targets={targets}
             value={node.then}
@@ -771,6 +800,358 @@ function AssetSelect({
       </select>
     </Field>
   );
+}
+
+const COMPARISON_OPERATORS = ["eq", "ne", "lt", "le", "gt", "ge"] as const;
+type ComparisonOperator = (typeof COMPARISON_OPERATORS)[number];
+
+function OptionalConditionEditor({
+  label,
+  manifest,
+  onChange,
+  value,
+}: {
+  label: string;
+  manifest: ContentManifest;
+  onChange(value: ConditionExpression | undefined): void;
+  value: ConditionExpression | undefined;
+}): ReactElement {
+  const fallbackVariable = Object.keys(manifest.variables)[0] ?? "flag";
+  return (
+    <div className="optional-condition">
+      <BooleanField
+        label={label}
+        onChange={(enabled) =>
+          onChange(
+            enabled ? (value ?? defaultCondition(fallbackVariable)) : undefined,
+          )
+        }
+        value={value !== undefined}
+      />
+      {value !== undefined && (
+        <ConditionEditor
+          manifest={manifest}
+          onChange={onChange}
+          value={value}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConditionEditor({
+  manifest,
+  onChange,
+  value,
+}: {
+  manifest: ContentManifest;
+  onChange(value: ConditionExpression): void;
+  value: ConditionExpression;
+}): ReactElement {
+  const fallbackVariable = Object.keys(manifest.variables)[0] ?? "flag";
+  return (
+    <div className="condition-editor">
+      <Field label="运算符">
+        <select
+          value={value.op}
+          onChange={(event) =>
+            onChange(
+              conditionForOperator(
+                event.currentTarget.value as ConditionExpression["op"],
+                value,
+                fallbackVariable,
+              ),
+            )
+          }
+        >
+          <option value="eq">Eq · 等于</option>
+          <option value="ne">Ne · 不等于</option>
+          <option value="lt">Lt · 小于</option>
+          <option value="le">Le · 小于等于</option>
+          <option value="gt">Gt · 大于</option>
+          <option value="ge">Ge · 大于等于</option>
+          <option value="and">And · 全部成立</option>
+          <option value="or">Or · 任一成立</option>
+          <option value="not">Not · 取反</option>
+        </select>
+      </Field>
+      {isComparison(value) && (
+        <div className="condition-operands">
+          <OperandEditor
+            label="左值"
+            manifest={manifest}
+            onChange={(left) => onChange({ ...value, left })}
+            other={value.right}
+            value={value.left}
+          />
+          <OperandEditor
+            label="右值"
+            manifest={manifest}
+            onChange={(right) => onChange({ ...value, right })}
+            other={value.left}
+            value={value.right}
+          />
+        </div>
+      )}
+      {(value.op === "and" || value.op === "or") && (
+        <div className="condition-children">
+          {value.conditions.map((child, index) => (
+            <div className="condition-child" key={index}>
+              <div className="condition-child-actions">
+                <button
+                  disabled={index === 0}
+                  onClick={() => {
+                    const conditions = [...value.conditions];
+                    [conditions[index - 1], conditions[index]] = [
+                      conditions[index],
+                      conditions[index - 1],
+                    ];
+                    onChange({ ...value, conditions });
+                  }}
+                  type="button"
+                >
+                  ↑
+                </button>
+                <button
+                  disabled={index === value.conditions.length - 1}
+                  onClick={() => {
+                    const conditions = [...value.conditions];
+                    [conditions[index], conditions[index + 1]] = [
+                      conditions[index + 1],
+                      conditions[index],
+                    ];
+                    onChange({ ...value, conditions });
+                  }}
+                  type="button"
+                >
+                  ↓
+                </button>
+                <button
+                  className="danger-text"
+                  onClick={() =>
+                    onChange({
+                      ...value,
+                      conditions: value.conditions.filter(
+                        (_candidate, candidateIndex) =>
+                          candidateIndex !== index,
+                      ),
+                    })
+                  }
+                  type="button"
+                >
+                  删除
+                </button>
+              </div>
+              <ConditionEditor
+                manifest={manifest}
+                onChange={(condition) =>
+                  onChange({
+                    ...value,
+                    conditions: value.conditions.map(
+                      (candidate, candidateIndex) =>
+                        candidateIndex === index ? condition : candidate,
+                    ),
+                  })
+                }
+                value={child}
+              />
+            </div>
+          ))}
+          <button
+            className="wide-button"
+            onClick={() =>
+              onChange({
+                ...value,
+                conditions: [
+                  ...value.conditions,
+                  defaultCondition(fallbackVariable),
+                ],
+              })
+            }
+            type="button"
+          >
+            ＋ 添加子条件
+          </button>
+        </div>
+      )}
+      {value.op === "not" && (
+        <div className="condition-child">
+          <ConditionEditor
+            manifest={manifest}
+            onChange={(condition) => onChange({ ...value, condition })}
+            value={value.condition}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OperandEditor({
+  label,
+  manifest,
+  onChange,
+  other,
+  value,
+}: {
+  label: string;
+  manifest: ContentManifest;
+  onChange(value: ValueOperand): void;
+  other: ValueOperand;
+  value: ValueOperand;
+}): ReactElement {
+  const variableIds = Object.keys(manifest.variables);
+  const expectedType = operandVariableType(other, manifest);
+  return (
+    <Field label={label}>
+      <div className="operand-editor">
+        <select
+          value={"variable" in value ? "variable" : "value"}
+          onChange={(event) => {
+            if (event.currentTarget.value === "variable") {
+              onChange({ variable: variableIds[0] ?? "" });
+            } else {
+              onChange({ value: defaultScalar(expectedType ?? "boolean") });
+            }
+          }}
+        >
+          <option value="variable">变量</option>
+          <option value="value">字面量</option>
+        </select>
+        {"variable" in value ? (
+          <select
+            value={value.variable}
+            onChange={(event) =>
+              onChange({ variable: event.currentTarget.value })
+            }
+          >
+            {!variableIds.includes(value.variable) && (
+              <option value={value.variable}>
+                {value.variable || "— 未声明 —"}
+              </option>
+            )}
+            {variableIds.map((id) => (
+              <option key={id} value={id}>
+                {id} · {manifest.variables[id].scope}/
+                {manifest.variables[id].type}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <LiteralEditor
+            expectedType={expectedType}
+            onChange={(literal) => onChange({ value: literal })}
+            value={value.value}
+          />
+        )}
+      </div>
+    </Field>
+  );
+}
+
+function LiteralEditor({
+  expectedType,
+  onChange,
+  value,
+}: {
+  expectedType: VariableType | null;
+  onChange(value: ScalarValue): void;
+  value: ScalarValue;
+}): ReactElement {
+  const valueType = expectedType ?? scalarVariableType(value);
+  if (valueType === "boolean") {
+    return (
+      <select
+        value={String(value)}
+        onChange={(event) => onChange(event.currentTarget.value === "true")}
+      >
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+  return (
+    <input
+      step={valueType === "integer" ? 1 : "any"}
+      type={
+        valueType === "integer" || valueType === "number" ? "number" : "text"
+      }
+      value={String(value)}
+      onChange={(event) =>
+        onChange(
+          valueType === "integer"
+            ? Math.trunc(Number(event.currentTarget.value))
+            : valueType === "number"
+              ? Number(event.currentTarget.value)
+              : event.currentTarget.value,
+        )
+      }
+    />
+  );
+}
+
+function isComparison(
+  value: ConditionExpression,
+): value is Extract<ConditionExpression, { left: ValueOperand }> {
+  return COMPARISON_OPERATORS.includes(
+    value.op as (typeof COMPARISON_OPERATORS)[number],
+  );
+}
+
+function conditionForOperator(
+  op: ConditionExpression["op"],
+  previous: ConditionExpression,
+  fallbackVariable: string,
+): ConditionExpression {
+  if (COMPARISON_OPERATORS.includes(op as ComparisonOperator)) {
+    return {
+      op: op as ComparisonOperator,
+      left: isComparison(previous)
+        ? previous.left
+        : { variable: fallbackVariable },
+      right: isComparison(previous) ? previous.right : { value: true },
+    };
+  }
+  if (op === "and" || op === "or") {
+    return {
+      op,
+      conditions:
+        previous.op === "and" || previous.op === "or"
+          ? previous.conditions
+          : [previous],
+    };
+  }
+  return {
+    op: "not",
+    condition: previous.op === "not" ? previous.condition : previous,
+  };
+}
+
+function operandVariableType(
+  operand: ValueOperand,
+  manifest: ContentManifest,
+): VariableType | null {
+  return "variable" in operand
+    ? (manifest.variables[operand.variable]?.type ?? null)
+    : scalarVariableType(operand.value);
+}
+
+function scalarVariableType(value: ScalarValue): VariableType {
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "string") return "string";
+  return Number.isInteger(value) ? "integer" : "number";
+}
+
+function defaultScalar(type: VariableType): ScalarValue {
+  switch (type) {
+    case "boolean":
+      return false;
+    case "integer":
+    case "number":
+      return 0;
+    case "string":
+      return "";
+  }
 }
 
 function ScalarEditor({

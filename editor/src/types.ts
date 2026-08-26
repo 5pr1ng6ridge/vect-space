@@ -2,8 +2,27 @@ export type AssetKind =
   "background" | "sprite" | "gui" | "bgm" | "sfx" | "font";
 
 export type ScalarValue = boolean | number | string;
+export type VariableScope = "save" | "profile";
+export type VariableType = "boolean" | "integer" | "number" | "string";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
 export type NodeType = SceneNode["type"];
+
+export interface VariableDefinition {
+  scope: VariableScope;
+  type: VariableType;
+  default: ScalarValue;
+}
+
+export type ValueOperand = { variable: string } | { value: ScalarValue };
+
+export type ConditionExpression =
+  | {
+      op: "eq" | "ne" | "lt" | "le" | "gt" | "ge";
+      left: ValueOperand;
+      right: ValueOperand;
+    }
+  | { op: "and" | "or"; conditions: ConditionExpression[] }
+  | { op: "not"; condition: ConditionExpression };
 
 export interface AssetDefinition {
   kind: AssetKind;
@@ -15,6 +34,7 @@ export interface ContentManifest {
   content_version: string;
   entry_scene: string;
   default_locale: string;
+  variables: Record<string, VariableDefinition>;
   assets: Record<string, AssetDefinition>;
   scenes: string[];
 }
@@ -59,6 +79,8 @@ export interface ChoiceDefinition {
   id: string;
   label: string;
   next: string;
+  visible_if?: ConditionExpression;
+  enabled_if?: ConditionExpression;
 }
 
 export interface ChoiceNode {
@@ -72,10 +94,9 @@ export interface SetNode extends NextNode {
   value: ScalarValue;
 }
 
-export interface BranchNode {
-  type: "branch";
-  variable: string;
-  equals: ScalarValue;
+export interface ConditionNode {
+  type: "condition";
+  condition: ConditionExpression;
   then: string;
   otherwise: string;
 }
@@ -132,7 +153,7 @@ export type SceneNode =
   | SayNode
   | ChoiceNode
   | SetNode
-  | BranchNode
+  | ConditionNode
   | JumpNode
   | WaitNode
   | BgmNode

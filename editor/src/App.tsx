@@ -16,6 +16,7 @@ import { YamlPanel } from "./components/YamlPanel";
 import {
   NODE_TYPES,
   cloneProject,
+  countVariableReferences,
   defaultNode,
   ensureSceneLayout,
   findScene,
@@ -24,6 +25,7 @@ import {
   projectRequest,
   renameNode,
   renameScene,
+  renameVariable,
   setPortTarget,
   uniqueNodeId,
 } from "./story";
@@ -475,6 +477,26 @@ export function App(): ReactElement {
             draft.assets = draft.assets.filter((asset) => asset.id !== id);
           })
         }
+        onAddVariable={(id, definition) =>
+          commit((draft) => {
+            draft.manifest.variables[id] = definition;
+          })
+        }
+        onChangeVariable={(id, definition) =>
+          commit((draft) => {
+            draft.manifest.variables[id] = definition;
+          })
+        }
+        onDeleteVariable={(id) => {
+          const references = countVariableReferences(project, id);
+          if (references > 0) {
+            setError(`变量 ${id} 仍被 ${references} 处剧情引用，不能删除。`);
+            return;
+          }
+          commit((draft) => {
+            Reflect.deleteProperty(draft.manifest.variables, id);
+          });
+        }}
         onRenameScene={(previousId, nextId) => {
           if (!/^[A-Za-z0-9._-]{1,128}$/.test(nextId)) {
             setError("场景 ID 非法。");
@@ -489,6 +511,19 @@ export function App(): ReactElement {
           setProject(renameScene(project, previousId, nextId));
           setDirty(true);
           setActiveSceneId(nextId);
+        }}
+        onRenameVariable={(previousId, nextId) => {
+          if (
+            !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
+            project.manifest.variables[nextId] !== undefined
+          ) {
+            setError("新变量 ID 非法或已经存在。");
+            return;
+          }
+          setPast((items) => [...items.slice(-99), cloneProject(project)]);
+          setFuture([]);
+          setProject(renameVariable(project, previousId, nextId));
+          setDirty(true);
         }}
         onSelectScene={(sceneId) => {
           setActiveSceneId(sceneId);

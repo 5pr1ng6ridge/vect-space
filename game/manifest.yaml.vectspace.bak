@@ -1,0 +1,25 @@
+schema_version: 1
+content_version: demo-1
+entry_scene: prologue
+default_locale: zh-CN
+assets:
+  bg.vector_space:
+    kind: background
+    path: backgrounds/bg_vstest.png
+  font.fusion_pixel:
+    kind: font
+    path: fonts/fusion-pixel-12px-monospaced-zh_hans.ttf
+  gui.dialogue_box:
+    kind: gui
+    path: gui/diaboxtest.png
+  gui.name_box:
+    kind: gui
+    path: gui/nameboxtest.png
+  sfx.typing:
+    kind: sfx
+    path: audio/sfx_typing.wav
+  sprite.jelly:
+    kind: sprite
+    path: sprites/jelly.png
+scenes:
+- scenes/prologue.yaml

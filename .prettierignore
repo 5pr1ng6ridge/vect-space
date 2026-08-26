@@ -3,4 +3,5 @@
 **/src-tauri/gen
 **/src-tauri/target
 game/assets
+game/.vectspace
 game/**/*.yaml

@@ -7,6 +7,9 @@ import type {
   EditorAsset,
   EditorDiagnostic,
   EditorProject,
+  ScalarValue,
+  VariableDefinition,
+  VariableType,
 } from "../types";
 
 interface ProjectSidebarProps {
@@ -20,6 +23,10 @@ interface ProjectSidebarProps {
   onManifestChange(manifest: ContentManifest): void;
   onImportAsset(id: string, kind: AssetKind, sourcePath: string): Promise<void>;
   onRemoveAsset(id: string): void;
+  onAddVariable(id: string, definition: VariableDefinition): void;
+  onChangeVariable(id: string, definition: VariableDefinition): void;
+  onRenameVariable(previousId: string, nextId: string): void;
+  onDeleteVariable(id: string): void;
 }
 
 type SidebarTab = "scenes" | "assets" | "project";
@@ -35,6 +42,10 @@ export function ProjectSidebar({
   onManifestChange,
   onImportAsset,
   onRemoveAsset,
+  onAddVariable,
+  onChangeVariable,
+  onRenameVariable,
+  onDeleteVariable,
 }: ProjectSidebarProps): ReactElement {
   const [tab, setTab] = useState<SidebarTab>("scenes");
   return (
@@ -85,6 +96,10 @@ export function ProjectSidebar({
         <ProjectPanel
           manifest={project.manifest}
           onChange={onManifestChange}
+          onAddVariable={onAddVariable}
+          onChangeVariable={onChangeVariable}
+          onDeleteVariable={onDeleteVariable}
+          onRenameVariable={onRenameVariable}
           project={project}
         />
       )}
@@ -312,10 +327,18 @@ function AssetPreview({ asset }: { asset: EditorAsset }): ReactElement {
 function ProjectPanel({
   manifest,
   onChange,
+  onAddVariable,
+  onChangeVariable,
+  onDeleteVariable,
+  onRenameVariable,
   project,
 }: {
   manifest: ContentManifest;
   onChange(manifest: ContentManifest): void;
+  onAddVariable(id: string, definition: VariableDefinition): void;
+  onChangeVariable(id: string, definition: VariableDefinition): void;
+  onDeleteVariable(id: string): void;
+  onRenameVariable(previousId: string, nextId: string): void;
   project: EditorProject;
 }): ReactElement {
   return (
@@ -357,6 +380,94 @@ function ProjectPanel({
           ))}
         </select>
       </label>
+      <section className="variable-settings">
+        <header>
+          <strong>剧情变量</strong>
+          <button
+            onClick={() => {
+              const id = window.prompt("新变量 ID", "new_variable")?.trim();
+              if (!id || manifest.variables[id] !== undefined) return;
+              onAddVariable(id, {
+                scope: "save",
+                type: "boolean",
+                default: false,
+              });
+            }}
+            type="button"
+          >
+            ＋
+          </button>
+        </header>
+        {Object.entries(manifest.variables).map(([id, definition]) => (
+          <article className="variable-card" key={id}>
+            <header>
+              <code>{id}</code>
+              <div>
+                <button
+                  onClick={() => {
+                    const next = window.prompt("新的变量 ID", id)?.trim();
+                    if (next && next !== id) onRenameVariable(id, next);
+                  }}
+                  type="button"
+                >
+                  ✎
+                </button>
+                <button
+                  className="danger-text"
+                  onClick={() => onDeleteVariable(id)}
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            </header>
+            <label>
+              <span>作用域</span>
+              <select
+                value={definition.scope}
+                onChange={(event) =>
+                  onChangeVariable(id, {
+                    ...definition,
+                    scope: event.currentTarget
+                      .value as VariableDefinition["scope"],
+                  })
+                }
+              >
+                <option value="save">save · 随存档</option>
+                <option value="profile">profile · 跨存档</option>
+              </select>
+            </label>
+            <label>
+              <span>类型</span>
+              <select
+                value={definition.type}
+                onChange={(event) => {
+                  const type = event.currentTarget.value as VariableType;
+                  onChangeVariable(id, {
+                    ...definition,
+                    type,
+                    default: defaultForVariableType(type),
+                  });
+                }}
+              >
+                <option value="boolean">boolean</option>
+                <option value="integer">integer</option>
+                <option value="number">number</option>
+                <option value="string">string</option>
+              </select>
+            </label>
+            <label>
+              <span>默认值</span>
+              <VariableDefaultInput
+                definition={definition}
+                onChange={(defaultValue) =>
+                  onChangeVariable(id, { ...definition, default: defaultValue })
+                }
+              />
+            </label>
+          </article>
+        ))}
+      </section>
       <dl className="project-facts">
         <div>
           <dt>Schema</dt>
@@ -374,4 +485,53 @@ function ProjectPanel({
       <code className="project-root">{project.root}</code>
     </div>
   );
+}
+
+function VariableDefaultInput({
+  definition,
+  onChange,
+}: {
+  definition: VariableDefinition;
+  onChange(value: ScalarValue): void;
+}): ReactElement {
+  if (definition.type === "boolean") {
+    return (
+      <select
+        value={String(definition.default)}
+        onChange={(event) => onChange(event.currentTarget.value === "true")}
+      >
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+  const numeric = definition.type === "integer" || definition.type === "number";
+  return (
+    <input
+      step={definition.type === "integer" ? 1 : "any"}
+      type={numeric ? "number" : "text"}
+      value={String(definition.default)}
+      onChange={(event) =>
+        onChange(
+          definition.type === "integer"
+            ? Math.trunc(Number(event.currentTarget.value))
+            : definition.type === "number"
+              ? Number(event.currentTarget.value)
+              : event.currentTarget.value,
+        )
+      }
+    />
+  );
+}
+
+function defaultForVariableType(type: VariableType): ScalarValue {
+  switch (type) {
+    case "boolean":
+      return false;
+    case "integer":
+    case "number":
+      return 0;
+    case "string":
+      return "";
+  }
 }

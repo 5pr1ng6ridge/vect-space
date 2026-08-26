@@ -7,10 +7,14 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{PromptSnapshot, RuntimeSnapshot, SaveSlotSummary, Settings};
+use crate::model::{
+    PromptSnapshot, RuntimeSnapshot, SaveSlotSummary, ScalarValue, Settings, VariableDefinition,
+    VariableMap, VariableScope, VariableType,
+};
 
-const SAVE_SCHEMA_VERSION: u32 = 1;
+const SAVE_SCHEMA_VERSION: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
+const PROFILE_SCHEMA_VERSION: u32 = 1;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
 const SLOT_IDS: [&str; 4] = ["auto", "1", "2", "3"];
 
@@ -37,6 +41,12 @@ pub struct SaveManager {
     content_version: String,
 }
 
+#[derive(Debug)]
+pub struct ProfileManager {
+    path: PathBuf,
+    definitions: std::collections::BTreeMap<String, VariableDefinition>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SaveFile {
@@ -52,6 +62,13 @@ struct SaveFile {
 struct SettingsFile {
     schema_version: u32,
     settings: Settings,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFile {
+    schema_version: u32,
+    variables: VariableMap,
 }
 
 impl SaveManager {
@@ -139,6 +156,136 @@ impl SaveManager {
 
     fn slot_path(&self, slot: &str) -> PathBuf {
         self.root.join(format!("slot-{slot}.json"))
+    }
+}
+
+impl ProfileManager {
+    pub fn new(
+        root: PathBuf,
+        variables: &std::collections::BTreeMap<String, VariableDefinition>,
+    ) -> Result<(Self, VariableMap), SaveError> {
+        fs::create_dir_all(&root).map_err(|source| SaveError::Io {
+            path: root.clone(),
+            source,
+        })?;
+        let definitions = variables
+            .iter()
+            .filter(|(_, definition)| definition.scope == VariableScope::Profile)
+            .map(|(id, definition)| (id.clone(), definition.clone()))
+            .collect();
+        let manager = Self {
+            path: root.join("profile.json"),
+            definitions,
+        };
+        let values = manager.load_reconciled()?;
+        Ok((manager, values))
+    }
+
+    pub fn save(&self, variables: &VariableMap) -> Result<(), SaveError> {
+        let normalized = self.reconcile(variables)?;
+        if &normalized != variables {
+            return Err(SaveError::InvalidData(
+                "profile 变量缺失、类型不匹配或包含未声明项".to_owned(),
+            ));
+        }
+        self.write(&normalized)
+    }
+
+    fn load_reconciled(&self) -> Result<VariableMap, SaveError> {
+        if !self.path.exists() && !backup_path(&self.path).exists() {
+            let defaults = self.defaults()?;
+            self.write(&defaults)?;
+            return Ok(defaults);
+        }
+
+        let loaded = read_json_with_backup::<ProfileFile>(&self.path);
+        let (stored, recovered) = match loaded {
+            Ok(file) if file.schema_version == PROFILE_SCHEMA_VERSION => (file.variables, false),
+            Ok(file) => {
+                eprintln!(
+                    "profile schema {} 不受支持，已备份并重建",
+                    file.schema_version
+                );
+                self.backup_incompatible()?;
+                (VariableMap::new(), true)
+            }
+            Err(error) => {
+                eprintln!("profile 无法读取，已备份并重建: {error}");
+                self.backup_incompatible()?;
+                (VariableMap::new(), true)
+            }
+        };
+        let reconciled = self.reconcile(&stored)?;
+        if recovered || reconciled != stored {
+            eprintln!("profile 变量声明已变化，已按当前 manifest 调整并保留备份");
+            self.write(&reconciled)?;
+        }
+        Ok(reconciled)
+    }
+
+    fn defaults(&self) -> Result<VariableMap, SaveError> {
+        self.definitions
+            .iter()
+            .map(|(id, definition)| {
+                normalize_profile_value(&definition.default, definition.value_type)
+                    .map(|value| (id.clone(), value))
+                    .ok_or_else(|| {
+                        SaveError::InvalidData(format!("profile 变量 {id} 默认值类型不匹配"))
+                    })
+            })
+            .collect()
+    }
+
+    fn reconcile(&self, stored: &VariableMap) -> Result<VariableMap, SaveError> {
+        let defaults = self.defaults()?;
+        Ok(self
+            .definitions
+            .iter()
+            .map(|(id, definition)| {
+                let value = stored
+                    .get(id)
+                    .and_then(|value| normalize_profile_value(value, definition.value_type))
+                    .unwrap_or_else(|| defaults[id].clone());
+                (id.clone(), value)
+            })
+            .collect())
+    }
+
+    fn write(&self, variables: &VariableMap) -> Result<(), SaveError> {
+        let file = ProfileFile {
+            schema_version: PROFILE_SCHEMA_VERSION,
+            variables: variables.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|error| SaveError::InvalidData(error.to_string()))?;
+        atomic_write(&self.path, &bytes)
+    }
+
+    fn backup_incompatible(&self) -> Result<(), SaveError> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let backup = self.path.with_extension("incompatible.json.bak");
+        fs::copy(&self.path, &backup).map_err(|source| SaveError::Io {
+            path: backup,
+            source,
+        })?;
+        Ok(())
+    }
+}
+
+fn normalize_profile_value(value: &ScalarValue, expected: VariableType) -> Option<ScalarValue> {
+    match (expected, value) {
+        (VariableType::Boolean, value @ ScalarValue::Boolean(_))
+        | (VariableType::Integer, value @ ScalarValue::Integer(_))
+        | (VariableType::String, value @ ScalarValue::Text(_)) => Some(value.clone()),
+        (VariableType::Number, ScalarValue::Integer(value)) => {
+            Some(ScalarValue::Number(*value as f64))
+        }
+        (VariableType::Number, ScalarValue::Number(value)) if value.is_finite() => {
+            Some(ScalarValue::Number(*value))
+        }
+        _ => None,
     }
 }
 
@@ -295,6 +442,7 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn only_the_four_declared_slots_are_valid() {
@@ -312,5 +460,64 @@ mod tests {
             ..Settings::default()
         };
         assert!(validate_settings(invalid).is_err());
+    }
+
+    #[test]
+    fn profile_values_persist_and_reconcile_with_declarations() {
+        let directory = tempdir().unwrap();
+        let definitions = std::collections::BTreeMap::from([(
+            "ending_seen".to_owned(),
+            VariableDefinition {
+                scope: VariableScope::Profile,
+                value_type: VariableType::Boolean,
+                default: ScalarValue::Boolean(false),
+            },
+        )]);
+        let (manager, mut values) =
+            ProfileManager::new(directory.path().to_path_buf(), &definitions).unwrap();
+        assert_eq!(
+            values.get("ending_seen"),
+            Some(&ScalarValue::Boolean(false))
+        );
+        values.insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        manager.save(&values).unwrap();
+
+        let (_, loaded) =
+            ProfileManager::new(directory.path().to_path_buf(), &definitions).unwrap();
+        assert_eq!(loaded.get("ending_seen"), Some(&ScalarValue::Boolean(true)));
+
+        let changed = std::collections::BTreeMap::from([(
+            "ending_seen".to_owned(),
+            VariableDefinition {
+                scope: VariableScope::Profile,
+                value_type: VariableType::String,
+                default: ScalarValue::Text("reset".to_owned()),
+            },
+        )]);
+        let (_, reconciled) =
+            ProfileManager::new(directory.path().to_path_buf(), &changed).unwrap();
+        assert_eq!(
+            reconciled.get("ending_seen"),
+            Some(&ScalarValue::Text("reset".to_owned()))
+        );
+        assert!(directory.path().join("profile.json.bak").exists());
+    }
+
+    #[test]
+    fn profile_write_failures_are_reported() {
+        let directory = tempdir().unwrap();
+        let definitions = std::collections::BTreeMap::from([(
+            "ending_seen".to_owned(),
+            VariableDefinition {
+                scope: VariableScope::Profile,
+                value_type: VariableType::Boolean,
+                default: ScalarValue::Boolean(false),
+            },
+        )]);
+        let (manager, mut values) =
+            ProfileManager::new(directory.path().to_path_buf(), &definitions).unwrap();
+        values.insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        fs::remove_dir_all(directory.path()).unwrap();
+        assert!(manager.save(&values).is_err());
     }
 }

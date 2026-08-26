@@ -1,8 +1,59 @@
-schema_version: 1
+schema_version: 2
 id: prologue
 entry: establish
-
 nodes:
+  algebra_line:
+    type: say
+    speaker: test
+    text: 若 $A$ 可逆，则每个 $b$ 都有唯一解 $x=A^{-1}b$。[pause=350ms] 这是同一事实的代数表述。
+    speed_cps: null
+    next: flash_result
+  camera_move:
+    type: camera
+    x: -40.0
+    "y": -20.0
+    zoom: 1.05
+    duration_ms: 500
+    easing: ease_in_out
+    await: true
+    next: conclusion
+  choose_algebra:
+    type: set
+    variable: route
+    value: algebra
+    next: route_branch
+  choose_geometry:
+    type: set
+    variable: route
+    value: geometry
+    next: route_branch
+  choose_test:
+    type: set
+    variable: route
+    value: test
+    next: say_2
+  conclusion:
+    type: say
+    speaker: 系统
+    text: 分支已经汇合。读档只恢复这个最终世界，不会重放刚才的转场、音效、闪光或镜头运动。
+    speed_cps: 32.0
+    next: mark_ending
+  ending:
+    type: end
+  enter_jelly:
+    type: sprite
+    sprite_id: jelly
+    action: show
+    asset: sprite.jelly
+    x: 420.0
+    "y": 1150.0
+    scale: 1.2
+    opacity: 1.0
+    z: 10
+    duration_ms: 550
+    easing: ease_out
+    await: false
+    next: introduction
   establish:
     type: background
     background: bg.vector_space
@@ -11,37 +62,31 @@ nodes:
     easing: ease_in_out
     await: true
     next: enter_jelly
-
-  enter_jelly:
-    type: sprite
-    sprite_id: jelly
-    action: show
-    asset: sprite.jelly
-    x: 420
-    y: 1150
-    scale: 1.2
-    opacity: 1.0
-    z: 10
-    duration_ms: 550
-    easing: ease_out
+  flash_result:
+    type: screen_effect
+    effect: flash
+    duration_ms: 260
     await: false
-    next: introduction
-
+    next: camera_move
+  geometry_line:
+    type: say
+    speaker: test
+    text: 非零行列式意味着线性变换不压扁空间；[fx=glow]体积缩放因子[/fx]是 $|\det(A)|$。
+    speed_cps: null
+    next: flash_result
   introduction:
     type: say
     speaker: test
-    speed_cps: 28
-    text: '这里是固定的$1920\times1080$舞台。公式$V=\operatorname{span}\{v_1,v_2\}$会先完成排版，再逐个显示。'
+    text: 这里是固定的$1920\times1080$舞台。公式$V=\operatorname{span}\{v_1,v_2\}$会先完成排版，再逐个显示。
+    speed_cps: 28.0
     next: move_jelly
-
-
   move_jelly:
     type: sprite
     sprite_id: jelly
     action: move
     asset: null
-    x: 1470
-    y: 1250
+    x: 1470.0
+    "y": 1250.0
     scale: 1.05
     opacity: 1.0
     z: 10
@@ -49,73 +94,60 @@ nodes:
     easing: ease_in_out
     await: true
     next: route_choice
-
-
-
+  mark_ending:
+    type: set
+    variable: ending_seen
+    value: true
+    next: ending
+  route_branch:
+    type: condition
+    condition:
+      op: or
+      conditions:
+      - op: eq
+        left: { variable: route }
+        right: { value: geometry }
+      - op: and
+        conditions:
+        - op: ne
+          left: { variable: route }
+          right: { value: algebra }
+        - op: not
+          condition:
+            op: eq
+            left: { variable: route }
+            right: { value: test }
+    then: geometry_line
+    otherwise: algebra_line
   route_choice:
     type: choice
     choices:
-      - id: geometry
-        label: '观察几何意义：$\det(A)\neq0$'
-        next: choose_geometry
-      - id: algebra
-        label: "从代数关系出发：$Ax=b$"
-        next: choose_algebra
-
-  choose_geometry:
-    type: set
-    variable: route
-    value: geometry
-    next: route_branch
-
-  choose_algebra:
-    type: set
-    variable: route
-    value: algebra
-    next: route_branch
-
-  route_branch:
-    type: branch
-    variable: route
-    equals: geometry
-    then: geometry_line
-    otherwise: algebra_line
-
-  geometry_line:
+    - id: geometry
+      label: 观察几何意义：$\det(A)\neq0$
+      visible_if:
+        op: ge
+        left: { variable: score }
+        right: { value: 0 }
+      next: choose_geometry
+    - id: algebra
+      label: 从代数关系出发：$Ax=b$
+      enabled_if:
+        op: le
+        left: { variable: score }
+        right: { value: 0 }
+      next: choose_algebra
+    - id: test
+      label: test1.
+      visible_if:
+        op: eq
+        left: { variable: ending_seen }
+        right: { value: true }
+      next: choose_test
+  say_2:
     type: say
     speaker: test
-    text: '非零行列式意味着线性变换不压扁空间；[fx=glow]体积缩放因子[/fx]是 $|\det(A)|$。'
+    text: >-
+      对正数 $x,y$，$\frac{x+y}{2} \ge \sqrt{xy}$， 因为
+      $x+y-2\sqrt{xy}=(\sqrt{x}-\sqrt{y})^2 \ge 0$，所以二元均值不等式成立。
+    speed_cps: null
     next: flash_result
-
-  algebra_line:
-    type: say
-    speaker: test
-    text: "若 $A$ 可逆，则每个 $b$ 都有唯一解 $x=A^{-1}b$。[pause=350ms] 这是同一事实的代数表述。"
-    next: flash_result
-
-  flash_result:
-    type: screen_effect
-    effect: flash
-    duration_ms: 260
-    await: false
-    next: camera_move
-
-  camera_move:
-    type: camera
-    x: -40
-    y: -20
-    zoom: 1.05
-    duration_ms: 500
-    easing: ease_in_out
-    await: true
-    next: conclusion
-
-  conclusion:
-    type: say
-    speaker: 系统
-    speed_cps: 32
-    text: "分支已经汇合。读档只恢复这个最终世界，不会重放刚才的转场、音效、闪光或镜头运动。"
-    next: ending
-
-  ending:
-    type: end
