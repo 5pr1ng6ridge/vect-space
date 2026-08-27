@@ -5,7 +5,12 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { memo, useEffect, type ReactElement } from "react";
+import {
+  memo,
+  useEffect,
+  type MouseEvent as ReactMouseEvent,
+  type ReactElement,
+} from "react";
 import {
   nodeLabel,
   outputPorts,
@@ -37,6 +42,13 @@ export const StoryNodeCard = memo(function StoryNodeCard({
 }: NodeProps<StoryFlowNode>): ReactElement {
   const updateNodeInternals = useUpdateNodeInternals();
   const ports = outputPorts(data.node);
+  const hasNextPort = ports.some((port) => port.id === "next");
+  const insertSides: InsertSide[] = hasNextPort ? ["left"] : ["left", "right"];
+  const openNextInsert = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    data.onQuickInsert(data.nodeId, "right", event.clientX, event.clientY);
+  };
   useEffect(
     () => updateNodeInternals(id),
     [id, ports.length, updateNodeInternals],
@@ -54,7 +66,7 @@ export const StoryNodeCard = memo(function StoryNodeCard({
         data.onQuickInsert(data.nodeId, "right", event.clientX, event.clientY);
       }}
     >
-      {(["left", "right"] as InsertSide[]).map((side) => (
+      {insertSides.map((side) => (
         <button
           aria-label={`在${side === "left" ? "左" : "右"}侧插入节点`}
           className={`insert-point insert-point-${side}`}
@@ -107,12 +119,34 @@ export const StoryNodeCard = memo(function StoryNodeCard({
                 <span>{port.label}</span>
                 <small>{port.target}</small>
                 <Handle
-                  className="story-handle output-handle"
+                  aria-label={
+                    port.id === "next"
+                      ? "拖动连接，或点击在右侧插入节点"
+                      : undefined
+                  }
+                  className={`story-handle output-handle${
+                    port.id === "next" ? " next-output-handle" : ""
+                  }`}
+                  data-allow-context-menu={
+                    port.id === "next" ? "true" : undefined
+                  }
                   id={port.id}
+                  {...(port.id === "next"
+                    ? {
+                        onClick: openNextInsert,
+                        onContextMenu: openNextInsert,
+                      }
+                    : {})}
                   position={Position.Right}
                   style={{ top }}
                   type="source"
-                />
+                >
+                  {port.id === "next" && (
+                    <span aria-hidden="true" className="next-output-glyph">
+                      ＋
+                    </span>
+                  )}
+                </Handle>
               </div>
             );
           })}

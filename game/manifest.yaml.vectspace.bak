@@ -42,5 +42,11 @@ assets:
   sprite.jelly:
     kind: sprite
     path: sprites/jelly.png
+  sprite.omo:
+    kind: sprite
+    path: sprites/omo.png
+  video.test:
+    kind: video
+    path: videos/test_movie.mp4
 scenes:
 - scenes/prologue.yaml

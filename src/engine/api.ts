@@ -8,6 +8,7 @@ import type {
   RuntimeUpdate,
   SaveSlotSummary,
   Settings,
+  PresentationOutcome,
 } from "./types";
 
 function messageFrom(error: unknown): string {
@@ -32,8 +33,8 @@ export const engineApi = {
     command<RuntimeUpdate>("advance", { expectedRevision, source }),
   choose: (choiceId: string, expectedRevision: number) =>
     command<RuntimeUpdate>("choose", { choiceId, expectedRevision }),
-  presentationComplete: (updateId: number) =>
-    command<RuntimeUpdate>("presentation_complete", { updateId }),
+  presentationComplete: (updateId: number, outcome: PresentationOutcome) =>
+    command<RuntimeUpdate>("presentation_complete", { updateId, outcome }),
   getSnapshot: () => command<RuntimeSnapshot>("get_snapshot"),
   resolveAssets: (assetIds: string[]) =>
     command<ResolvedAsset[]>("resolve_assets", { assetIds }),

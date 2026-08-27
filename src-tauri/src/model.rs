@@ -11,6 +11,8 @@ pub struct ProfileState {
     pub variables: VariableMap,
     pub read_content_version: String,
     pub read_dialogues: BTreeSet<String>,
+    #[serde(default)]
+    pub seen_presentations: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -170,6 +172,7 @@ pub enum AssetKind {
     Bgm,
     Sfx,
     Font,
+    Video,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -255,10 +258,27 @@ pub enum SceneNode {
         asset: Option<String>,
         #[serde(default = "default_volume")]
         volume: f32,
+        #[serde(default)]
+        start_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_start_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_end_ms: Option<u64>,
         #[serde(default = "default_medium_duration")]
         duration_ms: u64,
         #[serde(default, rename = "await")]
         await_completion: bool,
+        next: String,
+    },
+    Timeline {
+        duration_ms: u64,
+        #[serde(rename = "await")]
+        await_completion: bool,
+        skippable: bool,
+        #[serde(default)]
+        tracks: Vec<TimelineTrack>,
+        #[serde(default)]
+        events: Vec<TimelineEvent>,
         next: String,
     },
     Sfx {
@@ -362,6 +382,111 @@ pub enum ScreenEffectKind {
     Flash,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineEasingPreset {
+    Step,
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum TimelineEasing {
+    Preset(TimelineEasingPreset),
+    CubicBezier { cubic_bezier: [f32; 4] },
+}
+
+impl Default for TimelineEasing {
+    fn default() -> Self {
+        Self::Preset(TimelineEasingPreset::Linear)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineKeyframe {
+    pub at_ms: u64,
+    pub value: f32,
+    #[serde(default)]
+    pub easing: TimelineEasing,
+}
+
+pub type TimelineChannels = BTreeMap<String, Vec<TimelineKeyframe>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoFit {
+    Contain,
+    Cover,
+    Stretch,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TimelineTrack {
+    Sprite {
+        sprite_id: String,
+        asset: String,
+        #[serde(default)]
+        remove_at_end: bool,
+        #[serde(default)]
+        channels: TimelineChannels,
+    },
+    Camera {
+        #[serde(default)]
+        channels: TimelineChannels,
+    },
+    Video {
+        asset: String,
+        #[serde(default)]
+        clip_start_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip_end_ms: Option<u64>,
+        #[serde(default, rename = "loop")]
+        loop_playback: bool,
+        #[serde(default = "default_video_fit")]
+        fit: VideoFit,
+        #[serde(default = "default_true")]
+        audio_enabled: bool,
+        #[serde(default)]
+        channels: TimelineChannels,
+    },
+    Bgm {
+        #[serde(default)]
+        channels: TimelineChannels,
+    },
+}
+
+fn default_video_fit() -> VideoFit {
+    VideoFit::Contain
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TimelineEvent {
+    Sfx {
+        id: String,
+        at_ms: u64,
+        asset: String,
+        #[serde(default = "default_volume")]
+        volume: f32,
+    },
+    ScreenEffect {
+        id: String,
+        at_ms: u64,
+        effect: ScreenEffectKind,
+        #[serde(default = "default_short_duration")]
+        duration_ms: u64,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSnapshot {
@@ -443,6 +568,12 @@ pub struct SpriteSnapshot {
     pub x: f32,
     pub y: f32,
     pub scale: f32,
+    #[serde(default = "default_scale_component")]
+    pub scale_x: f32,
+    #[serde(default = "default_scale_component")]
+    pub scale_y: f32,
+    #[serde(default)]
+    pub rotation_deg: f32,
     pub opacity: f32,
     pub z: i32,
 }
@@ -453,6 +584,12 @@ pub struct CameraSnapshot {
     pub x: f32,
     pub y: f32,
     pub zoom: f32,
+    #[serde(default)]
+    pub rotation_deg: f32,
+}
+
+fn default_scale_component() -> f32 {
+    1.0
 }
 
 impl Default for CameraSnapshot {
@@ -461,6 +598,7 @@ impl Default for CameraSnapshot {
             x: 0.0,
             y: 0.0,
             zoom: 1.0,
+            rotation_deg: 0.0,
         }
     }
 }
@@ -476,6 +614,12 @@ pub struct AudioSnapshot {
 pub struct LoopingAudioSnapshot {
     pub asset: String,
     pub volume: f32,
+    #[serde(default)]
+    pub start_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_end_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -585,6 +729,22 @@ pub enum PresentationCueKind {
     Delay {
         duration_ms: u64,
     },
+    Timeline {
+        presentation_id: String,
+        duration_ms: u64,
+        skippable: bool,
+        is_seen: bool,
+        tracks: Vec<TimelineTrack>,
+        events: Vec<TimelineEvent>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentationOutcome {
+    Completed,
+    Skipped,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -620,6 +780,8 @@ pub struct Settings {
     pub master_volume: f32,
     pub bgm_volume: f32,
     pub sfx_volume: f32,
+    #[serde(default = "default_volume")]
+    pub video_volume: f32,
     pub text_speed_cps: f32,
     #[serde(default)]
     pub skip_mode: SkipMode,
@@ -640,6 +802,7 @@ impl Default for Settings {
             master_volume: 1.0,
             bgm_volume: 0.7,
             sfx_volume: 0.8,
+            video_volume: 1.0,
             text_speed_cps: 30.0,
             skip_mode: SkipMode::ReadOnly,
         }

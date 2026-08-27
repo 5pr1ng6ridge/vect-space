@@ -1,9 +1,10 @@
 export type AssetKind =
-  "background" | "sprite" | "gui" | "bgm" | "sfx" | "font";
+  "background" | "sprite" | "gui" | "bgm" | "sfx" | "font" | "video";
 export type CueGate = "none" | "player_advance" | "runtime";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
 export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
 export type SkipMode = "disabled" | "read_only" | "all";
+export type PresentationOutcome = "completed" | "skipped" | "failed";
 
 export interface StoryLocation {
   scene_id: string;
@@ -15,6 +16,9 @@ export interface SpriteSnapshot {
   x: number;
   y: number;
   scale: number;
+  scale_x: number;
+  scale_y: number;
+  rotation_deg: number;
   opacity: number;
   z: number;
 }
@@ -23,6 +27,7 @@ export interface CameraSnapshot {
   x: number;
   y: number;
   zoom: number;
+  rotation_deg: number;
 }
 
 export interface WorldSnapshot {
@@ -36,6 +41,9 @@ export interface WorldSnapshot {
 export interface LoopingAudioSnapshot {
   asset: string;
   volume: number;
+  start_ms: number;
+  loop_start_ms?: number | null;
+  loop_end_ms?: number | null;
 }
 
 export interface AudioSnapshot {
@@ -97,6 +105,53 @@ interface CueBase {
   gate: CueGate;
 }
 
+export type TimelineEasing =
+  | "step"
+  | "linear"
+  | "ease_in"
+  | "ease_out"
+  | "ease_in_out"
+  | { cubic_bezier: [number, number, number, number] };
+
+export interface TimelineKeyframe {
+  at_ms: number;
+  value: number;
+  easing: TimelineEasing;
+}
+
+export type TimelineChannels = Record<string, TimelineKeyframe[]>;
+
+export type TimelineTrack =
+  | {
+      type: "sprite";
+      sprite_id: string;
+      asset: string;
+      remove_at_end: boolean;
+      channels: TimelineChannels;
+    }
+  | { type: "camera"; channels: TimelineChannels }
+  | {
+      type: "video";
+      asset: string;
+      clip_start_ms: number;
+      clip_end_ms?: number | null;
+      loop: boolean;
+      fit: "contain" | "cover" | "stretch";
+      audio_enabled: boolean;
+      channels: TimelineChannels;
+    }
+  | { type: "bgm"; channels: TimelineChannels };
+
+export type TimelineEvent =
+  | { type: "sfx"; id: string; at_ms: number; asset: string; volume: number }
+  | {
+      type: "screen_effect";
+      id: string;
+      at_ms: number;
+      effect: "shake" | "flash";
+      duration_ms: number;
+    };
+
 export type PresentationCue = CueBase &
   (
     | {
@@ -151,6 +206,15 @@ export type PresentationCue = CueBase &
         type: "delay";
         duration_ms: number;
       }
+    | {
+        type: "timeline";
+        presentation_id: string;
+        duration_ms: number;
+        skippable: boolean;
+        is_seen: boolean;
+        tracks: TimelineTrack[];
+        events: TimelineEvent[];
+      }
   );
 
 export interface RuntimeUpdate {
@@ -187,6 +251,7 @@ export interface Settings {
   master_volume: number;
   bgm_volume: number;
   sfx_volume: number;
+  video_volume: number;
   text_speed_cps: number;
   skip_mode: SkipMode;
 }

@@ -23,6 +23,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "sprite", label: "立绘", group: "画面" },
   { type: "camera", label: "镜头", group: "画面" },
   { type: "screen_effect", label: "屏幕效果", group: "画面" },
+  { type: "timeline", label: "关键帧时间线", group: "画面" },
   { type: "dialogue_ui", label: "对话框", group: "画面" },
   { type: "bgm", label: "BGM", group: "声音" },
   { type: "sfx", label: "音效", group: "声音" },
@@ -143,6 +144,8 @@ export function summarizeNode(node: SceneNode): string {
       return node.effect;
     case "dialogue_ui":
       return node.visible ? "显示" : "隐藏";
+    case "timeline":
+      return `${node.duration_ms} ms · ${node.tracks.length} 轨 · ${node.events.length} 事件`;
     case "end":
       return "剧情终点";
   }
@@ -255,6 +258,16 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         visible: true,
         duration_ms: 200,
         await: false,
+        next: fallback,
+      };
+    case "timeline":
+      return {
+        type,
+        duration_ms: 2400,
+        await: true,
+        skippable: true,
+        tracks: [],
+        events: [],
         next: fallback,
       };
     case "end":

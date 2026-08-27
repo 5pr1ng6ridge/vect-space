@@ -302,6 +302,62 @@ button:disabled {
   vertical-align: -0.08em;
 }
 
+.math-reveal-content {
+  display: inline-block;
+}
+
+.display-math .math-reveal-content {
+  display: block;
+}
+
+.math-unit.is-math-revealed:not(.is-math-instant) .math-reveal-content {
+  opacity: 1;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 49%,
+    transparent 51%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 49%,
+    transparent 51%,
+    transparent 100%
+  );
+  -webkit-mask-position: 0 0;
+  mask-position: 0 0;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 210% 100%;
+  mask-size: 210% 100%;
+  animation: math-reveal-left-to-right var(--math-reveal-duration, 45ms) linear
+    both;
+  will-change: mask-position, opacity;
+}
+
+.math-unit.is-math-instant .math-reveal-content {
+  -webkit-mask: none;
+  mask: none;
+  animation: none;
+  opacity: 1;
+}
+
+@keyframes math-reveal-left-to-right {
+  from {
+    -webkit-mask-position: 100% 0;
+    mask-position: 100% 0;
+    opacity: 0.72;
+  }
+
+  to {
+    -webkit-mask-position: 0 0;
+    mask-position: 0 0;
+    opacity: 1;
+  }
+}
+
 .display-math {
   display: block;
   margin: 0.5em auto;
@@ -599,5 +655,12 @@ button:disabled {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .math-unit .math-reveal-content {
+    -webkit-mask: none !important;
+    mask: none !important;
+    animation: none !important;
+    opacity: 1 !important;
   }
 }

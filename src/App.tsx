@@ -15,7 +15,7 @@ import { DialogueBox, type DialogueBoxHandle } from "./components/DialogueBox";
 import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
-import { autoReadingDelay } from "./engine/markup";
+import { autoReadingDelay, hasImmediateAutoAdvance } from "./engine/markup";
 import { canFastForwardPrompt } from "./engine/playback";
 import type {
   AdvanceSource,
@@ -23,6 +23,7 @@ import type {
   BootstrapPayload,
   ChoicePrompt,
   DialoguePrompt,
+  PresentationCue,
   RuntimeUpdate,
   SaveSlotSummary,
   Settings,
@@ -33,6 +34,7 @@ const DEFAULT_SETTINGS: Settings = {
   master_volume: 1,
   bgm_volume: 0.7,
   sfx_volume: 0.8,
+  video_volume: 1,
   text_speed_cps: 30,
   skip_mode: "read_only",
 };
@@ -71,8 +73,12 @@ export default function App(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [contentVersion, setContentVersion] = useState("");
   const [typingSfxActive, setTypingSfxActive] = useState(false);
+  const [typingSfxCps, setTypingSfxCps] = useState(
+    DEFAULT_SETTINGS.text_speed_cps,
+  );
   const [normalAuto, setNormalAuto] = useState(false);
   const [ctrlHeld, setCtrlHeld] = useState(false);
+  const [pageHidden, setPageHidden] = useState(document.hidden);
   const [completedPromptId, setCompletedPromptId] = useState<string | null>(
     null,
   );
@@ -157,14 +163,17 @@ export default function App(): ReactElement {
   );
 
   const handlePresentationSettled = useCallback(
-    (settled: RuntimeUpdate): void => {
+    (
+      settled: RuntimeUpdate,
+      outcome: "completed" | "skipped" | "failed",
+    ): void => {
       if (settled.requires_ack) {
         if (acknowledgedUpdates.current.has(settled.update_id)) {
           return;
         }
         acknowledgedUpdates.current.add(settled.update_id);
         void runStoryCommand(() =>
-          engineApi.presentationComplete(settled.update_id),
+          engineApi.presentationComplete(settled.update_id, outcome),
         );
         return;
       }
@@ -271,16 +280,23 @@ export default function App(): ReactElement {
     update?.snapshot.prompt.kind === "dialogue" ? update.snapshot.prompt : null;
   const choice =
     update?.snapshot.prompt.kind === "choice" ? update.snapshot.prompt : null;
-  const revealCps = useMemo(
-    () => dialogueRevealSpeed(update, dialogue) ?? settings.text_speed_cps,
-    [dialogue, settings.text_speed_cps, update],
+  const dialogueCueCps = useMemo(
+    () => dialogueRevealSpeed(update, dialogue),
+    [dialogue, update],
   );
+  const revealCps = dialogueCueCps ?? settings.text_speed_cps;
   const runtimeLocked = update?.requires_ack ?? false;
+  const activeTimelineCue = update?.cues.find(
+    (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
+      cue.type === "timeline" && cue.gate === "runtime",
+  );
   const playback = update?.snapshot.playback ?? {
     auto: "normal" as const,
     ctrl_fast_forward: "allow" as const,
   };
   const forcedAuto = playback.auto === "forced";
+  const immediateAutoAdvance =
+    dialogue !== null && hasImmediateAutoAdvance(dialogue.text);
   const ctrlPolicyAllows =
     !forcedAuto && playback.ctrl_fast_forward === "allow";
   const fastForwardRequested =
@@ -294,19 +310,29 @@ export default function App(): ReactElement {
     panel === "none" &&
     fastForwardRequested &&
     update !== null &&
-    canFastForwardPrompt(playback, settings.skip_mode, update.snapshot.prompt);
+    canFastForwardPrompt(
+      playback,
+      settings.skip_mode,
+      update.snapshot.prompt,
+    ) &&
+    (activeTimelineCue === undefined ||
+      settings.skip_mode === "all" ||
+      (settings.skip_mode === "read_only" && activeTimelineCue.is_seen));
   const autoSlot = saveSlots.find((slot) => slot.slot === "auto");
-  const handleTypingChange = useCallback((typing: boolean): void => {
-    setTypingSfxActive(typing);
-  }, []);
+  const handleTypingChange = useCallback(
+    (typing: boolean, cps: number): void => {
+      setTypingSfxActive(typing);
+      setTypingSfxCps(cps);
+    },
+    [],
+  );
   const handlePlayerAdvance = useCallback((): void => {
     if (
       phaseRef.current !== "playing" ||
       panel !== "none" ||
       busyRef.current ||
-      runtimeLocked ||
-      dialogue === null ||
-      !update?.snapshot.world.dialogue_ui_visible
+      (!runtimeLocked &&
+        (dialogue === null || !update?.snapshot.world.dialogue_ui_visible))
     ) {
       return;
     }
@@ -315,6 +341,11 @@ export default function App(): ReactElement {
     if (forcedAuto) {
       return;
     }
+    if (runtimeLocked) {
+      sceneRef.current?.skipCurrentPresentation();
+      return;
+    }
+    if (dialogue === null) return;
     if (!dialogueRef.current?.isComplete()) {
       dialogueRef.current?.complete();
       return;
@@ -338,8 +369,13 @@ export default function App(): ReactElement {
     }
 
     let timer = 0;
-    if (forcedAuto) {
-      if (completedPromptId !== dialogue.prompt_id) return;
+    if (completedPromptId !== dialogue.prompt_id) return;
+    if (immediateAutoAdvance) {
+      timer = window.setTimeout(
+        () => advance(forcedAuto ? "forced_auto" : "auto"),
+        0,
+      );
+    } else if (forcedAuto) {
       timer = window.setTimeout(
         () => advance("forced_auto"),
         autoReadingDelay(dialogue.text),
@@ -363,6 +399,7 @@ export default function App(): ReactElement {
     fastForwardDialogueAllowed,
     fastForwardRequested,
     forcedAuto,
+    immediateAutoAdvance,
     normalAuto,
     panel,
     phase,
@@ -405,6 +442,7 @@ export default function App(): ReactElement {
       setCtrlHeld(false);
     };
     const handleVisibility = (): void => {
+      setPageHidden(document.hidden);
       if (document.hidden) clearControlKeys();
     };
     window.addEventListener("click", handleClick);
@@ -428,11 +466,13 @@ export default function App(): ReactElement {
           assets={assets}
           onDiagnostic={setError}
           onSettled={handlePresentationSettled}
+          paused={panel !== "none" || phase !== "playing" || pageHidden}
           playbackRate={fastForwardActive ? 8 : 1}
           ref={sceneRef}
           settings={settings}
           suppressOneShots={fastForwardActive}
           typingSfxActive={typingSfxActive && !fastForwardActive}
+          typingSfxCps={typingSfxCps}
           update={update}
         />
 
@@ -513,11 +553,13 @@ export default function App(): ReactElement {
                 dialogueBoxUrl={assets["gui.dialogue_box"] ?? ""}
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
+                key={`${dialogue.prompt_id}:${update.snapshot.revision}`}
                 nameBoxUrl={assets["gui.name_box"] ?? ""}
                 onTypingChange={handleTypingChange}
                 onRevealComplete={handleRevealComplete}
                 prompt={dialogue}
                 ref={dialogueRef}
+                revealImmediately={dialogueCueCps === null}
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
             )}
@@ -687,7 +729,12 @@ function SettingsPanel({
   onClose,
 }: SettingsPanelProps): ReactElement {
   const rows: {
-    key: "master_volume" | "bgm_volume" | "sfx_volume" | "text_speed_cps";
+    key:
+      | "master_volume"
+      | "bgm_volume"
+      | "sfx_volume"
+      | "video_volume"
+      | "text_speed_cps";
     label: string;
     min: number;
     max: number;
@@ -696,6 +743,7 @@ function SettingsPanel({
     { key: "master_volume", label: "主音量", min: 0, max: 1, step: 0.01 },
     { key: "bgm_volume", label: "BGM", min: 0, max: 1, step: 0.01 },
     { key: "sfx_volume", label: "音效", min: 0, max: 1, step: 0.01 },
+    { key: "video_volume", label: "视频", min: 0, max: 1, step: 0.01 },
     { key: "text_speed_cps", label: "文字速度", min: 5, max: 80, step: 1 },
   ];
   return (
@@ -840,7 +888,12 @@ function formatTimestamp(value: number | null): string {
 
 function formatSetting(
   value: number,
-  key: "master_volume" | "bgm_volume" | "sfx_volume" | "text_speed_cps",
+  key:
+    | "master_volume"
+    | "bgm_volume"
+    | "sfx_volume"
+    | "video_volume"
+    | "text_speed_cps",
 ): string {
   return key === "text_speed_cps"
     ? `${Math.round(value)} cps`

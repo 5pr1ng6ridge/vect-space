@@ -8,11 +8,17 @@ import {
 } from "react";
 
 import { PresentationController } from "../engine/presentation";
-import type { AssetUrlMap, RuntimeUpdate, Settings } from "../engine/types";
+import type {
+  AssetUrlMap,
+  PresentationOutcome,
+  RuntimeUpdate,
+  Settings,
+} from "../engine/types";
 
 export interface SceneCanvasHandle {
   captureThumbnail(): string | null;
   unlockAudio(): Promise<void>;
+  skipCurrentPresentation(): boolean;
 }
 
 interface SceneCanvasProps {
@@ -20,9 +26,11 @@ interface SceneCanvasProps {
   assets: AssetUrlMap;
   settings: Settings;
   typingSfxActive: boolean;
+  typingSfxCps: number;
   playbackRate: number;
   suppressOneShots: boolean;
-  onSettled(update: RuntimeUpdate): void;
+  paused: boolean;
+  onSettled(update: RuntimeUpdate, outcome: PresentationOutcome): void;
   onDiagnostic(message: string): void;
 }
 
@@ -38,8 +46,10 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       assets,
       settings,
       typingSfxActive,
+      typingSfxCps,
       playbackRate,
       suppressOneShots,
+      paused,
       onSettled,
       onDiagnostic,
     },
@@ -126,24 +136,32 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
     }, [controller, playbackRate, suppressOneShots]);
 
     useEffect(() => {
+      controller?.setPaused(paused);
+    }, [controller, paused]);
+
+    useEffect(() => {
       if (controller === null) {
         return;
       }
       void controller
-        .setTypingSfx(typingSfxActive, assets)
+        .setTypingSfx(typingSfxActive, assets, typingSfxCps)
         .catch((error: unknown) => {
           console.error("Typing SFX failed", error);
           onDiagnostic(`打字音效加载失败：${errorMessage(error)}`);
         });
-    }, [assets, controller, onDiagnostic, typingSfxActive]);
+    }, [assets, controller, onDiagnostic, typingSfxActive, typingSfxCps]);
 
     useEffect(() => {
       if (controller === null || update === null) {
         return;
       }
       let active = true;
+      let outcome: PresentationOutcome = "failed";
       void controller
         .present(update, assets)
+        .then((result) => {
+          outcome = result;
+        })
         .catch((error: unknown) => {
           if (active) {
             console.error("Presentation update failed", error);
@@ -152,7 +170,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
         })
         .finally(() => {
           if (active) {
-            onSettled(update);
+            onSettled(update, outcome);
           }
         });
       return () => {
@@ -163,7 +181,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
     useEffect(() => {
       if (initializationFailed && update !== null) {
         // A rendering failure must not leave a Runtime-gated story permanently locked.
-        onSettled(update);
+        // Renderer initialization failures release gates without marking them seen.
+        onSettled(update, "failed");
       }
     }, [initializationFailed, onSettled, update]);
 
@@ -172,6 +191,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       () => ({
         captureThumbnail: () => controller?.captureThumbnail() ?? null,
         unlockAudio: () => controller?.unlockAudio() ?? Promise.resolve(),
+        skipCurrentPresentation: () =>
+          controller?.skipCurrentPresentation() ?? false,
       }),
       [controller],
     );

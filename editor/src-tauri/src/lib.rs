@@ -12,8 +12,8 @@ use tauri::{AppHandle, Manager, State};
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AdvanceSource, AssetKind, ContentManifest, ResolvedAsset, RuntimeUpdate, SceneDefinition,
-        SceneNode,
+        AdvanceSource, AssetKind, ContentManifest, PresentationOutcome, ResolvedAsset,
+        RuntimeUpdate, SceneDefinition, SceneNode, TimelineEvent, TimelineTrack,
     },
     runtime::{RuntimeEngine, RuntimeError},
 };
@@ -249,6 +249,14 @@ fn import_asset(
     if !source.is_file() {
         return Err("选择的素材不是文件".to_owned());
     }
+    if request.kind == AssetKind::Video
+        && source
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("mp4"))
+    {
+        return Err("视频素材必须是 .mp4（H.264/AAC）".to_owned());
+    }
     let file_name = source.file_name().ok_or("无法识别素材文件名")?.to_owned();
     let folder = asset_folder(request.kind);
     let destination_dir = session.root.join("assets").join(folder);
@@ -339,7 +347,7 @@ fn preview_presentation_complete(
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_mut().ok_or("尚未打开项目")?;
     transact_preview(session, |runtime, catalog| {
-        runtime.presentation_complete(catalog, update_id)
+        runtime.presentation_complete(catalog, update_id, PresentationOutcome::Completed)
     })
 }
 
@@ -656,6 +664,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::Camera { next, .. }
         | SceneNode::ScreenEffect { next, .. }
         | SceneNode::DialogueUi { next, .. } => vec![local(next)],
+        SceneNode::Timeline { next, .. } => vec![local(next)],
         SceneNode::Choice { choices } => choices.iter().map(|choice| local(&choice.next)).collect(),
         SceneNode::Condition {
             then, otherwise, ..
@@ -692,6 +701,9 @@ fn is_immediate(node: &SceneNode) -> bool {
             await_completion, ..
         }
         | SceneNode::DialogueUi {
+            await_completion, ..
+        }
+        | SceneNode::Timeline {
             await_completion, ..
         } => !await_completion,
         SceneNode::Set { .. }
@@ -775,6 +787,21 @@ fn collect_node_assets<'a>(node: &'a SceneNode, output: &mut BTreeSet<&'a str>) 
         | SceneNode::Sfx { asset: id, .. } => {
             output.insert(id);
         }
+        SceneNode::Timeline { tracks, events, .. } => {
+            for track in tracks {
+                match track {
+                    TimelineTrack::Sprite { asset, .. } | TimelineTrack::Video { asset, .. } => {
+                        output.insert(asset);
+                    }
+                    TimelineTrack::Camera { .. } | TimelineTrack::Bgm { .. } => {}
+                }
+            }
+            for event in events {
+                if let TimelineEvent::Sfx { asset, .. } = event {
+                    output.insert(asset);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -786,6 +813,7 @@ fn asset_folder(kind: AssetKind) -> &'static str {
         AssetKind::Gui => "gui",
         AssetKind::Bgm | AssetKind::Sfx => "audio",
         AssetKind::Font => "fonts",
+        AssetKind::Video => "videos",
     }
 }
 

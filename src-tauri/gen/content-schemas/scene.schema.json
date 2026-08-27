@@ -665,8 +665,30 @@
               "default": 500,
               "minimum": 0
             },
+            "loop_end_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "loop_start_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
             "next": {
               "type": "string"
+            },
+            "start_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 0,
+              "minimum": 0
             },
             "type": {
               "type": "string",
@@ -682,6 +704,51 @@
           "required": [
             "type",
             "action",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean"
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "events": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/TimelineEvent"
+              }
+            },
+            "next": {
+              "type": "string"
+            },
+            "skippable": {
+              "type": "boolean"
+            },
+            "tracks": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/TimelineTrack"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "timeline"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "duration_ms",
+            "await",
+            "skippable",
             "next"
           ]
         },
@@ -849,6 +916,270 @@
         "hide"
       ]
     },
+    "TimelineEasing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TimelineEasingPreset"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cubic_bezier": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 4,
+              "minItems": 4
+            }
+          },
+          "required": [
+            "cubic_bezier"
+          ]
+        }
+      ]
+    },
+    "TimelineEasingPreset": {
+      "type": "string",
+      "enum": [
+        "step",
+        "linear",
+        "ease_in",
+        "ease_out",
+        "ease_in_out"
+      ]
+    },
+    "TimelineEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string"
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "sfx"
+            },
+            "volume": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "at_ms",
+            "asset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 200,
+              "minimum": 0
+            },
+            "effect": {
+              "$ref": "#/$defs/ScreenEffectKind"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "screen_effect"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "at_ms",
+            "effect"
+          ]
+        }
+      ]
+    },
+    "TimelineKeyframe": {
+      "type": "object",
+      "properties": {
+        "at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "easing": {
+          "$ref": "#/$defs/TimelineEasing",
+          "default": "linear"
+        },
+        "value": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at_ms",
+        "value"
+      ]
+    },
+    "TimelineTrack": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string"
+            },
+            "channels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/TimelineKeyframe"
+                }
+              },
+              "default": {}
+            },
+            "remove_at_end": {
+              "type": "boolean",
+              "default": false
+            },
+            "sprite_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "sprite"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "sprite_id",
+            "asset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "channels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/TimelineKeyframe"
+                }
+              },
+              "default": {}
+            },
+            "type": {
+              "type": "string",
+              "const": "camera"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string"
+            },
+            "audio_enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "channels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/TimelineKeyframe"
+                }
+              },
+              "default": {}
+            },
+            "clip_end_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "clip_start_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 0,
+              "minimum": 0
+            },
+            "fit": {
+              "$ref": "#/$defs/VideoFit",
+              "default": "contain"
+            },
+            "loop": {
+              "type": "boolean",
+              "default": false
+            },
+            "type": {
+              "type": "string",
+              "const": "video"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "asset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "channels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/TimelineKeyframe"
+                }
+              },
+              "default": {}
+            },
+            "type": {
+              "type": "string",
+              "const": "bgm"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
     "ValueOperand": {
       "anyOf": [
         {
@@ -881,6 +1212,14 @@
         "mod",
         "append",
         "toggle"
+      ]
+    },
+    "VideoFit": {
+      "type": "string",
+      "enum": [
+        "contain",
+        "cover",
+        "stretch"
       ]
     }
   }

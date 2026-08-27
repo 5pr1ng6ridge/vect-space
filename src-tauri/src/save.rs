@@ -14,7 +14,7 @@ use crate::model::{
 
 const SAVE_SCHEMA_VERSION: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
-const PROFILE_SCHEMA_VERSION: u32 = 2;
+const PROFILE_SCHEMA_VERSION: u32 = 3;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
 const SLOT_IDS: [&str; 4] = ["auto", "1", "2", "3"];
 
@@ -68,6 +68,16 @@ struct SettingsFile {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
+    schema_version: u32,
+    variables: VariableMap,
+    read_content_version: String,
+    read_dialogues: std::collections::BTreeSet<String>,
+    seen_presentations: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyProfileV2File {
     schema_version: u32,
     variables: VariableMap,
     read_content_version: String,
@@ -208,6 +218,14 @@ impl ProfileManager {
                 "profile 包含无效已读节点 ID".to_owned(),
             ));
         }
+        if state.seen_presentations.iter().any(|id| {
+            id.split_once('/')
+                .is_none_or(|(scene, node)| scene.is_empty() || node.is_empty())
+        }) {
+            return Err(SaveError::InvalidData(
+                "profile 包含无效已观看表现 ID".to_owned(),
+            ));
+        }
         self.write(state)
     }
 
@@ -220,7 +238,7 @@ impl ProfileManager {
 
         let loaded = read_json_with_backup::<serde_json::Value>(&self.path);
         let (stored, mut rewrite) = match loaded {
-            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(2) => {
+            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(3) => {
                 let file: ProfileFile = serde_json::from_value(value)
                     .map_err(|error| SaveError::InvalidData(error.to_string()))?;
                 (
@@ -228,19 +246,35 @@ impl ProfileManager {
                         variables: file.variables,
                         read_content_version: file.read_content_version,
                         read_dialogues: file.read_dialogues,
+                        seen_presentations: file.seen_presentations,
                     },
                     false,
+                )
+            }
+            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(2) => {
+                let file: LegacyProfileV2File = serde_json::from_value(value)
+                    .map_err(|error| SaveError::InvalidData(error.to_string()))?;
+                eprintln!("profile v2 已迁移为 v3，已观看表现集合从空集合开始");
+                (
+                    ProfileState {
+                        variables: file.variables,
+                        read_content_version: file.read_content_version,
+                        read_dialogues: file.read_dialogues,
+                        seen_presentations: Default::default(),
+                    },
+                    true,
                 )
             }
             Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(1) => {
                 let file: LegacyProfileFile = serde_json::from_value(value)
                     .map_err(|error| SaveError::InvalidData(error.to_string()))?;
-                eprintln!("profile v1 已迁移为 v2，已读集合从空集合开始");
+                eprintln!("profile v1 已迁移为 v3，已读与已观看表现集合从空集合开始");
                 (
                     ProfileState {
                         variables: file.variables,
                         read_content_version: self.content_version.clone(),
                         read_dialogues: Default::default(),
+                        seen_presentations: Default::default(),
                     },
                     true,
                 )
@@ -270,6 +304,7 @@ impl ProfileManager {
                 .read_content_version
                 .clone_from(&self.content_version);
             reconciled.read_dialogues.clear();
+            reconciled.seen_presentations.clear();
             rewrite = true;
         }
         if rewrite {
@@ -284,6 +319,7 @@ impl ProfileManager {
             variables: self.defaults()?,
             read_content_version: self.content_version.clone(),
             read_dialogues: Default::default(),
+            seen_presentations: Default::default(),
         })
     }
 
@@ -321,6 +357,7 @@ impl ProfileManager {
             variables: state.variables.clone(),
             read_content_version: state.read_content_version.clone(),
             read_dialogues: state.read_dialogues.clone(),
+            seen_presentations: state.seen_presentations.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| SaveError::InvalidData(error.to_string()))?;
@@ -379,6 +416,7 @@ fn validate_settings(settings: Settings) -> Result<Settings, SaveError> {
         settings.master_volume,
         settings.bgm_volume,
         settings.sfx_volume,
+        settings.video_volume,
     ];
     if volumes
         .iter()
@@ -400,6 +438,7 @@ fn sanitize_settings(mut settings: Settings) -> Settings {
     settings.master_volume = finite_clamp(settings.master_volume, 0.0, 1.0, 1.0);
     settings.bgm_volume = finite_clamp(settings.bgm_volume, 0.0, 1.0, 0.7);
     settings.sfx_volume = finite_clamp(settings.sfx_volume, 0.0, 1.0, 0.8);
+    settings.video_volume = finite_clamp(settings.video_volume, 0.0, 1.0, 1.0);
     settings.text_speed_cps = finite_clamp(settings.text_speed_cps, 1.0, 200.0, 30.0);
     settings
 }
@@ -538,6 +577,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(settings.skip_mode, crate::model::SkipMode::ReadOnly);
+        assert_eq!(settings.video_volume, 1.0);
     }
 
     #[test]
@@ -657,6 +697,9 @@ mod tests {
         migrated
             .read_dialogues
             .insert("prologue/introduction".to_owned());
+        migrated
+            .seen_presentations
+            .insert("prologue/timeline_showcase".to_owned());
         manager.save(&migrated).unwrap();
 
         let (_, changed) = ProfileManager::new(
@@ -671,5 +714,42 @@ mod tests {
         );
         assert_eq!(changed.read_content_version, "demo-3");
         assert!(changed.read_dialogues.is_empty());
+        assert!(changed.seen_presentations.is_empty());
+    }
+
+    #[test]
+    fn profile_v2_migrates_to_v3_without_losing_variables_or_read_history() {
+        let directory = tempdir().unwrap();
+        let definitions = std::collections::BTreeMap::from([(
+            "ending_seen".to_owned(),
+            VariableDefinition {
+                scope: VariableScope::Profile,
+                value_type: VariableType::Boolean,
+                default: ScalarValue::Boolean(false),
+            },
+        )]);
+        fs::write(
+            directory.path().join("profile.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 2,
+                "variables": { "ending_seen": true },
+                "read_content_version": "demo-2",
+                "read_dialogues": ["prologue/introduction"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (_, migrated) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &definitions,
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            migrated.variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
+        assert!(migrated.read_dialogues.contains("prologue/introduction"));
+        assert!(migrated.seen_presentations.is_empty());
     }
 }

@@ -90,38 +90,40 @@ export function PreviewPanel({
       </div>
       {error !== null && <div className="preview-error">{error}</div>}
       <div className="preview-workspace">
-        <div className="preview-stage">
-          {update?.snapshot.world.background !== null &&
-            update?.snapshot.world.background !== undefined && (
-              <img
-                className="preview-background"
-                src={urls[update.snapshot.world.background]}
-                alt="背景"
-              />
-            )}
-          {update !== null &&
-            Object.entries(update.snapshot.world.sprites)
-              .sort(([, left], [, right]) => left.z - right.z)
-              .map(([id, sprite]) => (
+        <div className="preview-stage-slot">
+          <div className="preview-stage">
+            {update?.snapshot.world.background !== null &&
+              update?.snapshot.world.background !== undefined && (
                 <img
-                  alt={id}
-                  className="preview-sprite"
-                  key={id}
-                  src={urls[sprite.asset]}
-                  style={{
-                    left: `${(sprite.x / 1920) * 100}%`,
-                    top: `${(sprite.y / 1080) * 100}%`,
-                    opacity: sprite.opacity,
-                    transform: `translate(-50%, -100%) scale(${sprite.scale})`,
-                    zIndex: sprite.z,
-                  }}
+                  className="preview-background"
+                  src={urls[update.snapshot.world.background]}
+                  alt="背景"
                 />
-              ))}
-          {update === null && (
-            <div className="preview-placeholder">
-              保存项目后，从入口开始试玩
-            </div>
-          )}
+              )}
+            {update !== null &&
+              Object.entries(update.snapshot.world.sprites)
+                .sort(([, left], [, right]) => left.z - right.z)
+                .map(([id, sprite]) => (
+                  <img
+                    alt={id}
+                    className="preview-sprite"
+                    key={id}
+                    src={urls[sprite.asset]}
+                    style={{
+                      left: `${(sprite.x / 1920) * 100}%`,
+                      top: `${(sprite.y / 1080) * 100}%`,
+                      opacity: sprite.opacity,
+                      transform: `translate(-50%, -100%) rotate(${sprite.rotation_deg}deg) scale(${sprite.scale * sprite.scale_x}, ${sprite.scale * sprite.scale_y})`,
+                      zIndex: sprite.z,
+                    }}
+                  />
+                ))}
+            {update === null && (
+              <div className="preview-placeholder">
+                保存项目后，从入口开始试玩
+              </div>
+            )}
+          </div>
         </div>
         <div className="preview-prompt">
           {prompt?.kind === "dialogue" && (

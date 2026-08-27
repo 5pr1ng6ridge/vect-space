@@ -245,12 +245,14 @@ function AssetsPanel({
     const id = window.prompt("素材逻辑 ID", "asset.new")?.trim();
     if (!id) return;
     const kind = window.prompt(
-      "素材类型：background / sprite / gui / bgm / sfx / font",
+      "素材类型：background / sprite / gui / bgm / sfx / video / font",
       "background",
     ) as AssetKind | null;
     if (
       !kind ||
-      !["background", "sprite", "gui", "bgm", "sfx", "font"].includes(kind)
+      !["background", "sprite", "gui", "bgm", "sfx", "video", "font"].includes(
+        kind,
+      )
     ) {
       window.alert("素材类型无效");
       return;
@@ -329,6 +331,11 @@ function AssetPreview({ asset }: { asset: EditorAsset }): ReactElement {
   }
   if (asset.kind === "bgm" || asset.kind === "sfx") {
     return <audio className="asset-audio" controls src={url} />;
+  }
+  if (asset.kind === "video") {
+    return (
+      <video className="asset-preview" controls preload="metadata" src={url} />
+    );
   }
   return (
     <div className="font-preview" style={{ fontFamily: `url(${url})` }}>

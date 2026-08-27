@@ -743,6 +743,48 @@ function renderFields(
             step={0.05}
             value={node.volume}
           />
+          {node.action === "start" && (
+            <>
+              <NumberField
+                label="起播 ms"
+                min={0}
+                onChange={(start_ms) => update({ ...node, start_ms })}
+                step={100}
+                value={node.start_ms ?? 0}
+              />
+              <BooleanField
+                label="自定义循环段"
+                onChange={(enabled) =>
+                  update({
+                    ...node,
+                    loop_start_ms: enabled ? 0 : null,
+                    loop_end_ms: enabled ? 1000 : null,
+                  })
+                }
+                value={node.loop_start_ms != null && node.loop_end_ms != null}
+              />
+              {node.loop_start_ms != null && node.loop_end_ms != null && (
+                <div className="field-grid">
+                  <NumberField
+                    label="循环起点 ms"
+                    min={0}
+                    onChange={(loop_start_ms) =>
+                      update({ ...node, loop_start_ms })
+                    }
+                    step={100}
+                    value={node.loop_start_ms}
+                  />
+                  <NumberField
+                    label="循环终点 ms"
+                    min={0}
+                    onChange={(loop_end_ms) => update({ ...node, loop_end_ms })}
+                    step={100}
+                    value={node.loop_end_ms}
+                  />
+                </div>
+              )}
+            </>
+          )}
           <AwaitFields node={node} onChange={update} />
           <TargetSelect
             label="下一节点"
@@ -844,6 +886,44 @@ function renderFields(
             value={node.visible}
           />
           <AwaitFields node={node} onChange={update} />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    case "timeline":
+      return (
+        <>
+          <NumberField
+            label="时间线时长 ms"
+            max={1_800_000}
+            min={1}
+            onChange={(duration_ms) => update({ ...node, duration_ms })}
+            step={100}
+            value={node.duration_ms}
+          />
+          <BooleanField
+            label="等待时间线完成"
+            onChange={(awaitCompletion) =>
+              update({
+                ...node,
+                await: awaitCompletion,
+                skippable: awaitCompletion ? node.skippable : false,
+              })
+            }
+            value={node.await}
+          />
+          <BooleanField
+            label="允许手动跳过"
+            onChange={(skippable) => update({ ...node, skippable })}
+            value={node.skippable}
+          />
+          <p className="field-note">
+            在底部“关键帧”工作区编辑轨道、事件和缓动曲线。
+          </p>
           <TargetSelect
             label="下一节点"
             onChange={(next) => update({ ...node, next })}

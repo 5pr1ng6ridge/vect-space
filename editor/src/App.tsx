@@ -14,6 +14,7 @@ import { NodeInspector } from "./components/NodeInspector";
 import { PreviewPanel } from "./components/PreviewPanel";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { StoryGraph } from "./components/StoryGraph";
+import { TimelineEditor } from "./components/TimelineEditor";
 import { YamlPanel } from "./components/YamlPanel";
 import {
   NODE_TYPES,
@@ -46,7 +47,7 @@ import type {
 } from "./types";
 import { validateLive } from "./validation";
 
-type BottomTab = "problems" | "yaml" | "preview";
+type BottomTab = "problems" | "yaml" | "preview" | "timeline";
 
 type ResizeAxis = "left" | "right" | "bottom";
 
@@ -752,7 +753,8 @@ export function App(): ReactElement {
             ＋ 添加节点
           </button>
           <span className="workspace-hint">
-            节点两侧的 ＋ 可快速插入；右键节点或插入点可选择类型
+            节点左侧的 ＋ 可快速插入；右侧 ＋ 同时是 next
+            连线点，右键节点或插入点可选择类型
           </span>
         </div>
         {activeScene !== undefined ? (
@@ -871,6 +873,24 @@ export function App(): ReactElement {
             剧情试玩
           </button>
           <button
+            className={bottomTab === "timeline" ? "active" : ""}
+            disabled={
+              selectedNodeId === null ||
+              activeScene?.nodes[selectedNodeId]?.type !== "timeline"
+            }
+            onClick={() => {
+              setBottomTab("timeline");
+              setBottomOpen(true);
+              setPanelSizes((sizes) => ({
+                ...sizes,
+                bottom: Math.max(520, sizes.bottom),
+              }));
+            }}
+            type="button"
+          >
+            关键帧
+          </button>
+          <button
             className="bottom-toggle"
             onClick={() => setBottomOpen((value) => !value)}
             type="button"
@@ -910,6 +930,15 @@ export function App(): ReactElement {
                 onNavigate={(sceneId, nodeId) => navigate(sceneId, nodeId)}
               />
             )}
+            {bottomTab === "timeline" &&
+              selectedNodeId !== null &&
+              activeScene?.nodes[selectedNodeId]?.type === "timeline" && (
+                <TimelineEditor
+                  assets={project.assets}
+                  node={activeScene.nodes[selectedNodeId]}
+                  onChange={(node) => changeNode(selectedNodeId, node)}
+                />
+              )}
           </div>
         )}
       </section>

@@ -8,11 +8,15 @@ import type {
   CameraSnapshot,
   Easing,
   PresentationCue,
+  PresentationOutcome,
   RuntimeSnapshot,
   RuntimeUpdate,
   Settings,
   SpriteSnapshot,
+  TimelineEvent,
+  TimelineTrack,
 } from "./types";
+import { evaluateChannel, TimelineClock } from "./timeline";
 import { advanceVirtualElapsed } from "./virtualClock";
 
 const WIDTH = 1920;
@@ -24,20 +28,24 @@ export class PresentationController {
   readonly #application = new Application();
   readonly #world = new Container();
   readonly #backgrounds = new Container();
-  readonly #sprites = new Container();
   readonly #effects = new Container();
   readonly #spriteViews = new Map<string, Sprite>();
   readonly #audio: AudioManager;
   readonly #canvas: HTMLCanvasElement;
   readonly #diagnostic: (message: string) => void;
   #background: Sprite | null = null;
-  #camera: CameraSnapshot = { x: 0, y: 0, zoom: 1 };
+  #camera: CameraSnapshot = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
   #generation = 0;
   #abort = new AbortController();
   #currentUpdateId: number | null = null;
-  #currentPromise: Promise<void> | null = null;
+  #currentPromise: Promise<PresentationOutcome> | null = null;
   #playbackRate = 1;
   #suppressOneShots = false;
+  #paused = false;
+  #timelineClock: TimelineClock | null = null;
+  #timelineSkippable = false;
+  #skipSuppressTimelineEvents = false;
+  #activeVideo: HTMLVideoElement | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -62,8 +70,9 @@ export class PresentationController {
       powerPreference: "high-performance",
       preserveDrawingBuffer: true,
     });
-    this.#sprites.sortableChildren = true;
-    this.#world.addChild(this.#backgrounds, this.#sprites);
+    this.#world.sortableChildren = true;
+    this.#backgrounds.zIndex = -1_000_000;
+    this.#world.addChild(this.#backgrounds);
     this.#application.stage.addChild(this.#world, this.#effects);
     this.#applyCamera();
     this.#application.render();
@@ -77,8 +86,12 @@ export class PresentationController {
     this.#audio.applySettings(settings);
   }
 
-  setTypingSfx(active: boolean, assets: AssetUrlMap): Promise<void> {
-    return this.#audio.setTypingSfx(active, assets);
+  setTypingSfx(
+    active: boolean,
+    assets: AssetUrlMap,
+    cps: number,
+  ): Promise<void> {
+    return this.#audio.setTypingSfx(active, assets, cps);
   }
 
   setPlaybackMode(rate: number, suppressOneShots: boolean): void {
@@ -87,7 +100,24 @@ export class PresentationController {
     this.#audio.setPlaybackRate(this.#playbackRate);
   }
 
-  present(update: RuntimeUpdate, assets: AssetUrlMap): Promise<void> {
+  setPaused(paused: boolean): void {
+    this.#paused = paused;
+    this.#timelineClock?.setPaused(paused);
+    if (paused) this.#activeVideo?.pause();
+    else void this.#activeVideo?.play().catch(() => undefined);
+    void this.#audio.setPaused(paused);
+  }
+
+  skipCurrentPresentation(): boolean {
+    if (!this.#timelineSkippable || this.#timelineClock === null) return false;
+    this.#skipSuppressTimelineEvents = true;
+    return this.#timelineClock.skip();
+  }
+
+  present(
+    update: RuntimeUpdate,
+    assets: AssetUrlMap,
+  ): Promise<PresentationOutcome> {
     if (
       this.#currentUpdateId === update.update_id &&
       this.#currentPromise !== null
@@ -102,17 +132,14 @@ export class PresentationController {
     const operation = (async () => {
       if (update.cues.length === 0) {
         await this.#reconcile(update.snapshot, assets, signal);
-        return;
+        return "completed" as const;
       }
       const results = await Promise.allSettled(
         update.cues.map((cue) =>
-          withTimeout(
-            this.#executeCue(update.update_id, cue, assets, signal),
-            15_000,
-            `Cue ${update.update_id}:${cue.cue_id} 超时`,
-          ),
+          this.#executeCue(update.update_id, cue, assets, signal),
         ),
       );
+      let outcome: PresentationOutcome = "completed";
       for (const result of results) {
         if (result.status === "rejected") {
           console.error(
@@ -120,17 +147,19 @@ export class PresentationController {
             result.reason,
           );
           this.#diagnostic(`表现 Cue 失败：${errorMessage(result.reason)}`);
+          outcome = "failed";
+        } else if (result.value === "failed") {
+          outcome = "failed";
+        } else if (result.value === "skipped" && outcome !== "failed") {
+          outcome = "skipped";
         }
       }
       if (generation === this.#generation && !signal.aborted) {
         await this.#reconcile(update.snapshot, assets, signal);
       }
+      return outcome;
     })();
-    this.#currentPromise = withTimeout(
-      operation,
-      30_000,
-      `RuntimeUpdate ${update.update_id} 表现同步超时`,
-    );
+    this.#currentPromise = operation;
     return this.#currentPromise;
   }
 
@@ -143,6 +172,8 @@ export class PresentationController {
     this.#generation += 1;
     this.#currentUpdateId = null;
     this.#currentPromise = null;
+    this.#timelineClock = null;
+    this.#timelineSkippable = false;
     await this.#reconcile(snapshot, assets, this.#abort.signal);
   }
 
@@ -174,7 +205,7 @@ export class PresentationController {
     cue: PresentationCue,
     assets: AssetUrlMap,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<PresentationOutcome> {
     const key = `${updateId}:${cue.cue_id}`;
     switch (cue.type) {
       case "background_transition":
@@ -229,15 +260,18 @@ export class PresentationController {
           "linear",
           () => undefined,
           signal,
-          () => this.#playbackRate,
+          () => (this.#paused ? 0 : this.#playbackRate),
         );
         break;
       case "dialogue_reveal":
       case "dialogue_ui_transition":
         break;
+      case "timeline":
+        return this.#runTimeline(cue, assets, signal);
       default:
         cue satisfies never;
     }
+    return "completed";
   }
 
   async #transitionBackground(
@@ -322,9 +356,12 @@ export class PresentationController {
       view.label = targetUrl;
       view.x = target.x;
       view.y = target.y + 48;
-      view.scale.set(target.scale * 0.96);
+      view.scale.set(
+        target.scale * target.scale_x * 0.96,
+        target.scale * target.scale_y * 0.96,
+      );
       view.alpha = 0;
-      this.#sprites.addChild(view);
+      this.#world.addChild(view);
       this.#spriteViews.set(id, view);
     }
     if (signal.aborted) {
@@ -340,7 +377,21 @@ export class PresentationController {
         }
         view.x = mix(start.x, target.x, progress);
         view.y = mix(start.y, target.y, progress);
-        view.scale.set(mix(start.scale, target.scale, progress));
+        view.scale.set(
+          mix(
+            start.scale * start.scale_x,
+            target.scale * target.scale_x,
+            progress,
+          ),
+          mix(
+            start.scale * start.scale_y,
+            target.scale * target.scale_y,
+            progress,
+          ),
+        );
+        view.rotation =
+          (mix(start.rotation_deg, target.rotation_deg, progress) * Math.PI) /
+          180;
         view.alpha = mix(start.opacity, target.opacity, progress);
         view.zIndex = progress < 1 ? start.z : target.z;
       },
@@ -363,6 +414,7 @@ export class PresentationController {
           x: mix(start.x, target.x, progress),
           y: mix(start.y, target.y, progress),
           zoom: mix(start.zoom, target.zoom, progress),
+          rotation_deg: mix(start.rotation_deg, target.rotation_deg, progress),
         };
         this.#applyCamera();
       },
@@ -405,6 +457,304 @@ export class PresentationController {
     this.#applyCamera();
   }
 
+  async #runTimeline(
+    cue: Extract<PresentationCue, { type: "timeline" }>,
+    assets: AssetUrlMap,
+    signal: AbortSignal,
+  ): Promise<PresentationOutcome> {
+    const firedEvents = new Set<string>();
+    const spriteBases = new Map<string, Omit<SpriteSnapshot, "asset">>();
+    const spriteTracks = cue.tracks.filter(
+      (track): track is Extract<TimelineTrack, { type: "sprite" }> =>
+        track.type === "sprite",
+    );
+    for (const track of spriteTracks) {
+      const url = requireAssetUrl(assets, track.asset);
+      let view = this.#spriteViews.get(track.sprite_id);
+      if (view === undefined || view.label !== url) {
+        view?.destroy();
+        view = await this.#makeSprite(
+          {
+            asset: track.asset,
+            x: 960,
+            y: 1080,
+            scale: 1,
+            scale_x: 1,
+            scale_y: 1,
+            rotation_deg: 0,
+            opacity: 1,
+            z: 0,
+          },
+          assets,
+        );
+        view.label = url;
+        this.#world.addChild(view);
+        this.#spriteViews.set(track.sprite_id, view);
+      }
+      spriteBases.set(track.sprite_id, readSprite(view));
+    }
+
+    const videoTrack = cue.tracks.find(
+      (track): track is Extract<TimelineTrack, { type: "video" }> =>
+        track.type === "video",
+    );
+    let video: HTMLVideoElement | null = null;
+    let videoView: Sprite | null = null;
+    let buffering = false;
+    const setBuffering = (value: boolean): void => {
+      buffering = value;
+      this.#timelineClock?.setBuffering(value);
+    };
+    if (videoTrack !== undefined) {
+      video = document.createElement("video");
+      this.#activeVideo = video;
+      video.preload = "auto";
+      video.crossOrigin = "anonymous";
+      video.playsInline = true;
+      video.src = requireAssetUrl(assets, videoTrack.asset);
+      video.muted = !videoTrack.audio_enabled;
+      await waitForVideo(video, signal);
+      if (signal.aborted) return "failed";
+      video.currentTime = videoTrack.clip_start_ms / 1_000;
+      if (videoTrack.audio_enabled) this.#audio.attachVideo(video, 1);
+      video.addEventListener("waiting", () => setBuffering(true));
+      video.addEventListener("stalled", () => setBuffering(true));
+      video.addEventListener("playing", () => setBuffering(false));
+      video.addEventListener("canplay", () => setBuffering(false));
+      videoView = new Sprite(Texture.from(video));
+      videoView.anchor.set(0, 0);
+      this.#world.addChild(videoView);
+      await video.play().catch(() => undefined);
+    }
+
+    let previousElapsed = -1;
+    const render = (elapsedMs: number): void => {
+      for (const track of cue.tracks) {
+        this.#applyTimelineTrack(
+          track,
+          elapsedMs,
+          video,
+          videoView,
+          spriteBases,
+        );
+      }
+      if (!this.#skipSuppressTimelineEvents) {
+        for (const event of cue.events) {
+          if (
+            event.at_ms <= elapsedMs &&
+            event.at_ms > previousElapsed &&
+            !firedEvents.has(event.id)
+          ) {
+            firedEvents.add(event.id);
+            this.#fireTimelineEvent(cue.cue_id, event, assets, signal);
+          }
+        }
+      }
+      if (video !== null && videoTrack !== undefined) {
+        const clipStart = videoTrack.clip_start_ms / 1_000;
+        const clipEnd =
+          (videoTrack.clip_end_ms ?? video.duration * 1_000) / 1_000;
+        const clipDuration = Math.max(0.001, clipEnd - clipStart);
+        const rawTime = clipStart + elapsedMs / 1_000;
+        const desired = videoTrack.loop
+          ? clipStart + ((rawTime - clipStart) % clipDuration)
+          : Math.min(clipEnd, rawTime);
+        const rate = Math.max(0.25, Math.min(8, this.#playbackRate));
+        video.playbackRate = rate;
+        if (videoTrack.audio_enabled) {
+          const volume = evaluateChannel(
+            videoTrack.channels,
+            "volume",
+            elapsedMs,
+            1,
+          );
+          this.#audio.setVideoVolume(
+            video,
+            this.#playbackRate >= 8 ? 0 : volume,
+          );
+        }
+        if (!buffering && Math.abs(video.currentTime - desired) > 0.08) {
+          video.currentTime = desired;
+        }
+      }
+      previousElapsed = elapsedMs;
+      this.#application.render();
+    };
+    const clock = new TimelineClock(
+      cue.duration_ms,
+      () => (this.#paused ? 0 : this.#playbackRate),
+      render,
+    );
+    this.#timelineClock = clock;
+    this.#timelineSkippable = cue.skippable;
+    this.#skipSuppressTimelineEvents = false;
+    clock.setPaused(this.#paused);
+    clock.setBuffering(buffering);
+    try {
+      return await clock.run(signal);
+    } finally {
+      this.#timelineClock = null;
+      this.#timelineSkippable = false;
+      this.#skipSuppressTimelineEvents = false;
+      if (video !== null) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+      this.#activeVideo = null;
+      videoView?.destroy({ texture: true });
+    }
+  }
+
+  #applyTimelineTrack(
+    track: TimelineTrack,
+    elapsedMs: number,
+    video: HTMLVideoElement | null,
+    videoView: Sprite | null,
+    spriteBases: ReadonlyMap<string, Omit<SpriteSnapshot, "asset">>,
+  ): void {
+    switch (track.type) {
+      case "sprite": {
+        const view = this.#spriteViews.get(track.sprite_id);
+        if (view === undefined) return;
+        const base = spriteBases.get(track.sprite_id) ?? readSprite(view);
+        const scale = evaluateChannel(
+          track.channels,
+          "scale",
+          elapsedMs,
+          base.scale,
+        );
+        view.x = evaluateChannel(track.channels, "x", elapsedMs, base.x);
+        view.y = evaluateChannel(track.channels, "y", elapsedMs, base.y);
+        view.scale.set(
+          scale *
+            evaluateChannel(track.channels, "scale_x", elapsedMs, base.scale_x),
+          scale *
+            evaluateChannel(track.channels, "scale_y", elapsedMs, base.scale_y),
+        );
+        view.rotation =
+          (evaluateChannel(
+            track.channels,
+            "rotation_deg",
+            elapsedMs,
+            base.rotation_deg,
+          ) *
+            Math.PI) /
+          180;
+        view.alpha = evaluateChannel(
+          track.channels,
+          "opacity",
+          elapsedMs,
+          base.opacity,
+        );
+        view.zIndex = Math.round(
+          evaluateChannel(track.channels, "z", elapsedMs, base.z),
+        );
+        break;
+      }
+      case "camera":
+        this.#camera = {
+          x: evaluateChannel(track.channels, "x", elapsedMs, this.#camera.x),
+          y: evaluateChannel(track.channels, "y", elapsedMs, this.#camera.y),
+          zoom: evaluateChannel(
+            track.channels,
+            "zoom",
+            elapsedMs,
+            this.#camera.zoom,
+          ),
+          rotation_deg: evaluateChannel(
+            track.channels,
+            "rotation_deg",
+            elapsedMs,
+            this.#camera.rotation_deg,
+          ),
+        };
+        this.#applyCamera();
+        break;
+      case "video": {
+        if (video === null || videoView === null) return;
+        const x = evaluateChannel(track.channels, "x", elapsedMs, 0);
+        const y = evaluateChannel(track.channels, "y", elapsedMs, 0);
+        const width = evaluateChannel(
+          track.channels,
+          "width",
+          elapsedMs,
+          WIDTH,
+        );
+        const height = evaluateChannel(
+          track.channels,
+          "height",
+          elapsedMs,
+          HEIGHT,
+        );
+        const naturalWidth = Math.max(1, video.videoWidth);
+        const naturalHeight = Math.max(1, video.videoHeight);
+        if (track.fit === "stretch") {
+          videoView.position.set(x, y);
+          videoView.width = width;
+          videoView.height = height;
+        } else {
+          const factor =
+            track.fit === "cover"
+              ? Math.max(width / naturalWidth, height / naturalHeight)
+              : Math.min(width / naturalWidth, height / naturalHeight);
+          videoView.width = naturalWidth * factor;
+          videoView.height = naturalHeight * factor;
+          videoView.position.set(
+            x + (width - videoView.width) / 2,
+            y + (height - videoView.height) / 2,
+          );
+        }
+        videoView.alpha = evaluateChannel(
+          track.channels,
+          "opacity",
+          elapsedMs,
+          1,
+        );
+        videoView.zIndex = Math.round(
+          evaluateChannel(track.channels, "z", elapsedMs, 0),
+        );
+        break;
+      }
+      case "bgm":
+        this.#audio.setBgmTimelineVolume(
+          evaluateChannel(
+            track.channels,
+            "volume",
+            elapsedMs,
+            this.#audio.currentBgmVolume() ?? 1,
+          ),
+        );
+        break;
+    }
+  }
+
+  #fireTimelineEvent(
+    cueId: number,
+    event: TimelineEvent,
+    assets: AssetUrlMap,
+    signal: AbortSignal,
+  ): void {
+    const key = `timeline:${cueId}:${event.id}`;
+    if (oneShotLedger.has(key)) return;
+    oneShotLedger.add(key);
+    trimLedger();
+    if (event.type === "sfx") {
+      if (!this.#suppressOneShots) {
+        void this.#audio
+          .playSfx(event.asset, event.volume, assets)
+          .catch((error: unknown) =>
+            this.#diagnostic(`时间线 SFX 失败：${errorMessage(error)}`),
+          );
+      }
+    } else {
+      void this.#screenEffect(event.effect, event.duration_ms, signal).catch(
+        (error: unknown) =>
+          this.#diagnostic(`时间线屏幕效果失败：${errorMessage(error)}`),
+      );
+    }
+  }
+
   async #reconcile(
     snapshot: RuntimeSnapshot,
     assets: AssetUrlMap,
@@ -432,7 +782,7 @@ export class PresentationController {
           return;
         }
         view.label = url;
-        this.#sprites.addChild(view);
+        this.#world.addChild(view);
         this.#spriteViews.set(id, view);
       }
       applySprite(view, state);
@@ -491,6 +841,7 @@ export class PresentationController {
     const sprite = new Sprite(texture);
     sprite.anchor.set(0.5, 1);
     sprite.label = url;
+    applySprite(sprite, state);
     return sprite;
   }
 
@@ -508,6 +859,7 @@ export class PresentationController {
       HEIGHT / 2 + this.#camera.y,
     );
     this.#world.scale.set(this.#camera.zoom);
+    this.#world.rotation = (this.#camera.rotation_deg * Math.PI) / 180;
   }
 
   #animate(
@@ -524,14 +876,15 @@ export class PresentationController {
         this.#application.render();
       },
       signal,
-      () => this.#playbackRate,
+      () => (this.#paused ? 0 : this.#playbackRate),
     );
   }
 }
 
 function applySprite(view: Sprite, state: SpriteSnapshot): void {
   view.position.set(state.x, state.y);
-  view.scale.set(state.scale);
+  view.scale.set(state.scale * state.scale_x, state.scale * state.scale_y);
+  view.rotation = (state.rotation_deg * Math.PI) / 180;
   view.alpha = state.opacity;
   view.zIndex = state.z;
 }
@@ -541,9 +894,47 @@ function readSprite(view: Sprite): Omit<SpriteSnapshot, "asset"> {
     x: view.x,
     y: view.y,
     scale: view.scale.x,
+    scale_x: 1,
+    scale_y: view.scale.x === 0 ? 1 : view.scale.y / view.scale.x,
+    rotation_deg: (view.rotation * 180) / Math.PI,
     opacity: view.alpha,
     z: view.zIndex,
   };
+}
+
+function waitForVideo(
+  video: HTMLVideoElement,
+  signal: AbortSignal,
+): Promise<void> {
+  if (video.readyState >= HTMLMediaElement.HAVE_METADATA)
+    return Promise.resolve();
+  return withTimeout(
+    new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        video.removeEventListener("loadedmetadata", loaded);
+        video.removeEventListener("error", failed);
+        signal.removeEventListener("abort", aborted);
+      };
+      const loaded = (): void => {
+        cleanup();
+        resolve();
+      };
+      const failed = (): void => {
+        cleanup();
+        reject(new Error("视频元数据加载失败"));
+      };
+      const aborted = (): void => {
+        cleanup();
+        resolve();
+      };
+      video.addEventListener("loadedmetadata", loaded, { once: true });
+      video.addEventListener("error", failed, { once: true });
+      signal.addEventListener("abort", aborted, { once: true });
+      video.load();
+    }),
+    15_000,
+    "视频加载超时",
+  );
 }
 
 function requireAssetUrl(assets: AssetUrlMap, id: string): string {
@@ -580,12 +971,15 @@ function animate(
       if (signal.aborted) {
         return;
       }
-      virtualElapsed = advanceVirtualElapsed(
-        virtualElapsed,
-        now - previous,
-        getRate(),
-        durationMs,
-      );
+      const rate = getRate();
+      if (rate > 0) {
+        virtualElapsed = advanceVirtualElapsed(
+          virtualElapsed,
+          now - previous,
+          rate,
+          durationMs,
+        );
+      }
       previous = now;
       const raw = Math.min(1, virtualElapsed / durationMs);
       apply(ease(raw, easing));

@@ -25,7 +25,12 @@ export interface SpeedUnit {
   cps: number | null;
 }
 
-export type MarkupUnit = CharacterUnit | MathUnit | PauseUnit | SpeedUnit;
+export interface AutoAdvanceUnit {
+  kind: "auto_advance";
+}
+
+export type MarkupUnit =
+  CharacterUnit | MathUnit | PauseUnit | SpeedUnit | AutoAdvanceUnit;
 export type VisibleUnit = CharacterUnit | MathUnit;
 
 export interface PauseWindow {
@@ -36,6 +41,8 @@ export interface PauseWindow {
 const OPEN_FX = /^\[fx=(shake|wave|glow)\]/;
 const PAUSE = /^\[pause=(\d+)ms\]/;
 const SPEED = /^\[speed=(default|\d+(?:\.\d+)?cps)\]/;
+const AUTO_ADVANCE = /^\[auto\]/;
+export const DEFAULT_MATH_REVEAL_DURATION_MS = 120;
 
 export function parseMarkup(source: string): MarkupUnit[] {
   const units: MarkupUnit[] = [];
@@ -57,6 +64,12 @@ export function parseMarkup(source: string): MarkupUnit[] {
         cps: speed[1] === "default" ? null : Number(speed[1].slice(0, -3)),
       });
       index += speed[0].length;
+      continue;
+    }
+    const autoAdvance = AUTO_ADVANCE.exec(remaining);
+    if (autoAdvance !== null) {
+      units.push({ kind: "auto_advance" });
+      index += autoAdvance[0].length;
       continue;
     }
     const openFx = OPEN_FX.exec(remaining);
@@ -121,10 +134,12 @@ export function buildRevealSchedule(
   units: MarkupUnit[],
   initialCps: number,
   defaultCps: number,
+  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
 ): number[] {
   const schedule: number[] = [];
   let elapsed = 0;
   let cps = validCps(initialCps, defaultCps);
+  let visibleIndex = 0;
   for (const unit of units) {
     if (unit.kind === "pause") {
       elapsed += unit.durationMs;
@@ -133,9 +148,15 @@ export function buildRevealSchedule(
         unit.cps === null
           ? validCps(defaultCps, 30)
           : validCps(unit.cps, defaultCps);
-    } else {
+    } else if (unit.kind === "character" || unit.kind === "math") {
       elapsed += 1000 / cps;
       schedule.push(elapsed);
+      if (unit.kind === "math") {
+        elapsed += validMathRevealDuration(
+          mathRevealDurations.get(visibleIndex),
+        );
+      }
+      visibleIndex += 1;
     }
   }
   return schedule;
@@ -150,10 +171,12 @@ export function buildPauseWindows(
   units: MarkupUnit[],
   initialCps: number,
   defaultCps: number,
+  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
 ): PauseWindow[] {
   const windows: PauseWindow[] = [];
   let elapsed = 0;
   let cps = validCps(initialCps, defaultCps);
+  let visibleIndex = 0;
   for (const unit of units) {
     if (unit.kind === "pause") {
       const startMs = elapsed;
@@ -164,11 +187,82 @@ export function buildPauseWindows(
         unit.cps === null
           ? validCps(defaultCps, 30)
           : validCps(unit.cps, defaultCps);
-    } else {
+    } else if (unit.kind === "character" || unit.kind === "math") {
       elapsed += 1000 / cps;
+      if (unit.kind === "math") {
+        elapsed += validMathRevealDuration(
+          mathRevealDurations.get(visibleIndex),
+        );
+      }
+      visibleIndex += 1;
     }
   }
   return windows;
+}
+
+/**
+ * `[auto]` is an author-controlled boundary marker. It takes effect only when
+ * it is the last non-whitespace markup unit, so an accidental mid-sentence
+ * marker cannot make the player miss text.
+ */
+export function hasImmediateAutoAdvance(source: string): boolean {
+  const units = parseMarkup(source.trimEnd());
+  return units[units.length - 1]?.kind === "auto_advance";
+}
+
+export function buildVisibleUnitCps(
+  units: MarkupUnit[],
+  initialCps: number,
+  defaultCps: number,
+): number[] {
+  const result: number[] = [];
+  let cps = validCps(initialCps, defaultCps);
+  for (const unit of units) {
+    if (unit.kind === "speed") {
+      cps =
+        unit.cps === null
+          ? validCps(defaultCps, 30)
+          : validCps(unit.cps, defaultCps);
+    } else if (unit.kind === "character" || unit.kind === "math") {
+      result.push(cps);
+    }
+  }
+  return result;
+}
+
+export function revealCompletionTime(
+  units: MarkupUnit[],
+  schedule: readonly number[],
+  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
+): number {
+  const visible = visibleUnits(units);
+  const finalAppearance = schedule[schedule.length - 1] ?? 0;
+  const finalIndex = visible.length - 1;
+  return visible[finalIndex]?.kind === "math"
+    ? finalAppearance +
+        validMathRevealDuration(mathRevealDurations.get(finalIndex))
+    : finalAppearance;
+}
+
+export function formulaRevealDurationMs(
+  widthPx: number,
+  fontSizePx: number,
+  cps: number,
+): number {
+  const safeCps = validCps(cps, 30);
+  const safeFontSize =
+    Number.isFinite(fontSizePx) && fontSizePx > 0 ? fontSizePx : 34;
+  const safeWidth =
+    Number.isFinite(widthPx) && widthPx > 0 ? widthPx : safeFontSize;
+  const equivalentCharacters = Math.max(1, safeWidth / safeFontSize);
+  const duration = (1000 / safeCps) * Math.max(0, equivalentCharacters * 2);
+  return Math.round(Math.min(3000, Math.max(10, duration)));
+}
+
+function validMathRevealDuration(value: number | undefined): number {
+  return Number.isFinite(value) && (value ?? 0) > 0
+    ? (value ?? DEFAULT_MATH_REVEAL_DURATION_MS)
+    : DEFAULT_MATH_REVEAL_DURATION_MS;
 }
 
 export function visibleUnits(units: MarkupUnit[]): VisibleUnit[] {

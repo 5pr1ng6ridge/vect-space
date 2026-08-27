@@ -78,7 +78,8 @@
         "gui",
         "bgm",
         "sfx",
-        "font"
+        "font",
+        "video"
       ]
     },
     "CharacterDefinition": {

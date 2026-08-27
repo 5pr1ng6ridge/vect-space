@@ -4,9 +4,10 @@ use crate::{
         AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
         ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, LoopingAudioSnapshot,
         MutationValue, PlaybackAutoMode, PlaybackSnapshot, PresentationCue, PresentationCueKind,
-        ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, SceneNode,
-        SpriteAction, SpriteSnapshot, StoryLocation, ValueOperand, VariableMap, VariableOperation,
-        VariableScope, VariableType, WorldSnapshot,
+        PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate,
+        ScalarValue, SceneNode, SpriteAction, SpriteSnapshot, StoryLocation, TimelineChannels,
+        TimelineTrack, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
+        WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
@@ -24,6 +25,8 @@ pub enum RuntimeError {
     PresentationPending(u64),
     #[error("表现确认不匹配：期望 update {expected}，收到 {actual}")]
     InvalidAcknowledgement { expected: u64, actual: u64 },
+    #[error("该表现不可跳过")]
+    PresentationNotSkippable,
     #[error("当前不是可推进的对话")]
     AdvanceNotAllowed,
     #[error("当前不是选择状态")]
@@ -43,10 +46,18 @@ pub struct RuntimeEngine {
     snapshot: RuntimeSnapshot,
     profile_variables: VariableMap,
     read_dialogues: std::collections::BTreeSet<String>,
+    seen_presentations: std::collections::BTreeSet<String>,
     started: bool,
     next_update_id: u64,
     next_cue_id: u64,
-    pending_runtime_update: Option<u64>,
+    pending_runtime_update: Option<PendingPresentation>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPresentation {
+    update_id: u64,
+    presentation_id: Option<String>,
+    skippable: bool,
 }
 
 impl RuntimeEngine {
@@ -58,6 +69,7 @@ impl RuntimeEngine {
                 variables: profile_defaults(content)?,
                 read_content_version: content.manifest.content_version.clone(),
                 read_dialogues: Default::default(),
+                seen_presentations: Default::default(),
             },
         )
     }
@@ -72,6 +84,7 @@ impl RuntimeEngine {
             snapshot,
             profile_variables: profile.variables,
             read_dialogues: profile.read_dialogues,
+            seen_presentations: profile.seen_presentations,
             started: false,
             next_update_id: 1,
             next_cue_id: 1,
@@ -161,18 +174,28 @@ impl RuntimeEngine {
         &mut self,
         content: &ContentCatalog,
         update_id: u64,
+        outcome: PresentationOutcome,
     ) -> Result<RuntimeUpdate, RuntimeError> {
-        let expected = self
-            .pending_runtime_update
-            .ok_or(RuntimeError::InvalidAcknowledgement {
-                expected: 0,
-                actual: update_id,
-            })?;
-        if expected != update_id {
+        let expected =
+            self.pending_runtime_update
+                .clone()
+                .ok_or(RuntimeError::InvalidAcknowledgement {
+                    expected: 0,
+                    actual: update_id,
+                })?;
+        if expected.update_id != update_id {
             return Err(RuntimeError::InvalidAcknowledgement {
-                expected,
+                expected: expected.update_id,
                 actual: update_id,
             });
+        }
+        if outcome == PresentationOutcome::Skipped && !expected.skippable {
+            return Err(RuntimeError::PresentationNotSkippable);
+        }
+        if outcome != PresentationOutcome::Failed {
+            if let Some(presentation_id) = expected.presentation_id {
+                self.seen_presentations.insert(presentation_id);
+            }
         }
         self.pending_runtime_update = None;
         let cues = self.run_until_boundary(content)?;
@@ -193,11 +216,14 @@ impl RuntimeEngine {
             variables: self.profile_variables.clone(),
             read_content_version: content.manifest.content_version.clone(),
             read_dialogues: self.read_dialogues.clone(),
+            seen_presentations: self.seen_presentations.clone(),
         }
     }
 
     pub fn pending_runtime_update(&self) -> Option<u64> {
         self.pending_runtime_update
+            .as_ref()
+            .map(|pending| pending.update_id)
     }
 
     pub fn load_snapshot(
@@ -223,8 +249,8 @@ impl RuntimeEngine {
         if !self.started {
             return Err(RuntimeError::NotStarted);
         }
-        if let Some(update_id) = self.pending_runtime_update {
-            return Err(RuntimeError::PresentationPending(update_id));
+        if let Some(pending) = &self.pending_runtime_update {
+            return Err(RuntimeError::PresentationPending(pending.update_id));
         }
         if self.snapshot.revision != expected_revision {
             return Err(RuntimeError::StaleRevision {
@@ -313,6 +339,9 @@ impl RuntimeEngine {
                             x: x.unwrap_or(960.0),
                             y: y.unwrap_or(1080.0),
                             scale: scale.unwrap_or(1.0),
+                            scale_x: 1.0,
+                            scale_y: 1.0,
+                            rotation_deg: 0.0,
                             opacity: opacity.unwrap_or(1.0),
                             z: z.unwrap_or(0),
                         }),
@@ -510,6 +539,9 @@ impl RuntimeEngine {
                     action,
                     asset,
                     volume,
+                    start_ms,
+                    loop_start_ms,
+                    loop_end_ms,
                     duration_ms,
                     await_completion,
                     next,
@@ -523,6 +555,9 @@ impl RuntimeEngine {
                                 ))
                             })?,
                             volume,
+                            start_ms,
+                            loop_start_ms,
+                            loop_end_ms,
                         }),
                         AudioAction::Stop => None,
                     };
@@ -561,7 +596,12 @@ impl RuntimeEngine {
                     next,
                 } => {
                     let from = self.snapshot.world.camera.clone();
-                    let to = CameraSnapshot { x, y, zoom };
+                    let to = CameraSnapshot {
+                        x,
+                        y,
+                        zoom,
+                        rotation_deg: from.rotation_deg,
+                    };
                     self.snapshot.world.camera.clone_from(&to);
                     self.snapshot.location.node_id = next;
                     cues.push(self.cue(
@@ -608,6 +648,35 @@ impl RuntimeEngine {
                         PresentationCueKind::DialogueUiTransition {
                             visible,
                             duration_ms,
+                        },
+                    ));
+                    if await_completion {
+                        return Ok(cues);
+                    }
+                }
+                SceneNode::Timeline {
+                    duration_ms,
+                    await_completion,
+                    skippable,
+                    tracks,
+                    events,
+                    next,
+                } => {
+                    apply_timeline_final_state(&mut self.snapshot, &tracks).map_err(|message| {
+                        RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
+                    })?;
+                    self.snapshot.location.node_id = next;
+                    let presentation_id = format!("{scene_id}/{node_id}");
+                    let is_seen = self.seen_presentations.contains(&presentation_id);
+                    cues.push(self.cue(
+                        gate(await_completion),
+                        PresentationCueKind::Timeline {
+                            presentation_id,
+                            duration_ms,
+                            skippable,
+                            is_seen,
+                            tracks,
+                            events,
                         },
                     ));
                     if await_completion {
@@ -757,7 +826,19 @@ impl RuntimeEngine {
         self.next_update_id = self.next_update_id.saturating_add(1);
         let requires_ack = cues.iter().any(|cue| cue.gate == CueGate::Runtime);
         if requires_ack {
-            self.pending_runtime_update = Some(update_id);
+            let timeline = cues.iter().find_map(|cue| match &cue.kind {
+                PresentationCueKind::Timeline {
+                    presentation_id,
+                    skippable,
+                    ..
+                } if cue.gate == CueGate::Runtime => Some((presentation_id.clone(), *skippable)),
+                _ => None,
+            });
+            self.pending_runtime_update = Some(PendingPresentation {
+                update_id,
+                presentation_id: timeline.as_ref().map(|value| value.0.clone()),
+                skippable: timeline.is_some_and(|value| value.1),
+            });
         }
         RuntimeUpdate {
             update_id,
@@ -873,6 +954,109 @@ fn gate(await_completion: bool) -> CueGate {
     } else {
         CueGate::None
     }
+}
+
+fn final_channel(channels: &TimelineChannels, id: &str) -> Option<f32> {
+    channels
+        .get(id)
+        .and_then(|keyframes| keyframes.last())
+        .map(|keyframe| keyframe.value)
+}
+
+fn apply_timeline_final_state(
+    snapshot: &mut RuntimeSnapshot,
+    tracks: &[TimelineTrack],
+) -> Result<(), String> {
+    for track in tracks {
+        match track {
+            TimelineTrack::Sprite {
+                sprite_id,
+                asset,
+                remove_at_end,
+                channels,
+            } => {
+                if *remove_at_end {
+                    snapshot.world.sprites.remove(sprite_id);
+                    continue;
+                }
+                let mut target =
+                    snapshot
+                        .world
+                        .sprites
+                        .get(sprite_id)
+                        .cloned()
+                        .unwrap_or(SpriteSnapshot {
+                            asset: asset.clone(),
+                            x: 960.0,
+                            y: 1080.0,
+                            scale: 1.0,
+                            scale_x: 1.0,
+                            scale_y: 1.0,
+                            rotation_deg: 0.0,
+                            opacity: 1.0,
+                            z: 0,
+                        });
+                target.asset.clone_from(asset);
+                if let Some(value) = final_channel(channels, "x") {
+                    target.x = value;
+                }
+                if let Some(value) = final_channel(channels, "y") {
+                    target.y = value;
+                }
+                if let Some(value) = final_channel(channels, "scale") {
+                    target.scale = value;
+                }
+                if let Some(value) = final_channel(channels, "scale_x") {
+                    target.scale_x = value;
+                }
+                if let Some(value) = final_channel(channels, "scale_y") {
+                    target.scale_y = value;
+                }
+                if let Some(value) = final_channel(channels, "rotation_deg") {
+                    target.rotation_deg = value;
+                }
+                if let Some(value) = final_channel(channels, "opacity") {
+                    target.opacity = value;
+                }
+                if let Some(value) = final_channel(channels, "z") {
+                    target.z = value.round() as i32;
+                }
+                if target.scale <= 0.0 || target.scale_x <= 0.0 || target.scale_y <= 0.0 {
+                    return Err(format!("立绘 {sprite_id} 的最终缩放必须大于 0"));
+                }
+                snapshot.world.sprites.insert(sprite_id.clone(), target);
+            }
+            TimelineTrack::Camera { channels } => {
+                if let Some(value) = final_channel(channels, "x") {
+                    snapshot.world.camera.x = value;
+                }
+                if let Some(value) = final_channel(channels, "y") {
+                    snapshot.world.camera.y = value;
+                }
+                if let Some(value) = final_channel(channels, "zoom") {
+                    if value <= 0.0 {
+                        return Err("相机最终 zoom 必须大于 0".to_owned());
+                    }
+                    snapshot.world.camera.zoom = value;
+                }
+                if let Some(value) = final_channel(channels, "rotation_deg") {
+                    snapshot.world.camera.rotation_deg = value;
+                }
+            }
+            TimelineTrack::Bgm { channels } => {
+                if let Some(value) = final_channel(channels, "volume") {
+                    let bgm = snapshot
+                        .audio
+                        .bgm
+                        .as_mut()
+                        .ok_or_else(|| "BGM 音量轨要求当前存在 BGM".to_owned())?;
+                    bgm.volume = value;
+                }
+            }
+            TimelineTrack::Video { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1057,10 +1241,44 @@ fn validate_snapshot(
     content
         .resolve_assets(&referenced_assets)
         .map_err(|error| RuntimeError::InvalidSnapshot(error.to_string()))?;
-    if !snapshot.world.camera.zoom.is_finite() || snapshot.world.camera.zoom <= 0.0 {
+    if !snapshot.world.camera.x.is_finite()
+        || !snapshot.world.camera.y.is_finite()
+        || !snapshot.world.camera.rotation_deg.is_finite()
+        || !snapshot.world.camera.zoom.is_finite()
+        || snapshot.world.camera.zoom <= 0.0
+    {
         return Err(RuntimeError::InvalidSnapshot(
-            "相机缩放不是有效正数".to_owned(),
+            "相机状态包含无效数值".to_owned(),
         ));
+    }
+    for (id, sprite) in &snapshot.world.sprites {
+        if !sprite.x.is_finite()
+            || !sprite.y.is_finite()
+            || !sprite.scale.is_finite()
+            || !sprite.scale_x.is_finite()
+            || !sprite.scale_y.is_finite()
+            || !sprite.rotation_deg.is_finite()
+            || !sprite.opacity.is_finite()
+            || sprite.scale <= 0.0
+            || sprite.scale_x <= 0.0
+            || sprite.scale_y <= 0.0
+            || !(0.0..=1.0).contains(&sprite.opacity)
+        {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "立绘 {id} 状态包含无效数值"
+            )));
+        }
+    }
+    if let Some(bgm) = &snapshot.audio.bgm {
+        if !bgm.volume.is_finite()
+            || !(0.0..=1.0).contains(&bgm.volume)
+            || bgm.loop_start_ms.is_some() != bgm.loop_end_ms.is_some()
+            || matches!((bgm.loop_start_ms, bgm.loop_end_ms), (Some(start), Some(end)) if start >= end || bgm.start_ms > end)
+        {
+            return Err(RuntimeError::InvalidSnapshot(
+                "BGM 状态包含无效数值或循环点".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1071,6 +1289,14 @@ mod tests {
 
     use super::*;
     use crate::model::{LiteralOperand, VariableOperand};
+
+    #[derive(serde::Deserialize)]
+    struct TimelineConformanceSample {
+        name: String,
+        easing: crate::model::TimelineEasing,
+        time: f32,
+        expected: f32,
+    }
 
     fn catalog() -> ContentCatalog {
         ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
@@ -1085,6 +1311,66 @@ mod tests {
         ValueOperand::Variable(VariableOperand {
             variable: id.to_owned(),
         })
+    }
+
+    #[test]
+    fn timeline_easing_matches_the_shared_frontend_corpus() {
+        let samples: Vec<TimelineConformanceSample> =
+            serde_json::from_str(include_str!("../../shared/timeline-conformance.json")).unwrap();
+        for sample in samples {
+            let progress = sample.time / 1000.0;
+            let value = 10.0 * test_timeline_ease(progress, &sample.easing);
+            assert!(
+                (value - sample.expected).abs() < 0.001,
+                "{}: expected {}, got {}",
+                sample.name,
+                sample.expected,
+                value
+            );
+        }
+    }
+
+    fn test_timeline_ease(value: f32, easing: &crate::model::TimelineEasing) -> f32 {
+        use crate::model::{TimelineEasing, TimelineEasingPreset};
+        let value = value.clamp(0.0, 1.0);
+        match easing {
+            TimelineEasing::Preset(TimelineEasingPreset::Step) => {
+                if value < 1.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            TimelineEasing::Preset(TimelineEasingPreset::Linear) => value,
+            TimelineEasing::Preset(TimelineEasingPreset::EaseIn) => value * value,
+            TimelineEasing::Preset(TimelineEasingPreset::EaseOut) => 1.0 - (1.0 - value).powi(2),
+            TimelineEasing::Preset(TimelineEasingPreset::EaseInOut) => {
+                if value < 0.5 {
+                    2.0 * value * value
+                } else {
+                    1.0 - (-2.0 * value + 2.0).powi(2) / 2.0
+                }
+            }
+            TimelineEasing::CubicBezier { cubic_bezier } => {
+                let sample = |time: f32, first: f32, second: f32| {
+                    3.0 * (1.0 - time).powi(2) * time * first
+                        + 3.0 * (1.0 - time) * time.powi(2) * second
+                        + time.powi(3)
+                };
+                let mut low = 0.0;
+                let mut high = 1.0;
+                let mut time = value;
+                for _ in 0..14 {
+                    if sample(time, cubic_bezier[0], cubic_bezier[2]) < value {
+                        low = time;
+                    } else {
+                        high = time;
+                    }
+                    time = (low + high) / 2.0;
+                }
+                sample(time, cubic_bezier[1], cubic_bezier[3])
+            }
+        }
     }
 
     fn mutate(
@@ -1454,7 +1740,7 @@ mod tests {
         let first = runtime.start_new_game(&content).unwrap();
         if first.requires_ack {
             let next = runtime
-                .presentation_complete(&content, first.update_id)
+                .presentation_complete(&content, first.update_id, PresentationOutcome::Completed)
                 .unwrap();
             assert!(matches!(
                 next.snapshot.prompt,
@@ -1501,11 +1787,15 @@ mod tests {
             Err(RuntimeError::PresentationPending(_))
         ));
         assert!(matches!(
-            runtime.presentation_complete(&content, update.update_id + 1),
+            runtime.presentation_complete(
+                &content,
+                update.update_id + 1,
+                PresentationOutcome::Completed,
+            ),
             Err(RuntimeError::InvalidAcknowledgement { .. })
         ));
         assert!(runtime
-            .presentation_complete(&content, update.update_id)
+            .presentation_complete(&content, update.update_id, PresentationOutcome::Completed,)
             .is_ok());
     }
 
@@ -1524,6 +1814,45 @@ mod tests {
         assert_eq!(value["gate"], "player_advance");
         assert_eq!(value["cue_id"], 9);
         assert!(value.get("kind").is_none());
+    }
+
+    #[test]
+    fn timeline_commits_final_state_and_tracks_seen_outcomes() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.started = true;
+        runtime.snapshot.audio.bgm = Some(LoopingAudioSnapshot {
+            asset: "bgm.test1".to_owned(),
+            volume: 0.5,
+            start_ms: 0,
+            loop_start_ms: None,
+            loop_end_ms: None,
+        });
+        runtime.snapshot.location.node_id = "timeline_showcase".to_owned();
+        let cues = runtime.run_until_boundary(&content).unwrap();
+        let update = runtime.finish_update(cues, true);
+        assert!(update.requires_ack);
+        assert_eq!(update.snapshot.world.sprites["omo"].x, 1380.0);
+        assert_eq!(update.snapshot.world.camera.rotation_deg, 0.0);
+        assert_eq!(update.snapshot.audio.bgm.as_ref().unwrap().volume, 0.35);
+        let PresentationCueKind::Timeline {
+            presentation_id,
+            is_seen,
+            ..
+        } = &update.cues[0].kind
+        else {
+            panic!("expected timeline cue")
+        };
+        assert_eq!(presentation_id, "prologue/timeline_showcase");
+        assert!(!is_seen);
+
+        let video_update = runtime
+            .presentation_complete(&content, update.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(video_update.requires_ack);
+        assert!(runtime
+            .seen_presentations
+            .contains("prologue/timeline_showcase"));
     }
 
     #[test]

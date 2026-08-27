@@ -8,8 +8,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use content::ContentCatalog;
 use model::{
-    AdvanceSource, BootstrapPayload, ResolvedAsset, RuntimeSnapshot, RuntimeUpdate,
-    SaveSlotRequest, SaveSlotSummary, Settings,
+    AdvanceSource, BootstrapPayload, PresentationOutcome, ResolvedAsset, RuntimeSnapshot,
+    RuntimeUpdate, SaveSlotRequest, SaveSlotSummary, Settings,
 };
 use runtime::RuntimeEngine;
 use save::{ProfileManager, SaveManager};
@@ -78,9 +78,12 @@ fn choose(
 #[tauri::command]
 fn presentation_complete(
     update_id: u64,
+    outcome: PresentationOutcome,
     state: State<'_, EngineState>,
 ) -> Result<RuntimeUpdate, String> {
-    state.transact_runtime(|runtime| runtime.presentation_complete(&state.content, update_id))
+    state.transact_runtime(|runtime| {
+        runtime.presentation_complete(&state.content, update_id, outcome)
+    })
 }
 
 #[tauri::command]
@@ -358,7 +361,11 @@ mod tests {
             .unwrap();
         let dialogue = state
             .transact_runtime(|runtime| {
-                runtime.presentation_complete(&state.content, first.update_id)
+                runtime.presentation_complete(
+                    &state.content,
+                    first.update_id,
+                    PresentationOutcome::Completed,
+                )
             })
             .unwrap();
         assert!(matches!(

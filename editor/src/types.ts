@@ -1,10 +1,18 @@
 export type AssetKind =
-  "background" | "sprite" | "gui" | "bgm" | "sfx" | "font";
+  "background" | "sprite" | "gui" | "bgm" | "sfx" | "font" | "video";
 
 export type ScalarValue = boolean | number | string;
 export type VariableScope = "save" | "profile";
 export type VariableType = "boolean" | "integer" | "number" | "string";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+export type TimelineEasing =
+  "step" | Easing | { cubic_bezier: [number, number, number, number] };
+export interface TimelineKeyframe {
+  at_ms: number;
+  value: number;
+  easing: TimelineEasing;
+}
+export type TimelineChannels = Record<string, TimelineKeyframe[]>;
 export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
 export type NodeType = SceneNode["type"];
 
@@ -137,6 +145,49 @@ export interface BgmNode extends AwaitedNode {
   action: "start" | "stop";
   asset: string | null;
   volume: number;
+  start_ms?: number;
+  loop_start_ms?: number | null;
+  loop_end_ms?: number | null;
+}
+
+export type TimelineTrack =
+  | {
+      type: "sprite";
+      sprite_id: string;
+      asset: string;
+      remove_at_end: boolean;
+      channels: TimelineChannels;
+    }
+  | { type: "camera"; channels: TimelineChannels }
+  | {
+      type: "video";
+      asset: string;
+      clip_start_ms: number;
+      clip_end_ms?: number | null;
+      loop: boolean;
+      fit: "contain" | "cover" | "stretch";
+      audio_enabled: boolean;
+      channels: TimelineChannels;
+    }
+  | { type: "bgm"; channels: TimelineChannels };
+
+export type TimelineEvent =
+  | { type: "sfx"; id: string; at_ms: number; asset: string; volume: number }
+  | {
+      type: "screen_effect";
+      id: string;
+      at_ms: number;
+      effect: "shake" | "flash";
+      duration_ms: number;
+    };
+
+export interface TimelineNode extends NextNode {
+  type: "timeline";
+  duration_ms: number;
+  await: boolean;
+  skippable: boolean;
+  tracks: TimelineTrack[];
+  events: TimelineEvent[];
 }
 
 export interface SfxNode extends NextNode {
@@ -182,6 +233,7 @@ export type SceneNode =
   | CameraNode
   | ScreenEffectNode
   | DialogueUiNode
+  | TimelineNode
   | EndNode;
 
 export interface SceneDefinition {
@@ -261,6 +313,9 @@ export interface SpriteSnapshot {
   x: number;
   y: number;
   scale: number;
+  scale_x: number;
+  scale_y: number;
+  rotation_deg: number;
   opacity: number;
   z: number;
 }
@@ -291,11 +346,19 @@ export interface RuntimeSnapshot {
   world: {
     background: string | null;
     sprites: Record<string, SpriteSnapshot>;
-    camera: { x: number; y: number; zoom: number };
+    camera: { x: number; y: number; zoom: number; rotation_deg: number };
     dialogue_ui_visible: boolean;
     persistent_effects: string[];
   };
-  audio: { bgm: { asset: string; volume: number } | null };
+  audio: {
+    bgm: {
+      asset: string;
+      volume: number;
+      start_ms: number;
+      loop_start_ms?: number | null;
+      loop_end_ms?: number | null;
+    } | null;
+  };
   playback: {
     auto: "normal" | "forced";
     ctrl_fast_forward: "allow" | "block";

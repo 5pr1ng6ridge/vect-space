@@ -11,13 +11,18 @@ use thiserror::Error;
 use crate::model::{
     AssetDefinition, AssetKind, AudioAction, CharacterDefinition, ConditionExpression,
     ContentManifest, MutationValue, ResolvedAsset, ScalarValue, SceneDefinition, SceneNode,
-    SpriteAction, ValueOperand, VariableDefinition, VariableOperation, VariableType,
+    SpriteAction, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, ValueOperand,
+    VariableDefinition, VariableOperation, VariableType,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
 const CONTENT_SCHEMA_VERSION: u32 = 2;
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 256;
+const MAX_TIMELINE_DURATION_MS: u64 = 30 * 60 * 1_000;
+const MAX_TIMELINE_TRACKS: usize = 64;
+const MAX_TIMELINE_KEYFRAMES: usize = 10_000;
+const MAX_TIMELINE_EVENTS: usize = 2_048;
 
 #[derive(Debug, Error)]
 pub enum ContentError {
@@ -260,6 +265,16 @@ fn validate_assets(
         validate_identifier("asset id", id)?;
         let relative = validate_relative_path(&definition.path)?;
         canonical_file_within(assets_root, &assets_root.join(relative))?;
+        if definition.kind == AssetKind::Video
+            && Path::new(&definition.path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_none_or(|extension| !extension.eq_ignore_ascii_case("mp4"))
+        {
+            return Err(ContentError::Validation(format!(
+                "视频素材 {id} 必须使用 .mp4（H.264/AAC）"
+            )));
+        }
     }
     Ok(())
 }
@@ -448,6 +463,9 @@ fn validate_scenes(
                     asset,
                     volume,
                     duration_ms,
+                    start_ms,
+                    loop_start_ms,
+                    loop_end_ms,
                     next,
                     ..
                 } => {
@@ -458,6 +476,14 @@ fn validate_scenes(
                         require_asset(assets, id, AssetKind::Bgm, scene_id, node_id)?;
                     }
                     validate_volume(*volume, scene_id, node_id)?;
+                    if loop_start_ms.is_some() != loop_end_ms.is_some() {
+                        return node_error(scene_id, node_id, "BGM 循环起止点必须同时提供");
+                    }
+                    if let (Some(start), Some(end)) = (loop_start_ms, loop_end_ms) {
+                        if start >= end || *start_ms > *end {
+                            return node_error(scene_id, node_id, "BGM 循环点顺序无效");
+                        }
+                    }
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
@@ -491,8 +517,234 @@ fn validate_scenes(
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
+                SceneNode::Timeline {
+                    duration_ms,
+                    await_completion,
+                    skippable,
+                    tracks,
+                    events,
+                    next,
+                } => {
+                    validate_timeline(
+                        *duration_ms,
+                        *await_completion,
+                        *skippable,
+                        tracks,
+                        events,
+                        assets,
+                        scene_id,
+                        node_id,
+                    )?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
                 SceneNode::End => {}
             }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_timeline(
+    duration_ms: u64,
+    await_completion: bool,
+    skippable: bool,
+    tracks: &[TimelineTrack],
+    events: &[TimelineEvent],
+    assets: &BTreeMap<String, AssetDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    if duration_ms == 0 || duration_ms > MAX_TIMELINE_DURATION_MS {
+        return node_error(scene_id, node_id, "时间线时长必须在 1ms 到 30 分钟之间");
+    }
+    if tracks.len() > MAX_TIMELINE_TRACKS {
+        return node_error(scene_id, node_id, "时间线轨道超过 64 条");
+    }
+    if events.len() > MAX_TIMELINE_EVENTS {
+        return node_error(scene_id, node_id, "时间线事件超过 2048 个");
+    }
+    if !await_completion && skippable {
+        return node_error(scene_id, node_id, "非阻塞时间线不能设为可跳过");
+    }
+    let mut keyframe_count = 0usize;
+    let mut video_count = 0usize;
+    let mut track_ids = BTreeSet::new();
+    for track in tracks {
+        let (channels, allowed): (&TimelineChannels, &[&str]) = match track {
+            TimelineTrack::Sprite {
+                sprite_id,
+                asset,
+                channels,
+                ..
+            } => {
+                validate_identifier("timeline sprite id", sprite_id)?;
+                if !track_ids.insert(format!("sprite:{sprite_id}")) {
+                    return node_error(scene_id, node_id, "同一立绘不能出现多条时间线轨道");
+                }
+                require_asset(assets, asset, AssetKind::Sprite, scene_id, node_id)?;
+                (
+                    channels,
+                    &[
+                        "x",
+                        "y",
+                        "scale",
+                        "scale_x",
+                        "scale_y",
+                        "rotation_deg",
+                        "opacity",
+                        "z",
+                    ],
+                )
+            }
+            TimelineTrack::Camera { channels } => {
+                if !track_ids.insert("camera".to_owned()) {
+                    return node_error(scene_id, node_id, "时间线只能包含一条镜头轨");
+                }
+                (channels, &["x", "y", "zoom", "rotation_deg"])
+            }
+            TimelineTrack::Video {
+                asset,
+                clip_start_ms,
+                clip_end_ms,
+                channels,
+                ..
+            } => {
+                video_count += 1;
+                track_ids.insert("video".to_owned());
+                if !await_completion {
+                    return node_error(scene_id, node_id, "包含视频的时间线必须 await: true");
+                }
+                require_asset(assets, asset, AssetKind::Video, scene_id, node_id)?;
+                if clip_end_ms.is_some_and(|end| end <= *clip_start_ms) {
+                    return node_error(scene_id, node_id, "视频裁剪终点必须晚于起点");
+                }
+                (
+                    channels,
+                    &["x", "y", "width", "height", "opacity", "z", "volume"],
+                )
+            }
+            TimelineTrack::Bgm { channels } => {
+                if !track_ids.insert("bgm".to_owned()) {
+                    return node_error(scene_id, node_id, "时间线只能包含一条 BGM 音量轨");
+                }
+                (channels, &["volume"])
+            }
+        };
+        validate_timeline_channels(
+            channels,
+            allowed,
+            duration_ms,
+            scene_id,
+            node_id,
+            &mut keyframe_count,
+        )?;
+    }
+    if video_count > 1 {
+        return node_error(scene_id, node_id, "单条时间线最多包含一个视频轨");
+    }
+    if keyframe_count > MAX_TIMELINE_KEYFRAMES {
+        return node_error(scene_id, node_id, "时间线关键帧超过 10000 个");
+    }
+    let mut event_ids = BTreeSet::new();
+    let mut previous = 0;
+    for (index, event) in events.iter().enumerate() {
+        let (id, at_ms) = match event {
+            TimelineEvent::Sfx {
+                id,
+                at_ms,
+                asset,
+                volume,
+            } => {
+                require_asset(assets, asset, AssetKind::Sfx, scene_id, node_id)?;
+                validate_volume(*volume, scene_id, node_id)?;
+                (id, *at_ms)
+            }
+            TimelineEvent::ScreenEffect {
+                id,
+                at_ms,
+                duration_ms: effect_duration,
+                ..
+            } => {
+                if at_ms.saturating_add(*effect_duration) > duration_ms {
+                    return node_error(scene_id, node_id, "屏幕效果事件超出时间线时长");
+                }
+                (id, *at_ms)
+            }
+        };
+        validate_identifier("timeline event id", id)?;
+        if !event_ids.insert(id) {
+            return node_error(scene_id, node_id, "时间线事件 ID 重复");
+        }
+        if at_ms > duration_ms || (index > 0 && at_ms < previous) {
+            return node_error(scene_id, node_id, "时间线事件必须按时间排序且位于时长内");
+        }
+        previous = at_ms;
+    }
+    Ok(())
+}
+
+fn validate_timeline_channels(
+    channels: &TimelineChannels,
+    allowed: &[&str],
+    duration_ms: u64,
+    scene_id: &str,
+    node_id: &str,
+    keyframe_count: &mut usize,
+) -> Result<(), ContentError> {
+    for (name, keyframes) in channels {
+        if !allowed.contains(&name.as_str()) {
+            return node_error(
+                scene_id,
+                node_id,
+                &format!("时间线通道 {name} 不适用于该轨道"),
+            );
+        }
+        if keyframes.is_empty() {
+            return node_error(scene_id, node_id, &format!("时间线通道 {name} 不能为空"));
+        }
+        *keyframe_count = keyframe_count.saturating_add(keyframes.len());
+        let mut previous = None;
+        for keyframe in keyframes {
+            if keyframe.at_ms > duration_ms
+                || previous.is_some_and(|value| keyframe.at_ms <= value)
+                || !keyframe.value.is_finite()
+            {
+                return node_error(
+                    scene_id,
+                    node_id,
+                    &format!("时间线通道 {name} 的关键帧无效"),
+                );
+            }
+            if matches!(name.as_str(), "opacity" | "volume")
+                && !(0.0..=1.0).contains(&keyframe.value)
+            {
+                return node_error(
+                    scene_id,
+                    node_id,
+                    &format!("时间线通道 {name} 必须在 0 到 1 之间"),
+                );
+            }
+            if matches!(
+                name.as_str(),
+                "scale" | "scale_x" | "scale_y" | "zoom" | "width" | "height"
+            ) && keyframe.value <= 0.0
+            {
+                return node_error(scene_id, node_id, &format!("时间线通道 {name} 必须大于 0"));
+            }
+            if let TimelineEasing::CubicBezier { cubic_bezier } = &keyframe.easing {
+                if cubic_bezier.iter().any(|value| !value.is_finite())
+                    || !(0.0..=1.0).contains(&cubic_bezier[0])
+                    || !(0.0..=1.0).contains(&cubic_bezier[2])
+                {
+                    return node_error(
+                        scene_id,
+                        node_id,
+                        "cubic_bezier 的 x 控制点必须在 0 到 1 之间",
+                    );
+                }
+            }
+            previous = Some(keyframe.at_ms);
         }
     }
     Ok(())
@@ -770,6 +1022,7 @@ fn validate_text_markup(
     if open_effects != text.matches("[/fx]").count() {
         return node_error(scene_id, node_id, "文本特效标记未闭合");
     }
+    validate_auto_advance_marker(text, scene_id, node_id)?;
     let references = text_template::references(text)
         .map_err(|error| ContentError::Validation(format!("{scene_id}/{node_id}: {error}")))?;
     for reference in references {
@@ -781,6 +1034,29 @@ fn validate_text_markup(
         })?;
         text_template::validate_reference_type(&reference, definition.value_type)
             .map_err(|error| ContentError::Validation(format!("{scene_id}/{node_id}: {error}")))?;
+    }
+    Ok(())
+}
+
+fn validate_auto_advance_marker(
+    text: &str,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    const MARKER: &str = "[auto]";
+    let mut markers = text.match_indices(MARKER).filter(|(index, _)| {
+        let slash_count = text.as_bytes()[..*index]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        slash_count % 2 == 0
+    });
+    let Some((index, _)) = markers.next() else {
+        return Ok(());
+    };
+    if markers.next().is_some() || !text[index + MARKER.len()..].trim().is_empty() {
+        return node_error(scene_id, node_id, "[auto] 只能出现一次且必须位于对话末尾");
     }
     Ok(())
 }
@@ -898,6 +1174,14 @@ mod tests {
             ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
                 .unwrap();
         catalog.write_development_schemas().unwrap();
+    }
+
+    #[test]
+    fn auto_advance_marker_must_be_terminal_and_unescaped() {
+        assert!(validate_auto_advance_marker("完成后继续。[auto]", "s", "n").is_ok());
+        assert!(validate_auto_advance_marker(r"\[auto]", "s", "n").is_ok());
+        assert!(validate_auto_advance_marker("[auto] 不能在开头", "s", "n").is_err());
+        assert!(validate_auto_advance_marker("[auto][auto]", "s", "n").is_err());
     }
 
     #[test]

@@ -7,6 +7,7 @@ import type {
   EditorProject,
   ScalarValue,
   SceneNode,
+  TimelineTrack,
   ValueOperand,
   VariableType,
 } from "./types";
@@ -270,9 +271,151 @@ function validateNode(
     case "dialogue_ui":
       checkDuration(node.duration_ms);
       break;
+    case "timeline": {
+      if (
+        !Number.isInteger(node.duration_ms) ||
+        node.duration_ms < 1 ||
+        node.duration_ms > 1_800_000
+      ) {
+        issue(
+          "invalid_timeline_duration",
+          "时间线时长必须在 1ms 到 30 分钟之间",
+        );
+      }
+      if (!node.await && node.skippable) {
+        issue("invalid_timeline_skip", "非阻塞时间线不能设为可跳过");
+      }
+      if (node.tracks.length > 64)
+        issue("too_many_timeline_tracks", "时间线轨道超过 64 条");
+      if (node.events.length > 2048)
+        issue("too_many_timeline_events", "时间线事件超过 2048 个");
+      let keyframes = 0;
+      let videos = 0;
+      const trackIds = new Set<string>();
+      for (const track of node.tracks) {
+        const trackId =
+          track.type === "sprite" ? `sprite:${track.sprite_id}` : track.type;
+        if (trackIds.has(trackId))
+          issue("duplicate_timeline_track", `重复时间线轨道：${trackId}`);
+        trackIds.add(trackId);
+        if (track.type === "video") {
+          videos += 1;
+          checkAsset(track.asset, "video", true);
+          if (!node.await)
+            issue("video_requires_await", "视频时间线必须等待完成");
+        } else if (track.type === "sprite")
+          checkAsset(track.asset, "sprite", true);
+        const allowed = timelineChannels(track);
+        for (const [channel, frames] of Object.entries(track.channels)) {
+          if (!allowed.includes(channel))
+            issue(
+              "invalid_timeline_channel",
+              `${track.type} 不支持 ${channel} 通道`,
+            );
+          keyframes += frames.length;
+          let prior = -1;
+          for (const frame of frames) {
+            if (
+              !Number.isFinite(frame.value) ||
+              frame.at_ms <= prior ||
+              frame.at_ms > node.duration_ms
+            ) {
+              issue(
+                "invalid_timeline_keyframe",
+                `${channel} 关键帧时间或数值无效`,
+              );
+            }
+            if (
+              ["opacity", "volume"].includes(channel) &&
+              (frame.value < 0 || frame.value > 1)
+            ) {
+              issue(
+                "invalid_timeline_range",
+                `${channel} 关键帧必须在 0 到 1 之间`,
+              );
+            }
+            if (
+              [
+                "scale",
+                "scale_x",
+                "scale_y",
+                "zoom",
+                "width",
+                "height",
+              ].includes(channel) &&
+              frame.value <= 0
+            ) {
+              issue("invalid_timeline_range", `${channel} 关键帧必须大于 0`);
+            }
+            if (typeof frame.easing === "object") {
+              const [x1, y1, x2, y2] = frame.easing.cubic_bezier;
+              if (
+                ![x1, y1, x2, y2].every(Number.isFinite) ||
+                x1 < 0 ||
+                x1 > 1 ||
+                x2 < 0 ||
+                x2 > 1
+              ) {
+                issue(
+                  "invalid_cubic_bezier",
+                  "贝塞尔曲线的 x 控制点必须在 0 到 1 之间",
+                );
+              }
+            }
+            prior = frame.at_ms;
+          }
+        }
+      }
+      if (videos > 1)
+        issue("too_many_video_tracks", "单条时间线最多一个视频轨");
+      if (keyframes > 10_000)
+        issue("too_many_keyframes", "时间线关键帧超过 10000 个");
+      const ids = new Set<string>();
+      let priorEvent = -1;
+      for (const event of node.events) {
+        if (!ID_PATTERN.test(event.id) || ids.has(event.id))
+          issue("invalid_timeline_event", `事件 ID 无效或重复：${event.id}`);
+        if (event.at_ms < priorEvent || event.at_ms > node.duration_ms)
+          issue("invalid_timeline_event_time", `事件 ${event.id} 未排序或越界`);
+        if (event.type === "sfx") {
+          checkAsset(event.asset, "sfx", true);
+          checkVolume(event.volume);
+        } else if (event.at_ms + event.duration_ms > node.duration_ms) {
+          issue(
+            "invalid_timeline_event_time",
+            `事件 ${event.id} 超出时间线时长`,
+          );
+        }
+        ids.add(event.id);
+        priorEvent = event.at_ms;
+      }
+      break;
+    }
     case "jump":
     case "end":
       break;
+  }
+}
+
+function timelineChannels(track: TimelineTrack): string[] {
+  switch (track.type) {
+    case "sprite":
+      return [
+        "x",
+        "y",
+        "scale",
+        "scale_x",
+        "scale_y",
+        "rotation_deg",
+        "opacity",
+        "z",
+      ];
+    case "camera":
+      return ["x", "y", "zoom", "rotation_deg"];
+    case "video":
+      return ["x", "y", "width", "height", "opacity", "z", "volume"];
+    case "bgm":
+      return ["volume"];
   }
 }
 
