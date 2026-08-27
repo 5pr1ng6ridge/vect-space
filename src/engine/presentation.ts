@@ -1,6 +1,13 @@
 import "pixi.js/unsafe-eval";
 
-import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
+import {
+  Application,
+  Container,
+  Graphics,
+  Sprite,
+  Texture,
+  VideoSource,
+} from "pixi.js";
 
 import { AudioManager } from "./audio";
 import type {
@@ -500,6 +507,7 @@ export class PresentationController {
     );
     let video: HTMLVideoElement | null = null;
     let videoView: Sprite | null = null;
+    let videoSource: VideoSource | null = null;
     let buffering = false;
     const setBuffering = (value: boolean): void => {
       buffering = value;
@@ -511,20 +519,36 @@ export class PresentationController {
       video.preload = "auto";
       video.crossOrigin = "anonymous";
       video.playsInline = true;
+      video.autoplay = false;
+      video.loop = false;
+      video.controls = false;
+      video.disablePictureInPicture = true;
       video.src = requireAssetUrl(assets, videoTrack.asset);
       video.muted = !videoTrack.audio_enabled;
-      await waitForVideo(video, signal);
+      await waitForVideoFrameData(video, signal);
       if (signal.aborted) return "failed";
-      video.currentTime = videoTrack.clip_start_ms / 1_000;
+      await seekVideo(video, videoTrack.clip_start_ms / 1_000, signal);
+      if (signal.aborted) return "failed";
       if (videoTrack.audio_enabled) this.#audio.attachVideo(video, 1);
       video.addEventListener("waiting", () => setBuffering(true));
       video.addEventListener("stalled", () => setBuffering(true));
       video.addEventListener("playing", () => setBuffering(false));
       video.addEventListener("canplay", () => setBuffering(false));
-      videoView = new Sprite(Texture.from(video));
+      videoSource = new VideoSource({
+        resource: video,
+        autoLoad: false,
+        autoPlay: false,
+        updateFPS: 0,
+      });
+      await videoSource.load();
+      videoSource.autoUpdate = false;
+      videoSource.update();
+      videoView = new Sprite(new Texture({ source: videoSource }));
       videoView.anchor.set(0, 0);
       this.#world.addChild(videoView);
-      await video.play().catch(() => undefined);
+      await startVideoPlayback(video, signal);
+      await waitForPresentedVideoFrame(video, signal);
+      videoSource.update();
     }
 
     let previousElapsed = -1;
@@ -576,6 +600,7 @@ export class PresentationController {
         if (!buffering && Math.abs(video.currentTime - desired) > 0.08) {
           video.currentTime = desired;
         }
+        videoSource?.update();
       }
       previousElapsed = elapsedMs;
       this.#application.render();
@@ -598,11 +623,17 @@ export class PresentationController {
       this.#skipSuppressTimelineEvents = false;
       if (video !== null) {
         video.pause();
-        video.removeAttribute("src");
-        video.load();
       }
       this.#activeVideo = null;
-      videoView?.destroy({ texture: true });
+      if (videoView !== null) {
+        videoView.destroy({ texture: true, textureSource: true });
+      } else {
+        videoSource?.destroy();
+        if (video !== null) {
+          video.removeAttribute("src");
+          video.load();
+        }
+      }
     }
   }
 
@@ -902,39 +933,132 @@ function readSprite(view: Sprite): Omit<SpriteSnapshot, "asset"> {
   };
 }
 
-function waitForVideo(
+function waitForVideoFrameData(
   video: HTMLVideoElement,
   signal: AbortSignal,
 ): Promise<void> {
-  if (video.readyState >= HTMLMediaElement.HAVE_METADATA)
+  if (
+    video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+    video.videoWidth > 0 &&
+    video.videoHeight > 0
+  )
     return Promise.resolve();
   return withTimeout(
     new Promise<void>((resolve, reject) => {
       const cleanup = (): void => {
-        video.removeEventListener("loadedmetadata", loaded);
+        video.removeEventListener("loadeddata", loaded);
+        video.removeEventListener("canplay", loaded);
         video.removeEventListener("error", failed);
         signal.removeEventListener("abort", aborted);
       };
       const loaded = (): void => {
+        if (video.videoWidth <= 0 || video.videoHeight <= 0) return;
         cleanup();
         resolve();
       };
       const failed = (): void => {
         cleanup();
-        reject(new Error("视频元数据加载失败"));
+        reject(new Error(videoErrorMessage(video, "视频帧加载失败")));
       };
       const aborted = (): void => {
         cleanup();
         resolve();
       };
-      video.addEventListener("loadedmetadata", loaded, { once: true });
+      video.addEventListener("loadeddata", loaded);
+      video.addEventListener("canplay", loaded);
       video.addEventListener("error", failed, { once: true });
       signal.addEventListener("abort", aborted, { once: true });
       video.load();
     }),
     15_000,
-    "视频加载超时",
+    "视频首帧加载超时",
   );
+}
+
+function seekVideo(
+  video: HTMLVideoElement,
+  targetSeconds: number,
+  signal: AbortSignal,
+): Promise<void> {
+  const target = Math.max(0, targetSeconds);
+  if (Math.abs(video.currentTime - target) < 0.001) return Promise.resolve();
+  return withTimeout(
+    new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        video.removeEventListener("seeked", seeked);
+        video.removeEventListener("error", failed);
+        signal.removeEventListener("abort", aborted);
+      };
+      const seeked = (): void => {
+        cleanup();
+        resolve();
+      };
+      const failed = (): void => {
+        cleanup();
+        reject(new Error(videoErrorMessage(video, "视频定位失败")));
+      };
+      const aborted = (): void => {
+        cleanup();
+        resolve();
+      };
+      video.addEventListener("seeked", seeked, { once: true });
+      video.addEventListener("error", failed, { once: true });
+      signal.addEventListener("abort", aborted, { once: true });
+      video.currentTime = target;
+    }),
+    8_000,
+    "视频定位超时",
+  );
+}
+
+async function startVideoPlayback(
+  video: HTMLVideoElement,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return;
+  try {
+    await video.play();
+  } catch (error) {
+    throw new Error(`视频无法开始播放：${errorMessage(error)}`);
+  }
+}
+
+function waitForPresentedVideoFrame(
+  video: HTMLVideoElement,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  if (typeof video.requestVideoFrameCallback !== "function") {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+  return withTimeout(
+    new Promise<void>((resolve) => {
+      let handle = 0;
+      const cleanup = (): void => {
+        video.cancelVideoFrameCallback(handle);
+        signal.removeEventListener("abort", aborted);
+      };
+      const presented = (): void => {
+        cleanup();
+        resolve();
+      };
+      const aborted = (): void => {
+        cleanup();
+        resolve();
+      };
+      handle = video.requestVideoFrameCallback(presented);
+      signal.addEventListener("abort", aborted, { once: true });
+    }),
+    5_000,
+    "视频首帧呈现超时",
+  );
+}
+
+function videoErrorMessage(video: HTMLVideoElement, prefix: string): string {
+  const code = video.error?.code;
+  const suffix =
+    code === undefined ? "" : `（MediaError ${code}: ${video.error?.message}）`;
+  return `${prefix}${suffix}`;
 }
 
 function requireAssetUrl(assets: AssetUrlMap, id: string): string {

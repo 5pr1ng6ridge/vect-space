@@ -1,7 +1,17 @@
 [
-  { "name": "linear quarter", "easing": "linear", "time": 250, "expected": 2.5 },
+  {
+    "name": "linear quarter",
+    "easing": "linear",
+    "time": 250,
+    "expected": 2.5
+  },
   { "name": "step holds", "easing": "step", "time": 999, "expected": 0.0 },
-  { "name": "ease in midpoint", "easing": "ease_in", "time": 500, "expected": 2.5 },
+  {
+    "name": "ease in midpoint",
+    "easing": "ease_in",
+    "time": 500,
+    "expected": 2.5
+  },
   {
     "name": "linear cubic midpoint",
     "easing": { "cubic_bezier": [0.0, 0.0, 1.0, 1.0] },

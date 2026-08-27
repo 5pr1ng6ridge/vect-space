@@ -217,7 +217,7 @@ nodes:
     speaker: test
     text: >-
       对正数 $x,y$，因为 $x+y-2\sqrt{xy}=(\sqrt{x}-\sqrt{y})^2 \ge
-      0$，所以二元均值不等式$\frac{x+y}{2} \ge \sqrt{xy}$成立。
+      0$，所以二元均值不等式$\frac{x+y}{2} \ge \sqrt{xy}$成立。[auto]
     speed_cps: null
     next: say_3
   say_3:
@@ -357,7 +357,7 @@ nodes:
         - at_ms: 0
           value: 0.0
           easing: ease_out
-        - at_ms: 500
+        - at_ms: 2000
           value: 1.0
           easing: linear
         - at_ms: 4500
