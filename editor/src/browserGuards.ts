@@ -77,6 +77,12 @@ export function installBrowserGuards(): void {
   if (!isTauriRuntime()) return;
 
   const preventContextMenu = (event: MouseEvent): void => {
+    if (
+      event.target instanceof Element &&
+      event.target.closest("[data-allow-context-menu]") !== null
+    ) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
   };

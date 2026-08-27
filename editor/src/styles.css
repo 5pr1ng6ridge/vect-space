@@ -853,6 +853,50 @@ code {
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.29);
 }
 
+.insert-point {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #53617a;
+  border-radius: 50%;
+  background: #151923;
+  color: #b9c3d8;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.72;
+  place-items: center;
+  transform: translateY(-50%);
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.insert-point:hover,
+.insert-point:focus-visible {
+  border-color: var(--accent);
+  background: #203b3b;
+  color: var(--accent);
+  opacity: 1;
+  outline: none;
+  transform: translateY(-50%) scale(1.08);
+}
+
+.insert-point-left {
+  left: -29px;
+}
+
+.insert-point-right {
+  right: -29px;
+}
+
 .story-node::before {
   position: absolute;
   top: -1px;
@@ -1030,6 +1074,106 @@ code {
 .story-edge-choice path,
 .story-edge-condition path {
   stroke: #a88754;
+}
+
+.quick-insert-menu {
+  position: absolute;
+  z-index: 30;
+  width: 264px;
+  max-height: min(440px, calc(100% - 16px));
+  overflow: hidden;
+  border: 1px solid #3d4960;
+  border-radius: 9px;
+  background: rgba(18, 21, 29, 0.98);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+}
+
+.quick-insert-menu-header {
+  display: flex;
+  min-height: 48px;
+  padding: 9px 10px 8px 13px;
+  border-bottom: 1px solid #2b3140;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.quick-insert-menu-header div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.quick-insert-menu-header strong {
+  color: #e0e5f0;
+  font-size: 11px;
+}
+
+.quick-insert-menu-header small {
+  overflow: hidden;
+  color: #788399;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-insert-menu-header button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #788399;
+  font-size: 18px;
+}
+
+.quick-insert-menu-header button:hover {
+  color: #e0e5f0;
+}
+
+.quick-insert-options {
+  display: grid;
+  max-height: 340px;
+  padding: 8px;
+  overflow-y: auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.quick-insert-options button {
+  display: grid;
+  min-height: 42px;
+  padding: 7px 8px;
+  border: 1px solid #30394b;
+  border-radius: 6px;
+  background: #191d27;
+  color: #d7deed;
+  text-align: left;
+  gap: 3px;
+}
+
+.quick-insert-options button:hover,
+.quick-insert-options button:focus-visible {
+  border-color: var(--accent);
+  background: #203039;
+  outline: none;
+}
+
+.quick-insert-options button span {
+  font-size: 10px;
+}
+
+.quick-insert-options button small {
+  color: #788399;
+  font-size: 8px;
+}
+
+.quick-insert-menu > p {
+  margin: 0;
+  padding: 0 12px 10px;
+  color: #788399;
+  font-size: 9px;
 }
 
 /* Inspector */

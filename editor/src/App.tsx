@@ -23,7 +23,9 @@ import {
   defaultNode,
   ensureSceneLayout,
   findScene,
+  insertNode,
   newSceneFile,
+  nodeLabel,
   outputPorts,
   projectRequest,
   renameCharacter,
@@ -407,6 +409,27 @@ export function App(): ReactElement {
     setSelectedNodeId(id);
   };
 
+  const quickInsertNode = (
+    sourceId: string,
+    side: "left" | "right",
+    type: NodeType,
+  ): void => {
+    if (project === null) return;
+    const result = insertNode(project, activeSceneId, sourceId, side, type);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setPast((items) => [...items.slice(-99), cloneProject(project)]);
+    setFuture([]);
+    setProject(result.project);
+    setDirty(true);
+    setSelectedNodeId(result.nodeId);
+    setNotice(
+      `已在${side === "left" ? "左" : "右"}侧插入${nodeLabel(type)}节点。`,
+    );
+  };
+
   const deleteNode = (nodeId: string): void => {
     if (
       activeScene === undefined ||
@@ -729,7 +752,7 @@ export function App(): ReactElement {
             ＋ 添加节点
           </button>
           <span className="workspace-hint">
-            从节点右侧端口拖到目标节点，即可修改 YAML 跳转字段
+            节点两侧的 ＋ 可快速插入；右键节点或插入点可选择类型
           </span>
         </div>
         {activeScene !== undefined ? (
@@ -763,6 +786,7 @@ export function App(): ReactElement {
                   position;
               })
             }
+            onQuickInsert={quickInsertNode}
             onSelect={setSelectedNodeId}
             onViewport={(viewport) =>
               commit((draft) => {

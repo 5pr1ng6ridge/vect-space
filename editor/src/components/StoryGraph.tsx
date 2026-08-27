@@ -19,13 +19,15 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactElement,
 } from "react";
-import { outputPorts } from "../story";
+import { NODE_TYPES, nodeLabel, outputPorts, type InsertSide } from "../story";
 import type {
   EditorDiagnostic,
   NodePosition,
+  NodeType,
   SceneDefinition,
   SceneLayout,
 } from "../types";
@@ -43,6 +45,14 @@ interface StoryGraphProps {
   onMoveNode(nodeId: string, position: NodePosition): void;
   onMoveMany(positions: Record<string, NodePosition>): void;
   onViewport(viewport: Viewport): void;
+  onQuickInsert(nodeId: string, side: InsertSide, type: NodeType): void;
+}
+
+interface QuickInsertMenu {
+  nodeId: string;
+  side: InsertSide;
+  x: number;
+  y: number;
 }
 
 export function StoryGraph(props: StoryGraphProps): ReactElement {
@@ -63,8 +73,12 @@ function StoryGraphInner({
   onMoveNode,
   onMoveMany,
   onViewport,
+  onQuickInsert,
 }: StoryGraphProps): ReactElement {
   const { fitView, setViewport } = useReactFlow<StoryFlowNode>();
+  const graphShellRef = useRef<HTMLDivElement>(null);
+  const [quickInsertMenu, setQuickInsertMenu] =
+    useState<QuickInsertMenu | null>(null);
   const issuesByNode = useMemo(() => {
     const result = new Map<string, number>();
     for (const issue of diagnostics) {
@@ -74,6 +88,30 @@ function StoryGraphInner({
     }
     return result;
   }, [diagnostics, scene.id]);
+
+  const openQuickInsertMenu = useCallback(
+    (
+      nodeId: string,
+      side: InsertSide,
+      clientX: number,
+      clientY: number,
+    ): void => {
+      const bounds = graphShellRef.current?.getBoundingClientRect();
+      const rawX = clientX - (bounds?.left ?? 0);
+      const rawY = clientY - (bounds?.top ?? 0);
+      const menuWidth = 264;
+      const menuHeight = 410;
+      const x = bounds
+        ? Math.max(8, Math.min(rawX, bounds.width - menuWidth - 8))
+        : rawX;
+      const y = bounds
+        ? Math.max(8, Math.min(rawY, bounds.height - menuHeight - 8))
+        : rawY;
+      setQuickInsertMenu({ nodeId, side, x, y });
+      onSelect(nodeId);
+    },
+    [onSelect],
+  );
 
   const buildNodes = useCallback(
     (): StoryFlowNode[] =>
@@ -92,9 +130,17 @@ function StoryGraphInner({
           entry: scene.entry === nodeId,
           issueCount: issuesByNode.get(nodeId) ?? 0,
           onOpen: onSelect,
+          onQuickInsert: openQuickInsertMenu,
         },
       })),
-    [issuesByNode, layout?.nodes, onSelect, scene, selectedNodeId],
+    [
+      issuesByNode,
+      layout?.nodes,
+      onSelect,
+      openQuickInsertMenu,
+      scene,
+      selectedNodeId,
+    ],
   );
 
   const buildEdges = useCallback((): Edge[] => {
@@ -123,8 +169,8 @@ function StoryGraphInner({
     return edges;
   }, [scene]);
 
-  const [nodes, setNodes] = useState<StoryFlowNode[]>(buildNodes);
-  const [edges, setEdges] = useState<Edge[]>(buildEdges);
+  const [nodes, setNodes] = useState<StoryFlowNode[]>([]);
+  const [edges, setEdges] = useState<Edge[]>([]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => setNodes(buildNodes()));
@@ -135,6 +181,7 @@ function StoryGraphInner({
     return () => cancelAnimationFrame(frame);
   }, [buildEdges]);
   useEffect(() => {
+    if (nodes.length === 0) return;
     const viewport = layout?.viewport;
     if (viewport !== null && viewport !== undefined) {
       void setViewport(viewport, { duration: 0 });
@@ -143,7 +190,7 @@ function StoryGraphInner({
         () => void fitView({ padding: 0.2, duration: 250 }),
       );
     }
-  }, [fitView, layout?.viewport, scene.id, setViewport]);
+  }, [fitView, layout?.viewport, nodes.length, scene.id, setViewport]);
 
   const handleNodesChange = (changes: NodeChange<StoryFlowNode>[]): void => {
     setNodes((current) => applyNodeChanges(changes, current));
@@ -161,8 +208,18 @@ function StoryGraphInner({
     }
   };
   const handleNodeClick: NodeMouseHandler<StoryFlowNode> = (_event, node) => {
+    setQuickInsertMenu(null);
     onSelect(node.id);
   };
+
+  useEffect(() => {
+    if (quickInsertMenu === null) return;
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setQuickInsertMenu(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [quickInsertMenu]);
 
   const autoLayout = async (): Promise<void> => {
     const { default: ELK } = await import("elkjs/lib/elk.bundled.js");
@@ -193,7 +250,7 @@ function StoryGraphInner({
   };
 
   return (
-    <div className="graph-shell">
+    <div className="graph-shell" ref={graphShellRef}>
       <div className="graph-toolbar">
         <strong>{scene.id}</strong>
         <span>{Object.keys(scene.nodes).length} nodes</span>
@@ -223,7 +280,10 @@ function StoryGraphInner({
         onNodeClick={handleNodeClick}
         onNodeDragStop={(_event, node) => onMoveNode(node.id, node.position)}
         onNodesChange={handleNodesChange}
-        onPaneClick={() => onSelect(null)}
+        onPaneClick={() => {
+          setQuickInsertMenu(null);
+          onSelect(null);
+        }}
         snapGrid={[16, 16]}
         snapToGrid
       >
@@ -238,6 +298,55 @@ function StoryGraphInner({
         />
         <Controls position="bottom-right" showInteractive={false} />
       </ReactFlow>
+      {quickInsertMenu !== null && (
+        <div
+          className="quick-insert-menu"
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.stopPropagation()}
+          role="menu"
+          style={{ left: quickInsertMenu.x, top: quickInsertMenu.y }}
+        >
+          <header className="quick-insert-menu-header">
+            <div>
+              <strong>
+                {quickInsertMenu.side === "left" ? "左侧" : "右侧"}插入节点
+              </strong>
+              <small>
+                {nodeLabel(scene.nodes[quickInsertMenu.nodeId]?.type ?? "say")}{" "}
+                · {quickInsertMenu.nodeId}
+              </small>
+            </div>
+            <button
+              aria-label="关闭插入菜单"
+              onClick={() => setQuickInsertMenu(null)}
+              type="button"
+            >
+              ×
+            </button>
+          </header>
+          <div className="quick-insert-options">
+            {NODE_TYPES.map((candidate) => (
+              <button
+                key={candidate.type}
+                onClick={() => {
+                  setQuickInsertMenu(null);
+                  onQuickInsert(
+                    quickInsertMenu.nodeId,
+                    quickInsertMenu.side,
+                    candidate.type,
+                  );
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <span>{candidate.label}</span>
+                <small>{candidate.group}</small>
+              </button>
+            ))}
+          </div>
+          <p>选择类型后会自动接管原有连线。</p>
+        </div>
+      )}
     </div>
   );
 }

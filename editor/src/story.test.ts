@@ -4,6 +4,7 @@ import {
   countCharacterReferences,
   outputPorts,
   defaultNode,
+  insertNode,
   renameNode,
   renameCharacter,
   renameVariable,
@@ -90,6 +91,45 @@ describe("story graph mapping", () => {
     expect(outputPorts(node)).toEqual([
       { id: "next", label: "下一步", target: "end", targetScene: null },
     ]);
+  });
+
+  it("inserts a node on the right and preserves the original destination", () => {
+    const result = insertNode(project(), "main", "right", "right", "wait");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const scene = result.project.scenes[0].definition;
+    const source = scene.nodes.right;
+    const inserted = scene.nodes[result.nodeId];
+    expect(source.type === "say" && source.next).toBe(result.nodeId);
+    expect(inserted.type === "wait" && inserted.next).toBe("end");
+  });
+
+  it("allows an explicit end node as a terminal right insertion", () => {
+    const result = insertNode(project(), "main", "right", "right", "end");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const scene = result.project.scenes[0].definition;
+    const source = scene.nodes.right;
+    expect(source.type === "say" && source.next).toBe(result.nodeId);
+    expect(scene.nodes[result.nodeId]).toEqual({ type: "end" });
+  });
+
+  it("inserts a node on the left and redirects all local references", () => {
+    const source = project();
+    const result = insertNode(source, "main", "end", "left", "wait");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const scene = result.project.scenes[0].definition;
+    const inserted = scene.nodes[result.nodeId];
+    expect(scene.entry).toBe("start");
+    expect(inserted.type).toBe("wait");
+    if (inserted.type === "wait") expect(inserted.next).toBe("end");
+    expect(scene.nodes.left.type === "jump" && scene.nodes.left.target).toBe(
+      result.nodeId,
+    );
+    expect(scene.nodes.right.type === "say" && scene.nodes.right.next).toBe(
+      result.nodeId,
+    );
   });
 
   it("renames a node and all local and jump references atomically", () => {

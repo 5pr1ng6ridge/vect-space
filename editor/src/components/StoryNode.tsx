@@ -6,7 +6,12 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { memo, useEffect, type ReactElement } from "react";
-import { nodeLabel, outputPorts, summarizeNode } from "../story";
+import {
+  nodeLabel,
+  outputPorts,
+  summarizeNode,
+  type InsertSide,
+} from "../story";
 import type { SceneNode } from "../types";
 
 export interface StoryNodeData extends Record<string, unknown> {
@@ -15,6 +20,12 @@ export interface StoryNodeData extends Record<string, unknown> {
   entry: boolean;
   issueCount: number;
   onOpen(nodeId: string): void;
+  onQuickInsert(
+    nodeId: string,
+    side: InsertSide,
+    clientX: number,
+    clientY: number,
+  ): void;
 }
 
 export type StoryFlowNode = Node<StoryNodeData, "story">;
@@ -35,8 +46,36 @@ export const StoryNodeCard = memo(function StoryNodeCard({
   return (
     <article
       className={`story-node story-node-${data.node.type}${selected ? " is-selected" : ""}`}
+      data-allow-context-menu="true"
       onDoubleClick={() => data.onOpen(data.nodeId)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        data.onQuickInsert(data.nodeId, "right", event.clientX, event.clientY);
+      }}
     >
+      {(["left", "right"] as InsertSide[]).map((side) => (
+        <button
+          aria-label={`在${side === "left" ? "左" : "右"}侧插入节点`}
+          className={`insert-point insert-point-${side}`}
+          data-allow-context-menu="true"
+          key={side}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            data.onQuickInsert(data.nodeId, side, event.clientX, event.clientY);
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            data.onQuickInsert(data.nodeId, side, event.clientX, event.clientY);
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          type="button"
+        >
+          <span aria-hidden="true">＋</span>
+        </button>
+      ))}
       <Handle
         className="story-handle input-handle"
         position={Position.Left}
