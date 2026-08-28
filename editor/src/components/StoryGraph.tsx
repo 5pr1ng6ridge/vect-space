@@ -41,6 +41,7 @@ interface StoryGraphProps {
   diagnostics: EditorDiagnostic[];
   selectedNodeId: string | null;
   onSelect(nodeId: string | null): void;
+  onOpen(nodeId: string): void;
   onConnect(sourceId: string, handle: string, targetId: string): void;
   onMoveNode(nodeId: string, position: NodePosition): void;
   onMoveMany(positions: Record<string, NodePosition>): void;
@@ -69,6 +70,7 @@ function StoryGraphInner({
   diagnostics,
   selectedNodeId,
   onSelect,
+  onOpen,
   onConnect,
   onMoveNode,
   onMoveMany,
@@ -129,7 +131,8 @@ function StoryGraphInner({
           node,
           entry: scene.entry === nodeId,
           issueCount: issuesByNode.get(nodeId) ?? 0,
-          onOpen: onSelect,
+          onOpen,
+          onSelect,
           onQuickInsert: openQuickInsertMenu,
         },
       })),
@@ -137,6 +140,7 @@ function StoryGraphInner({
       issuesByNode,
       layout?.nodes,
       onSelect,
+      onOpen,
       openQuickInsertMenu,
       scene,
       selectedNodeId,

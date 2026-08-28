@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useMemo, useState, type ReactElement } from "react";
 import { assetUrl } from "../api";
+import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import type {
   AssetKind,
   CharacterDefinition,
@@ -15,6 +16,7 @@ import type {
 
 interface ProjectSidebarProps {
   project: EditorProject;
+  activeTab?: SidebarTab;
   activeSceneId: string;
   diagnostics: EditorDiagnostic[];
   onSelectScene(sceneId: string): void;
@@ -32,12 +34,15 @@ interface ProjectSidebarProps {
   onChangeCharacter(id: string, definition: CharacterDefinition): void;
   onRenameCharacter(previousId: string, nextId: string): void;
   onDeleteCharacter(id: string): void;
+  onNavigate(sceneId: string | null, nodeId: string | null): void;
+  onTabChange?(tab: SidebarTab): void;
 }
 
-type SidebarTab = "scenes" | "assets" | "project";
+export type SidebarTab = "scenes" | "assets" | "project" | "problems";
 
 export function ProjectSidebar({
   project,
+  activeTab,
   activeSceneId,
   diagnostics,
   onSelectScene,
@@ -55,8 +60,18 @@ export function ProjectSidebar({
   onChangeCharacter,
   onRenameCharacter,
   onDeleteCharacter,
+  onNavigate,
+  onTabChange,
 }: ProjectSidebarProps): ReactElement {
-  const [tab, setTab] = useState<SidebarTab>("scenes");
+  const [internalTab, setInternalTab] = useState<SidebarTab>("scenes");
+  const tab = activeTab ?? internalTab;
+  const errorCount = diagnostics.filter(
+    (diagnostic) => diagnostic.severity === "error",
+  ).length;
+  const setTab = (next: SidebarTab): void => {
+    setInternalTab(next);
+    onTabChange?.(next);
+  };
   return (
     <aside className="project-sidebar">
       <div className="sidebar-tabs">
@@ -80,6 +95,21 @@ export function ProjectSidebar({
           type="button"
         >
           项目
+        </button>
+        <button
+          className={tab === "problems" ? "active" : ""}
+          onClick={() => setTab("problems")}
+          type="button"
+        >
+          问题
+          {diagnostics.length > 0 && (
+            <span className="sidebar-tab-count">{diagnostics.length}</span>
+          )}
+          {errorCount > 0 && (
+            <span className="sidebar-tab-count sidebar-tab-count-error">
+              {errorCount}
+            </span>
+          )}
         </button>
       </div>
       {tab === "scenes" && (
@@ -115,6 +145,9 @@ export function ProjectSidebar({
           onRenameCharacter={onRenameCharacter}
           project={project}
         />
+      )}
+      {tab === "problems" && (
+        <DiagnosticsPanel diagnostics={diagnostics} onNavigate={onNavigate} />
       )}
     </aside>
   );

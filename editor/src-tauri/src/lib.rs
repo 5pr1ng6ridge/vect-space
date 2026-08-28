@@ -12,10 +12,12 @@ use tauri::{AppHandle, Manager, State};
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AdvanceSource, AssetKind, ContentManifest, PresentationOutcome, ResolvedAsset,
-        RuntimeUpdate, SceneDefinition, SceneNode, TimelineEvent, TimelineTrack,
+        AssetKind, ChoiceSnapshot, ContentManifest, ResolvedAsset, RuntimeSnapshot, RuntimeUpdate,
+        SceneDefinition, SceneNode, StoryLocation, TimelineEvent, TimelineTrack, VariableMap,
     },
-    runtime::{RuntimeEngine, RuntimeError},
+    runtime::{
+        PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
+    },
 };
 
 const LAYOUT_RELATIVE_PATH: &str = ".vectspace/layout-v1.json";
@@ -29,7 +31,6 @@ struct ProjectSession {
     root: PathBuf,
     catalog: ContentCatalog,
     fingerprint: String,
-    preview: Option<RuntimeEngine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +84,8 @@ struct EditorLayout {
     version: u32,
     #[serde(default)]
     scenes: BTreeMap<String, SceneLayout>,
+    #[serde(default)]
+    timeline_previews: BTreeMap<String, TimelinePreviewSettings>,
 }
 
 impl Default for EditorLayout {
@@ -90,8 +93,59 @@ impl Default for EditorLayout {
         Self {
             version: 1,
             scenes: BTreeMap::new(),
+            timeline_previews: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelinePreviewSettings {
+    #[serde(default)]
+    variable_overrides: VariableMap,
+    #[serde(default)]
+    choices: Vec<PreviewChoiceDecision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewChoiceDecision {
+    scene_id: String,
+    node_id: String,
+    visit: usize,
+    choice_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelinePreviewRequest {
+    project: SaveProjectRequest,
+    target: StoryLocation,
+    #[serde(default)]
+    variable_overrides: VariableMap,
+    #[serde(default)]
+    choices: Vec<PreviewChoiceDecision>,
+}
+
+#[derive(Debug, Serialize)]
+#[allow(clippy::large_enum_variant)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum TimelinePreviewResult {
+    NeedsChoice {
+        location: StoryLocation,
+        visit: usize,
+        choices: Vec<ChoiceSnapshot>,
+        trace: Vec<StoryLocation>,
+    },
+    Ready {
+        start_snapshot: RuntimeSnapshot,
+        update: RuntimeUpdate,
+        trace: Vec<StoryLocation>,
+    },
+    Unreachable {
+        message: String,
+        trace: Vec<StoryLocation>,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -167,7 +221,6 @@ fn open_project(
         root,
         catalog,
         fingerprint,
-        preview: None,
     });
     Ok(project)
 }
@@ -205,7 +258,6 @@ fn save_project(
         project_fingerprint(&session.root, &request.manifest).map_err(display_error)?;
     session.catalog = candidate;
     session.fingerprint.clone_from(&fingerprint);
-    session.preview = None;
     project_payload(&session.root, &session.catalog, request.layout, fingerprint)
 }
 
@@ -290,75 +342,64 @@ fn import_asset(
 }
 
 #[tauri::command]
-fn preview_start(state: State<'_, EditorState>) -> Result<RuntimeUpdate, String> {
+fn build_timeline_preview(
+    request: TimelinePreviewRequest,
+    state: State<'_, EditorState>,
+) -> Result<TimelinePreviewResult, String> {
     let mut guard = state
         .session
         .lock()
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_mut().ok_or("尚未打开项目")?;
-    let mut runtime = RuntimeEngine::new(&session.catalog).map_err(display_error)?;
-    let update = runtime
-        .start_new_game(&session.catalog)
+    let scenes = validate_scene_file_set(&request.project.manifest, &request.project.scenes)?;
+    let catalog =
+        ContentCatalog::from_documents(session.root.clone(), request.project.manifest, scenes)
+            .map_err(display_error)?;
+    let decisions = request
+        .choices
+        .iter()
+        .map(|choice| CorePreviewChoiceDecision {
+            scene_id: choice.scene_id.clone(),
+            node_id: choice.node_id.clone(),
+            visit: choice.visit,
+            choice_id: choice.choice_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut runtime = RuntimeEngine::with_preview_overrides(&catalog, &request.variable_overrides)
         .map_err(display_error)?;
-    session.preview = Some(runtime);
-    Ok(update)
-}
-
-#[tauri::command]
-fn preview_advance(
-    expected_revision: u64,
-    source: AdvanceSource,
-    state: State<'_, EditorState>,
-) -> Result<RuntimeUpdate, String> {
-    let mut guard = state
-        .session
-        .lock()
-        .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
-    let session = guard.as_mut().ok_or("尚未打开项目")?;
-    transact_preview(session, |runtime, catalog| {
-        runtime.advance(catalog, expected_revision, source)
-    })
-}
-
-#[tauri::command]
-fn preview_choose(
-    choice_id: String,
-    expected_revision: u64,
-    state: State<'_, EditorState>,
-) -> Result<RuntimeUpdate, String> {
-    let mut guard = state
-        .session
-        .lock()
-        .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
-    let session = guard.as_mut().ok_or("尚未打开项目")?;
-    transact_preview(session, |runtime, catalog| {
-        runtime.choose(catalog, &choice_id, expected_revision)
-    })
-}
-
-#[tauri::command]
-fn preview_presentation_complete(
-    update_id: u64,
-    state: State<'_, EditorState>,
-) -> Result<RuntimeUpdate, String> {
-    let mut guard = state
-        .session
-        .lock()
-        .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
-    let session = guard.as_mut().ok_or("尚未打开项目")?;
-    transact_preview(session, |runtime, catalog| {
-        runtime.presentation_complete(catalog, update_id, PresentationOutcome::Completed)
-    })
-}
-
-fn transact_preview(
-    session: &mut ProjectSession,
-    operation: impl FnOnce(&mut RuntimeEngine, &ContentCatalog) -> Result<RuntimeUpdate, RuntimeError>,
-) -> Result<RuntimeUpdate, String> {
-    let mut candidate = session.preview.as_ref().ok_or("预览尚未开始")?.clone();
-    let update = operation(&mut candidate, &session.catalog).map_err(display_error)?;
-    session.preview = Some(candidate);
-    Ok(update)
+    match runtime.preview_to(&catalog, &request.target, &decisions) {
+        Ok(PreviewRunResult::NeedsChoice {
+            location,
+            visit,
+            choices,
+            trace,
+        }) => Ok(TimelinePreviewResult::NeedsChoice {
+            location,
+            visit,
+            choices,
+            trace,
+        }),
+        Ok(PreviewRunResult::Ready {
+            snapshot: start_snapshot,
+            trace,
+        }) => {
+            let update = runtime
+                .preview_execute_current(&catalog)
+                .map_err(display_error)?;
+            Ok(TimelinePreviewResult::Ready {
+                start_snapshot,
+                update,
+                trace,
+            })
+        }
+        Ok(PreviewRunResult::Unreachable { message, trace }) => {
+            Ok(TimelinePreviewResult::Unreachable { message, trace })
+        }
+        Err(error) => Ok(TimelinePreviewResult::Unreachable {
+            message: error.to_string(),
+            trace: Vec::new(),
+        }),
+    }
 }
 
 fn resolve_content_root(selected: &Path) -> Result<PathBuf, std::io::Error> {
@@ -873,10 +914,7 @@ pub fn run() {
             save_project,
             validate_project,
             import_asset,
-            preview_start,
-            preview_advance,
-            preview_choose,
-            preview_presentation_complete,
+            build_timeline_preview,
         ])
         .run(tauri::generate_context!())
         .expect("VECTSPACE Story Editor failed to start");

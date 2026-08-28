@@ -25,6 +25,7 @@ export interface StoryNodeData extends Record<string, unknown> {
   entry: boolean;
   issueCount: number;
   onOpen(nodeId: string): void;
+  onSelect(nodeId: string): void;
   onQuickInsert(
     nodeId: string,
     side: InsertSide,
@@ -59,7 +60,10 @@ export const StoryNodeCard = memo(function StoryNodeCard({
     <article
       className={`story-node story-node-${data.node.type}${selected ? " is-selected" : ""}`}
       data-allow-context-menu="true"
-      onDoubleClick={() => data.onOpen(data.nodeId)}
+      onClick={() => data.onSelect(data.nodeId)}
+      onDoubleClick={() => {
+        if (data.node.type === "timeline") data.onOpen(data.nodeId);
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         event.stopPropagation();

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -11,9 +12,23 @@ import { evaluateChannel } from "../timeline";
 import type {
   EditorAsset,
   TimelineEasing,
+  TimelineEvent,
+  TimelineKeyframe,
   TimelineNode,
   TimelineTrack,
 } from "../types";
+
+export interface TimelineSelection {
+  track: number;
+  channel: string;
+  index: number;
+  frame: TimelineKeyframe;
+}
+
+export interface TimelineEventSelection {
+  index: number;
+  event: TimelineEvent;
+}
 
 const CHANNELS: Record<TimelineTrack["type"], string[]> = {
   sprite: [
@@ -49,22 +64,55 @@ export function TimelineEditor({
   node,
   assets,
   onChange,
+  hidePreview = false,
+  hideTransport = false,
+  playheadOverride,
+  onPlayheadChange,
+  snapOverride,
+  onSnapChange,
+  onSelectionChange,
+  onEventSelectionChange,
 }: {
   node: TimelineNode;
   assets: EditorAsset[];
   onChange(node: TimelineNode): void;
+  hidePreview?: boolean;
+  hideTransport?: boolean;
+  playheadOverride?: number;
+  onPlayheadChange?(value: number): void;
+  snapOverride?: number;
+  onSnapChange?(value: number): void;
+  onSelectionChange?(selection: TimelineSelection | null): void;
+  onEventSelectionChange?(selection: TimelineEventSelection | null): void;
 }): ReactElement {
   const [dragDraft, setDragDraft] = useState<TimelineNode | null>(null);
   const draft = dragDraft ?? node;
-  const [playhead, setPlayhead] = useState(0);
+  const [internalPlayhead, setInternalPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [snap, setSnap] = useState(50);
+  const [internalSnap, setInternalSnap] = useState(50);
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [trackType, setTrackType] = useState<TimelineTrack["type"]>("sprite");
   const [channelName, setChannelName] = useState("x");
   const rulerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const playhead = playheadOverride ?? internalPlayhead;
+  const snap = snapOverride ?? internalSnap;
+  const setSnap = (value: number): void => {
+    setInternalSnap(value);
+    onSnapChange?.(value);
+  };
+  const setPlayhead = useCallback(
+    (value: number | ((current: number) => number)): void => {
+      setInternalPlayhead((current) => {
+        const next = typeof value === "function" ? value(current) : value;
+        onPlayheadChange?.(next);
+        return next;
+      });
+    },
+    [onPlayheadChange],
+  );
 
   useEffect(() => {
     if (!playing) return;
@@ -85,7 +133,7 @@ export function TimelineEditor({
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [draft.duration_ms, playing]);
+  }, [draft.duration_ms, playing, setPlayhead]);
 
   const videoTrack = draft.tracks.find(
     (track): track is Extract<TimelineTrack, { type: "video" }> =>
@@ -146,6 +194,47 @@ export function TimelineEditor({
     commit({ ...draft, tracks: [...draft.tracks, track] });
   };
   const selectedFrame = findSelectedFrame(draft, selected);
+  const selectedFrameSignature =
+    selectedFrame === null
+      ? ""
+      : `${selectedFrame.track}:${selectedFrame.channel}:${selectedFrame.index}:${selectedFrame.frame.at_ms}:${selectedFrame.frame.value}:${JSON.stringify(selectedFrame.frame.easing)}`;
+  useEffect(() => {
+    onSelectionChange?.(selectedFrame);
+    // findSelectedFrame intentionally returns a fresh object for easy edits;
+    // the primitive signature prevents this synchronization from firing on
+    // every render and causing a parent state loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onSelectionChange, selectedFrameSignature]);
+  const selectedEvent =
+    selectedEventId === null
+      ? null
+      : (() => {
+          const index = draft.events.findIndex(
+            (event) => event.id === selectedEventId,
+          );
+          const event = draft.events[index];
+          return event === undefined ? null : { index, event };
+        })();
+  const selectedEventSignature =
+    selectedEvent === null
+      ? ""
+      : `${selectedEvent.index}:${selectedEvent.event.id}:${selectedEvent.event.at_ms}:${JSON.stringify(selectedEvent.event)}`;
+  useEffect(() => {
+    onEventSelectionChange?.(selectedEvent);
+    // selectedEvent is derived from the stable signature for the same reason
+    // as keyframe selection above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onEventSelectionChange, selectedEventSignature]);
+  const deleteSelected = (): void => {
+    if (selected.size === 0) return;
+    const next = structuredClone(draft);
+    for (const item of [...selected].sort(compareSelectionKeys)) {
+      const [track, channel, frame] = item.split(":");
+      next.tracks[Number(track)]?.channels[channel]?.splice(Number(frame), 1);
+    }
+    setSelected(new Set());
+    commit(next);
+  };
 
   const beginDrag = (
     event: ReactPointerEvent<HTMLButtonElement>,
@@ -164,6 +253,12 @@ export function TimelineEditor({
           : new Set([key]);
     setSelected(selection);
     if (!selection.has(key)) return;
+    const [selectedTrack, selectedChannel, selectedIndex] = key.split(":");
+    const selectedKeyframe =
+      draft.tracks[Number(selectedTrack)]?.channels[selectedChannel ?? ""]?.[
+        Number(selectedIndex)
+      ];
+    if (selectedKeyframe !== undefined) setPlayhead(selectedKeyframe.at_ms);
     const initial = structuredClone(draft);
     const startX = event.clientX;
     const width = Math.max(1, rulerRef.current?.clientWidth ?? 1);
@@ -208,196 +303,202 @@ export function TimelineEditor({
   };
 
   return (
-    <div className="timeline-editor">
-      <div className="timeline-preview-pane">
-        <div className="timeline-preview-stage">
-          {draft.tracks.map((track, index) =>
-            track.type === "sprite" ? (
-              <img
-                alt={track.sprite_id}
-                key={`sprite-${index}`}
-                src={urls[track.asset]}
-                style={spriteStyle(track, playhead)}
+    <div
+      className={`timeline-editor${hidePreview ? " timeline-editor-compact" : ""}`}
+      onKeyDown={(event) => {
+        if (
+          event.key === "Delete" &&
+          !(event.target instanceof HTMLInputElement) &&
+          !(event.target instanceof HTMLTextAreaElement)
+        ) {
+          event.preventDefault();
+          deleteSelected();
+        }
+      }}
+      tabIndex={-1}
+    >
+      {!hidePreview && (
+        <div className="timeline-preview-pane">
+          <div className="timeline-preview-stage">
+            {draft.tracks.map((track, index) =>
+              track.type === "sprite" ? (
+                <img
+                  alt={track.sprite_id}
+                  key={`sprite-${index}`}
+                  src={urls[track.asset]}
+                  style={spriteStyle(track, playhead)}
+                />
+              ) : null,
+            )}
+            {videoTrack !== undefined && (
+              <video
+                className="timeline-video-preview"
+                muted
+                onLoadedMetadata={(event) => {
+                  const element = event.currentTarget;
+                  setVideoDuration(element.duration * 1000);
+                  element.currentTime = videoTrack.clip_start_ms / 1000;
+                }}
+                preload="metadata"
+                ref={videoRef}
+                src={urls[videoTrack.asset]}
+                style={videoStyle(videoTrack, playhead)}
               />
-            ) : null,
-          )}
-          {videoTrack !== undefined && (
-            <video
-              className="timeline-video-preview"
-              muted
-              onLoadedMetadata={(event) => {
-                const element = event.currentTarget;
-                setVideoDuration(element.duration * 1000);
-                element.currentTime = videoTrack.clip_start_ms / 1000;
-              }}
-              preload="metadata"
-              ref={videoRef}
-              src={urls[videoTrack.asset]}
-              style={videoStyle(videoTrack, playhead)}
-            />
-          )}
-          <div className="timeline-safe-frame">1920 × 1080</div>
+            )}
+            <div className="timeline-safe-frame">1920 × 1080</div>
+          </div>
+          <div className="timeline-properties">
+            <strong>时间线属性</strong>
+            <label>
+              时长{" "}
+              <input
+                min={1}
+                max={1_800_000}
+                type="number"
+                value={draft.duration_ms}
+                onChange={(event) =>
+                  commit({
+                    ...draft,
+                    duration_ms: Number(event.currentTarget.value),
+                  })
+                }
+              />
+            </label>
+            <label>
+              吸附{" "}
+              <select
+                value={snap}
+                onChange={(event) => setSnap(Number(event.currentTarget.value))}
+              >
+                <option value={10}>10 ms</option>
+                <option value={50}>50 ms</option>
+                <option value={100}>100 ms</option>
+              </select>
+            </label>
+            {selectedFrame !== null && (
+              <KeyframeInspector
+                frame={selectedFrame.frame}
+                onChange={(frame) => {
+                  const next = structuredClone(draft);
+                  const frames =
+                    next.tracks[selectedFrame.track]?.channels[
+                      selectedFrame.channel
+                    ];
+                  if (frames !== undefined) frames[selectedFrame.index] = frame;
+                  commit(next);
+                }}
+              />
+            )}
+            {videoTrack !== undefined && (
+              <small>
+                视频元数据由浏览器读取；裁剪：{videoTrack.clip_start_ms}–
+                {videoTrack.clip_end_ms ?? "结尾"} ms；素材时长：
+                {videoDuration === null
+                  ? "读取中"
+                  : `${Math.round(videoDuration)} ms`}
+              </small>
+            )}
+          </div>
         </div>
-        <div className="timeline-properties">
-          <strong>时间线属性</strong>
-          <label>
-            时长{" "}
-            <input
-              min={1}
-              max={1_800_000}
-              type="number"
-              value={draft.duration_ms}
-              onChange={(event) =>
-                commit({
-                  ...draft,
-                  duration_ms: Number(event.currentTarget.value),
-                })
-              }
-            />
-          </label>
-          <label>
-            吸附{" "}
-            <select
-              value={snap}
-              onChange={(event) => setSnap(Number(event.currentTarget.value))}
-            >
-              <option value={10}>10 ms</option>
-              <option value={50}>50 ms</option>
-              <option value={100}>100 ms</option>
-            </select>
-          </label>
-          {selectedFrame !== null && (
-            <KeyframeInspector
-              frame={selectedFrame.frame}
-              onChange={(frame) => {
-                const next = structuredClone(draft);
-                const frames =
-                  next.tracks[selectedFrame.track]?.channels[
-                    selectedFrame.channel
-                  ];
-                if (frames !== undefined) frames[selectedFrame.index] = frame;
-                commit(next);
-              }}
-            />
-          )}
-          {videoTrack !== undefined && (
-            <small>
-              视频元数据由浏览器读取；裁剪：{videoTrack.clip_start_ms}–
-              {videoTrack.clip_end_ms ?? "结尾"} ms；素材时长：
-              {videoDuration === null
-                ? "读取中"
-                : `${Math.round(videoDuration)} ms`}
-            </small>
-          )}
+      )}
+      {!hideTransport && (
+        <div className="timeline-transport">
+          <button
+            onClick={() => {
+              if (playhead >= draft.duration_ms) setPlayhead(0);
+              setPlaying((value) => !value);
+            }}
+            type="button"
+          >
+            {playing ? "❚❚" : "▶"}
+          </button>
+          <button
+            onClick={() => {
+              setPlaying(false);
+              setPlayhead(0);
+            }}
+            type="button"
+          >
+            ■
+          </button>
+          <code>
+            {Math.round(playhead)} / {draft.duration_ms} ms
+          </code>
+          <input
+            aria-label="播放头"
+            max={draft.duration_ms}
+            min={0}
+            onChange={(event) => setPlayhead(Number(event.currentTarget.value))}
+            type="range"
+            value={playhead}
+          />
+          <select
+            value={trackType}
+            onChange={(event) => {
+              const value = event.currentTarget.value as TimelineTrack["type"];
+              setTrackType(value);
+              setChannelName(firstItem(CHANNELS[value]) ?? "x");
+            }}
+          >
+            <option value="sprite">立绘轨</option>
+            <option value="camera">镜头轨</option>
+            <option value="video">视频轨</option>
+            <option value="bgm">BGM 音量轨</option>
+          </select>
+          <button onClick={addTrack} type="button">
+            ＋轨道
+          </button>
+          <button
+            onClick={() => {
+              const asset =
+                assets.find((candidate) => candidate.kind === "sfx")?.id ?? "";
+              const event = {
+                type: "sfx" as const,
+                id: uniqueEventId(draft, "sfx"),
+                at_ms: Math.round(playhead / snap) * snap,
+                asset,
+                volume: 1,
+              };
+              commit({
+                ...draft,
+                events: [...draft.events, event].sort(
+                  (a, b) => a.at_ms - b.at_ms,
+                ),
+              });
+            }}
+            type="button"
+          >
+            ＋SFX 事件
+          </button>
+          <button
+            onClick={() => {
+              const event = {
+                type: "screen_effect" as const,
+                id: uniqueEventId(draft, "flash"),
+                at_ms: Math.round(playhead / snap) * snap,
+                effect: "flash" as const,
+                duration_ms: Math.min(200, draft.duration_ms - playhead),
+              };
+              commit({
+                ...draft,
+                events: [...draft.events, event].sort(
+                  (a, b) => a.at_ms - b.at_ms,
+                ),
+              });
+            }}
+            type="button"
+          >
+            ＋闪光事件
+          </button>
+          <button
+            disabled={selected.size === 0}
+            onClick={deleteSelected}
+            type="button"
+          >
+            删除关键帧
+          </button>
         </div>
-      </div>
-      <div className="timeline-transport">
-        <button
-          onClick={() => {
-            if (playhead >= draft.duration_ms) setPlayhead(0);
-            setPlaying((value) => !value);
-          }}
-          type="button"
-        >
-          {playing ? "❚❚" : "▶"}
-        </button>
-        <button
-          onClick={() => {
-            setPlaying(false);
-            setPlayhead(0);
-          }}
-          type="button"
-        >
-          ■
-        </button>
-        <code>
-          {Math.round(playhead)} / {draft.duration_ms} ms
-        </code>
-        <input
-          aria-label="播放头"
-          max={draft.duration_ms}
-          min={0}
-          onChange={(event) => setPlayhead(Number(event.currentTarget.value))}
-          type="range"
-          value={playhead}
-        />
-        <select
-          value={trackType}
-          onChange={(event) => {
-            const value = event.currentTarget.value as TimelineTrack["type"];
-            setTrackType(value);
-            setChannelName(firstItem(CHANNELS[value]) ?? "x");
-          }}
-        >
-          <option value="sprite">立绘轨</option>
-          <option value="camera">镜头轨</option>
-          <option value="video">视频轨</option>
-          <option value="bgm">BGM 音量轨</option>
-        </select>
-        <button onClick={addTrack} type="button">
-          ＋轨道
-        </button>
-        <button
-          onClick={() => {
-            const asset =
-              assets.find((candidate) => candidate.kind === "sfx")?.id ?? "";
-            const event = {
-              type: "sfx" as const,
-              id: uniqueEventId(draft, "sfx"),
-              at_ms: Math.round(playhead / snap) * snap,
-              asset,
-              volume: 1,
-            };
-            commit({
-              ...draft,
-              events: [...draft.events, event].sort(
-                (a, b) => a.at_ms - b.at_ms,
-              ),
-            });
-          }}
-          type="button"
-        >
-          ＋SFX 事件
-        </button>
-        <button
-          onClick={() => {
-            const event = {
-              type: "screen_effect" as const,
-              id: uniqueEventId(draft, "flash"),
-              at_ms: Math.round(playhead / snap) * snap,
-              effect: "flash" as const,
-              duration_ms: Math.min(200, draft.duration_ms - playhead),
-            };
-            commit({
-              ...draft,
-              events: [...draft.events, event].sort(
-                (a, b) => a.at_ms - b.at_ms,
-              ),
-            });
-          }}
-          type="button"
-        >
-          ＋闪光事件
-        </button>
-        <button
-          disabled={selected.size === 0}
-          onClick={() => {
-            const next = structuredClone(draft);
-            for (const item of [...selected].reverse()) {
-              const [track, channel, frame] = item.split(":");
-              next.tracks[Number(track)]?.channels[channel]?.splice(
-                Number(frame),
-                1,
-              );
-            }
-            setSelected(new Set());
-            commit(next);
-          }}
-          type="button"
-        >
-          删除关键帧
-        </button>
-      </div>
+      )}
       <div
         className="timeline-ruler"
         ref={rulerRef}
@@ -635,15 +736,19 @@ export function TimelineEditor({
                   aria-label={`${event.id} ${event.at_ms}ms`}
                   className={`timeline-event-marker event-${event.type}`}
                   key={event.id}
-                  onClick={() => setPlayhead(event.at_ms)}
-                  onDoubleClick={() =>
+                  onClick={() => {
+                    setSelectedEventId(event.id);
+                    setPlayhead(event.at_ms);
+                  }}
+                  onDoubleClick={() => {
+                    setSelectedEventId(null);
                     commit({
                       ...draft,
                       events: draft.events.filter(
                         (candidate) => candidate.id !== event.id,
                       ),
-                    })
-                  }
+                    });
+                  }}
                   style={{
                     left: `${(event.at_ms / draft.duration_ms) * 100}%`,
                   }}
@@ -756,7 +861,10 @@ function KeyframeInspector({
   );
 }
 
-function findSelectedFrame(node: TimelineNode, selected: Set<string>) {
+function findSelectedFrame(
+  node: TimelineNode,
+  selected: Set<string>,
+): TimelineSelection | null {
   const key = selected.values().next().value;
   if (key === undefined) return null;
   const [track, channel, index] = key.split(":");
@@ -764,6 +872,16 @@ function findSelectedFrame(node: TimelineNode, selected: Set<string>) {
   return frame === undefined || channel === undefined
     ? null
     : { track: Number(track), channel, index: Number(index), frame };
+}
+
+function compareSelectionKeys(left: string, right: string): number {
+  const [leftTrack, leftChannel, leftIndex] = left.split(":");
+  const [rightTrack, rightChannel, rightIndex] = right.split(":");
+  const trackDelta = Number(rightTrack) - Number(leftTrack);
+  if (trackDelta !== 0) return trackDelta;
+  const channelDelta = (rightChannel ?? "").localeCompare(leftChannel ?? "");
+  if (channelDelta !== 0) return channelDelta;
+  return Number(rightIndex) - Number(leftIndex);
 }
 
 function firstItem<T>(values: readonly T[]): T | undefined {

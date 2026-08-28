@@ -9,13 +9,10 @@ import {
   type ReactElement,
 } from "react";
 import { editorApi } from "./api";
-import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { NodeInspector } from "./components/NodeInspector";
-import { PreviewPanel } from "./components/PreviewPanel";
-import { ProjectSidebar } from "./components/ProjectSidebar";
+import { ProjectSidebar, type SidebarTab } from "./components/ProjectSidebar";
 import { StoryGraph } from "./components/StoryGraph";
-import { TimelineEditor } from "./components/TimelineEditor";
-import { YamlPanel } from "./components/YamlPanel";
+import { TimelineWorkspace } from "./components/TimelineWorkspace";
 import {
   NODE_TYPES,
   cloneProject,
@@ -42,19 +39,15 @@ import type {
   EditorProject,
   NodePosition,
   NodeType,
-  SceneDefinition,
   SceneNode,
 } from "./types";
 import { validateLive } from "./validation";
 
-type BottomTab = "problems" | "yaml" | "preview" | "timeline";
-
-type ResizeAxis = "left" | "right" | "bottom";
+type ResizeAxis = "left" | "right";
 
 interface PanelSizes {
   left: number;
   right: number;
-  bottom: number;
 }
 
 interface ResizeState {
@@ -67,14 +60,12 @@ interface ResizeState {
 const DEFAULT_PANEL_SIZES: PanelSizes = {
   left: 278,
   right: 370,
-  bottom: 300,
 };
 
 function clampPanelSize(axis: ResizeAxis, value: number): number {
   const bounds: Record<ResizeAxis, [number, number]> = {
     left: [220, 480],
     right: [300, 560],
-    bottom: [180, 620],
   };
   const [minimum, maximum] = bounds[axis];
   return Math.round(Math.min(maximum, Math.max(minimum, value)));
@@ -89,19 +80,11 @@ function ResizeHandle({
   onStart(axis: ResizeAxis, startX: number, startY: number): void;
   onStep(axis: ResizeAxis, delta: number): void;
 }): ReactElement {
-  const label =
-    axis === "left"
-      ? "调整左侧栏宽度"
-      : axis === "right"
-        ? "调整右侧栏宽度"
-        : "调整底部面板高度";
+  const label = axis === "left" ? "调整左侧栏宽度" : "调整右侧栏宽度";
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     const step = event.shiftKey ? 32 : 12;
     let delta: number | null = null;
-    if (axis === "bottom") {
-      if (event.key === "ArrowUp") delta = step;
-      if (event.key === "ArrowDown") delta = -step;
-    } else if (axis === "left") {
+    if (axis === "left") {
       if (event.key === "ArrowRight") delta = step;
       if (event.key === "ArrowLeft") delta = -step;
     } else {
@@ -116,7 +99,7 @@ function ResizeHandle({
   return (
     <div
       aria-label={label}
-      aria-orientation={axis === "bottom" ? "horizontal" : "vertical"}
+      aria-orientation="vertical"
       className={`resize-handle resize-handle-${axis}`}
       onKeyDown={handleKeyDown}
       onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => {
@@ -138,8 +121,11 @@ export function App(): ReactElement {
   const [activeSceneId, setActiveSceneId] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [addType, setAddType] = useState<NodeType>("say");
-  const [bottomTab, setBottomTab] = useState<BottomTab>("problems");
-  const [bottomOpen, setBottomOpen] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("scenes");
+  const [timelineTarget, setTimelineTarget] = useState<{
+    sceneId: string;
+    nodeId: string;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -169,10 +155,7 @@ export function App(): ReactElement {
   useEffect(() => {
     if (resizeState === null) return;
     const handlePointerMove = (event: globalThis.PointerEvent): void => {
-      const delta =
-        resizeState.axis === "bottom"
-          ? resizeState.startY - event.clientY
-          : event.clientX - resizeState.startX;
+      const delta = event.clientX - resizeState.startX;
       const signedDelta = resizeState.axis === "right" ? -delta : delta;
       setPanelSizes((current) => ({
         ...current,
@@ -199,9 +182,6 @@ export function App(): ReactElement {
     () => (project === null ? [] : validateLive(project)),
     [project],
   );
-  const errorCount = diagnostics.filter(
-    (diagnostic) => diagnostic.severity === "error",
-  ).length;
   const activeSceneFile =
     project === null ? undefined : findScene(project, activeSceneId);
   const activeScene = activeSceneFile?.definition;
@@ -254,6 +234,7 @@ export function App(): ReactElement {
         loaded.manifest.entry_scene || loaded.scenes[0]?.definition.id || "";
       setActiveSceneId(initialScene);
       setSelectedNodeId(null);
+      setTimelineTarget(null);
       resetHistory();
       localStorage.setItem("vectspace-editor:last-project", loaded.root);
       setNotice(`已打开 ${loaded.root}`);
@@ -271,8 +252,7 @@ export function App(): ReactElement {
       (diagnostic) => diagnostic.severity === "error",
     );
     if (errors.length > 0) {
-      setBottomOpen(true);
-      setBottomTab("problems");
+      setSidebarTab("problems");
       setError(`存在 ${errors.length} 个错误，修复后才能保存。`);
       return;
     }
@@ -481,6 +461,18 @@ export function App(): ReactElement {
         ensureSceneLayout(draft.layout, activeSceneId).nodes,
         nodeId,
       );
+      if (draft.layout.timeline_previews !== undefined) {
+        Reflect.deleteProperty(
+          draft.layout.timeline_previews,
+          `${activeSceneId}/${nodeId}`,
+        );
+        for (const settings of Object.values(draft.layout.timeline_previews)) {
+          settings.choices = settings.choices.filter(
+            (choice) =>
+              choice.scene_id !== activeSceneId || choice.node_id !== nodeId,
+          );
+        }
+      }
     });
     setSelectedNodeId(null);
   };
@@ -540,6 +532,17 @@ export function App(): ReactElement {
         );
       }
       Reflect.deleteProperty(draft.layout.scenes, sceneId);
+      if (draft.layout.timeline_previews !== undefined) {
+        for (const key of Object.keys(draft.layout.timeline_previews)) {
+          if (key.startsWith(`${sceneId}/`))
+            Reflect.deleteProperty(draft.layout.timeline_previews, key);
+        }
+        for (const settings of Object.values(draft.layout.timeline_previews)) {
+          settings.choices = settings.choices.filter(
+            (choice) => choice.scene_id !== sceneId,
+          );
+        }
+      }
     });
     const next =
       project.scenes.find((file) => file.definition.id !== sceneId)?.definition
@@ -566,19 +569,64 @@ export function App(): ReactElement {
   };
 
   const navigate = (sceneId: string | null, nodeId: string | null): void => {
-    if (sceneId !== null && findScene(project, sceneId) !== undefined)
+    if (sceneId !== null && findScene(project, sceneId) !== undefined) {
       setActiveSceneId(sceneId);
+      setSidebarTab("scenes");
+    }
     setSelectedNodeId(nodeId);
   };
 
+  const timelineScene = findScene(project, timelineTarget?.sceneId ?? "");
+  const timelineNode =
+    timelineTarget === null
+      ? undefined
+      : timelineScene?.definition.nodes[timelineTarget.nodeId];
+  if (timelineTarget !== null && timelineNode?.type === "timeline") {
+    const previewKey = `${timelineTarget.sceneId}/${timelineTarget.nodeId}`;
+    return (
+      <>
+        <TimelineWorkspace
+          assets={project.assets}
+          dirty={dirty}
+          futureAvailable={future.length > 0}
+          node={timelineNode}
+          nodeId={timelineTarget.nodeId}
+          onBack={() => setTimelineTarget(null)}
+          onChange={(node) => changeNode(timelineTarget.nodeId, node)}
+          onError={setError}
+          onPreviewSettingsChange={(settings) =>
+            commit((draft) => {
+              draft.layout.timeline_previews ??= {};
+              draft.layout.timeline_previews[previewKey] = settings;
+            }, false)
+          }
+          onRedo={redo}
+          onSave={() => void saveProject()}
+          onUndo={undo}
+          project={project}
+          previewSettings={project.layout.timeline_previews?.[previewKey]}
+          sceneId={timelineTarget.sceneId}
+        />
+        {error !== null && (
+          <div className="error-toast" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              关闭
+            </button>
+          </div>
+        )}
+        {notice !== null && <div className="notice-toast">{notice}</div>}
+      </>
+    );
+  }
+
   return (
     <main
-      className={`editor-shell${bottomOpen ? " bottom-open" : ""}`}
+      className="editor-shell"
       style={
         {
           "--left-sidebar-width": `${panelSizes.left}px`,
           "--right-sidebar-width": `${panelSizes.right}px`,
-          "--bottom-panel-height": `${panelSizes.bottom}px`,
         } as CSSProperties
       }
     >
@@ -632,6 +680,7 @@ export function App(): ReactElement {
       </header>
 
       <ProjectSidebar
+        activeTab={sidebarTab}
         activeSceneId={activeSceneId}
         diagnostics={diagnostics}
         onAddScene={addScene}
@@ -731,6 +780,8 @@ export function App(): ReactElement {
           setActiveSceneId(sceneId);
           setSelectedNodeId(null);
         }}
+        onNavigate={navigate}
+        onTabChange={setSidebarTab}
         project={project}
       />
       <ResizeHandle axis="left" onStart={startResize} onStep={resizeBy} />
@@ -789,6 +840,11 @@ export function App(): ReactElement {
               })
             }
             onQuickInsert={quickInsertNode}
+            onOpen={(nodeId) => {
+              if (activeScene.nodes[nodeId]?.type === "timeline") {
+                setTimelineTarget({ sceneId: activeSceneId, nodeId });
+              }
+            }}
             onSelect={setSelectedNodeId}
             onViewport={(viewport) =>
               commit((draft) => {
@@ -836,113 +892,6 @@ export function App(): ReactElement {
         />
       )}
       <ResizeHandle axis="right" onStart={startResize} onStep={resizeBy} />
-
-      <section className={`bottom-panel${bottomOpen ? " open" : " collapsed"}`}>
-        <header className="bottom-tabs">
-          <button
-            className={bottomTab === "problems" ? "active" : ""}
-            onClick={() => {
-              setBottomTab("problems");
-              setBottomOpen(true);
-            }}
-            type="button"
-          >
-            问题{" "}
-            <span className={errorCount > 0 ? "count-error" : ""}>
-              {diagnostics.length}
-            </span>
-          </button>
-          <button
-            className={bottomTab === "yaml" ? "active" : ""}
-            onClick={() => {
-              setBottomTab("yaml");
-              setBottomOpen(true);
-            }}
-            type="button"
-          >
-            YAML
-          </button>
-          <button
-            className={bottomTab === "preview" ? "active" : ""}
-            onClick={() => {
-              setBottomTab("preview");
-              setBottomOpen(true);
-            }}
-            type="button"
-          >
-            剧情试玩
-          </button>
-          <button
-            className={bottomTab === "timeline" ? "active" : ""}
-            disabled={
-              selectedNodeId === null ||
-              activeScene?.nodes[selectedNodeId]?.type !== "timeline"
-            }
-            onClick={() => {
-              setBottomTab("timeline");
-              setBottomOpen(true);
-              setPanelSizes((sizes) => ({
-                ...sizes,
-                bottom: Math.max(520, sizes.bottom),
-              }));
-            }}
-            type="button"
-          >
-            关键帧
-          </button>
-          <button
-            className="bottom-toggle"
-            onClick={() => setBottomOpen((value) => !value)}
-            type="button"
-          >
-            {bottomOpen ? "⌄" : "⌃"}
-          </button>
-        </header>
-        {bottomOpen && (
-          <div className="bottom-content">
-            {bottomTab === "problems" && (
-              <DiagnosticsPanel
-                diagnostics={diagnostics}
-                onNavigate={navigate}
-              />
-            )}
-            {bottomTab === "yaml" && activeScene !== undefined && (
-              <YamlPanel
-                onApply={(scene: SceneDefinition) => {
-                  if (scene.id !== activeSceneId) {
-                    setError(
-                      "请使用场景重命名功能更改场景 ID，而不是直接修改 YAML 的 id。 ",
-                    );
-                    return;
-                  }
-                  commit((draft) => {
-                    const file = findScene(draft, activeSceneId);
-                    if (file !== undefined) file.definition = scene;
-                  });
-                }}
-                scene={activeScene}
-              />
-            )}
-            {bottomTab === "preview" && (
-              <PreviewPanel
-                assets={project.assets}
-                dirty={dirty}
-                onNavigate={(sceneId, nodeId) => navigate(sceneId, nodeId)}
-              />
-            )}
-            {bottomTab === "timeline" &&
-              selectedNodeId !== null &&
-              activeScene?.nodes[selectedNodeId]?.type === "timeline" && (
-                <TimelineEditor
-                  assets={project.assets}
-                  node={activeScene.nodes[selectedNodeId]}
-                  onChange={(node) => changeNode(selectedNodeId, node)}
-                />
-              )}
-          </div>
-        )}
-      </section>
-      <ResizeHandle axis="bottom" onStart={startResize} onStep={resizeBy} />
 
       {error !== null && (
         <div className="error-toast" role="alert">

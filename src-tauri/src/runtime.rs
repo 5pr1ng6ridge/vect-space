@@ -15,6 +15,38 @@ use thiserror::Error;
 
 const MAX_IMMEDIATE_NODES: usize = 10_000;
 
+/// A deterministic choice supplied by the editor's timeline-context wizard.
+/// `visit` disambiguates loops that encounter the same choice node more than
+/// once while replaying from the scene entry.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewChoiceDecision {
+    pub scene_id: String,
+    pub node_id: String,
+    pub visit: usize,
+    pub choice_id: String,
+}
+
+#[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreviewRunResult {
+    Ready {
+        snapshot: RuntimeSnapshot,
+        trace: Vec<StoryLocation>,
+    },
+    NeedsChoice {
+        location: StoryLocation,
+        visit: usize,
+        choices: Vec<ChoiceSnapshot>,
+        trace: Vec<StoryLocation>,
+    },
+    Unreachable {
+        message: String,
+        trace: Vec<StoryLocation>,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("剧情尚未开始")]
@@ -51,6 +83,8 @@ pub struct RuntimeEngine {
     next_update_id: u64,
     next_cue_id: u64,
     pending_runtime_update: Option<PendingPresentation>,
+    preview_target: Option<StoryLocation>,
+    preview_skip_target_once: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +123,180 @@ impl RuntimeEngine {
             next_update_id: 1,
             next_cue_id: 1,
             pending_runtime_update: None,
+            preview_target: None,
+            preview_skip_target_once: false,
         })
+    }
+
+    /// Build an isolated runtime with editor-provided variable overrides.
+    /// This never touches the player's profile or save data.
+    #[allow(dead_code)]
+    pub fn with_preview_overrides(
+        content: &ContentCatalog,
+        overrides: &VariableMap,
+    ) -> Result<Self, RuntimeError> {
+        let mut runtime = Self::new(content)?;
+        for (id, value) in overrides {
+            let definition = content
+                .manifest
+                .variables
+                .get(id)
+                .ok_or_else(|| RuntimeError::Content(format!("未声明变量 {id}")))?;
+            let value = normalize_value(value.clone(), definition.value_type)?;
+            match definition.scope {
+                VariableScope::Save => {
+                    runtime.snapshot.variables.insert(id.clone(), value);
+                }
+                VariableScope::Profile => {
+                    runtime.profile_variables.insert(id.clone(), value);
+                }
+            }
+        }
+        Ok(runtime)
+    }
+
+    /// Replay the story from its entry until immediately before `target`.
+    /// Dialogue and awaited presentation boundaries are completed internally;
+    /// choices are returned to the editor so the caller can extend the path.
+    #[allow(dead_code)]
+    pub fn preview_to(
+        &mut self,
+        content: &ContentCatalog,
+        target: &StoryLocation,
+        decisions: &[PreviewChoiceDecision],
+    ) -> Result<PreviewRunResult, RuntimeError> {
+        self.preview_target = Some(target.clone());
+        self.preview_skip_target_once = false;
+        let mut last_trace = Vec::new();
+        let result = (|| {
+            let mut visits = std::collections::BTreeMap::<StoryLocation, usize>::new();
+            let mut trace = Vec::new();
+            let mut update = self.start_new_game(content)?;
+            for _ in 0..MAX_IMMEDIATE_NODES {
+                if trace.last() != Some(&self.snapshot.location) {
+                    trace.push(self.snapshot.location.clone());
+                    last_trace.clone_from(&trace);
+                }
+                if self.snapshot.location == *target
+                    && matches!(self.snapshot.prompt, PromptSnapshot::None)
+                    && !update.requires_ack
+                {
+                    return Ok(PreviewRunResult::Ready {
+                        snapshot: self.snapshot.clone(),
+                        trace,
+                    });
+                }
+                if update.requires_ack {
+                    update = self.presentation_complete(
+                        content,
+                        update.update_id,
+                        PresentationOutcome::Completed,
+                    )?;
+                    continue;
+                }
+                match &self.snapshot.prompt {
+                    PromptSnapshot::Dialogue { .. } => {
+                        let source = if self.snapshot.playback.auto == PlaybackAutoMode::Forced {
+                            AdvanceSource::ForcedAuto
+                        } else {
+                            AdvanceSource::Auto
+                        };
+                        update = self.advance(content, self.snapshot.revision, source)?;
+                    }
+                    PromptSnapshot::Choice { choices, .. } => {
+                        let location = self.snapshot.location.clone();
+                        let visit = visits.entry(location.clone()).or_insert(0);
+                        *visit += 1;
+                        let decision = decisions.iter().find(|candidate| {
+                            candidate.scene_id == location.scene_id
+                                && candidate.node_id == location.node_id
+                                && candidate.visit == *visit
+                        });
+                        let Some(decision) = decision else {
+                            return Ok(PreviewRunResult::NeedsChoice {
+                                location,
+                                visit: *visit,
+                                choices: choices.clone(),
+                                trace,
+                            });
+                        };
+                        if !choices
+                            .iter()
+                            .any(|choice| choice.id == decision.choice_id && choice.enabled)
+                        {
+                            // A changed document can invalidate a persisted
+                            // editor choice. Re-open the wizard at this first
+                            // invalid point instead of turning it into a
+                            // generic unreachable error.
+                            return Ok(PreviewRunResult::NeedsChoice {
+                                location,
+                                visit: *visit,
+                                choices: choices.clone(),
+                                trace,
+                            });
+                        }
+                        update =
+                            self.choose(content, &decision.choice_id, self.snapshot.revision)?;
+                    }
+                    PromptSnapshot::End { .. } => {
+                        return Err(RuntimeError::Content(format!(
+                            "未能到达时间轴节点 {}/{}：提前到达结束节点",
+                            target.scene_id, target.node_id
+                        )));
+                    }
+                    PromptSnapshot::None => {
+                        update = self.update_without_cues();
+                    }
+                }
+            }
+            Err(RuntimeError::ImmediateLoop)
+        })();
+        self.preview_target = None;
+        Ok(match result {
+            Ok(result) => result,
+            Err(error) => PreviewRunResult::Unreachable {
+                message: error.to_string(),
+                trace: last_trace,
+            },
+        })
+    }
+
+    /// Execute the timeline node at the current location exactly once and
+    /// return the same update the game would present. The preview target is
+    /// temporarily set to the node's successor so immediate nodes after the
+    /// timeline are not folded into this update.
+    #[allow(dead_code)]
+    pub fn preview_execute_current(
+        &mut self,
+        content: &ContentCatalog,
+    ) -> Result<RuntimeUpdate, RuntimeError> {
+        let scene_id = self.snapshot.location.scene_id.clone();
+        let node_id = self.snapshot.location.node_id.clone();
+        let scene = content
+            .scene(&scene_id)
+            .map_err(|error| RuntimeError::Content(error.to_string()))?;
+        let SceneNode::Timeline { next, .. } = scene
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| RuntimeError::Content(format!("节点不存在: {scene_id}/{node_id}")))?
+        else {
+            return Err(RuntimeError::Content(format!(
+                "目标节点不是 timeline：{scene_id}/{node_id}"
+            )));
+        };
+        self.preview_target = Some(StoryLocation {
+            scene_id,
+            node_id: next.clone(),
+        });
+        // The successor can legally loop back to this same node. Skip the
+        // breakpoint once so the target timeline itself is always executed.
+        self.preview_skip_target_once = true;
+        let result = self
+            .run_until_boundary(content)
+            .map(|cues| self.finish_update(cues, true));
+        self.preview_target = None;
+        self.preview_skip_target_once = false;
+        result
     }
 
     pub fn bootstrap(&mut self, content: &ContentCatalog) -> BootstrapPayload {
@@ -283,6 +490,15 @@ impl RuntimeEngine {
         for _ in 0..MAX_IMMEDIATE_NODES {
             let scene_id = self.snapshot.location.scene_id.clone();
             let node_id = self.snapshot.location.node_id.clone();
+            if self.preview_skip_target_once {
+                self.preview_skip_target_once = false;
+            } else if self
+                .preview_target
+                .as_ref()
+                .is_some_and(|target| target.scene_id == scene_id && target.node_id == node_id)
+            {
+                return Ok(cues);
+            }
             let scene = content
                 .scene(&scene_id)
                 .map_err(|error| RuntimeError::Content(error.to_string()))?;
@@ -1328,6 +1544,36 @@ mod tests {
                 value
             );
         }
+    }
+
+    #[test]
+    fn editor_preview_replays_choices_to_the_timeline_breakpoint() {
+        let content = catalog();
+        let target = StoryLocation {
+            scene_id: "prologue".to_owned(),
+            node_id: "timeline_showcase".to_owned(),
+        };
+        let decisions = [PreviewChoiceDecision {
+            scene_id: "prologue".to_owned(),
+            node_id: "route_choice".to_owned(),
+            visit: 1,
+            choice_id: "algebra".to_owned(),
+        }];
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let PreviewRunResult::Ready { snapshot, trace } =
+            runtime.preview_to(&content, &target, &decisions).unwrap()
+        else {
+            panic!("the default demo path should reach the timeline");
+        };
+        assert_eq!(snapshot.location, target);
+        assert!(trace
+            .iter()
+            .any(|location| location.node_id == "route_choice"));
+        let update = runtime.preview_execute_current(&content).unwrap();
+        assert!(update
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::Timeline { .. })));
     }
 
     fn test_timeline_ease(value: f32, easing: &crate::model::TimelineEasing) -> f32 {

@@ -6,6 +6,7 @@ import {
   defaultNode,
   insertNode,
   renameNode,
+  renameScene,
   renameCharacter,
   renameVariable,
   setPortTarget,
@@ -143,6 +144,48 @@ describe("story graph mapping", () => {
     expect(scene.nodes.right.type === "say" && scene.nodes.right.next).toBe(
       "finish",
     );
+  });
+
+  it("keeps timeline preview metadata in sync with renamed targets", () => {
+    const source = project();
+    source.layout.timeline_previews = {
+      "main/end": {
+        variable_overrides: { score: 5 },
+        choices: [
+          {
+            scene_id: "main",
+            node_id: "end",
+            visit: 1,
+            choice_id: "left",
+          },
+        ],
+      },
+    };
+    const renamedNode = renameNode(source, "main", "end", "finish");
+    expect(renamedNode.layout.timeline_previews?.["main/finish"]).toEqual({
+      variable_overrides: { score: 5 },
+      choices: [
+        {
+          scene_id: "main",
+          node_id: "finish",
+          visit: 1,
+          choice_id: "left",
+        },
+      ],
+    });
+    const renamedScene = renameScene(renamedNode, "main", "chapter_one");
+    expect(
+      renamedScene.layout.timeline_previews?.["chapter_one/finish"],
+    ).toBeDefined();
+    expect(
+      renamedScene.layout.timeline_previews?.["chapter_one/finish"]?.choices[0]
+        ?.scene_id,
+    ).toBe("chapter_one");
+    const renamedVariable = renameVariable(renamedScene, "score", "points");
+    expect(
+      renamedVariable.layout.timeline_previews?.["chapter_one/finish"]
+        ?.variable_overrides,
+    ).toEqual({ points: 5 });
   });
 
   it("reports a broken edge before Rust save validation", () => {

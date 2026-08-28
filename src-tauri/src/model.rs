@@ -532,7 +532,7 @@ pub enum AdvanceSource {
     ForcedAuto,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StoryLocation {
     pub scene_id: String,

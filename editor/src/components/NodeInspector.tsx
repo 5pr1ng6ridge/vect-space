@@ -922,7 +922,7 @@ function renderFields(
             value={node.skippable}
           />
           <p className="field-note">
-            在底部“关键帧”工作区编辑轨道、事件和缓动曲线。
+            双击时间线节点进入全屏工作区，编辑轨道、事件和缓动曲线。
           </p>
           <TargetSelect
             label="下一节点"

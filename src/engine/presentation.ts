@@ -25,9 +25,8 @@ import type {
 } from "./types";
 import { evaluateChannel, TimelineClock } from "./timeline";
 import { advanceVirtualElapsed } from "./virtualClock";
+import { DESIGN_HEIGHT, DESIGN_WIDTH } from "../viewport/viewport";
 
-const WIDTH = 1920;
-const HEIGHT = 1080;
 const oneShotLedger = new Set<string>();
 const texturePromises = new Map<string, Promise<Texture>>();
 
@@ -67,8 +66,8 @@ export class PresentationController {
   async init(): Promise<void> {
     await this.#application.init({
       canvas: this.#canvas,
-      width: WIDTH,
-      height: HEIGHT,
+      width: DESIGN_WIDTH,
+      height: DESIGN_HEIGHT,
       resolution: 1,
       autoDensity: false,
       antialias: true,
@@ -435,7 +434,9 @@ export class PresentationController {
     signal: AbortSignal,
   ): Promise<void> {
     if (effect === "flash") {
-      const flash = new Graphics().rect(0, 0, WIDTH, HEIGHT).fill(0xffffff);
+      const flash = new Graphics()
+        .rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT)
+        .fill(0xffffff);
       flash.alpha = 0.88;
       this.#effects.addChild(flash);
       await this.#animate(
@@ -455,8 +456,9 @@ export class PresentationController {
       (progress) => {
         const strength = (1 - progress) * 16;
         this.#world.position.set(
-          WIDTH / 2 + Math.sin(progress * Math.PI * 18) * strength,
-          HEIGHT / 2 + Math.cos(progress * Math.PI * 22) * strength * 0.6,
+          DESIGN_WIDTH / 2 + Math.sin(progress * Math.PI * 18) * strength,
+          DESIGN_HEIGHT / 2 +
+            Math.cos(progress * Math.PI * 22) * strength * 0.6,
         );
       },
       signal,
@@ -710,13 +712,13 @@ export class PresentationController {
           track.channels,
           "width",
           elapsedMs,
-          WIDTH,
+          DESIGN_WIDTH,
         );
         const height = evaluateChannel(
           track.channels,
           "height",
           elapsedMs,
-          HEIGHT,
+          DESIGN_HEIGHT,
         );
         const naturalWidth = Math.max(1, video.videoWidth);
         const naturalHeight = Math.max(1, video.videoHeight);
@@ -854,11 +856,14 @@ export class PresentationController {
     const texture = await loadTexture(url);
     const sprite = new Sprite(texture);
     sprite.label = url;
-    const scale = Math.max(WIDTH / texture.width, HEIGHT / texture.height);
+    const scale = Math.max(
+      DESIGN_WIDTH / texture.width,
+      DESIGN_HEIGHT / texture.height,
+    );
     sprite.scale.set(scale);
     sprite.position.set(
-      (WIDTH - texture.width * scale) / 2,
-      (HEIGHT - texture.height * scale) / 2,
+      (DESIGN_WIDTH - texture.width * scale) / 2,
+      (DESIGN_HEIGHT - texture.height * scale) / 2,
     );
     return sprite;
   }
@@ -884,10 +889,10 @@ export class PresentationController {
   }
 
   #applyCamera(): void {
-    this.#world.position.set(WIDTH / 2, HEIGHT / 2);
+    this.#world.position.set(DESIGN_WIDTH / 2, DESIGN_HEIGHT / 2);
     this.#world.pivot.set(
-      WIDTH / 2 + this.#camera.x,
-      HEIGHT / 2 + this.#camera.y,
+      DESIGN_WIDTH / 2 + this.#camera.x,
+      DESIGN_HEIGHT / 2 + this.#camera.y,
     );
     this.#world.scale.set(this.#camera.zoom);
     this.#world.rotation = (this.#camera.rotation_deg * Math.PI) / 180;

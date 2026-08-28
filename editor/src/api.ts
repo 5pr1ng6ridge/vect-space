@@ -1,12 +1,12 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AssetKind,
-  AdvanceSource,
   EditorDiagnostic,
   EditorProject,
   ImportedAsset,
-  RuntimeUpdate,
   SaveProjectRequest,
+  TimelinePreviewRequest,
+  TimelinePreviewResult,
 } from "./types";
 
 async function command<T>(
@@ -31,13 +31,8 @@ export const editorApi = {
     command<ImportedAsset>("import_asset", {
       request: { id, kind, source_path: sourcePath },
     }),
-  previewStart: () => command<RuntimeUpdate>("preview_start"),
-  previewAdvance: (expectedRevision: number, source: AdvanceSource) =>
-    command<RuntimeUpdate>("preview_advance", { expectedRevision, source }),
-  previewChoose: (choiceId: string, expectedRevision: number) =>
-    command<RuntimeUpdate>("preview_choose", { choiceId, expectedRevision }),
-  previewPresentationComplete: (updateId: number) =>
-    command<RuntimeUpdate>("preview_presentation_complete", { updateId }),
+  buildTimelinePreview: (request: TimelinePreviewRequest) =>
+    command<TimelinePreviewResult>("build_timeline_preview", { request }),
 };
 
 export function assetUrl(path: string): string {

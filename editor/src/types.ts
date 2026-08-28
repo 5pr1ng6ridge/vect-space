@@ -267,6 +267,19 @@ export interface SceneLayout {
 export interface EditorLayout {
   version: number;
   scenes: Record<string, SceneLayout>;
+  timeline_previews?: Record<string, TimelinePreviewSettings>;
+}
+
+export interface TimelinePreviewSettings {
+  variable_overrides: Record<string, ScalarValue>;
+  choices: PreviewChoiceDecision[];
+}
+
+export interface PreviewChoiceDecision {
+  scene_id: string;
+  node_id: string;
+  visit: number;
+  choice_id: string;
 }
 
 export interface EditorAsset {
@@ -375,6 +388,29 @@ export interface RuntimeUpdate {
   } & Record<string, unknown>)[];
   requires_ack: boolean;
 }
+
+export interface TimelinePreviewRequest {
+  project: SaveProjectRequest;
+  target: StoryLocation;
+  variable_overrides: Record<string, ScalarValue>;
+  choices: PreviewChoiceDecision[];
+}
+
+export type TimelinePreviewResult =
+  | {
+      status: "needs_choice";
+      location: StoryLocation;
+      visit: number;
+      choices: { id: string; label: string; enabled: boolean }[];
+      trace: StoryLocation[];
+    }
+  | {
+      status: "ready";
+      start_snapshot: RuntimeSnapshot;
+      update: RuntimeUpdate;
+      trace: StoryLocation[];
+    }
+  | { status: "unreachable"; message: string; trace: StoryLocation[] };
 
 export interface ImportedAsset {
   id: string;

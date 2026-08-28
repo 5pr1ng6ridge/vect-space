@@ -9,6 +9,7 @@ import type {
   ScalarValue,
   SceneDefinition,
   SceneNode,
+  TimelinePreviewSettings,
 } from "./types";
 import { countTemplateVariable, renameTemplateVariable } from "./textTemplate";
 
@@ -535,6 +536,20 @@ export function renameVariable(
       }
     }
   }
+  for (const settings of Object.values(
+    updated.layout.timeline_previews ?? {},
+  )) {
+    if (
+      Object.prototype.hasOwnProperty.call(
+        settings.variable_overrides,
+        previousId,
+      )
+    ) {
+      settings.variable_overrides[nextId] =
+        settings.variable_overrides[previousId];
+      Reflect.deleteProperty(settings.variable_overrides, previousId);
+    }
+  }
   return updated;
 }
 
@@ -756,6 +771,20 @@ export function renameNode(
     sceneLayout.nodes[nextId] = sceneLayout.nodes[previousId];
     Reflect.deleteProperty(sceneLayout.nodes, previousId);
   }
+  const previews = updated.layout.timeline_previews;
+  if (previews !== undefined) {
+    const oldKey = `${sceneId}/${previousId}`;
+    const newKey = `${sceneId}/${nextId}`;
+    if (previews[oldKey] !== undefined) {
+      previews[newKey] = previews[oldKey];
+      Reflect.deleteProperty(previews, oldKey);
+    }
+    migratePreviewChoices(previews, (choice) =>
+      choice.scene_id === sceneId && choice.node_id === previousId
+        ? { ...choice, node_id: nextId }
+        : choice,
+    );
+  }
   return updated;
 }
 
@@ -790,7 +819,31 @@ export function renameScene(
     updated.layout.scenes[nextId] = updated.layout.scenes[previousId];
     Reflect.deleteProperty(updated.layout.scenes, previousId);
   }
+  const previews = updated.layout.timeline_previews;
+  if (previews !== undefined) {
+    for (const key of Object.keys(previews)) {
+      if (key.startsWith(`${previousId}/`)) {
+        previews[`${nextId}/${key.slice(previousId.length + 1)}`] =
+          previews[key];
+        Reflect.deleteProperty(previews, key);
+      }
+    }
+    migratePreviewChoices(previews, (choice) =>
+      choice.scene_id === previousId ? { ...choice, scene_id: nextId } : choice,
+    );
+  }
   return updated;
+}
+
+function migratePreviewChoices(
+  previews: Record<string, TimelinePreviewSettings>,
+  migrate: (
+    choice: TimelinePreviewSettings["choices"][number],
+  ) => TimelinePreviewSettings["choices"][number],
+): void {
+  for (const settings of Object.values(previews)) {
+    settings.choices = settings.choices.map(migrate);
+  }
 }
 
 export function projectRequest(project: EditorProject) {
