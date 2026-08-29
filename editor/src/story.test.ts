@@ -5,6 +5,7 @@ import {
   outputPorts,
   defaultNode,
   insertNode,
+  preparePastedNode,
   renameNode,
   renameScene,
   renameCharacter,
@@ -71,6 +72,109 @@ function project(): EditorProject {
 }
 
 describe("story graph mapping", () => {
+  it("pastes nodes without carrying story connections", () => {
+    const source = project();
+    const manifest = source.manifest;
+    const choice = preparePastedNode(
+      source.scenes[0].definition.nodes.start,
+      manifest,
+    );
+    expect(
+      choice.type === "choice" && choice.choices.map(({ next }) => next),
+    ).toEqual(["", ""]);
+
+    const condition = preparePastedNode(
+      {
+        type: "condition",
+        condition: {
+          op: "ge",
+          left: { variable: "score" },
+          right: { value: 1 },
+        },
+        then: "left",
+        otherwise: "right",
+      },
+      manifest,
+    );
+    expect(condition).toMatchObject({ then: "", otherwise: "" });
+    const jump = preparePastedNode(
+      { type: "jump", scene: "other", target: "start" },
+      manifest,
+    );
+    expect(jump).toEqual({ type: "jump", scene: null, target: "" });
+  });
+
+  it("empties missing project references while preserving available ones", () => {
+    const manifest = project().manifest;
+    const set = preparePastedNode(
+      {
+        type: "set",
+        variable: "missing_target",
+        op: "add",
+        value: { variable: "missing_operand" },
+        next: "end",
+      },
+      manifest,
+    );
+    expect(set).toMatchObject({
+      variable: "",
+      value: { variable: "" },
+      next: "",
+    });
+
+    const say = preparePastedNode(
+      {
+        type: "say",
+        speaker: "alice",
+        text: "保留 [var=score]，移除 [var=missing]，字面 \\[var=missing]",
+        speed_cps: null,
+        next: "end",
+      },
+      { ...manifest, characters: {} },
+      "alice",
+    );
+    expect(say).toMatchObject({
+      speaker: null,
+      text: "保留 [var=score]，移除 ，字面 \\[var=missing]",
+      next: "",
+    });
+
+    const timeline = preparePastedNode(
+      {
+        type: "timeline",
+        duration_ms: 1000,
+        await: true,
+        skippable: true,
+        tracks: [
+          {
+            type: "sprite",
+            sprite_id: "alice",
+            asset: "missing.sprite",
+            remove_at_end: false,
+            channels: {},
+          },
+        ],
+        events: [
+          {
+            type: "sfx",
+            id: "hit",
+            at_ms: 100,
+            asset: "missing.sfx",
+            volume: 1,
+          },
+        ],
+        next: "end",
+      },
+      manifest,
+    );
+    expect(timeline.type === "timeline" && timeline.tracks[0]).toMatchObject({
+      asset: "",
+    });
+    expect(timeline.type === "timeline" && timeline.events[0]).toMatchObject({
+      asset: "",
+    });
+  });
+
   it("maps every choice to an independently addressable output port", () => {
     const node = project().scenes[0].definition.nodes.start;
     expect(outputPorts(node).map((port) => port.id)).toEqual([

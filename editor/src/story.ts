@@ -11,7 +11,11 @@ import type {
   SceneNode,
   TimelinePreviewSettings,
 } from "./types";
-import { countTemplateVariable, renameTemplateVariable } from "./textTemplate";
+import {
+  countTemplateVariable,
+  removeUnknownTemplateVariables,
+  renameTemplateVariable,
+} from "./textTemplate";
 
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
@@ -286,6 +290,136 @@ export function uniqueNodeId(scene: SceneDefinition, prefix: string): string {
     index += 1;
   }
   return `${cleaned}_${index}`;
+}
+
+/**
+ * Prepare one copied node for insertion as an independent graph node.
+ * Flow edges never cross the clipboard boundary. References that no longer
+ * exist in the destination project are intentionally emptied so the editor can
+ * surface them as ordinary, fixable diagnostics.
+ */
+export function preparePastedNode(
+  source: SceneNode,
+  manifest: ContentManifest,
+  sourceCharacterId: string | null = null,
+): SceneNode {
+  const node = structuredClone(source);
+  const variables = new Set(Object.keys(manifest.variables));
+  const hasAsset = (id: string | null, kind: string): boolean =>
+    id !== null && manifest.assets[id]?.kind === kind;
+  const clearOperand = (
+    operand: { variable: string } | { value: ScalarValue },
+  ): { variable: string } | { value: ScalarValue } =>
+    "variable" in operand && !variables.has(operand.variable)
+      ? { variable: "" }
+      : operand;
+  const clearCondition = (
+    condition: ConditionExpression,
+  ): ConditionExpression => {
+    switch (condition.op) {
+      case "eq":
+      case "ne":
+      case "lt":
+      case "le":
+      case "gt":
+      case "ge":
+        return {
+          ...condition,
+          left: clearOperand(condition.left),
+          right: clearOperand(condition.right),
+        };
+      case "and":
+      case "or":
+        return {
+          ...condition,
+          conditions: condition.conditions.map(clearCondition),
+        };
+      case "not":
+        return { ...condition, condition: clearCondition(condition.condition) };
+    }
+  };
+
+  if ("next" in node) node.next = "";
+  switch (node.type) {
+    case "background":
+      if (node.background !== null && !hasAsset(node.background, "background"))
+        node.background = null;
+      break;
+    case "sprite":
+      if (node.asset !== null && !hasAsset(node.asset, "sprite"))
+        node.asset = null;
+      break;
+    case "say":
+      if (
+        sourceCharacterId !== null &&
+        manifest.characters[sourceCharacterId] === undefined
+      ) {
+        node.speaker = null;
+      }
+      node.text = removeUnknownTemplateVariables(node.text, variables);
+      break;
+    case "choice":
+      node.choices = node.choices.map((choice) => ({
+        ...choice,
+        label: removeUnknownTemplateVariables(choice.label, variables),
+        next: "",
+        ...(choice.visible_if === undefined
+          ? {}
+          : { visible_if: clearCondition(choice.visible_if) }),
+        ...(choice.enabled_if === undefined
+          ? {}
+          : { enabled_if: clearCondition(choice.enabled_if) }),
+      }));
+      break;
+    case "set":
+      if (!variables.has(node.variable)) node.variable = "";
+      if (
+        typeof node.value === "object" &&
+        node.value !== null &&
+        !variables.has(node.value.variable)
+      ) {
+        node.value = { variable: "" };
+      }
+      break;
+    case "condition":
+      node.condition = clearCondition(node.condition);
+      node.then = "";
+      node.otherwise = "";
+      break;
+    case "jump":
+      node.scene = null;
+      node.target = "";
+      break;
+    case "bgm":
+      if (node.asset !== null && !hasAsset(node.asset, "bgm"))
+        node.asset = null;
+      break;
+    case "sfx":
+      if (!hasAsset(node.asset, "sfx")) node.asset = "";
+      break;
+    case "timeline":
+      node.tracks = node.tracks.map((track) => {
+        if (track.type === "sprite" && !hasAsset(track.asset, "sprite"))
+          return { ...track, asset: "" };
+        if (track.type === "video" && !hasAsset(track.asset, "video"))
+          return { ...track, asset: "" };
+        return track;
+      });
+      node.events = node.events.map((event) =>
+        event.type === "sfx" && !hasAsset(event.asset, "sfx")
+          ? { ...event, asset: "" }
+          : event,
+      );
+      break;
+    case "playback":
+    case "wait":
+    case "camera":
+    case "screen_effect":
+    case "dialogue_ui":
+    case "end":
+      break;
+  }
+  return node;
 }
 
 /**

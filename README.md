@@ -136,7 +136,7 @@ out every Chinese character and KaTeX formula first, then reveals units with
 This first stage includes the VN runtime, fixed viewport, validated content,
 Pixi presentation cues, KaTeX dialogue, BGM/SFX infrastructure, settings, a
 minimal title screen, automatic save, three manual slots, and NSIS configuration.
-Voice, history, auto/skip, 30 slots, multiple windows, Lean proof-card gameplay,
+History, auto/skip, 30 slots, multiple windows, Lean proof-card gameplay,
 and a separate rhythm subsystem remain later milestones.
 
 The copied demo assets and license notice are documented in

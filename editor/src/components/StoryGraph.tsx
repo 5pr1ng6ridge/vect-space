@@ -43,8 +43,10 @@ interface StoryGraphProps {
   onSelect(nodeId: string | null): void;
   onOpen(nodeId: string): void;
   onConnect(sourceId: string, handle: string, targetId: string): void;
+  onCopy(nodeId: string): void;
   onMoveNode(nodeId: string, position: NodePosition): void;
   onMoveMany(positions: Record<string, NodePosition>): void;
+  onPaste(position: NodePosition): void;
   onViewport(viewport: Viewport): void;
   onQuickInsert(nodeId: string, side: InsertSide, type: NodeType): void;
 }
@@ -54,6 +56,8 @@ interface QuickInsertMenu {
   side: InsertSide;
   x: number;
   y: number;
+  clientX: number;
+  clientY: number;
 }
 
 export function StoryGraph(props: StoryGraphProps): ReactElement {
@@ -72,13 +76,20 @@ function StoryGraphInner({
   onSelect,
   onOpen,
   onConnect,
+  onCopy,
   onMoveNode,
   onMoveMany,
+  onPaste,
   onViewport,
   onQuickInsert,
 }: StoryGraphProps): ReactElement {
-  const { fitView, setViewport } = useReactFlow<StoryFlowNode>();
+  const { fitView, screenToFlowPosition, setViewport } =
+    useReactFlow<StoryFlowNode>();
   const graphShellRef = useRef<HTMLDivElement>(null);
+  const lastPointerRef = useRef({
+    x: window.innerWidth / 2,
+    y: window.innerHeight / 2,
+  });
   const [quickInsertMenu, setQuickInsertMenu] =
     useState<QuickInsertMenu | null>(null);
   const issuesByNode = useMemo(() => {
@@ -102,14 +113,15 @@ function StoryGraphInner({
       const rawX = clientX - (bounds?.left ?? 0);
       const rawY = clientY - (bounds?.top ?? 0);
       const menuWidth = 264;
-      const menuHeight = 410;
+      const menuHeight = 500;
       const x = bounds
         ? Math.max(8, Math.min(rawX, bounds.width - menuWidth - 8))
         : rawX;
       const y = bounds
         ? Math.max(8, Math.min(rawY, bounds.height - menuHeight - 8))
         : rawY;
-      setQuickInsertMenu({ nodeId, side, x, y });
+      lastPointerRef.current = { x: clientX, y: clientY };
+      setQuickInsertMenu({ nodeId, side, x, y, clientX, clientY });
       onSelect(nodeId);
     },
     [onSelect],
@@ -225,6 +237,32 @@ function StoryGraphInner({
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [quickInsertMenu]);
 
+  useEffect(() => {
+    const handleClipboardShortcut = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "c" && selectedNodeId !== null) {
+        event.preventDefault();
+        onCopy(selectedNodeId);
+      } else if (key === "v") {
+        event.preventDefault();
+        onPaste(screenToFlowPosition(lastPointerRef.current));
+        setQuickInsertMenu(null);
+      }
+    };
+    window.addEventListener("keydown", handleClipboardShortcut);
+    return () => window.removeEventListener("keydown", handleClipboardShortcut);
+  }, [onCopy, onPaste, screenToFlowPosition, selectedNodeId]);
+
   const autoLayout = async (): Promise<void> => {
     const { default: ELK } = await import("elkjs/lib/elk.bundled.js");
     const elk = new ELK();
@@ -254,7 +292,13 @@ function StoryGraphInner({
   };
 
   return (
-    <div className="graph-shell" ref={graphShellRef}>
+    <div
+      className="graph-shell"
+      onPointerMove={(event) => {
+        lastPointerRef.current = { x: event.clientX, y: event.clientY };
+      }}
+      ref={graphShellRef}
+    >
       <div className="graph-toolbar">
         <strong>{scene.id}</strong>
         <span>{Object.keys(scene.nodes).length} nodes</span>
@@ -328,6 +372,33 @@ function StoryGraphInner({
               ×
             </button>
           </header>
+          <div className="quick-insert-clipboard">
+            <button
+              onClick={() => {
+                onCopy(quickInsertMenu.nodeId);
+                setQuickInsertMenu(null);
+              }}
+              role="menuitem"
+              type="button"
+            >
+              复制节点 <kbd>Ctrl+C</kbd>
+            </button>
+            <button
+              onClick={() => {
+                onPaste(
+                  screenToFlowPosition({
+                    x: quickInsertMenu.clientX,
+                    y: quickInsertMenu.clientY,
+                  }),
+                );
+                setQuickInsertMenu(null);
+              }}
+              role="menuitem"
+              type="button"
+            >
+              粘贴到此处 <kbd>Ctrl+V</kbd>
+            </button>
+          </div>
           <div className="quick-insert-options">
             {NODE_TYPES.map((candidate) => (
               <button

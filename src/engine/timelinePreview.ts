@@ -70,6 +70,11 @@ const DEFAULT_SETTINGS: Settings = {
   skip_mode: "disabled",
 };
 
+const MUTED_PREVIEW_SETTINGS: Settings = {
+  ...DEFAULT_SETTINGS,
+  master_volume: 0,
+};
+
 /**
  * Pixi-backed timeline surface shared by the game renderer and the editor.
  * The editor uses the seek/interaction methods; the game can use the same
@@ -110,6 +115,7 @@ export class TimelinePreviewSurface {
   #flashDuration = 0;
   #shakeStartedAt = 0;
   #shakeDuration = 0;
+  #destroyed = false;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -119,7 +125,10 @@ export class TimelinePreviewSurface {
     this.#canvas = canvas;
     this.#diagnostic = diagnostic;
     this.#onFrame = onFrame ?? null;
-    this.#audio = new AudioManager(DEFAULT_SETTINGS);
+    // Timeline previews are silent until the user explicitly unmutes them.
+    // Applying this before the first snapshot reconcile prevents an entry BGM
+    // from becoming audible while the context is still loading (or failing).
+    this.#audio = new AudioManager(MUTED_PREVIEW_SETTINGS);
   }
 
   async init(): Promise<void> {
@@ -168,47 +177,57 @@ export class TimelinePreviewSurface {
     this.#lastElapsed = -1;
     this.#objectOverrides.clear();
     this.#cameraOverride = {};
-    await this.#reconcile(start);
-    this.#spriteBases.clear();
-    for (const track of cue.tracks) {
-      if (track.type === "sprite") {
-        let view = this.#spriteViews.get(track.sprite_id);
-        if (view === undefined || view.label !== assets[track.asset]) {
-          view?.destroy();
-          view = await this.#makeSprite(track.asset, {
-            asset: track.asset,
-            x: 960,
-            y: 1080,
-            scale: 1,
-            scale_x: 1,
-            scale_y: 1,
-            rotation_deg: 0,
-            opacity: 1,
-            z: 0,
-          });
-          view.label = assets[track.asset] ?? track.asset;
-          this.#world.addChild(view);
-          this.#spriteViews.set(track.sprite_id, view);
+    try {
+      await this.#reconcile(start);
+      this.#spriteBases.clear();
+      for (const track of cue.tracks) {
+        if (track.type === "sprite") {
+          let view = this.#spriteViews.get(track.sprite_id);
+          if (view === undefined || view.label !== assets[track.asset]) {
+            view?.destroy();
+            view = await this.#makeSprite(track.asset, {
+              asset: track.asset,
+              x: 960,
+              y: 1080,
+              scale: 1,
+              scale_x: 1,
+              scale_y: 1,
+              rotation_deg: 0,
+              opacity: 1,
+              z: 0,
+            });
+            view.label = assets[track.asset] ?? track.asset;
+            this.#world.addChild(view);
+            this.#spriteViews.set(track.sprite_id, view);
+          }
+          const startState = start.world.sprites[track.sprite_id];
+          this.#spriteBases.set(
+            track.sprite_id,
+            startState === undefined
+              ? defaultSpriteFrame()
+              : omitSpriteAsset(startState),
+          );
         }
-        const startState = start.world.sprites[track.sprite_id];
-        this.#spriteBases.set(
-          track.sprite_id,
-          startState === undefined
-            ? defaultSpriteFrame()
-            : omitSpriteAsset(startState),
-        );
       }
-    }
-    const videoTrack = cue.tracks.find(
-      (track): track is Extract<TimelineTrack, { type: "video" }> =>
-        track.type === "video",
-    );
-    if (videoTrack !== undefined) await this.#prepareVideo(videoTrack);
-    await this.seek(0, false);
-    if (this.#video !== null) {
-      await waitForPresentedVideoFrame(this.#video);
-      this.#videoSource?.update();
-      this.#application.render();
+      const videoTrack = cue.tracks.find(
+        (track): track is Extract<TimelineTrack, { type: "video" }> =>
+          track.type === "video",
+      );
+      if (videoTrack !== undefined) await this.#prepareVideo(videoTrack);
+      await this.seek(0, false);
+      if (this.#video !== null) {
+        await waitForPresentedVideoFrame(this.#video);
+        this.#videoSource?.update();
+        this.#application.render();
+      }
+    } catch (error) {
+      this.stop();
+      // A partially restored context must not leave its BGM running after the
+      // preview reports an image/video/WebGL error.
+      await this.#audio
+        .reconcile({ bgm: null }, this.#assets)
+        .catch(() => undefined);
+      throw error;
     }
   }
 
@@ -515,6 +534,8 @@ export class TimelinePreviewSurface {
   }
 
   destroy(): void {
+    if (this.#destroyed) return;
+    this.#destroyed = true;
     this.stop();
     this.#audio.destroy();
     this.#application.destroy({ removeView: false }, { children: true });
@@ -986,6 +1007,11 @@ function requireAssetUrl(assets: AssetUrlMap, id: string): string {
 function loadTexture(url: string): Promise<Texture> {
   return new Promise<Texture>((resolve, reject) => {
     const image = new Image();
+    // convertFileSrc() uses Tauri's asset origin. Without an explicit
+    // anonymous CORS request WebView2 may decode the image for <img>, but marks
+    // it origin-dirty and WebGL rejects it in texImage2D().
+    image.crossOrigin = "anonymous";
+    image.decoding = "async";
     image.onload = () => resolve(Texture.from(image));
     image.onerror = () => reject(new Error(`图片加载失败：${url}`));
     image.src = url;

@@ -121,6 +121,11 @@ export function TimelineWorkspace({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const surfaceRef = useRef<TimelinePreviewSurface | null>(null);
   const surfaceReadyRef = useRef<Promise<void>>(Promise.resolve());
+  const surfaceSessionRef = useRef<{
+    surface: TimelinePreviewSurface;
+    initialized: Promise<void>;
+  } | null>(null);
+  const surfaceDestroyTimerRef = useRef<number | null>(null);
   const contextRequestRef = useRef(0);
   const gestureCancelRef = useRef<(() => void) | null>(null);
   const parentNodeCommitRef = useRef<TimelineNode | null>(null);
@@ -162,15 +167,27 @@ export function TimelineWorkspace({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (canvas === null) return;
-    const surface = new TimelinePreviewSurface(
-      canvas,
-      handleDiagnostic,
-      setFrame,
-    );
+    if (surfaceDestroyTimerRef.current !== null) {
+      window.clearTimeout(surfaceDestroyTimerRef.current);
+      surfaceDestroyTimerRef.current = null;
+    }
+    let session = surfaceSessionRef.current;
+    if (session === null) {
+      const next = new TimelinePreviewSurface(
+        canvas,
+        handleDiagnostic,
+        setFrame,
+      );
+      session = { surface: next, initialized: next.init() };
+      surfaceSessionRef.current = session;
+    }
+    const currentSession = session;
+    const surface = currentSession.surface;
+    surface.setOnFrame(setFrame);
     surface.setOnPlayingChange(setPlaying);
     surfaceRef.current = surface;
     let active = true;
-    const ready = surface.init();
+    const ready = currentSession.initialized;
     surfaceReadyRef.current = ready;
     void ready.catch((error: unknown) => {
       if (active)
@@ -179,8 +196,26 @@ export function TimelineWorkspace({
     return () => {
       active = false;
       contextRequestRef.current += 1;
-      surface.destroy();
+      surface.setOnFrame(null);
+      surface.setOnPlayingChange(null);
       surfaceRef.current = null;
+      // React Strict Mode immediately probes effects with a setup/cleanup/setup
+      // cycle. Delay disposal by one task so the second setup can reclaim the
+      // same asynchronously initialized Pixi application. On a real unmount,
+      // destruction waits for init() and therefore never calls Pixi's plugins
+      // while they are only partially installed.
+      surfaceDestroyTimerRef.current = window.setTimeout(() => {
+        if (surfaceSessionRef.current !== currentSession) return;
+        void currentSession.initialized
+          .then(
+            () => currentSession.surface.destroy(),
+            () => undefined,
+          )
+          .finally(() => {
+            if (surfaceSessionRef.current === currentSession)
+              surfaceSessionRef.current = null;
+          });
+      }, 0);
     };
   }, [handleDiagnostic]);
 
@@ -211,25 +246,30 @@ export function TimelineWorkspace({
           setContextError(result.message);
           setPreview(null);
         } else {
-          setPreview(result);
-          setContextStatus(
-            `已捕获真实进入状态（${result.trace.length} 个边界）`,
-          );
           const surface = surfaceRef.current;
           if (surface !== null) {
             await surfaceReadyRef.current;
             if (surfaceRef.current !== surface) return;
+            // Set the requested audio policy before restoring a snapshot: the
+            // snapshot can already contain a looping BGM from the story path.
+            surface.setMuted(muted);
             await surface.load(
               result.start_snapshot,
               result.update as unknown as GameRuntimeUpdate,
               urls,
             );
             await surface.seek(playheadRef.current, false);
-            surface.setMuted(muted);
           }
+          setPreview(result);
+          setContextStatus(
+            `已捕获真实进入状态（${result.trace.length} 个边界）`,
+          );
         }
       } catch (error) {
         if (requestId !== contextRequestRef.current) return;
+        setPreview(null);
+        setFrame(null);
+        setPlaying(false);
         setContextStatus("上下文构建失败");
         setContextError(errorMessage(error));
       } finally {

@@ -1108,13 +1108,15 @@ code {
 .quick-insert-menu {
   position: absolute;
   z-index: 30;
+  display: flex;
   width: 264px;
-  max-height: min(440px, calc(100% - 16px));
+  max-height: min(500px, calc(100% - 16px));
   overflow: hidden;
   border: 1px solid #3d4960;
   border-radius: 9px;
   background: rgba(18, 21, 29, 0.98);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+  flex-direction: column;
 }
 
 .quick-insert-menu-header {
@@ -1163,11 +1165,46 @@ code {
 
 .quick-insert-options {
   display: grid;
-  max-height: 340px;
+  min-height: 0;
   padding: 8px;
   overflow-y: auto;
+  flex: 1;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 5px;
+}
+
+.quick-insert-clipboard {
+  display: grid;
+  padding: 8px 8px 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.quick-insert-clipboard button {
+  display: flex;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid #3d4960;
+  border-radius: 6px;
+  background: #202633;
+  color: #d7deed;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 9px;
+}
+
+.quick-insert-clipboard button:hover,
+.quick-insert-clipboard button:focus-visible {
+  border-color: var(--accent);
+  background: #203039;
+  outline: none;
+}
+
+.quick-insert-clipboard kbd {
+  color: #788399;
+  font: inherit;
+  font-size: 8px;
 }
 
 .quick-insert-options button {

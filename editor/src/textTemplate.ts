@@ -84,6 +84,19 @@ export function countTemplateVariable(
   }
 }
 
+export function removeUnknownTemplateVariables(
+  source: string,
+  knownVariables: ReadonlySet<string>,
+): string {
+  try {
+    return replaceReferences(source, (reference) =>
+      knownVariables.has(reference.id) ? null : "",
+    );
+  } catch {
+    return source;
+  }
+}
+
 export function validateTemplate(
   source: string,
   variableTypes: Record<string, VariableType>,

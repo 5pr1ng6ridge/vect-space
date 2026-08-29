@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -25,6 +26,7 @@ import {
   newSceneFile,
   nodeLabel,
   outputPorts,
+  preparePastedNode,
   projectRequest,
   renameCharacter,
   renameNode,
@@ -55,6 +57,12 @@ interface ResizeState {
   startX: number;
   startY: number;
   initial: number;
+}
+
+interface NodeClipboard {
+  node: SceneNode;
+  sourceNodeId: string;
+  sourceCharacterId: string | null;
 }
 
 const DEFAULT_PANEL_SIZES: PanelSizes = {
@@ -131,6 +139,7 @@ export function App(): ReactElement {
   const [notice, setNotice] = useState<string | null>(null);
   const [panelSizes, setPanelSizes] = useState<PanelSizes>(DEFAULT_PANEL_SIZES);
   const [resizeState, setResizeState] = useState<ResizeState | null>(null);
+  const nodeClipboardRef = useRef<NodeClipboard | null>(null);
 
   const resizeBy = (axis: ResizeAxis, delta: number): void => {
     setPanelSizes((current) => ({
@@ -492,6 +501,48 @@ export function App(): ReactElement {
     setSelectedNodeId(id);
   };
 
+  const copyNode = (nodeId: string): void => {
+    const node = activeScene?.nodes[nodeId];
+    if (node === undefined) return;
+    const sourceCharacterId =
+      node.type === "say" &&
+      node.speaker !== null &&
+      project.manifest.characters[node.speaker] !== undefined
+        ? node.speaker
+        : null;
+    nodeClipboardRef.current = {
+      node: structuredClone(node),
+      sourceNodeId: nodeId,
+      sourceCharacterId,
+    };
+    setNotice(`已复制节点 ${nodeId}，可切换场景后粘贴。`);
+  };
+
+  const pasteNode = (position: NodePosition): void => {
+    const clipboard = nodeClipboardRef.current;
+    if (clipboard === null || activeScene === undefined) {
+      setNotice("还没有复制节点。");
+      return;
+    }
+    const id = uniqueNodeId(activeScene, `${clipboard.sourceNodeId}_copy`);
+    const snapped = {
+      x: Math.round(position.x / 16) * 16,
+      y: Math.round(position.y / 16) * 16,
+    };
+    commit((draft) => {
+      const file = findScene(draft, activeSceneId);
+      if (file === undefined) return;
+      file.definition.nodes[id] = preparePastedNode(
+        clipboard.node,
+        draft.manifest,
+        clipboard.sourceCharacterId,
+      );
+      ensureSceneLayout(draft.layout, activeSceneId).nodes[id] = snapped;
+    });
+    setSelectedNodeId(id);
+    setNotice(`已粘贴为 ${id}；流程连接已清空。`);
+  };
+
   const addScene = (id: string): void => {
     if (
       !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
@@ -812,6 +863,7 @@ export function App(): ReactElement {
           <StoryGraph
             diagnostics={diagnostics}
             layout={project.layout.scenes[activeSceneId]}
+            onCopy={copyNode}
             onConnect={(sourceId, handle, targetId) =>
               commit((draft) => {
                 const file = findScene(draft, activeSceneId);
@@ -839,6 +891,7 @@ export function App(): ReactElement {
                   position;
               })
             }
+            onPaste={pasteNode}
             onQuickInsert={quickInsertNode}
             onOpen={(nodeId) => {
               if (activeScene.nodes[nodeId]?.type === "timeline") {

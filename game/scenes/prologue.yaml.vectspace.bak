@@ -127,6 +127,10 @@ nodes:
       $[var=score]$。
     speed_cps: 28.0
     next: forced_end
+  jump_say_3:
+    type: jump
+    scene: test_scene
+    target: background_start
   mark_ending:
     type: set
     variable: ending_seen
@@ -242,7 +246,7 @@ nodes:
       
       $$
     speed_cps: null
-    next: flash_result
+    next: jump_say_3
   sprite_move_jelly:
     type: sprite
     sprite_id: omo
@@ -255,7 +259,7 @@ nodes:
     z: 0
     duration_ms: 500
     easing: ease_in_out
-    await: true
+    await: false
     next: route_choice
   timeline_showcase:
     type: timeline
@@ -337,7 +341,7 @@ nodes:
     next: video_showcase
   video_showcase:
     type: timeline
-    duration_ms: 5000
+    duration_ms: 10000
     await: true
     skippable: true
     tracks:
@@ -357,7 +361,7 @@ nodes:
         - at_ms: 0
           value: 0.0
           easing: ease_out
-        - at_ms: 2000
+        - at_ms: 500
           value: 1.0
           easing: linear
         - at_ms: 4500

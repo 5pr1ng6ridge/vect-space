@@ -50,3 +50,4 @@ assets:
     path: videos/test_movie.mp4
 scenes:
 - scenes/prologue.yaml
+- scenes/test_scene.yaml
