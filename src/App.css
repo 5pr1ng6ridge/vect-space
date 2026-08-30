@@ -225,9 +225,6 @@ button:disabled {
   height: 387px;
   color: #17213a;
   pointer-events: none;
-  transition:
-    opacity 180ms ease,
-    transform 180ms ease;
 }
 
 .dialogue-frame {
@@ -241,8 +238,7 @@ button:disabled {
 
 .dialogue-box.is-hidden {
   pointer-events: none;
-  opacity: 0;
-  transform: translateY(24px);
+  visibility: hidden;
 }
 
 .speaker-name {

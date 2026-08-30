@@ -21,6 +21,9 @@ characters:
     name_color: "#1D5C78"
     text_color: "#17213A"
 assets:
+  bg.nvctsp:
+    kind: background
+    path: backgrounds/Photoshop_3a52oGnGn0.png
   bg.vector_space:
     kind: background
     path: backgrounds/bg_vstest.png

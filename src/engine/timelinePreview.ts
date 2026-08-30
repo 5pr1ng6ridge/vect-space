@@ -92,6 +92,7 @@ export class TimelinePreviewSurface {
   #background: Sprite | null = null;
   #camera = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
   #cameraStart = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
+  #bgmStartVolume = 1;
   #assets: AssetUrlMap = {};
   #cue: Extract<RuntimeUpdate["cues"][number], { type: "timeline" }> | null =
     null;
@@ -174,6 +175,7 @@ export class TimelinePreviewSurface {
     this.#cue = cue;
     this.#cameraStart = { ...start.world.camera };
     this.#camera = { ...start.world.camera };
+    this.#bgmStartVolume = start.audio.bgm?.volume ?? 1;
     this.#lastElapsed = -1;
     this.#objectOverrides.clear();
     this.#cameraOverride = {};
@@ -182,11 +184,15 @@ export class TimelinePreviewSurface {
       this.#spriteBases.clear();
       for (const track of cue.tracks) {
         if (track.type === "sprite") {
+          const effectiveAsset =
+            track.asset ?? start.world.sprites[track.sprite_id]?.asset;
+          if (effectiveAsset === undefined)
+            throw new Error(`立绘 ${track.sprite_id} 没有可继承的素材`);
           let view = this.#spriteViews.get(track.sprite_id);
-          if (view === undefined || view.label !== assets[track.asset]) {
+          if (view === undefined || view.label !== assets[effectiveAsset]) {
             view?.destroy();
-            view = await this.#makeSprite(track.asset, {
-              asset: track.asset,
+            view = await this.#makeSprite(effectiveAsset, {
+              asset: effectiveAsset,
               x: 960,
               y: 1080,
               scale: 1,
@@ -196,7 +202,7 @@ export class TimelinePreviewSurface {
               opacity: 1,
               z: 0,
             });
-            view.label = assets[track.asset] ?? track.asset;
+            view.label = assets[effectiveAsset] ?? effectiveAsset;
             this.#world.addChild(view);
             this.#spriteViews.set(track.sprite_id, view);
           }
@@ -438,7 +444,10 @@ export class TimelinePreviewSurface {
               base.opacity,
             ),
             z: evaluateChannel(track.channels, "z", elapsed, base.z),
-            asset: track.asset,
+            asset:
+              track.asset ??
+              this.#start?.world.sprites[track.sprite_id]?.asset ??
+              "",
           });
         } else if (track.type === "video") {
           objects.push({
@@ -691,7 +700,10 @@ export class TimelinePreviewSurface {
         base.scale,
       );
       applySprite(view, {
-        asset: track.asset,
+        asset:
+          track.asset ??
+          this.#start?.world.sprites[track.sprite_id]?.asset ??
+          "",
         x: evaluateChannel(track.channels, "x", elapsedMs, base.x),
         y: evaluateChannel(track.channels, "y", elapsedMs, base.y),
         scale,
@@ -835,7 +847,7 @@ export class TimelinePreviewSurface {
           track.channels,
           "volume",
           elapsedMs,
-          this.#audio.currentBgmVolume() ?? 1,
+          this.#bgmStartVolume,
         ),
       );
     }

@@ -35,7 +35,32 @@ export interface WorldSnapshot {
   sprites: Record<string, SpriteSnapshot>;
   camera: CameraSnapshot;
   dialogue_ui_visible: boolean;
+  ui_motion_bindings: UiMotionBindings;
   persistent_effects: string[];
+}
+
+export interface UiMotionBindings {
+  dialogue_show?: string | null;
+  dialogue_hide?: string | null;
+}
+
+export type UiMotionTarget =
+  | "dialogue_root"
+  | "dialogue_frame"
+  | "dialogue_nameplate"
+  | "dialogue_text"
+  | "dialogue_advance_indicator";
+
+export interface UiMotionTrack {
+  target: UiMotionTarget;
+  channels: TimelineChannels;
+}
+
+export interface UiMotionPreset {
+  schema_version: number;
+  id: string;
+  duration_ms: number;
+  tracks: UiMotionTrack[];
 }
 
 export interface LoopingAudioSnapshot {
@@ -70,6 +95,15 @@ export interface DialoguePrompt {
   is_read: boolean;
 }
 
+export interface DialoguePageSnapshot {
+  page_id: string;
+  speaker: string | null;
+  speaker_id?: string | null;
+  name_color?: string | null;
+  text_color?: string | null;
+  segments: string[];
+}
+
 export interface ChoiceSnapshot {
   id: string;
   label: string;
@@ -97,6 +131,7 @@ export interface RuntimeSnapshot {
   world: WorldSnapshot;
   audio: AudioSnapshot;
   playback: PlaybackSnapshot;
+  dialogue_page?: DialoguePageSnapshot | null;
   prompt: PromptSnapshot;
 }
 
@@ -115,7 +150,7 @@ export type TimelineEasing =
 
 export interface TimelineKeyframe {
   at_ms: number;
-  value: number;
+  value: number | "inherit";
   easing: TimelineEasing;
 }
 
@@ -125,7 +160,7 @@ export type TimelineTrack =
   | {
       type: "sprite";
       sprite_id: string;
-      asset: string;
+      asset: string | null;
       remove_at_end: boolean;
       channels: TimelineChannels;
     }
@@ -190,6 +225,14 @@ export type PresentationCue = CueBase &
         type: "dialogue_ui_transition";
         visible: boolean;
         duration_ms: number;
+        motion: UiMotionPreset | null;
+      }
+    | {
+        cue_id: number;
+        gate: CueGate;
+        type: "ui_motion";
+        duration_ms: number;
+        motion: UiMotionPreset;
       }
     | {
         type: "play_sfx";

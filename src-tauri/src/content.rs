@@ -10,9 +10,10 @@ use thiserror::Error;
 
 use crate::model::{
     AssetDefinition, AssetKind, AudioAction, CharacterDefinition, ConditionExpression,
-    ContentManifest, MutationValue, ResolvedAsset, ScalarValue, SceneDefinition, SceneNode,
-    SpriteAction, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, ValueOperand,
-    VariableDefinition, VariableOperation, VariableType,
+    ContentManifest, DialogueMode, MutationValue, ResolvedAsset, ScalarValue, SceneDefinition,
+    SceneNode, SpriteAction, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack,
+    UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation,
+    VariableType,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -23,6 +24,7 @@ const MAX_TIMELINE_DURATION_MS: u64 = 30 * 60 * 1_000;
 const MAX_TIMELINE_TRACKS: usize = 64;
 const MAX_TIMELINE_KEYFRAMES: usize = 10_000;
 const MAX_TIMELINE_EVENTS: usize = 2_048;
+const UI_MOTION_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum ContentError {
@@ -44,6 +46,7 @@ pub struct ContentCatalog {
     assets_root: PathBuf,
     pub manifest: ContentManifest,
     pub scenes: BTreeMap<String, SceneDefinition>,
+    pub ui_motions: BTreeMap<String, UiMotionPreset>,
 }
 
 impl ContentCatalog {
@@ -76,6 +79,9 @@ impl ContentCatalog {
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
 
+        let ui_motions = load_ui_motions(&root, &manifest.ui_motions)?;
+        validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
+
         let mut scenes = BTreeMap::new();
         for scene_path in &manifest.scenes {
             let relative = validate_relative_path(scene_path)?;
@@ -107,12 +113,14 @@ impl ContentCatalog {
             &manifest.assets,
             &manifest.variables,
             &manifest.characters,
+            &ui_motions,
         )?;
 
         Ok(Self {
             assets_root,
             manifest,
             scenes,
+            ui_motions,
         })
     }
 
@@ -125,6 +133,7 @@ impl ContentCatalog {
         root: PathBuf,
         manifest: ContentManifest,
         scenes: BTreeMap<String, SceneDefinition>,
+        ui_motion_files: BTreeMap<String, UiMotionPreset>,
     ) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
         if manifest.schema_version != CONTENT_SCHEMA_VERSION {
@@ -139,6 +148,8 @@ impl ContentCatalog {
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
+        let ui_motions = validate_ui_motion_files(&manifest.ui_motions, &ui_motion_files)?;
+        validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
 
         for (scene_id, scene) in &scenes {
             if scene.schema_version != CONTENT_SCHEMA_VERSION {
@@ -166,12 +177,14 @@ impl ContentCatalog {
             &manifest.assets,
             &manifest.variables,
             &manifest.characters,
+            &ui_motions,
         )?;
 
         Ok(Self {
             assets_root,
             manifest,
             scenes,
+            ui_motions,
         })
     }
 
@@ -227,6 +240,10 @@ impl ContentCatalog {
             &target.join("scene.schema.json"),
             &schema_for!(SceneDefinition),
         )?;
+        write_schema(
+            &target.join("ui-motion.schema.json"),
+            &schema_for!(UiMotionPreset),
+        )?;
         Ok(())
     }
 }
@@ -252,6 +269,138 @@ fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ContentEr
         path: path.to_path_buf(),
         message: error.to_string(),
     })
+}
+
+fn load_ui_motions(
+    root: &Path,
+    paths: &[String],
+) -> Result<BTreeMap<String, UiMotionPreset>, ContentError> {
+    let mut files = BTreeMap::new();
+    for path in paths {
+        let relative = validate_relative_path(path)?;
+        let full_path = canonical_file_within(root, &root.join(relative))?;
+        files.insert(path.clone(), read_yaml(&full_path)?);
+    }
+    validate_ui_motion_files(paths, &files)
+}
+
+fn validate_ui_motion_files(
+    paths: &[String],
+    files: &BTreeMap<String, UiMotionPreset>,
+) -> Result<BTreeMap<String, UiMotionPreset>, ContentError> {
+    let expected = paths.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = files.keys().cloned().collect::<BTreeSet<_>>();
+    if expected != actual {
+        return Err(ContentError::Validation(
+            "UI 动效文件集合与 manifest 不一致".to_owned(),
+        ));
+    }
+    let mut result = BTreeMap::new();
+    for (path, preset) in files {
+        validate_relative_path(path)?;
+        validate_ui_motion(preset)?;
+        if result.insert(preset.id.clone(), preset.clone()).is_some() {
+            return Err(ContentError::Validation(format!(
+                "UI 动效 ID 重复: {}",
+                preset.id
+            )));
+        }
+    }
+    Ok(result)
+}
+
+fn validate_ui_motion(preset: &UiMotionPreset) -> Result<(), ContentError> {
+    if preset.schema_version != UI_MOTION_SCHEMA_VERSION {
+        return Err(ContentError::Validation(format!(
+            "UI 动效 {} 使用了不支持的 schema_version {}",
+            preset.id, preset.schema_version
+        )));
+    }
+    validate_identifier("ui motion id", &preset.id)?;
+    if preset.duration_ms == 0 || preset.duration_ms > MAX_TIMELINE_DURATION_MS {
+        return Err(ContentError::Validation(format!(
+            "UI 动效 {} 时长必须在 1ms 到 30 分钟之间",
+            preset.id
+        )));
+    }
+    if preset.tracks.is_empty() {
+        return Err(ContentError::Validation(format!(
+            "UI 动效 {} 至少需要一条轨道",
+            preset.id
+        )));
+    }
+    let mut targets = BTreeSet::new();
+    let mut keyframe_count = 0;
+    for track in &preset.tracks {
+        if !targets.insert(track.target) {
+            return Err(ContentError::Validation(format!(
+                "UI 动效 {} 的目标 {:?} 重复",
+                preset.id, track.target
+            )));
+        }
+        if track.channels.is_empty() {
+            return Err(ContentError::Validation(format!(
+                "UI 动效 {} 的目标 {:?} 至少需要一个通道",
+                preset.id, track.target
+            )));
+        }
+        validate_timeline_channels(
+            &track.channels,
+            &[
+                "offset_x",
+                "offset_y",
+                "scale_x",
+                "scale_y",
+                "rotation_deg",
+                "opacity",
+            ],
+            preset.duration_ms,
+            "ui_motion",
+            &preset.id,
+            &mut keyframe_count,
+            false,
+        )?;
+    }
+    if keyframe_count > MAX_TIMELINE_KEYFRAMES {
+        return Err(ContentError::Validation(format!(
+            "UI 动效 {} 的关键帧超过 10000 个",
+            preset.id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_ui_motion_bindings(
+    bindings: &UiMotionBindings,
+    motions: &BTreeMap<String, UiMotionPreset>,
+) -> Result<(), ContentError> {
+    for (slot, motion) in [
+        ("dialogue_show", &bindings.dialogue_show),
+        ("dialogue_hide", &bindings.dialogue_hide),
+    ] {
+        if let Some(motion) = motion {
+            if !motions.contains_key(motion) {
+                return Err(ContentError::Validation(format!(
+                    "UI 动效默认绑定 {slot} 引用了未知动效 {motion}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_ui_motion_reference(
+    motion: Option<&str>,
+    motions: &BTreeMap<String, UiMotionPreset>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    if let Some(motion) = motion {
+        if !motions.contains_key(motion) {
+            return node_error(scene_id, node_id, &format!("引用了未知 UI 动效 {motion}"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_assets(
@@ -318,6 +467,7 @@ fn validate_scenes(
     assets: &BTreeMap<String, AssetDefinition>,
     variables: &BTreeMap<String, VariableDefinition>,
     characters: &BTreeMap<String, CharacterDefinition>,
+    ui_motions: &BTreeMap<String, UiMotionPreset>,
 ) -> Result<(), ContentError> {
     for (scene_id, scene) in scenes {
         if !scene.nodes.contains_key(&scene.entry) {
@@ -368,6 +518,8 @@ fn validate_scenes(
                 SceneNode::Say {
                     speaker,
                     text,
+                    mode,
+                    page_id,
                     next,
                     ..
                 } => {
@@ -382,6 +534,12 @@ fn validate_scenes(
                                 ))
                             })?;
                         }
+                    }
+                    if let Some(page_id) = page_id {
+                        validate_identifier("dialogue page id", page_id)?;
+                    }
+                    if *mode == DialogueMode::Append && page_id.is_none() {
+                        return node_error(scene_id, node_id, "append 对话必须提供 page_id");
                     }
                     validate_text_markup(text, variables, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
@@ -510,11 +668,36 @@ fn validate_scenes(
                 }
                 SceneNode::ScreenEffect {
                     duration_ms, next, ..
-                }
-                | SceneNode::DialogueUi {
-                    duration_ms, next, ..
                 } => {
                     validate_duration(*duration_ms, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::DialogueUi {
+                    motion,
+                    duration_ms,
+                    next,
+                    ..
+                } => {
+                    validate_ui_motion_reference(motion.as_deref(), ui_motions, scene_id, node_id)?;
+                    if let Some(duration_ms) = duration_ms {
+                        validate_duration(*duration_ms, scene_id, node_id)?;
+                    }
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::UiMotionSet { motion, next, .. } => {
+                    validate_ui_motion_reference(motion.as_deref(), ui_motions, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::UiMotionPlay {
+                    motion,
+                    duration_ms,
+                    next,
+                    ..
+                } => {
+                    validate_ui_motion_reference(Some(motion), ui_motions, scene_id, node_id)?;
+                    if let Some(duration_ms) = duration_ms {
+                        validate_duration(*duration_ms, scene_id, node_id)?;
+                    }
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Timeline {
@@ -571,7 +754,7 @@ fn validate_timeline(
     let mut video_count = 0usize;
     let mut track_ids = BTreeSet::new();
     for track in tracks {
-        let (channels, allowed): (&TimelineChannels, &[&str]) = match track {
+        let (channels, allowed, allow_inherit): (&TimelineChannels, &[&str], bool) = match track {
             TimelineTrack::Sprite {
                 sprite_id,
                 asset,
@@ -582,7 +765,9 @@ fn validate_timeline(
                 if !track_ids.insert(format!("sprite:{sprite_id}")) {
                     return node_error(scene_id, node_id, "同一立绘不能出现多条时间线轨道");
                 }
-                require_asset(assets, asset, AssetKind::Sprite, scene_id, node_id)?;
+                if let Some(asset) = asset {
+                    require_asset(assets, asset, AssetKind::Sprite, scene_id, node_id)?;
+                }
                 (
                     channels,
                     &[
@@ -595,13 +780,14 @@ fn validate_timeline(
                         "opacity",
                         "z",
                     ],
+                    true,
                 )
             }
             TimelineTrack::Camera { channels } => {
                 if !track_ids.insert("camera".to_owned()) {
                     return node_error(scene_id, node_id, "时间线只能包含一条镜头轨");
                 }
-                (channels, &["x", "y", "zoom", "rotation_deg"])
+                (channels, &["x", "y", "zoom", "rotation_deg"], true)
             }
             TimelineTrack::Video {
                 asset,
@@ -622,13 +808,14 @@ fn validate_timeline(
                 (
                     channels,
                     &["x", "y", "width", "height", "opacity", "z", "volume"],
+                    false,
                 )
             }
             TimelineTrack::Bgm { channels } => {
                 if !track_ids.insert("bgm".to_owned()) {
                     return node_error(scene_id, node_id, "时间线只能包含一条 BGM 音量轨");
                 }
-                (channels, &["volume"])
+                (channels, &["volume"], true)
             }
         };
         validate_timeline_channels(
@@ -638,6 +825,7 @@ fn validate_timeline(
             scene_id,
             node_id,
             &mut keyframe_count,
+            allow_inherit,
         )?;
     }
     if video_count > 1 {
@@ -691,6 +879,7 @@ fn validate_timeline_channels(
     scene_id: &str,
     node_id: &str,
     keyframe_count: &mut usize,
+    allow_inherit: bool,
 ) -> Result<(), ContentError> {
     for (name, keyframes) in channels {
         if !allowed.contains(&name.as_str()) {
@@ -705,10 +894,8 @@ fn validate_timeline_channels(
         }
         *keyframe_count = keyframe_count.saturating_add(keyframes.len());
         let mut previous = None;
-        for keyframe in keyframes {
-            if keyframe.at_ms > duration_ms
-                || previous.is_some_and(|value| keyframe.at_ms <= value)
-                || !keyframe.value.is_finite()
+        for (index, keyframe) in keyframes.iter().enumerate() {
+            if keyframe.at_ms > duration_ms || previous.is_some_and(|value| keyframe.at_ms <= value)
             {
                 return node_error(
                     scene_id,
@@ -716,21 +903,36 @@ fn validate_timeline_channels(
                     &format!("时间线通道 {name} 的关键帧无效"),
                 );
             }
-            if matches!(name.as_str(), "opacity" | "volume")
-                && !(0.0..=1.0).contains(&keyframe.value)
-            {
-                return node_error(
-                    scene_id,
-                    node_id,
-                    &format!("时间线通道 {name} 必须在 0 到 1 之间"),
-                );
-            }
-            if matches!(
-                name.as_str(),
-                "scale" | "scale_x" | "scale_y" | "zoom" | "width" | "height"
-            ) && keyframe.value <= 0.0
-            {
-                return node_error(scene_id, node_id, &format!("时间线通道 {name} 必须大于 0"));
+            if keyframe.value.is_inherit() {
+                if !allow_inherit || index != 0 || keyframe.at_ms != 0 || keyframes.len() < 2 {
+                    return node_error(
+                        scene_id,
+                        node_id,
+                        &format!("时间线通道 {name} 的 inherit 只能作为 0ms 起始帧"),
+                    );
+                }
+            } else if let Some(value) = keyframe.value.number() {
+                if !value.is_finite() {
+                    return node_error(
+                        scene_id,
+                        node_id,
+                        &format!("时间线通道 {name} 的关键帧数值无效"),
+                    );
+                }
+                if matches!(name.as_str(), "opacity" | "volume") && !(0.0..=1.0).contains(&value) {
+                    return node_error(
+                        scene_id,
+                        node_id,
+                        &format!("时间线通道 {name} 必须在 0 到 1 之间"),
+                    );
+                }
+                if matches!(
+                    name.as_str(),
+                    "scale" | "scale_x" | "scale_y" | "zoom" | "width" | "height"
+                ) && value <= 0.0
+                {
+                    return node_error(scene_id, node_id, &format!("时间线通道 {name} 必须大于 0"));
+                }
             }
             if let TimelineEasing::CubicBezier { cubic_bezier } = &keyframe.easing {
                 if cubic_bezier.iter().any(|value| !value.is_finite())
@@ -1159,7 +1361,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::model::{LiteralOperand, VariableOperand};
+    use crate::model::{
+        LiteralOperand, TimelineEasingPreset, TimelineKeyframe, TimelineKeyframeKeyword,
+        TimelineKeyframeValue, VariableOperand,
+    };
 
     #[test]
     fn traversal_is_rejected() {
@@ -1197,6 +1402,72 @@ mod tests {
         let options = serde_saphyr::options! { strict_booleans: true };
         let result = serde_saphyr::from_str_with_options::<ContentManifest>(yaml, options);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn timeline_inherit_is_only_a_zero_ms_first_frame() {
+        let inherited = TimelineKeyframe {
+            at_ms: 0,
+            value: TimelineKeyframeValue::Keyword(TimelineKeyframeKeyword::Inherit),
+            easing: TimelineEasing::Preset(TimelineEasingPreset::Linear),
+        };
+        let target = TimelineKeyframe {
+            at_ms: 500,
+            value: TimelineKeyframeValue::Number(700.0),
+            easing: TimelineEasing::Preset(TimelineEasingPreset::Linear),
+        };
+        let mut count = 0;
+        let valid = BTreeMap::from([("x".to_owned(), vec![inherited.clone(), target.clone()])]);
+        assert!(validate_timeline_channels(
+            &valid,
+            &["x"],
+            500,
+            "scene",
+            "timeline",
+            &mut count,
+            true,
+        )
+        .is_ok());
+
+        let mut late = inherited.clone();
+        late.at_ms = 100;
+        let mut count = 0;
+        let invalid_position = BTreeMap::from([("x".to_owned(), vec![late, target.clone()])]);
+        assert!(validate_timeline_channels(
+            &invalid_position,
+            &["x"],
+            500,
+            "scene",
+            "timeline",
+            &mut count,
+            true,
+        )
+        .is_err());
+
+        let mut count = 0;
+        assert!(validate_timeline_channels(
+            &valid,
+            &["x"],
+            500,
+            "scene",
+            "timeline",
+            &mut count,
+            false,
+        )
+        .is_err());
+
+        let mut count = 0;
+        let missing_target = BTreeMap::from([("x".to_owned(), vec![inherited])]);
+        assert!(validate_timeline_channels(
+            &missing_target,
+            &["x"],
+            500,
+            "scene",
+            "timeline",
+            &mut count,
+            true,
+        )
+        .is_err());
     }
 
     #[test]

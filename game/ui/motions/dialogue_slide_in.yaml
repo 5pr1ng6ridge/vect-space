@@ -1,0 +1,29 @@
+schema_version: 1
+id: ui.dialogue.slide_in
+duration_ms: 280
+tracks:
+- target: dialogue_root
+  channels:
+    offset_y:
+    - at_ms: 0
+      value: 72
+      easing: ease_out
+    - at_ms: 280
+      value: 0
+      easing: linear
+    opacity:
+    - at_ms: 0
+      value: 0
+      easing: ease_out
+    - at_ms: 280
+      value: 1
+      easing: linear
+- target: dialogue_nameplate
+  channels:
+    offset_x:
+    - at_ms: 0
+      value: -36
+      easing: ease_out
+    - at_ms: 280
+      value: 0
+      easing: linear

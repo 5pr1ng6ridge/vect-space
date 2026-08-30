@@ -509,7 +509,7 @@ fn summary_from_file(slot: &str, file: &SaveFile) -> SaveSlotSummary {
         exists: true,
         saved_at_unix_ms: Some(file.saved_at_unix_ms),
         scene_id: Some(file.snapshot.location.scene_id.clone()),
-        prompt_preview: prompt_preview(&file.snapshot.prompt),
+        prompt_preview: prompt_preview(&file.snapshot),
         thumbnail_data_url: file.thumbnail_data_url.clone(),
     }
 }
@@ -525,9 +525,16 @@ fn empty_summary(slot: &str) -> SaveSlotSummary {
     }
 }
 
-fn prompt_preview(prompt: &PromptSnapshot) -> Option<String> {
-    let text = match prompt {
-        PromptSnapshot::Dialogue { text, .. } => text,
+fn prompt_preview(snapshot: &RuntimeSnapshot) -> Option<String> {
+    let combined_dialogue;
+    let text = match &snapshot.prompt {
+        PromptSnapshot::Dialogue { text, .. } => {
+            combined_dialogue = snapshot
+                .dialogue_page
+                .as_ref()
+                .map(|page| page.segments.concat());
+            combined_dialogue.as_ref().unwrap_or(text)
+        }
         PromptSnapshot::Choice { choices, .. } => choices.first().map(|choice| &choice.label)?,
         PromptSnapshot::None | PromptSnapshot::End { .. } => return None,
     };

@@ -34,6 +34,9 @@ interface ProjectSidebarProps {
   onChangeCharacter(id: string, definition: CharacterDefinition): void;
   onRenameCharacter(previousId: string, nextId: string): void;
   onDeleteCharacter(id: string): void;
+  onCreateUiMotion(): void;
+  onEditUiMotion(id: string): void;
+  onDeleteUiMotion(id: string): void;
   onNavigate(sceneId: string | null, nodeId: string | null): void;
   onTabChange?(tab: SidebarTab): void;
 }
@@ -60,6 +63,9 @@ export function ProjectSidebar({
   onChangeCharacter,
   onRenameCharacter,
   onDeleteCharacter,
+  onCreateUiMotion,
+  onEditUiMotion,
+  onDeleteUiMotion,
   onNavigate,
   onTabChange,
 }: ProjectSidebarProps): ReactElement {
@@ -143,6 +149,9 @@ export function ProjectSidebar({
           onChangeCharacter={onChangeCharacter}
           onDeleteCharacter={onDeleteCharacter}
           onRenameCharacter={onRenameCharacter}
+          onCreateUiMotion={onCreateUiMotion}
+          onEditUiMotion={onEditUiMotion}
+          onDeleteUiMotion={onDeleteUiMotion}
           project={project}
         />
       )}
@@ -388,6 +397,9 @@ function ProjectPanel({
   onChangeCharacter,
   onDeleteCharacter,
   onRenameCharacter,
+  onCreateUiMotion,
+  onEditUiMotion,
+  onDeleteUiMotion,
   project,
 }: {
   manifest: ContentManifest;
@@ -400,6 +412,9 @@ function ProjectPanel({
   onChangeCharacter(id: string, definition: CharacterDefinition): void;
   onDeleteCharacter(id: string): void;
   onRenameCharacter(previousId: string, nextId: string): void;
+  onCreateUiMotion(): void;
+  onEditUiMotion(id: string): void;
+  onDeleteUiMotion(id: string): void;
   project: EditorProject;
 }): ReactElement {
   return (
@@ -441,6 +456,90 @@ function ProjectPanel({
           ))}
         </select>
       </label>
+      <section className="variable-settings ui-motion-settings">
+        <header>
+          <strong>UI 动效</strong>
+          <button onClick={onCreateUiMotion} type="button">
+            ＋
+          </button>
+        </header>
+        <label>
+          <span>对话框出现默认动效</span>
+          <select
+            value={manifest.ui_motion_defaults.dialogue_show ?? ""}
+            onChange={(event) =>
+              onChange({
+                ...manifest,
+                ui_motion_defaults: {
+                  ...manifest.ui_motion_defaults,
+                  dialogue_show: event.currentTarget.value || null,
+                },
+              })
+            }
+          >
+            <option value="">无（立即出现）</option>
+            {project.ui_motions.map(({ definition }) => (
+              <option key={definition.id} value={definition.id}>
+                {definition.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>对话框收起默认动效</span>
+          <select
+            value={manifest.ui_motion_defaults.dialogue_hide ?? ""}
+            onChange={(event) =>
+              onChange({
+                ...manifest,
+                ui_motion_defaults: {
+                  ...manifest.ui_motion_defaults,
+                  dialogue_hide: event.currentTarget.value || null,
+                },
+              })
+            }
+          >
+            <option value="">无（立即收起）</option>
+            {project.ui_motions.map(({ definition }) => (
+              <option key={definition.id} value={definition.id}>
+                {definition.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="ui-motion-list">
+          {project.ui_motions.map(({ definition, path }) => (
+            <article className="variable-card" key={definition.id}>
+              <header>
+                <span>
+                  <code>{definition.id}</code>
+                  <small>{definition.duration_ms} ms</small>
+                </span>
+                <div>
+                  <button
+                    onClick={() => onEditUiMotion(definition.id)}
+                    title="打开全屏关键帧编辑器"
+                    type="button"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    className="danger-text"
+                    onClick={() => onDeleteUiMotion(definition.id)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              </header>
+              <small>{path}</small>
+            </article>
+          ))}
+          {project.ui_motions.length === 0 && (
+            <small>还没有预设。创建后可在 UI 节点中复用。</small>
+          )}
+        </div>
+      </section>
       <section className="variable-settings character-settings">
         <header>
           <strong>角色</strong>

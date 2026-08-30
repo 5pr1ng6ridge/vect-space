@@ -83,6 +83,7 @@ export function TimelineWorkspace({
 }: TimelineWorkspaceProps): ReactElement {
   const [localNode, setLocalNode] = useState(node);
   const [playhead, setPlayhead] = useState(0);
+  const [playbackStart, setPlaybackStart] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [autoKey, setAutoKey] = useState(true);
   const [muted, setMuted] = useState(true);
@@ -132,8 +133,18 @@ export function TimelineWorkspace({
   const projectRef = useRef(project);
   const nodeRef = useRef(localNode);
   const playheadRef = useRef(playhead);
+  const playbackStartRef = useRef(playbackStart);
   const settings = previewSettings ?? DEFAULT_PREVIEW_SETTINGS;
   const targetKey = `${sceneId}:${nodeId}`;
+
+  const handlePreviewFrame = useCallback((next: TimelinePreviewFrame): void => {
+    // The Pixi preview owns the running clock. Mirror every emitted frame so
+    // the visible ruler, keyboard playback and authoring operations all use
+    // the exact same playhead.
+    playheadRef.current = next.elapsed_ms;
+    setPlayhead(next.elapsed_ms);
+    setFrame(next);
+  }, []);
 
   useEffect(() => {
     projectRef.current = project;
@@ -144,6 +155,9 @@ export function TimelineWorkspace({
   useEffect(() => {
     playheadRef.current = playhead;
   }, [playhead]);
+  useEffect(() => {
+    playbackStartRef.current = playbackStart;
+  }, [playbackStart]);
   useEffect(() => {
     // Keep an immediate local draft while App batches the history commit.
     // Parent replacements (undo/redo) must still reset that draft.
@@ -176,14 +190,14 @@ export function TimelineWorkspace({
       const next = new TimelinePreviewSurface(
         canvas,
         handleDiagnostic,
-        setFrame,
+        handlePreviewFrame,
       );
       session = { surface: next, initialized: next.init() };
       surfaceSessionRef.current = session;
     }
     const currentSession = session;
     const surface = currentSession.surface;
-    surface.setOnFrame(setFrame);
+    surface.setOnFrame(handlePreviewFrame);
     surface.setOnPlayingChange(setPlaying);
     surfaceRef.current = surface;
     let active = true;
@@ -217,7 +231,7 @@ export function TimelineWorkspace({
           });
       }, 0);
     };
-  }, [handleDiagnostic]);
+  }, [handleDiagnostic, handlePreviewFrame]);
 
   const buildContext = useCallback(
     async (nextSettings = settings): Promise<void> => {
@@ -248,6 +262,7 @@ export function TimelineWorkspace({
         } else {
           const surface = surfaceRef.current;
           if (surface !== null) {
+            const desiredPlayhead = playheadRef.current;
             await surfaceReadyRef.current;
             if (surfaceRef.current !== surface) return;
             // Set the requested audio policy before restoring a snapshot: the
@@ -258,7 +273,7 @@ export function TimelineWorkspace({
               result.update as unknown as GameRuntimeUpdate,
               urls,
             );
-            await surface.seek(playheadRef.current, false);
+            await surface.seek(desiredPlayhead, false);
           }
           setPreview(result);
           setContextStatus(
@@ -311,9 +326,10 @@ export function TimelineWorkspace({
       timelineCue.duration_ms = nextNode.duration_ms;
       timelineCue.tracks = nextNode.tracks;
       timelineCue.events = nextNode.events;
+      const desiredPlayhead = playheadRef.current;
       void surface
         .load(current.start_snapshot, update, urls)
-        .then(() => surface.seek(playheadRef.current, false))
+        .then(() => surface.seek(desiredPlayhead, false))
         .catch((error: unknown) => {
           if (surfaceRef.current === surface)
             onError(`时间轴预览刷新失败：${errorMessage(error)}`);
@@ -349,11 +365,27 @@ export function TimelineWorkspace({
   const setPosition = useCallback(
     async (value: number): Promise<void> => {
       const next = Math.max(0, Math.min(localNode.duration_ms, value));
+      playheadRef.current = next;
       setPlayhead(next);
       await surfaceRef.current?.seek(next, false);
     },
     [localNode.duration_ms],
   );
+
+  const setPlaybackStartPosition = (value: number): void => {
+    if (
+      !autoKey &&
+      (Object.keys(pendingTransforms).length > 0 || pendingCamera !== null)
+    ) {
+      commitPending();
+    }
+    const next = Math.max(0, Math.min(localNode.duration_ms, value));
+    playbackStartRef.current = next;
+    setPlaybackStart(next);
+    if (playing) surfaceRef.current?.pause();
+    setPlaying(false);
+    void setPosition(next);
+  };
 
   const togglePlayback = (): void => {
     const surface = surfaceRef.current;
@@ -362,8 +394,13 @@ export function TimelineWorkspace({
       surface.pause();
       setPlaying(false);
     } else {
-      void surface.play();
-      setPlaying(true);
+      void (async (): Promise<void> => {
+        // Each preview pass starts from the fixed marker, not from a prior
+        // paused or completed playhead. This makes one timing range easy to
+        // inspect repeatedly while authoring.
+        await setPosition(playbackStartRef.current);
+        if (surfaceRef.current === surface) await surface.play();
+      })();
     }
   };
 
@@ -382,7 +419,16 @@ export function TimelineWorkspace({
       const index = frames.findIndex((frame) => frame.at_ms === at);
       const keyframe = { at_ms: at, value, easing: "linear" as const };
       if (index >= 0) frames[index] = keyframe;
-      else frames.push(keyframe);
+      else {
+        if (frames.length === 0 && at > 0 && track.type !== "video") {
+          frames.push({
+            at_ms: 0,
+            value: "inherit",
+            easing: "linear",
+          });
+        }
+        frames.push(keyframe);
+      }
       frames.sort((left, right) => left.at_ms - right.at_ms);
       track.channels[channel] = frames;
       return { ...next, tracks };
@@ -406,7 +452,7 @@ export function TimelineWorkspace({
         next.tracks.push({
           type: "sprite",
           sprite_id: object.id,
-          asset: object.asset,
+          asset: null,
           remove_at_end: false,
           channels: {},
         });
@@ -674,16 +720,6 @@ export function TimelineWorkspace({
     });
   };
 
-  const movePlayhead = (value: number): void => {
-    if (
-      !autoKey &&
-      (Object.keys(pendingTransforms).length > 0 || pendingCamera !== null)
-    ) {
-      commitPending();
-    }
-    void setPosition(value);
-  };
-
   const beginTimelineResize = (
     event: ReactPointerEvent<HTMLDivElement>,
   ): void => {
@@ -834,10 +870,10 @@ export function TimelineWorkspace({
       togglePlayback();
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
-      movePlayhead(playhead - 10);
+      setPlaybackStartPosition(playbackStart - 10);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      movePlayhead(playhead + 10);
+      setPlaybackStartPosition(playbackStart + 10);
     } else if (event.key === "Escape") {
       if (gestureCancelRef.current !== null) {
         gestureCancelRef.current();
@@ -853,6 +889,13 @@ export function TimelineWorkspace({
     () => [...(frame?.objects ?? [])].sort((left, right) => left.z - right.z),
     [frame?.objects],
   );
+  const gizmoObjects = useMemo(() => {
+    if (selectedId === null) return objects;
+    const selected = objects.find((object) => object.id === selectedId);
+    return selected === undefined
+      ? objects
+      : [...objects.filter((object) => object.id !== selectedId), selected];
+  }, [objects, selectedId]);
   const selectedObject =
     selectedId === null
       ? undefined
@@ -886,13 +929,18 @@ export function TimelineWorkspace({
       next.tracks[selectedKeyframe.track]?.channels[selectedKeyframe.channel];
     const current = frames?.[selectedKeyframe.index];
     if (frames === undefined || current === undefined) return;
+    const value = patch.value ?? current.value;
     frames[selectedKeyframe.index] = {
       ...current,
       ...patch,
-      at_ms: Math.max(
-        0,
-        Math.min(next.duration_ms, patch.at_ms ?? current.at_ms),
-      ),
+      value,
+      at_ms:
+        value === "inherit"
+          ? 0
+          : Math.max(
+              0,
+              Math.min(next.duration_ms, patch.at_ms ?? current.at_ms),
+            ),
     };
     frames.sort((left, right) => left.at_ms - right.at_ms);
     commitNode(next);
@@ -939,7 +987,7 @@ export function TimelineWorkspace({
           {playing ? "❚❚" : "▶"}
         </button>
         <code>
-          {Math.round(playhead)} / {localNode.duration_ms} ms
+          播放 {Math.round(playhead)} · 起点 {Math.round(playbackStart)} ms
         </code>
         <label className="timeline-toolbar-select">
           吸附
@@ -990,7 +1038,7 @@ export function TimelineWorkspace({
               width={DESIGN_WIDTH}
             />
             <div className="timeline-gizmo-layer">
-              {objects.map((object) => (
+              {gizmoObjects.map((object) => (
                 <div
                   className={`timeline-gizmo${selectedId === object.id ? " selected" : ""}`}
                   key={object.id}
@@ -1062,7 +1110,7 @@ export function TimelineWorkspace({
             </div>
           </div>
           <div className="timeline-workspace-controls">
-            <button onClick={() => movePlayhead(0)} type="button">
+            <button onClick={() => setPlaybackStartPosition(0)} type="button">
               ■
             </button>
             <button
@@ -1355,6 +1403,13 @@ export function TimelineWorkspace({
           )}
           {selectedKeyframe !== null && (
             <TimelineKeyframeInspector
+              allowInherit={
+                selectedKeyframe.index === 0 &&
+                localNode.tracks[selectedKeyframe.track]?.type !== "video" &&
+                (localNode.tracks[selectedKeyframe.track]?.channels[
+                  selectedKeyframe.channel
+                ]?.length ?? 0) >= 2
+              }
               selection={selectedKeyframe}
               onChange={editSelectedKeyframe}
             />
@@ -1383,10 +1438,11 @@ export function TimelineWorkspace({
           node={localNode}
           onChange={commitNode}
           onEventSelectionChange={setSelectedEvent}
-          onPlayheadChange={movePlayhead}
+          onPlayheadChange={setPlaybackStartPosition}
           onSelectionChange={setSelectedKeyframe}
           onSnapChange={setSnap}
           playheadOverride={playhead}
+          playbackStartOverride={playbackStart}
           snapOverride={snap}
         />
         <input
@@ -1394,9 +1450,11 @@ export function TimelineWorkspace({
           className="timeline-workspace-range"
           max={localNode.duration_ms}
           min={0}
-          onChange={(event) => movePlayhead(Number(event.currentTarget.value))}
+          onChange={(event) =>
+            setPlaybackStartPosition(Number(event.currentTarget.value))
+          }
           type="range"
-          value={playhead}
+          value={playbackStart}
         />
       </section>
       {exitPrompt && (
@@ -1440,9 +1498,11 @@ function snapTime(value: number, snap: number, duration: number): number {
 }
 
 function TimelineKeyframeInspector({
+  allowInherit,
   selection,
   onChange,
 }: {
+  allowInherit: boolean;
   selection: TimelineSelection;
   onChange(patch: Partial<TimelineKeyframe>): void;
 }): ReactElement {
@@ -1459,8 +1519,24 @@ function TimelineKeyframeInspector({
         选中关键帧 · {selection.channel} · {frame.at_ms} ms
       </strong>
       <label>
+        值来源
+        <select
+          value={frame.value === "inherit" ? "inherit" : "number"}
+          onChange={(event) =>
+            onChange({
+              at_ms: event.currentTarget.value === "inherit" ? 0 : frame.at_ms,
+              value: event.currentTarget.value === "inherit" ? "inherit" : 0,
+            })
+          }
+        >
+          <option value="number">固定数值</option>
+          {allowInherit && <option value="inherit">继承入口值</option>}
+        </select>
+      </label>
+      <label>
         时间
         <input
+          disabled={frame.value === "inherit"}
           min={0}
           type="number"
           value={frame.at_ms}
@@ -1472,14 +1548,18 @@ function TimelineKeyframeInspector({
       <label>
         数值
         <input
+          disabled={frame.value === "inherit"}
           step="0.01"
           type="number"
-          value={frame.value}
+          value={frame.value === "inherit" ? 0 : frame.value}
           onChange={(event) =>
             onChange({ value: Number(event.currentTarget.value) })
           }
         />
       </label>
+      {frame.value === "inherit" && (
+        <small>在 0 ms 读取该通道进入时间轴时的真实值。</small>
+      )}
       <label>
         缓动
         <select

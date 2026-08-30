@@ -4,7 +4,7 @@ entry: background_start
 nodes:
   background_start:
     type: background
-    background: bg.vector_space
+    background: bg.nvctsp
     transition: cross_fade
     duration_ms: 0
     easing: ease_in_out
@@ -22,24 +22,59 @@ nodes:
   end:
     type: end
   move_jelly_copy:
-    type: sprite
-    sprite_id: e
-    action: move
-    asset: null
-    x: 1470.0
-    "y": 1250.0
-    scale: 1.05
-    opacity: 1.0
-    z: 10
+    type: timeline
     duration_ms: 650
-    easing: ease_in_out
     await: false
+    skippable: false
+    tracks:
+    - type: sprite
+      sprite_id: e
+      asset: null
+      remove_at_end: false
+      channels:
+        opacity:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 650
+          value: 1.0
+          easing: linear
+        scale:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 650
+          value: 1.05
+          easing: linear
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 650
+          value: 1470.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 650
+          value: 1250.0
+          easing: linear
+        z:
+        - at_ms: 0
+          value: inherit
+          easing: step
+        - at_ms: 650
+          value: 10.0
+          easing: linear
+    events: []
     next: say
   say:
     type: say
     speaker: e
     text: |
       test
+    mode: start
     speed_cps: null
     next: end
   sprite_choice_background_start:

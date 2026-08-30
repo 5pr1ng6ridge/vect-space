@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { PresentationController } from "../engine/presentation";
+import type { UiMotionHost } from "../engine/uiMotion";
 import type {
   AssetUrlMap,
   PresentationOutcome,
@@ -32,6 +33,7 @@ interface SceneCanvasProps {
   paused: boolean;
   onSettled(update: RuntimeUpdate, outcome: PresentationOutcome): void;
   onDiagnostic(message: string): void;
+  uiMotionHost: UiMotionHost;
 }
 
 interface PresentationSession {
@@ -52,6 +54,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       paused,
       onSettled,
       onDiagnostic,
+      uiMotionHost,
     },
     ref,
   ): ReactElement {
@@ -80,6 +83,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
           canvas,
           initialSettingsRef.current,
           (message) => diagnosticRef.current(message),
+          uiMotionHost,
         );
         session = {
           controller: next,
@@ -125,7 +129,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
             });
         }, 0);
       };
-    }, []);
+    }, [uiMotionHost]);
 
     useEffect(() => {
       controller?.applySettings(settings);

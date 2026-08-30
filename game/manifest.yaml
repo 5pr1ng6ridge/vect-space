@@ -21,6 +21,9 @@ characters:
     name_color: "#1D5C78"
     text_color: "#17213A"
 assets:
+  bg.nvctsp:
+    kind: background
+    path: backgrounds/Photoshop_3a52oGnGn0.png
   bg.vector_space:
     kind: background
     path: backgrounds/bg_vstest.png
@@ -51,3 +54,10 @@ assets:
 scenes:
 - scenes/prologue.yaml
 - scenes/test_scene.yaml
+ui_motions:
+- ui/motions/dialogue_slide_in.yaml
+- ui/motions/dialogue_slide_out.yaml
+- ui/motions/dialogue_emphasis.yaml
+ui_motion_defaults:
+  dialogue_show: ui.dialogue.slide_in
+  dialogue_hide: ui.dialogue.slide_out

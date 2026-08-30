@@ -14,9 +14,11 @@ import { NodeInspector } from "./components/NodeInspector";
 import { ProjectSidebar, type SidebarTab } from "./components/ProjectSidebar";
 import { StoryGraph } from "./components/StoryGraph";
 import { TimelineWorkspace } from "./components/TimelineWorkspace";
+import { UiMotionWorkspace } from "./components/UiMotionWorkspace";
 import {
   NODE_TYPES,
   cloneProject,
+  convertToTimeline as convertQuickNodeToTimeline,
   countCharacterReferences,
   countVariableReferences,
   defaultNode,
@@ -33,6 +35,7 @@ import {
   renameScene,
   renameVariable,
   setPortTarget,
+  splitDialogueAt,
   uniqueNodeId,
 } from "./story";
 import type {
@@ -134,6 +137,7 @@ export function App(): ReactElement {
     sceneId: string;
     nodeId: string;
   } | null>(null);
+  const [uiMotionTarget, setUiMotionTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -244,6 +248,7 @@ export function App(): ReactElement {
       setActiveSceneId(initialScene);
       setSelectedNodeId(null);
       setTimelineTarget(null);
+      setUiMotionTarget(null);
       resetHistory();
       localStorage.setItem("vectspace-editor:last-project", loaded.root);
       setNotice(`已打开 ${loaded.root}`);
@@ -378,6 +383,53 @@ export function App(): ReactElement {
       const scene = findScene(draft, activeSceneId);
       if (scene !== undefined) scene.definition.nodes[nodeId] = node;
     });
+  };
+
+  const convertNodeToTimeline = (nodeId: string): void => {
+    const sceneId = activeSceneId;
+    const sourceNode = findScene(project, sceneId)?.definition.nodes[nodeId];
+    if (sourceNode === undefined) return;
+    setError(null);
+    try {
+      const converted = convertQuickNodeToTimeline(sourceNode);
+      commit((draft) => {
+        const scene = findScene(draft, sceneId);
+        if (scene === undefined) return;
+        scene.definition.nodes[nodeId] = converted;
+      });
+      setNotice(
+        `已将 ${nodeLabel(sourceNode.type)}节点展开为关键帧时间线；起始通道继承真实入口值。`,
+      );
+      setTimelineTarget({ sceneId, nodeId });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const splitDialogue = (nodeId: string, offset: number): void => {
+    const scene = activeScene;
+    if (scene === undefined) return;
+    let result: ReturnType<typeof splitDialogueAt>;
+    try {
+      result = splitDialogueAt(scene, nodeId, offset);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      return;
+    }
+    commit((draft) => {
+      const file = findScene(draft, activeSceneId);
+      if (file === undefined) return;
+      file.definition.nodes[nodeId] = result.first;
+      file.definition.nodes[result.continuationId] = result.continuation;
+      const layout = ensureSceneLayout(draft.layout, activeSceneId);
+      const origin = layout.nodes[nodeId] ?? { x: 0, y: 0 };
+      layout.nodes[result.continuationId] = {
+        x: origin.x + 320,
+        y: origin.y,
+      };
+    });
+    setSelectedNodeId(result.continuationId);
+    setNotice("已拆成两个对话段；可在它们之间插入动画节点。");
   };
 
   const addNode = (): void => {
@@ -627,6 +679,126 @@ export function App(): ReactElement {
     setSelectedNodeId(nodeId);
   };
 
+  const createUiMotion = (): void => {
+    const id = window.prompt("新 UI 动效 ID", "ui.dialogue.motion")?.trim();
+    if (!id) return;
+    if (
+      !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
+      project.ui_motions.some((file) => file.definition.id === id)
+    ) {
+      setError("UI 动效 ID 非法或已经存在。");
+      return;
+    }
+    const path = `ui/motions/${id.replaceAll(".", "_")}.yaml`;
+    if (project.ui_motions.some((file) => file.path === path)) {
+      setError(`动效文件路径 ${path} 已经存在。`);
+      return;
+    }
+    commit((draft) => {
+      draft.manifest.ui_motions.push(path);
+      draft.ui_motions.push({
+        path,
+        definition: {
+          schema_version: 1,
+          id,
+          duration_ms: 280,
+          tracks: [
+            {
+              target: "dialogue_root",
+              channels: {
+                offset_y: [
+                  { at_ms: 0, value: 48, easing: "ease_out" },
+                  { at_ms: 280, value: 0, easing: "linear" },
+                ],
+                opacity: [
+                  { at_ms: 0, value: 0, easing: "ease_out" },
+                  { at_ms: 280, value: 1, easing: "linear" },
+                ],
+              },
+            },
+          ],
+        },
+      });
+    });
+    setUiMotionTarget(id);
+  };
+
+  const deleteUiMotion = (id: string): void => {
+    let references = 0;
+    if (project.manifest.ui_motion_defaults.dialogue_show === id)
+      references += 1;
+    if (project.manifest.ui_motion_defaults.dialogue_hide === id)
+      references += 1;
+    for (const file of project.scenes) {
+      for (const node of Object.values(file.definition.nodes)) {
+        if (node.type === "dialogue_ui" && node.motion === id) references += 1;
+        if (node.type === "ui_motion_set" && node.motion === id)
+          references += 1;
+        if (node.type === "ui_motion_play" && node.motion === id)
+          references += 1;
+      }
+    }
+    if (references > 0) {
+      setError(`UI 动效 ${id} 仍被 ${references} 处引用，不能删除。`);
+      return;
+    }
+    if (
+      !window.confirm(
+        `从项目清单移除 UI 动效 ${id}？磁盘上的 YAML 文件会保留。`,
+      )
+    )
+      return;
+    commit((draft) => {
+      const file = draft.ui_motions.find(
+        (candidate) => candidate.definition.id === id,
+      );
+      if (file === undefined) return;
+      draft.ui_motions = draft.ui_motions.filter(
+        (candidate) => candidate.definition.id !== id,
+      );
+      draft.manifest.ui_motions = draft.manifest.ui_motions.filter(
+        (path) => path !== file.path,
+      );
+    });
+    if (uiMotionTarget === id) setUiMotionTarget(null);
+  };
+
+  const uiMotionFile = project.ui_motions.find(
+    (file) => file.definition.id === uiMotionTarget,
+  );
+  if (uiMotionTarget !== null && uiMotionFile !== undefined) {
+    return (
+      <>
+        <UiMotionWorkspace
+          assets={project.assets}
+          dirty={dirty}
+          file={uiMotionFile}
+          onBack={() => setUiMotionTarget(null)}
+          onChange={(file) =>
+            commit((draft) => {
+              const index = draft.ui_motions.findIndex(
+                (candidate) => candidate.definition.id === uiMotionTarget,
+              );
+              if (index >= 0) draft.ui_motions[index] = file;
+            })
+          }
+          onRedo={redo}
+          onSave={() => void saveProject()}
+          onUndo={undo}
+        />
+        {error !== null && (
+          <div className="error-toast" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              关闭
+            </button>
+          </div>
+        )}
+        {notice !== null && <div className="notice-toast">{notice}</div>}
+      </>
+    );
+  }
+
   const timelineScene = findScene(project, timelineTarget?.sceneId ?? "");
   const timelineNode =
     timelineTarget === null
@@ -827,6 +999,9 @@ export function App(): ReactElement {
           setProject(renameCharacter(project, previousId, nextId));
           setDirty(true);
         }}
+        onCreateUiMotion={createUiMotion}
+        onEditUiMotion={setUiMotionTarget}
+        onDeleteUiMotion={deleteUiMotion}
         onSelectScene={(sceneId) => {
           setActiveSceneId(sceneId);
           setSelectedNodeId(null);
@@ -921,6 +1096,9 @@ export function App(): ReactElement {
           onChange={changeNode}
           onDelete={deleteNode}
           onDuplicate={duplicateNode}
+          onConvertToTimeline={convertNodeToTimeline}
+          onSplitDialogue={splitDialogue}
+          uiMotions={project.ui_motions}
           onRename={(previousId, nextId) => {
             if (
               !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||

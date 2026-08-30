@@ -1554,6 +1554,15 @@ code {
   grid-column: 1 / 3;
 }
 
+.inspector-actions .convert-timeline-button,
+.inspector-actions .field-note {
+  grid-column: 1 / 3;
+}
+
+.inspector-actions .field-note {
+  margin: 0 0 4px;
+}
+
 .empty-inspector {
   display: grid;
   place-items: center;
@@ -1710,6 +1719,7 @@ code {
 }
 
 .timeline-editor {
+  position: relative;
   display: grid;
   grid-template-rows: minmax(180px, 1fr) auto 28px minmax(130px, 0.8fr);
   height: 100%;
@@ -1803,7 +1813,6 @@ code {
 }
 .timeline-ruler {
   position: relative;
-  margin-left: 176px;
   border-bottom: 1px solid #344158;
   background: repeating-linear-gradient(
     90deg,
@@ -1812,6 +1821,34 @@ code {
     #29354a 10%
   );
   cursor: crosshair;
+}
+.timeline-ruler-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 176px minmax(0, 1fr);
+}
+.timeline-clipboard-tools {
+  display: flex;
+  min-width: 0;
+  padding: 2px 5px;
+  border-right: 1px solid #263247;
+  border-bottom: 1px solid #344158;
+  background: #111927;
+  align-items: center;
+  gap: 4px;
+}
+.timeline-clipboard-tools button {
+  height: 22px;
+  padding: 0 6px;
+  font-size: 9px;
+}
+.timeline-clipboard-tools span {
+  margin-left: auto;
+  overflow: hidden;
+  color: #75839a;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .timeline-ruler span {
   position: absolute;
@@ -1830,9 +1867,41 @@ code {
   background: #ff6a73;
   pointer-events: none;
 }
+.timeline-playback-start {
+  position: absolute;
+  top: 0;
+  bottom: -500px;
+  z-index: 11;
+  width: 2px;
+  background: #74dfff;
+  box-shadow: 0 0 0 1px rgb(3 17 26 / 65%);
+  pointer-events: none;
+}
 .timeline-tracks {
+  position: relative;
   min-height: 0;
   overflow: auto;
+}
+.timeline-selection-marquee {
+  position: absolute;
+  z-index: 20;
+  border: 1px solid #6bd9ff;
+  background: rgb(85 192 255 / 16%);
+  box-shadow: 0 0 0 1px rgb(85 192 255 / 8%);
+  pointer-events: none;
+}
+.timeline-clipboard-status {
+  position: absolute;
+  z-index: 35;
+  right: 14px;
+  bottom: 22px;
+  padding: 5px 8px;
+  border: 1px solid #3b5870;
+  border-radius: 5px;
+  background: rgb(13 24 36 / 94%);
+  color: #bfefff;
+  font-size: 10px;
+  pointer-events: none;
 }
 .timeline-track {
   border-bottom: 1px solid #202b3d;
@@ -1903,6 +1972,196 @@ code {
 .timeline-channel button.selected {
   outline: 2px solid #ffcb68;
   background: #fff0a8;
+}
+.timeline-channel button.inherited {
+  border: 2px solid #7ad7ff;
+  background: transparent;
+}
+.timeline-channel button.inherited.selected {
+  border-color: #fff0a8;
+  background: transparent;
+}
+
+.ui-motion-workspace {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr) minmax(220px, 32vh);
+  color: #dcecff;
+  background: #080d15;
+}
+.ui-motion-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #26364d;
+  background: #101927;
+}
+.ui-motion-toolbar strong {
+  margin-right: auto;
+}
+.ui-motion-main {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 300px;
+}
+.ui-motion-preview {
+  position: relative;
+  overflow: hidden;
+  background: #020408;
+}
+.ui-motion-design {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1920px;
+  height: 1080px;
+  transform-origin: 0 0;
+  translate: -50% -50%;
+  overflow: hidden;
+}
+.ui-motion-background {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgb(255 255 255 / 13%);
+  background: radial-gradient(circle at 50% 40%, #243650, #090f19 65%);
+  font-size: 42px;
+  letter-spacing: 0.2em;
+}
+.ui-preview-dialogue {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 1920px;
+  height: 387px;
+  color: #17213a;
+}
+.ui-preview-frame {
+  position: absolute;
+  inset: 0;
+  width: 1920px;
+  height: 387px;
+  object-fit: fill;
+}
+.ui-preview-name {
+  position: absolute;
+  top: -139px;
+  left: 100px;
+  width: 364px;
+  height: 243px;
+  font-size: 29px;
+  letter-spacing: 0.08em;
+}
+.ui-preview-name img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.ui-preview-name > span {
+  position: absolute;
+  top: 78px;
+  left: 54px;
+  width: 246px;
+  text-align: center;
+}
+.ui-preview-text {
+  position: absolute;
+  top: 103px;
+  right: 172px;
+  bottom: 45px;
+  left: 176px;
+  font-size: 34px;
+  line-height: 1.72;
+  letter-spacing: 0.035em;
+}
+.ui-preview-indicator {
+  position: absolute;
+  right: 150px;
+  bottom: 44px;
+  color: #264b78;
+  font-size: 19px;
+}
+.ui-preview-dialogue.selected,
+.ui-preview-frame.selected,
+.ui-preview-name.selected,
+.ui-preview-text.selected,
+.ui-preview-indicator.selected {
+  outline: 4px solid #67d9ff;
+  outline-offset: 3px;
+}
+.ui-motion-inspector {
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid #26364d;
+  background: #101722;
+}
+.ui-motion-inspector > label,
+.ui-keyframe-fields label {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+.ui-motion-timeline {
+  overflow: auto;
+  padding: 10px 14px 30px;
+  border-top: 1px solid #26364d;
+  background: #0d1521;
+}
+.ui-motion-timeline > input {
+  width: 100%;
+}
+.ui-motion-track {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+}
+.ui-motion-track header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+.ui-motion-track header strong {
+  margin-right: auto;
+}
+.ui-motion-channel {
+  display: grid;
+  grid-template-columns: 140px minmax(600px, 1fr);
+  min-height: 28px;
+}
+.ui-motion-channel > span {
+  padding: 6px 8px;
+  color: #8fa7c2;
+  font: 12px monospace;
+}
+.ui-motion-channel > div {
+  position: relative;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(10% - 1px),
+    rgb(70 88 114 / 55%) 10%
+  );
+}
+.ui-motion-channel button {
+  position: absolute;
+  top: 8px;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  translate: -50%;
+  rotate: 45deg;
+  border: 1px solid #07101a;
+  background: #71d8ff;
+}
+.ui-motion-channel button.selected {
+  outline: 2px solid #ffd36e;
+  background: #fff0ae;
 }
 .timeline-channel button.timeline-event-marker {
   border-radius: 50%;
@@ -2041,6 +2300,7 @@ code {
   transform-origin: 50% 100%;
 }
 .timeline-gizmo.selected {
+  z-index: 1000;
   border-color: #7ad7ff;
   box-shadow: 0 0 0 1px rgb(122 215 255 / 20%);
 }

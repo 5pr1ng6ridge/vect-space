@@ -13,7 +13,8 @@ use vectspace_core::{
     content::ContentCatalog,
     model::{
         AssetKind, ChoiceSnapshot, ContentManifest, ResolvedAsset, RuntimeSnapshot, RuntimeUpdate,
-        SceneDefinition, SceneNode, StoryLocation, TimelineEvent, TimelineTrack, VariableMap,
+        SceneDefinition, SceneNode, StoryLocation, TimelineEvent, TimelineTrack, UiMotionPreset,
+        VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
@@ -39,6 +40,7 @@ struct EditorProject {
     root: String,
     manifest: ContentManifest,
     scenes: Vec<EditorSceneFile>,
+    ui_motions: Vec<EditorUiMotionFile>,
     layout: EditorLayout,
     assets: Vec<EditorAsset>,
     diagnostics: Vec<EditorDiagnostic>,
@@ -50,6 +52,13 @@ struct EditorProject {
 struct EditorSceneFile {
     path: String,
     definition: SceneDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditorUiMotionFile {
+    path: String,
+    definition: UiMotionPreset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +186,7 @@ struct EditorViewport {
 struct SaveProjectRequest {
     manifest: ContentManifest,
     scenes: Vec<EditorSceneFile>,
+    ui_motions: Vec<EditorUiMotionFile>,
     layout: EditorLayout,
     expected_fingerprint: String,
 }
@@ -247,9 +257,14 @@ fn save_project(
     }
 
     let scenes = validate_scene_file_set(&request.manifest, &request.scenes)?;
-    let candidate =
-        ContentCatalog::from_documents(session.root.clone(), request.manifest.clone(), scenes)
-            .map_err(display_error)?;
+    let ui_motions = validate_ui_motion_file_set(&request.manifest, &request.ui_motions)?;
+    let candidate = ContentCatalog::from_documents(
+        session.root.clone(),
+        request.manifest.clone(),
+        scenes,
+        ui_motions,
+    )
+    .map_err(display_error)?;
 
     let writes = serialize_project(&session.root, &request)?;
     atomic_write_batch(&writes).map_err(display_error)?;
@@ -272,8 +287,10 @@ fn validate_project(
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_ref().ok_or("尚未打开项目")?;
     let scenes = validate_scene_file_set(&request.manifest, &request.scenes)?;
-    let candidate = ContentCatalog::from_documents(session.root.clone(), request.manifest, scenes)
-        .map_err(display_error)?;
+    let ui_motions = validate_ui_motion_file_set(&request.manifest, &request.ui_motions)?;
+    let candidate =
+        ContentCatalog::from_documents(session.root.clone(), request.manifest, scenes, ui_motions)
+            .map_err(display_error)?;
     Ok(analyze_catalog(&candidate))
 }
 
@@ -352,9 +369,15 @@ fn build_timeline_preview(
         .map_err(|_| "编辑器项目锁已损坏".to_owned())?;
     let session = guard.as_mut().ok_or("尚未打开项目")?;
     let scenes = validate_scene_file_set(&request.project.manifest, &request.project.scenes)?;
-    let catalog =
-        ContentCatalog::from_documents(session.root.clone(), request.project.manifest, scenes)
-            .map_err(display_error)?;
+    let ui_motions =
+        validate_ui_motion_file_set(&request.project.manifest, &request.project.ui_motions)?;
+    let catalog = ContentCatalog::from_documents(
+        session.root.clone(),
+        request.project.manifest.clone(),
+        scenes,
+        ui_motions,
+    )
+    .map_err(display_error)?;
     let decisions = request
         .choices
         .iter()
@@ -430,6 +453,13 @@ fn project_payload(
             definition,
         });
     }
+    let mut ui_motions = Vec::with_capacity(catalog.manifest.ui_motions.len());
+    for path in &catalog.manifest.ui_motions {
+        ui_motions.push(EditorUiMotionFile {
+            path: path.clone(),
+            definition: read_yaml(&root.join(path))?,
+        });
+    }
 
     let definitions = &catalog.manifest.assets;
     let ids = catalog.asset_ids();
@@ -454,6 +484,7 @@ fn project_payload(
         root: root.to_string_lossy().into_owned(),
         manifest: catalog.manifest.clone(),
         scenes,
+        ui_motions,
         layout,
         assets,
         diagnostics: analyze_catalog(catalog),
@@ -509,15 +540,46 @@ fn validate_scene_file_set(
     Ok(scenes)
 }
 
+fn validate_ui_motion_file_set(
+    manifest: &ContentManifest,
+    files: &[EditorUiMotionFile],
+) -> Result<BTreeMap<String, UiMotionPreset>, String> {
+    if manifest.ui_motions.len() != files.len() {
+        return Err("manifest 的 UI 动效文件列表与编辑器文档不一致".to_owned());
+    }
+    let declared = manifest
+        .ui_motions
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let provided = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if declared.len() != manifest.ui_motions.len() || declared != provided {
+        return Err("提交的 UI 动效路径与 manifest 不一致".to_owned());
+    }
+    let mut motions = BTreeMap::new();
+    for file in files {
+        safe_relative_path(&file.path)?;
+        motions.insert(file.path.clone(), file.definition.clone());
+    }
+    Ok(motions)
+}
+
 fn serialize_project(
     root: &Path,
     request: &SaveProjectRequest,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
-    let mut writes = Vec::with_capacity(request.scenes.len() + 2);
+    let mut writes = Vec::with_capacity(request.scenes.len() + request.ui_motions.len() + 2);
     writes.push((root.join("manifest.yaml"), yaml_bytes(&request.manifest)?));
     for scene in &request.scenes {
         safe_relative_path(&scene.path)?;
         writes.push((root.join(&scene.path), yaml_bytes(&scene.definition)?));
+    }
+    for motion in &request.ui_motions {
+        safe_relative_path(&motion.path)?;
+        writes.push((root.join(&motion.path), yaml_bytes(&motion.definition)?));
     }
     let layout = serde_json::to_vec_pretty(&request.layout).map_err(display_error)?;
     writes.push((root.join(LAYOUT_RELATIVE_PATH), layout));
@@ -599,9 +661,12 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 
 fn project_fingerprint(root: &Path, manifest: &ContentManifest) -> Result<String, std::io::Error> {
     let mut hasher = Sha256::new();
-    let mut paths = Vec::with_capacity(manifest.scenes.len() + 2);
+    let mut paths = Vec::with_capacity(manifest.scenes.len() + manifest.ui_motions.len() + 2);
     paths.push(root.join("manifest.yaml"));
     for path in &manifest.scenes {
+        paths.push(root.join(path));
+    }
+    for path in &manifest.ui_motions {
         paths.push(root.join(path));
     }
     paths.push(root.join(LAYOUT_RELATIVE_PATH));
@@ -704,7 +769,9 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::Sfx { next, .. }
         | SceneNode::Camera { next, .. }
         | SceneNode::ScreenEffect { next, .. }
-        | SceneNode::DialogueUi { next, .. } => vec![local(next)],
+        | SceneNode::DialogueUi { next, .. }
+        | SceneNode::UiMotionSet { next, .. }
+        | SceneNode::UiMotionPlay { next, .. } => vec![local(next)],
         SceneNode::Timeline { next, .. } => vec![local(next)],
         SceneNode::Choice { choices } => choices.iter().map(|choice| local(&choice.next)).collect(),
         SceneNode::Condition {
@@ -744,6 +811,9 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::DialogueUi {
             await_completion, ..
         }
+        | SceneNode::UiMotionPlay {
+            await_completion, ..
+        }
         | SceneNode::Timeline {
             await_completion, ..
         } => !await_completion,
@@ -751,6 +821,7 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::Condition { .. }
         | SceneNode::Playback { .. }
         | SceneNode::Jump { .. }
+        | SceneNode::UiMotionSet { .. }
         | SceneNode::Sfx { .. } => true,
     }
 }
@@ -831,10 +902,17 @@ fn collect_node_assets<'a>(node: &'a SceneNode, output: &mut BTreeSet<&'a str>) 
         SceneNode::Timeline { tracks, events, .. } => {
             for track in tracks {
                 match track {
-                    TimelineTrack::Sprite { asset, .. } | TimelineTrack::Video { asset, .. } => {
+                    TimelineTrack::Sprite {
+                        asset: Some(asset), ..
+                    } => {
                         output.insert(asset);
                     }
-                    TimelineTrack::Camera { .. } | TimelineTrack::Bgm { .. } => {}
+                    TimelineTrack::Video { asset, .. } => {
+                        output.insert(asset);
+                    }
+                    TimelineTrack::Sprite { asset: None, .. }
+                    | TimelineTrack::Camera { .. }
+                    | TimelineTrack::Bgm { .. } => {}
                 }
             }
             for event in events {
@@ -941,11 +1019,12 @@ mod tests {
         let payload =
             project_payload(&root, &catalog, EditorLayout::default(), fingerprint).unwrap();
         assert_eq!(payload.manifest.entry_scene, "prologue");
-        assert_eq!(payload.scenes.len(), 1);
-        assert!(payload.scenes[0]
-            .definition
-            .nodes
-            .contains_key("route_choice"));
+        let prologue = payload
+            .scenes
+            .iter()
+            .find(|scene| scene.definition.id == "prologue")
+            .expect("entry scene should be present in the editor payload");
+        assert!(prologue.definition.nodes.contains_key("route_choice"));
     }
 
     #[test]
@@ -958,8 +1037,20 @@ mod tests {
             panic!("fixture changed")
         };
         *next = "missing".to_owned();
+        let ui_motions = catalog
+            .manifest
+            .ui_motions
+            .iter()
+            .map(|path| {
+                (
+                    path.clone(),
+                    read_yaml(&root.join(path)).expect("demo UI motion should load"),
+                )
+            })
+            .collect();
         let error =
-            ContentCatalog::from_documents(root, catalog.manifest.clone(), scenes).unwrap_err();
+            ContentCatalog::from_documents(root, catalog.manifest.clone(), scenes, ui_motions)
+                .unwrap_err();
         assert!(error.to_string().contains("目标节点不存在"));
     }
 
@@ -988,8 +1079,20 @@ mod tests {
                 },
             ),
         ]);
+        let ui_motions = catalog
+            .manifest
+            .ui_motions
+            .iter()
+            .map(|path| {
+                (
+                    path.clone(),
+                    read_yaml(&root.join(path)).expect("demo UI motion should load"),
+                )
+            })
+            .collect();
         let candidate =
-            ContentCatalog::from_documents(root, catalog.manifest.clone(), scenes).unwrap();
+            ContentCatalog::from_documents(root, catalog.manifest.clone(), scenes, ui_motions)
+                .unwrap();
         assert!(analyze_catalog(&candidate)
             .iter()
             .any(|diagnostic| diagnostic.code == "immediate_cycle"));

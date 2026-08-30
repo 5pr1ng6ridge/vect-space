@@ -22,8 +22,10 @@ import type {
   SpriteSnapshot,
   TimelineEvent,
   TimelineTrack,
+  UiMotionPreset,
 } from "./types";
 import { evaluateChannel, TimelineClock } from "./timeline";
+import { UiMotionHost } from "./uiMotion";
 import { advanceVirtualElapsed } from "./virtualClock";
 import { DESIGN_HEIGHT, DESIGN_WIDTH } from "../viewport/viewport";
 
@@ -39,6 +41,7 @@ export class PresentationController {
   readonly #audio: AudioManager;
   readonly #canvas: HTMLCanvasElement;
   readonly #diagnostic: (message: string) => void;
+  readonly #uiMotionHost: UiMotionHost;
   #background: Sprite | null = null;
   #camera: CameraSnapshot = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
   #generation = 0;
@@ -57,10 +60,12 @@ export class PresentationController {
     canvas: HTMLCanvasElement,
     settings: Settings,
     diagnostic: (message: string) => void,
+    uiMotionHost: UiMotionHost,
   ) {
     this.#canvas = canvas;
     this.#audio = new AudioManager(settings);
     this.#diagnostic = diagnostic;
+    this.#uiMotionHost = uiMotionHost;
   }
 
   async init(): Promise<void> {
@@ -270,7 +275,16 @@ export class PresentationController {
         );
         break;
       case "dialogue_reveal":
+        break;
       case "dialogue_ui_transition":
+        this.#uiMotionHost.beginDialogueTransition();
+        if (cue.motion !== null) {
+          await this.#runUiMotion(cue.motion, cue.duration_ms, signal);
+        }
+        this.#uiMotionHost.reconcileDialogueVisible(cue.visible);
+        break;
+      case "ui_motion":
+        await this.#runUiMotion(cue.motion, cue.duration_ms, signal);
         break;
       case "timeline":
         return this.#runTimeline(cue, assets, signal);
@@ -473,14 +487,23 @@ export class PresentationController {
   ): Promise<PresentationOutcome> {
     const firedEvents = new Set<string>();
     const spriteBases = new Map<string, Omit<SpriteSnapshot, "asset">>();
+    const cameraBase = { ...this.#camera };
+    const bgmBase = this.#audio.currentBgmVolume() ?? 1;
     const spriteTracks = cue.tracks.filter(
       (track): track is Extract<TimelineTrack, { type: "sprite" }> =>
         track.type === "sprite",
     );
     for (const track of spriteTracks) {
-      const url = requireAssetUrl(assets, track.asset);
       let view = this.#spriteViews.get(track.sprite_id);
-      if (view === undefined || view.label !== url) {
+      const inheritedBase = view === undefined ? undefined : readSprite(view);
+      if (track.asset === null && view === undefined) {
+        throw new Error(`立绘 ${track.sprite_id} 没有可继承的素材`);
+      }
+      const url =
+        track.asset === null
+          ? (view as Sprite).label
+          : requireAssetUrl(assets, track.asset);
+      if (track.asset !== null && (view === undefined || view.label !== url)) {
         view?.destroy();
         view = await this.#makeSprite(
           {
@@ -500,7 +523,10 @@ export class PresentationController {
         this.#world.addChild(view);
         this.#spriteViews.set(track.sprite_id, view);
       }
-      spriteBases.set(track.sprite_id, readSprite(view));
+      if (view === undefined) {
+        throw new Error(`立绘 ${track.sprite_id} 无法建立时间轴对象`);
+      }
+      spriteBases.set(track.sprite_id, inheritedBase ?? readSprite(view));
     }
 
     const videoTrack = cue.tracks.find(
@@ -562,6 +588,8 @@ export class PresentationController {
           video,
           videoView,
           spriteBases,
+          cameraBase,
+          bgmBase,
         );
       }
       if (!this.#skipSuppressTimelineEvents) {
@@ -645,6 +673,8 @@ export class PresentationController {
     video: HTMLVideoElement | null,
     videoView: Sprite | null,
     spriteBases: ReadonlyMap<string, Omit<SpriteSnapshot, "asset">>,
+    cameraBase: CameraSnapshot,
+    bgmBase: number,
   ): void {
     switch (track.type) {
       case "sprite": {
@@ -687,19 +717,19 @@ export class PresentationController {
       }
       case "camera":
         this.#camera = {
-          x: evaluateChannel(track.channels, "x", elapsedMs, this.#camera.x),
-          y: evaluateChannel(track.channels, "y", elapsedMs, this.#camera.y),
+          x: evaluateChannel(track.channels, "x", elapsedMs, cameraBase.x),
+          y: evaluateChannel(track.channels, "y", elapsedMs, cameraBase.y),
           zoom: evaluateChannel(
             track.channels,
             "zoom",
             elapsedMs,
-            this.#camera.zoom,
+            cameraBase.zoom,
           ),
           rotation_deg: evaluateChannel(
             track.channels,
             "rotation_deg",
             elapsedMs,
-            this.#camera.rotation_deg,
+            cameraBase.rotation_deg,
           ),
         };
         this.#applyCamera();
@@ -751,12 +781,7 @@ export class PresentationController {
       }
       case "bgm":
         this.#audio.setBgmTimelineVolume(
-          evaluateChannel(
-            track.channels,
-            "volume",
-            elapsedMs,
-            this.#audio.currentBgmVolume() ?? 1,
-          ),
+          evaluateChannel(track.channels, "volume", elapsedMs, bgmBase),
         );
         break;
     }
@@ -793,6 +818,9 @@ export class PresentationController {
     assets: AssetUrlMap,
     signal: AbortSignal,
   ): Promise<void> {
+    this.#uiMotionHost.reconcileDialogueVisible(
+      snapshot.world.dialogue_ui_visible,
+    );
     await this.#setBackground(snapshot.world.background, assets, signal);
     if (signal.aborted) {
       return;
@@ -824,6 +852,21 @@ export class PresentationController {
     this.#applyCamera();
     this.#application.render();
     await this.#audio.reconcile(snapshot.audio, assets);
+  }
+
+  #runUiMotion(
+    motion: UiMotionPreset,
+    durationMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    return animate(
+      durationMs,
+      "linear",
+      (progress) =>
+        this.#uiMotionHost.apply(motion, progress * durationMs, durationMs),
+      signal,
+      () => (this.#paused ? 0 : this.#playbackRate),
+    );
   }
 
   async #setBackground(

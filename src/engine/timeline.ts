@@ -81,8 +81,8 @@ export function evaluateChannel(
   const first = firstItem(keyframes);
   const last = lastItem(keyframes);
   if (first === undefined || last === undefined) return fallback;
-  if (elapsedMs <= first.at_ms) return first.value;
-  if (elapsedMs >= last.at_ms) return last.value;
+  if (elapsedMs <= first.at_ms) return resolveValue(first.value, fallback);
+  if (elapsedMs >= last.at_ms) return resolveValue(last.value, fallback);
   for (let index = 0; index < keyframes.length - 1; index += 1) {
     const left = keyframes[index];
     const right = keyframes[index + 1];
@@ -90,10 +90,18 @@ export function evaluateChannel(
     if (elapsedMs <= right.at_ms) {
       const span = right.at_ms - left.at_ms;
       const progress = span <= 0 ? 1 : (elapsedMs - left.at_ms) / span;
-      return mix(left.value, right.value, applyEasing(progress, left.easing));
+      return mix(
+        resolveValue(left.value, fallback),
+        resolveValue(right.value, fallback),
+        applyEasing(progress, left.easing),
+      );
     }
   }
-  return last.value;
+  return resolveValue(last.value, fallback);
+}
+
+function resolveValue(value: number | "inherit", fallback: number): number {
+  return value === "inherit" ? fallback : value;
 }
 
 export function applyEasing(value: number, easing: TimelineEasing): number {

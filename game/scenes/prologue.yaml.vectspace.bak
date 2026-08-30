@@ -5,7 +5,8 @@ nodes:
   algebra_line:
     type: say
     speaker: test
-    text: 若$A$可逆，则每个$b$都有唯一解 $x=A^{-1}b$。[pause=350ms] 这是同一事实的代数表述。
+    text: 若$A$可逆，则每个$b$都有唯一解 $x=A^{-1}b$。[pause=5000ms] 这是[pause=5000ms] 同一事实的代数表述。
+    mode: start
     speed_cps: null
     next: flash_result
   award_geometry:
@@ -45,6 +46,7 @@ nodes:
     type: say
     speaker: 系统
     text: 分支已经汇合。读档只恢复这个最终世界，不会重放刚才的转场、音效、闪光或镜头运动。
+    mode: start
     speed_cps: 32.0
     next: ctrl_restore
   ctrl_block:
@@ -91,7 +93,7 @@ nodes:
     next: introduction
   establish:
     type: background
-    background: bg.vector_space
+    background: bg.nvctsp
     transition: cross_fade
     duration_ms: 700
     easing: ease_in_out
@@ -117,6 +119,7 @@ nodes:
     type: say
     speaker: test
     text: 非零行列式意味着线性变换不压扁空间；[fx=glow]体积缩放因子[/fx]是 $|\det(A)|$。
+    mode: start
     speed_cps: null
     next: flash_result
   introduction:
@@ -125,6 +128,7 @@ nodes:
     text: >-
       这里是固定的$1920\times1080$舞台。公式$V=\operatorname{span}\{v_1,v_2\}$会先完成排版，再逐个显示。当前分数为
       $[var=score]$。
+    mode: start
     speed_cps: 28.0
     next: forced_end
   jump_say_3:
@@ -142,15 +146,15 @@ nodes:
     sprite_id: jelly
     action: move
     asset: null
-    x: 1470.0
+    x: 570.0
     "y": 1250.0
     scale: 1.05
     opacity: 1.0
     z: 10
     duration_ms: 650
     easing: ease_in_out
-    await: false
-    next: sprite_move_jelly
+    await: true
+    next: wait_move_jelly
   route_branch:
     type: condition
     condition:
@@ -222,13 +226,22 @@ nodes:
     text: >-
       对正数 $x,y$，因为 $x+y-2\sqrt{xy}=(\sqrt{x}-\sqrt{y})^2 \ge
       0$，所以二元均值不等式$\frac{x+y}{2} \ge \sqrt{xy}$成立。[auto]
+    mode: start
     speed_cps: null
     next: say_3
   say_3:
     type: say
     speaker: null
+    text: 均值不等式链，
+    mode: start
+    page_id: say_3
+    speed_cps: null
+    next: say_3_continue
+  say_3_continue:
+    type: say
+    speaker: null
     text: |-
-      均值不等式链，$$
+      $$
       
       \sqrt{\frac{a_1^2+\cdots+a_n^2}{n}}
       
@@ -245,21 +258,117 @@ nodes:
       \frac{n}{\frac1{a_1}+\cdots+\frac1{a_n}}
       
       $$
+    mode: append
+    page_id: say_3
     speed_cps: null
     next: jump_say_3
   sprite_move_jelly:
-    type: sprite
-    sprite_id: omo
-    action: move
-    asset: sprite.omo
-    x: 420.0
-    "y": 1115.0
-    scale: 1.0
-    opacity: 1.0
-    z: 0
+    type: timeline
     duration_ms: 500
-    easing: ease_in_out
     await: false
+    skippable: false
+    tracks:
+    - type: sprite
+      sprite_id: omo
+      asset: sprite.omo
+      remove_at_end: false
+      channels:
+        opacity:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 500
+          value: 0.44
+          easing: linear
+        rotation_deg:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 500
+          value: 188.02168
+          easing: linear
+        scale:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 500
+          value: 1.0
+          easing: ease_in_out
+        scale_x:
+        - at_ms: 500
+          value: 1.0
+          easing: ease_in_out
+        scale_y:
+        - at_ms: 500
+          value: 1.0
+          easing: ease_in_out
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 500
+          value: 1898.243
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 500
+          value: -72.74612
+          easing: linear
+        z:
+        - at_ms: 500
+          value: 15.0
+          easing: linear
+    - type: sprite
+      sprite_id: jelly
+      asset: sprite.jelly
+      remove_at_end: false
+      channels:
+        scale:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 500
+          value: 0.6284974
+          easing: linear
+        scale_x:
+        - at_ms: 500
+          value: 1.0
+          easing: linear
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 500
+          value: 245.43877
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 500
+          value: 1179.1193
+          easing: linear
+    - type: camera
+      channels:
+        rotation_deg:
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+        x:
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+        zoom:
+        - at_ms: 0
+          value: 1.0
+          easing: linear
+    events: []
     next: route_choice
   timeline_showcase:
     type: timeline
@@ -388,3 +497,7 @@ nodes:
           easing: step
     events: []
     next: mark_ending
+  wait_move_jelly:
+    type: wait
+    duration_ms: 5000
+    next: sprite_move_jelly

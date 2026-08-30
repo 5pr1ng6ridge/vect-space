@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UiMotionPreset",
+  "type": "object",
+  "properties": {
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "tracks": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/UiMotionTrack"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "duration_ms"
+  ],
+  "$defs": {
+    "TimelineEasing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TimelineEasingPreset"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cubic_bezier": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 4,
+              "minItems": 4
+            }
+          },
+          "required": [
+            "cubic_bezier"
+          ]
+        }
+      ]
+    },
+    "TimelineEasingPreset": {
+      "type": "string",
+      "enum": [
+        "step",
+        "linear",
+        "ease_in",
+        "ease_out",
+        "ease_in_out"
+      ]
+    },
+    "TimelineKeyframe": {
+      "type": "object",
+      "properties": {
+        "at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "easing": {
+          "$ref": "#/$defs/TimelineEasing",
+          "default": "linear"
+        },
+        "value": {
+          "$ref": "#/$defs/TimelineKeyframeValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at_ms",
+        "value"
+      ]
+    },
+    "TimelineKeyframeKeyword": {
+      "type": "string",
+      "enum": [
+        "inherit"
+      ]
+    },
+    "TimelineKeyframeValue": {
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "float"
+        },
+        {
+          "$ref": "#/$defs/TimelineKeyframeKeyword"
+        }
+      ]
+    },
+    "UiMotionTarget": {
+      "type": "string",
+      "enum": [
+        "dialogue_root",
+        "dialogue_frame",
+        "dialogue_nameplate",
+        "dialogue_text",
+        "dialogue_advance_indicator"
+      ]
+    },
+    "UiMotionTrack": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TimelineKeyframe"
+            }
+          },
+          "default": {}
+        },
+        "target": {
+          "$ref": "#/$defs/UiMotionTarget"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target"
+      ]
+    }
+  }
+}

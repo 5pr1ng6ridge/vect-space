@@ -1,0 +1,26 @@
+schema_version: 1
+id: ui.dialogue.emphasis
+duration_ms: 180
+tracks:
+- target: dialogue_root
+  channels:
+    scale_x:
+    - at_ms: 0
+      value: 1
+      easing: ease_out
+    - at_ms: 80
+      value: 1.018
+      easing: ease_in_out
+    - at_ms: 180
+      value: 1
+      easing: linear
+    scale_y:
+    - at_ms: 0
+      value: 1
+      easing: ease_out
+    - at_ms: 80
+      value: 1.018
+      easing: ease_in_out
+    - at_ms: 180
+      value: 1
+      easing: linear

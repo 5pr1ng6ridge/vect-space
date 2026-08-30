@@ -9,10 +9,34 @@ export type TimelineEasing =
   "step" | Easing | { cubic_bezier: [number, number, number, number] };
 export interface TimelineKeyframe {
   at_ms: number;
-  value: number;
+  value: number | "inherit";
   easing: TimelineEasing;
 }
 export type TimelineChannels = Record<string, TimelineKeyframe[]>;
+export type UiMotionTarget =
+  | "dialogue_root"
+  | "dialogue_frame"
+  | "dialogue_nameplate"
+  | "dialogue_text"
+  | "dialogue_advance_indicator";
+export interface UiMotionTrack {
+  target: UiMotionTarget;
+  channels: TimelineChannels;
+}
+export interface UiMotionPreset {
+  schema_version: number;
+  id: string;
+  duration_ms: number;
+  tracks: UiMotionTrack[];
+}
+export interface UiMotionFile {
+  path: string;
+  definition: UiMotionPreset;
+}
+export interface UiMotionBindings {
+  dialogue_show?: string | null;
+  dialogue_hide?: string | null;
+}
 export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
 export type NodeType = SceneNode["type"];
 
@@ -58,6 +82,8 @@ export interface ContentManifest {
   characters: Record<string, CharacterDefinition>;
   assets: Record<string, AssetDefinition>;
   scenes: string[];
+  ui_motions: string[];
+  ui_motion_defaults: UiMotionBindings;
 }
 
 interface NextNode {
@@ -93,6 +119,8 @@ export interface SayNode extends NextNode {
   type: "say";
   speaker: string | null;
   text: string;
+  mode?: "start" | "append";
+  page_id?: string | null;
   speed_cps: number | null;
 }
 
@@ -154,7 +182,7 @@ export type TimelineTrack =
   | {
       type: "sprite";
       sprite_id: string;
-      asset: string;
+      asset: string | null;
       remove_at_end: boolean;
       channels: TimelineChannels;
     }
@@ -209,9 +237,25 @@ export interface ScreenEffectNode extends AwaitedNode {
   effect: "shake" | "flash";
 }
 
-export interface DialogueUiNode extends AwaitedNode {
+export interface DialogueUiNode extends NextNode {
   type: "dialogue_ui";
   visible: boolean;
+  motion: string | null;
+  duration_ms: number | null;
+  await: boolean;
+}
+
+export interface UiMotionSetNode extends NextNode {
+  type: "ui_motion_set";
+  slot: "dialogue_show" | "dialogue_hide";
+  motion: string | null;
+}
+
+export interface UiMotionPlayNode extends NextNode {
+  type: "ui_motion_play";
+  motion: string;
+  duration_ms: number | null;
+  await: boolean;
 }
 
 export interface EndNode {
@@ -233,6 +277,8 @@ export type SceneNode =
   | CameraNode
   | ScreenEffectNode
   | DialogueUiNode
+  | UiMotionSetNode
+  | UiMotionPlayNode
   | TimelineNode
   | EndNode;
 
@@ -303,6 +349,7 @@ export interface EditorProject {
   root: string;
   manifest: ContentManifest;
   scenes: EditorSceneFile[];
+  ui_motions: UiMotionFile[];
   layout: EditorLayout;
   assets: EditorAsset[];
   diagnostics: EditorDiagnostic[];
@@ -312,6 +359,7 @@ export interface EditorProject {
 export interface SaveProjectRequest {
   manifest: ContentManifest;
   scenes: EditorSceneFile[];
+  ui_motions: UiMotionFile[];
   layout: EditorLayout;
   expected_fingerprint: string;
 }
@@ -361,6 +409,7 @@ export interface RuntimeSnapshot {
     sprites: Record<string, SpriteSnapshot>;
     camera: { x: number; y: number; zoom: number; rotation_deg: number };
     dialogue_ui_visible: boolean;
+    ui_motion_bindings: UiMotionBindings;
     persistent_effects: string[];
   };
   audio: {
@@ -376,6 +425,14 @@ export interface RuntimeSnapshot {
     auto: "normal" | "forced";
     ctrl_fast_forward: "allow" | "block";
   };
+  dialogue_page?: {
+    page_id: string;
+    speaker: string | null;
+    speaker_id?: string | null;
+    name_color?: string | null;
+    text_color?: string | null;
+    segments: string[];
+  } | null;
   prompt: PromptSnapshot;
 }
 

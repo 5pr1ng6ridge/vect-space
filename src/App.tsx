@@ -17,6 +17,7 @@ import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
 import { autoReadingDelay, hasImmediateAutoAdvance } from "./engine/markup";
 import { canFastForwardPrompt } from "./engine/playback";
+import { UiMotionHost } from "./engine/uiMotion";
 import type {
   AdvanceSource,
   AssetUrlMap,
@@ -55,6 +56,7 @@ export default function App(): ReactElement {
   const { style: viewportStyle } = useViewportMetrics();
   const sceneRef = useRef<SceneCanvasHandle>(null);
   const dialogueRef = useRef<DialogueBoxHandle>(null);
+  const uiMotionHost = useMemo(() => new UiMotionHost(), []);
   const phaseRef = useRef<Phase>("booting");
   const busyRef = useRef(false);
   const acknowledgedUpdates = useRef(new Set<number>());
@@ -278,6 +280,35 @@ export default function App(): ReactElement {
 
   const dialogue =
     update?.snapshot.prompt.kind === "dialogue" ? update.snapshot.prompt : null;
+  const dialoguePage =
+    update?.snapshot.dialogue_page ??
+    (dialogue === null
+      ? null
+      : {
+          page_id: dialogue.prompt_id,
+          speaker: dialogue.speaker,
+          speaker_id: dialogue.speaker_id ?? null,
+          name_color: dialogue.name_color ?? null,
+          text_color: dialogue.text_color ?? null,
+          segments: [dialogue.text],
+        });
+  const hasUiMotionCue =
+    update?.cues.some(
+      (cue) =>
+        cue.type === "dialogue_ui_transition" || cue.type === "ui_motion",
+    ) ?? false;
+  const renderedDialoguePage =
+    dialoguePage ??
+    (hasUiMotionCue
+      ? {
+          page_id: "ui_motion_preview",
+          speaker: null,
+          speaker_id: null,
+          name_color: null,
+          text_color: null,
+          segments: [""],
+        }
+      : null);
   const choice =
     update?.snapshot.prompt.kind === "choice" ? update.snapshot.prompt : null;
   const dialogueCueCps = useMemo(
@@ -474,6 +505,7 @@ export default function App(): ReactElement {
           typingSfxActive={typingSfxActive && !fastForwardActive}
           typingSfxCps={typingSfxCps}
           update={update}
+          uiMotionHost={uiMotionHost}
         />
 
         {phase === "booting" && (
@@ -547,19 +579,21 @@ export default function App(): ReactElement {
               </button>
             </nav>
 
-            {dialogue !== null && (
+            {renderedDialoguePage !== null && (
               <DialogueBox
                 defaultCps={settings.text_speed_cps}
                 dialogueBoxUrl={assets["gui.dialogue_box"] ?? ""}
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
-                key={`${dialogue.prompt_id}:${update.snapshot.revision}`}
+                key={`${renderedDialoguePage.page_id}:${dialogue?.prompt_id ?? "retained"}:${update.snapshot.revision}`}
+                motionHost={uiMotionHost}
                 nameBoxUrl={assets["gui.name_box"] ?? ""}
                 onTypingChange={handleTypingChange}
                 onRevealComplete={handleRevealComplete}
+                page={renderedDialoguePage}
                 prompt={dialogue}
                 ref={dialogueRef}
-                revealImmediately={dialogueCueCps === null}
+                revealImmediately={dialogue === null || dialogueCueCps === null}
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
             )}

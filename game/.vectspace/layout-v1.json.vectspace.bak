@@ -5,7 +5,7 @@
       "nodes": {
         "algebra_line": {
           "x": 1532.0,
-          "y": 577.0
+          "y": 430.0
         },
         "award_geometry": {
           "x": 772.0,
@@ -44,7 +44,7 @@
           "y": 405.0
         },
         "enter_jelly": {
-          "x": 5344.0,
+          "x": 5332.0,
           "y": 208.0
         },
         "enter_omo": {
@@ -69,14 +69,14 @@
         },
         "geometry_line": {
           "x": 1532.0,
-          "y": 355.0
+          "y": 208.0
         },
         "introduction": {
           "x": 6092.0,
           "y": 208.0
         },
         "jump_say_3": {
-          "x": 1532.0,
+          "x": 1912.0,
           "y": 12.0
         },
         "mark_ending": {
@@ -84,7 +84,7 @@
           "y": 405.0
         },
         "move_jelly": {
-          "x": 6852.0,
+          "x": 7232.0,
           "y": 208.0
         },
         "route_branch": {
@@ -107,9 +107,13 @@
           "x": 1152.0,
           "y": 12.0
         },
+        "say_3_continue": {
+          "x": 1532.0,
+          "y": 12.0
+        },
         "sprite_move_jelly": {
-          "x": 7232.0,
-          "y": 183.0
+          "x": 7612.0,
+          "y": 208.0
         },
         "timeline_showcase": {
           "x": 3812.0,
@@ -118,12 +122,16 @@
         "video_showcase": {
           "x": 4192.0,
           "y": 405.0
+        },
+        "wait_move_jelly": {
+          "x": 7572.0,
+          "y": 388.0
         }
       },
       "viewport": {
-        "x": -7045.545794552035,
-        "y": 373.1307147311266,
-        "zoom": 1.04466067595535
+        "x": -5321.717279575319,
+        "y": 391.29669536956663,
+        "zoom": 0.7917047464637373
       }
     },
     "test_scene": {
@@ -154,11 +162,39 @@
         }
       },
       "viewport": {
-        "x": -234.67138810198293,
-        "y": 437.45184135977337,
-        "zoom": 0.7507082152974505
+        "x": 23.562332371289983,
+        "y": 481.776685738579,
+        "zoom": 0.9814814814814864
       }
     }
   },
-  "timeline_previews": {}
+  "timeline_previews": {
+    "prologue/sprite_move_jelly": {
+      "variable_overrides": {},
+      "choices": []
+    },
+    "test_scene/move_jelly_copy": {
+      "variable_overrides": {},
+      "choices": [
+        {
+          "scene_id": "prologue",
+          "node_id": "route_choice",
+          "visit": 1,
+          "choice_id": "algebra"
+        },
+        {
+          "scene_id": "prologue",
+          "node_id": "route_choice",
+          "visit": 2,
+          "choice_id": "test"
+        },
+        {
+          "scene_id": "test_scene",
+          "node_id": "choice_background_start",
+          "visit": 1,
+          "choice_id": "option_1"
+        }
+      ]
+    }
+  }
 }

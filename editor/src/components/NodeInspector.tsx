@@ -1,5 +1,17 @@
-import { useMemo, useState, type ReactElement, type ReactNode } from "react";
-import { NODE_TYPES, defaultCondition, defaultNode, nodeLabel } from "../story";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
+import {
+  NODE_TYPES,
+  canConvertToTimeline,
+  defaultCondition,
+  defaultNode,
+  nodeLabel,
+} from "../story";
 import { interpolateTemplate } from "../textTemplate";
 import type {
   AssetKind,
@@ -12,6 +24,7 @@ import type {
   ValueOperand,
   VariableOperation,
   VariableType,
+  UiMotionFile,
 } from "../types";
 import { MarkupPreview } from "./MarkupPreview";
 
@@ -23,7 +36,10 @@ interface NodeInspectorProps {
   onRename(previousId: string, nextId: string): void;
   onDelete(nodeId: string): void;
   onDuplicate(nodeId: string): void;
+  onConvertToTimeline(nodeId: string): void;
+  onSplitDialogue(nodeId: string, offset: number): void;
   onSetEntry(nodeId: string): void;
+  uiMotions: UiMotionFile[];
 }
 
 export function NodeInspector({
@@ -34,7 +50,10 @@ export function NodeInspector({
   onRename,
   onDelete,
   onDuplicate,
+  onConvertToTimeline,
+  onSplitDialogue,
   onSetEntry,
+  uiMotions,
 }: NodeInspectorProps): ReactElement {
   const node = nodeId === null ? undefined : scene.nodes[nodeId];
   const [idDraft, setIdDraft] = useState(nodeId ?? "");
@@ -108,10 +127,27 @@ export function NodeInspector({
       </section>
 
       <section className="inspector-section node-fields">
-        {renderFields(node, update, scene, manifest)}
+        {renderFields(node, update, scene, manifest, uiMotions, (offset) =>
+          onSplitDialogue(nodeId, offset),
+        )}
       </section>
 
       <section className="inspector-section inspector-actions">
+        {canConvertToTimeline(node) && (
+          <>
+            <button
+              className="convert-timeline-button"
+              onClick={() => onConvertToTimeline(nodeId)}
+              type="button"
+            >
+              转为关键帧时间线
+            </button>
+            <p className="field-note">
+              保留下一节点、时长与等待策略；0 ms
+              使用“继承入口值”，无需先选择预览路径。
+            </p>
+          </>
+        )}
         <button
           disabled={scene.entry === nodeId}
           onClick={() => onSetEntry(nodeId)}
@@ -139,6 +175,8 @@ function renderFields(
   update: (node: SceneNode) => void,
   scene: SceneDefinition,
   manifest: ContentManifest,
+  uiMotions: UiMotionFile[],
+  splitDialogue: (offset: number) => void,
 ): ReactNode {
   const targets = Object.keys(scene.nodes);
   switch (node.type) {
@@ -263,6 +301,32 @@ function renderFields(
           : undefined;
       return (
         <>
+          <Field label="对话页模式">
+            <select
+              value={node.mode ?? "start"}
+              onChange={(event) => {
+                const mode = event.currentTarget.value as "start" | "append";
+                update({
+                  ...node,
+                  mode,
+                  page_id:
+                    mode === "append"
+                      ? (node.page_id ?? "dialogue")
+                      : node.page_id,
+                });
+              }}
+            >
+              <option value="start">开始新对话页</option>
+              <option value="append">接续已有对话页</option>
+            </select>
+          </Field>
+          <TextField
+            label={node.mode === "append" ? "接续的页面 ID" : "页面 ID（可选）"}
+            onChange={(page_id) =>
+              update({ ...node, page_id: page_id || null })
+            }
+            value={node.page_id ?? ""}
+          />
           <Field label="说话人模式">
             <select
               value={speakerMode}
@@ -322,15 +386,11 @@ function renderFields(
               </span>
             </div>
           )}
-          <Field label="对话文本" hint="支持 KaTeX、pause、speed 和 fx 标记">
-            <textarea
-              rows={8}
-              value={node.text}
-              onChange={(event) =>
-                update({ ...node, text: event.currentTarget.value })
-              }
-            />
-          </Field>
+          <DialogueTextEditor
+            onChange={(text) => update({ ...node, text })}
+            onSplit={splitDialogue}
+            value={node.text}
+          />
           <Field label="实际渲染预览">
             <MarkupPreview source={interpolatePreview(node.text, manifest)} />
           </Field>
@@ -885,7 +945,83 @@ function renderFields(
             onChange={(visible) => update({ ...node, visible })}
             value={node.visible}
           />
-          <AwaitFields node={node} onChange={update} />
+          <UiMotionSelect
+            allowDefault
+            label="本次动效"
+            motions={uiMotions}
+            onChange={(motion) => update({ ...node, motion })}
+            value={node.motion}
+          />
+          <OptionalDurationField
+            onChange={(duration_ms) => update({ ...node, duration_ms })}
+            value={node.duration_ms}
+          />
+          <BooleanField
+            label="等待动效完成"
+            onChange={(awaitCompletion) =>
+              update({ ...node, await: awaitCompletion })
+            }
+            value={node.await}
+          />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    case "ui_motion_set":
+      return (
+        <>
+          <Field label="默认槽位">
+            <select
+              onChange={(event) =>
+                update({
+                  ...node,
+                  slot: event.currentTarget.value as typeof node.slot,
+                })
+              }
+              value={node.slot}
+            >
+              <option value="dialogue_show">对话框出现</option>
+              <option value="dialogue_hide">对话框收起</option>
+            </select>
+          </Field>
+          <UiMotionSelect
+            label="后续默认动效"
+            motions={uiMotions}
+            onChange={(motion) => update({ ...node, motion })}
+            value={node.motion}
+          />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    case "ui_motion_play":
+      return (
+        <>
+          <UiMotionSelect
+            label="播放动效"
+            motions={uiMotions}
+            onChange={(motion) => update({ ...node, motion: motion ?? "" })}
+            value={node.motion || null}
+          />
+          <OptionalDurationField
+            onChange={(duration_ms) => update({ ...node, duration_ms })}
+            value={node.duration_ms}
+          />
+          <BooleanField
+            label="等待动效完成"
+            onChange={(awaitCompletion) =>
+              update({ ...node, await: awaitCompletion })
+            }
+            value={node.await}
+          />
           <TargetSelect
             label="下一节点"
             onChange={(next) => update({ ...node, next })}
@@ -996,6 +1132,72 @@ function AwaitFields({
         value={node.await}
       />
     </div>
+  );
+}
+
+function OptionalDurationField({
+  value,
+  onChange,
+}: {
+  value: number | null;
+  onChange(value: number | null): void;
+}): ReactElement {
+  return (
+    <Field label="时长覆盖">
+      <label className="checkbox-field">
+        <input
+          checked={value !== null}
+          onChange={(event) =>
+            onChange(event.currentTarget.checked ? 200 : null)
+          }
+          type="checkbox"
+        />
+        使用节点时长
+      </label>
+      {value !== null && (
+        <input
+          max={60_000}
+          min={0}
+          onChange={(event) => onChange(Number(event.currentTarget.value))}
+          step={10}
+          type="number"
+          value={value}
+        />
+      )}
+      <small>关闭时使用预设自身时长</small>
+    </Field>
+  );
+}
+
+function UiMotionSelect({
+  allowDefault = false,
+  label,
+  motions,
+  value,
+  onChange,
+}: {
+  allowDefault?: boolean;
+  label: string;
+  motions: UiMotionFile[];
+  value: string | null;
+  onChange(value: string | null): void;
+}): ReactElement {
+  return (
+    <Field label={label}>
+      <select
+        onChange={(event) => onChange(event.currentTarget.value || null)}
+        value={value ?? ""}
+      >
+        <option value="">
+          {allowDefault ? "使用当前默认绑定" : "关闭 / 未选择"}
+        </option>
+        {motions.map(({ definition }) => (
+          <option key={definition.id} value={definition.id}>
+            {definition.id}
+          </option>
+        ))}
+      </select>
+    </Field>
   );
 }
 
@@ -1522,6 +1724,38 @@ function defaultScalar(type: VariableType): ScalarValue {
     case "string":
       return "";
   }
+}
+
+function DialogueTextEditor({
+  onChange,
+  onSplit,
+  value,
+}: {
+  onChange(value: string): void;
+  onSplit(offset: number): void;
+  value: string;
+}): ReactElement {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [offset, setOffset] = useState(0);
+  return (
+    <Field label="对话文本" hint="支持 KaTeX、pause、speed 和 fx 标记">
+      <textarea
+        ref={inputRef}
+        rows={8}
+        value={value}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        onSelect={(event) => setOffset(event.currentTarget.selectionStart)}
+      />
+      <button
+        className="wide-button"
+        disabled={offset <= 0 || offset >= value.length}
+        onClick={() => onSplit(inputRef.current?.selectionStart ?? 0)}
+        type="button"
+      >
+        在光标处分段并接续
+      </button>
+    </Field>
+  );
 }
 
 function Field({

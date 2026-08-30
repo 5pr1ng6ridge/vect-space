@@ -150,6 +150,57 @@ pub struct ContentManifest {
     pub characters: BTreeMap<String, CharacterDefinition>,
     pub assets: BTreeMap<String, AssetDefinition>,
     pub scenes: Vec<String>,
+    #[serde(default)]
+    pub ui_motions: Vec<String>,
+    #[serde(default)]
+    pub ui_motion_defaults: UiMotionBindings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UiMotionBindings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogue_show: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogue_hide: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UiMotionPreset {
+    pub schema_version: u32,
+    pub id: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub tracks: Vec<UiMotionTrack>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UiMotionTrack {
+    pub target: UiMotionTarget,
+    #[serde(default)]
+    pub channels: TimelineChannels,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
+pub enum UiMotionTarget {
+    DialogueRoot,
+    DialogueFrame,
+    DialogueNameplate,
+    DialogueText,
+    DialogueAdvanceIndicator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UiMotionSlot {
+    DialogueShow,
+    DialogueHide,
 }
 
 fn default_locale() -> String {
@@ -219,6 +270,10 @@ pub enum SceneNode {
     Say {
         speaker: Option<String>,
         text: String,
+        #[serde(default)]
+        mode: DialogueMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_id: Option<String>,
         #[serde(default)]
         speed_cps: Option<f32>,
         next: String,
@@ -309,13 +364,36 @@ pub enum SceneNode {
     },
     DialogueUi {
         visible: bool,
-        #[serde(default = "default_short_duration")]
-        duration_ms: u64,
+        #[serde(default)]
+        motion: Option<String>,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    UiMotionSet {
+        slot: UiMotionSlot,
+        motion: Option<String>,
+        next: String,
+    },
+    UiMotionPlay {
+        motion: String,
+        #[serde(default)]
+        duration_ms: Option<u64>,
         #[serde(default, rename = "await")]
         await_completion: bool,
         next: String,
     },
     End,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DialogueMode {
+    #[default]
+    Start,
+    Append,
 }
 
 fn default_short_duration() -> u64 {
@@ -409,9 +487,35 @@ impl Default for TimelineEasing {
 #[serde(deny_unknown_fields)]
 pub struct TimelineKeyframe {
     pub at_ms: u64,
-    pub value: f32,
+    pub value: TimelineKeyframeValue,
     #[serde(default)]
     pub easing: TimelineEasing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum TimelineKeyframeValue {
+    Number(f32),
+    Keyword(TimelineKeyframeKeyword),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineKeyframeKeyword {
+    Inherit,
+}
+
+impl TimelineKeyframeValue {
+    pub fn number(&self) -> Option<f32> {
+        match self {
+            Self::Number(value) => Some(*value),
+            Self::Keyword(TimelineKeyframeKeyword::Inherit) => None,
+        }
+    }
+
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Keyword(TimelineKeyframeKeyword::Inherit))
+    }
 }
 
 pub type TimelineChannels = BTreeMap<String, Vec<TimelineKeyframe>>;
@@ -429,7 +533,8 @@ pub enum VideoFit {
 pub enum TimelineTrack {
     Sprite {
         sprite_id: String,
-        asset: String,
+        #[serde(default)]
+        asset: Option<String>,
         #[serde(default)]
         remove_at_end: bool,
         #[serde(default)]
@@ -497,7 +602,23 @@ pub struct RuntimeSnapshot {
     pub audio: AudioSnapshot,
     #[serde(default)]
     pub playback: PlaybackSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogue_page: Option<DialoguePageSnapshot>,
     pub prompt: PromptSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DialoguePageSnapshot {
+    pub page_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    pub segments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -546,6 +667,8 @@ pub struct WorldSnapshot {
     pub sprites: BTreeMap<String, SpriteSnapshot>,
     pub camera: CameraSnapshot,
     pub dialogue_ui_visible: bool,
+    #[serde(default)]
+    pub ui_motion_bindings: UiMotionBindings,
     pub persistent_effects: Vec<String>,
 }
 
@@ -556,6 +679,7 @@ impl Default for WorldSnapshot {
             sprites: BTreeMap::new(),
             camera: CameraSnapshot::default(),
             dialogue_ui_visible: true,
+            ui_motion_bindings: UiMotionBindings::default(),
             persistent_effects: Vec::new(),
         }
     }
@@ -716,6 +840,11 @@ pub enum PresentationCueKind {
     DialogueUiTransition {
         visible: bool,
         duration_ms: u64,
+        motion: Option<UiMotionPreset>,
+    },
+    UiMotion {
+        duration_ms: u64,
+        motion: UiMotionPreset,
     },
     PlaySfx {
         asset: String,

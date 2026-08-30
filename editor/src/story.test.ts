@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   countVariableReferences,
   countCharacterReferences,
+  convertToTimeline,
   outputPorts,
   defaultNode,
   insertNode,
@@ -11,6 +12,7 @@ import {
   renameCharacter,
   renameVariable,
   setPortTarget,
+  splitDialogueAt,
 } from "./story";
 import type { EditorProject } from "./types";
 import { validateLive } from "./validation";
@@ -36,6 +38,8 @@ function project(): EditorProject {
       },
       assets: {},
       scenes: ["scenes/main.yaml"],
+      ui_motions: [],
+      ui_motion_defaults: {},
     },
     scenes: [
       {
@@ -65,6 +69,7 @@ function project(): EditorProject {
         },
       },
     ],
+    ui_motions: [],
     layout: { version: 1, scenes: {} },
     assets: [],
     diagnostics: [],
@@ -72,6 +77,115 @@ function project(): EditorProject {
 }
 
 describe("story graph mapping", () => {
+  it("splits dialogue at the caret into an explicit append page", () => {
+    const scene = project().scenes[0].definition;
+    scene.nodes.line = {
+      type: "say",
+      speaker: "alice",
+      text: "等等……我想起来了。",
+      speed_cps: 30,
+      next: "end",
+    };
+    const offset = "等等……".length;
+    const result = splitDialogueAt(scene, "line", offset);
+    expect(result.continuationId).toBe("line_continue");
+    expect(result.first).toMatchObject({
+      type: "say",
+      text: "等等……",
+      mode: "start",
+      page_id: "line",
+      next: "line_continue",
+    });
+    expect(result.continuation).toMatchObject({
+      type: "say",
+      text: "我想起来了。",
+      mode: "append",
+      page_id: "line",
+      next: "end",
+    });
+  });
+
+  it("expands quick presentation nodes into editable timeline data", () => {
+    const sprite = convertToTimeline({
+      type: "sprite",
+      sprite_id: "alice",
+      action: "move",
+      asset: null,
+      x: 700,
+      y: null,
+      scale: null,
+      opacity: 0.5,
+      z: null,
+      duration_ms: 600,
+      easing: "ease_in_out",
+      await: true,
+      next: "after",
+    });
+    expect(sprite).toMatchObject({
+      type: "timeline",
+      duration_ms: 600,
+      await: true,
+      skippable: false,
+      next: "after",
+      tracks: [
+        {
+          type: "sprite",
+          sprite_id: "alice",
+          asset: null,
+          remove_at_end: false,
+        },
+      ],
+    });
+    const spriteTrack = sprite.tracks[0];
+    expect(spriteTrack?.type).toBe("sprite");
+    if (spriteTrack?.type !== "sprite") throw new Error("missing sprite track");
+    expect(spriteTrack.channels.x?.map((frame) => frame.value)).toEqual([
+      "inherit",
+      700,
+    ]);
+    expect(spriteTrack.channels.opacity?.map((frame) => frame.value)).toEqual([
+      "inherit",
+      0.5,
+    ]);
+
+    const camera = convertToTimeline({
+      type: "camera",
+      x: 100,
+      y: 200,
+      zoom: 1.5,
+      duration_ms: 400,
+      easing: "linear",
+      await: false,
+      next: "after",
+    });
+    const cameraTrack = camera.tracks[0];
+    expect(cameraTrack?.type).toBe("camera");
+    if (cameraTrack?.type !== "camera") throw new Error("missing camera track");
+    expect(cameraTrack.channels.rotation_deg).toBeUndefined();
+    expect(cameraTrack.channels.x?.map((frame) => frame.value)).toEqual([
+      "inherit",
+      100,
+    ]);
+
+    expect(
+      convertToTimeline({
+        type: "screen_effect",
+        effect: "flash",
+        duration_ms: 200,
+        await: false,
+        next: "after",
+      }).events,
+    ).toEqual([
+      {
+        type: "screen_effect",
+        id: "quick_effect",
+        at_ms: 0,
+        effect: "flash",
+        duration_ms: 200,
+      },
+    ]);
+  });
+
   it("pastes nodes without carrying story connections", () => {
     const source = project();
     const manifest = source.manifest;
@@ -168,7 +282,7 @@ describe("story graph mapping", () => {
       manifest,
     );
     expect(timeline.type === "timeline" && timeline.tracks[0]).toMatchObject({
-      asset: "",
+      asset: null,
     });
     expect(timeline.type === "timeline" && timeline.events[0]).toMatchObject({
       asset: "",

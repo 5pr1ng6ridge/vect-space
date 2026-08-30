@@ -9,6 +9,8 @@ import type {
   ScalarValue,
   SceneDefinition,
   SceneNode,
+  TimelineChannels,
+  TimelineNode,
   TimelinePreviewSettings,
 } from "./types";
 import {
@@ -30,6 +32,8 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "screen_effect", label: "屏幕效果", group: "画面" },
   { type: "timeline", label: "关键帧时间线", group: "画面" },
   { type: "dialogue_ui", label: "对话框", group: "画面" },
+  { type: "ui_motion_set", label: "设置 UI 动效", group: "画面" },
+  { type: "ui_motion_play", label: "播放 UI 动效", group: "画面" },
   { type: "bgm", label: "BGM", group: "声音" },
   { type: "sfx", label: "音效", group: "声音" },
   { type: "wait", label: "等待", group: "流程" },
@@ -122,7 +126,7 @@ export function setPortTarget(
 export function summarizeNode(node: SceneNode): string {
   switch (node.type) {
     case "say":
-      return `${node.speaker ?? "旁白"}：${node.text}`;
+      return `${node.mode === "append" ? "接续 · " : ""}${node.speaker ?? "旁白"}：${node.text}`;
     case "choice":
       return `${node.choices.length} 个选项`;
     case "set":
@@ -148,7 +152,11 @@ export function summarizeNode(node: SceneNode): string {
     case "screen_effect":
       return node.effect;
     case "dialogue_ui":
-      return node.visible ? "显示" : "隐藏";
+      return `${node.visible ? "显示" : "隐藏"} · ${node.motion ?? "默认动效"}`;
+    case "ui_motion_set":
+      return `${node.slot} = ${node.motion ?? "关闭"}`;
+    case "ui_motion_play":
+      return node.motion || "未选择动效";
     case "timeline":
       return `${node.duration_ms} ms · ${node.tracks.length} 轨 · ${node.events.length} 事件`;
     case "end":
@@ -189,6 +197,8 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         type,
         speaker: null,
         text: "新对话",
+        mode: "start",
+        page_id: null,
         speed_cps: null,
         next: fallback,
       };
@@ -261,7 +271,23 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
       return {
         type,
         visible: true,
-        duration_ms: 200,
+        motion: null,
+        duration_ms: null,
+        await: false,
+        next: fallback,
+      };
+    case "ui_motion_set":
+      return {
+        type,
+        slot: "dialogue_show",
+        motion: null,
+        next: fallback,
+      };
+    case "ui_motion_play":
+      return {
+        type,
+        motion: "",
+        duration_ms: null,
         await: false,
         next: fallback,
       };
@@ -280,6 +306,178 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
   }
 }
 
+export function canConvertToTimeline(node: SceneNode): boolean {
+  return ["sprite", "camera", "screen_effect", "wait", "sfx"].includes(
+    node.type,
+  );
+}
+
+/**
+ * Expand one compact presentation node into an editable Timeline node. Move,
+ * hide and camera channels explicitly inherit the runtime value at 0ms, so
+ * conversion is independent of the route used to reach the node.
+ */
+export function convertToTimeline(node: SceneNode): TimelineNode {
+  const timeline = (
+    duration_ms: number,
+    awaitCompletion: boolean,
+  ): TimelineNode => ({
+    type: "timeline",
+    duration_ms: Math.max(1, duration_ms),
+    await: awaitCompletion,
+    skippable: false,
+    tracks: [],
+    events: [],
+    next: "next" in node ? node.next : "",
+  });
+
+  if (node.type === "wait") return timeline(node.duration_ms, true);
+  if (node.type === "sfx") {
+    return {
+      ...timeline(1, false),
+      events: [
+        {
+          type: "sfx",
+          id: "quick_sfx",
+          at_ms: 0,
+          asset: node.asset,
+          volume: node.volume,
+        },
+      ],
+    };
+  }
+  if (node.type === "screen_effect") {
+    const result = timeline(node.duration_ms, node.await);
+    result.events = [
+      {
+        type: "screen_effect",
+        id: "quick_effect",
+        at_ms: 0,
+        effect: node.effect,
+        duration_ms: node.duration_ms,
+      },
+    ];
+    return result;
+  }
+  if (node.type === "camera") {
+    const result = timeline(node.duration_ms, node.await);
+    result.tracks = [
+      {
+        type: "camera",
+        channels: inheritedChannels(
+          {
+            x: node.x,
+            y: node.y,
+            zoom: node.zoom,
+          },
+          result.duration_ms,
+          node.easing,
+        ),
+      },
+    ];
+    return result;
+  }
+  if (node.type === "sprite") {
+    const result = timeline(node.duration_ms, node.await);
+    let channels: TimelineChannels;
+    if (node.action === "show") {
+      if (node.asset === null) throw new Error("显示立绘缺少素材，无法转换。");
+      const target = {
+        x: node.x ?? 960,
+        y: node.y ?? 1080,
+        scale: node.scale ?? 1,
+        scale_x: 1,
+        scale_y: 1,
+        rotation_deg: 0,
+        opacity: node.opacity ?? 1,
+        z: node.z ?? 0,
+      };
+      channels = pairedChannels(
+        { ...target, y: target.y + 48, scale: target.scale * 0.96, opacity: 0 },
+        target,
+        result.duration_ms,
+        node.easing,
+      );
+    } else if (node.action === "hide") {
+      channels = inheritedChannels(
+        { opacity: 0 },
+        result.duration_ms,
+        node.easing,
+      );
+    } else {
+      channels = inheritedChannels(
+        Object.fromEntries(
+          Object.entries({
+            x: node.x,
+            y: node.y,
+            scale: node.scale,
+            opacity: node.opacity,
+            z: node.z,
+          }).filter((entry): entry is [string, number] => entry[1] !== null),
+        ),
+        result.duration_ms,
+        node.easing,
+      );
+    }
+    result.tracks = [
+      {
+        type: "sprite",
+        sprite_id: node.sprite_id,
+        asset: node.asset,
+        remove_at_end: node.action === "hide",
+        channels,
+      },
+    ];
+    return result;
+  }
+  throw new Error(`${nodeLabel(node.type)}节点不能无损转换为关键帧时间线。`);
+}
+
+function pairedChannels(
+  start: Record<string, number>,
+  end: Record<string, number>,
+  durationMs: number,
+  easing: "linear" | "ease_in" | "ease_out" | "ease_in_out",
+): TimelineChannels {
+  return Object.fromEntries(
+    Object.keys(end).map((channel) => [
+      channel,
+      [
+        {
+          at_ms: 0,
+          value: start[channel] ?? end[channel] ?? 0,
+          easing: channel === "z" ? "step" : easing,
+        },
+        {
+          at_ms: durationMs,
+          value: end[channel] ?? 0,
+          easing: "linear",
+        },
+      ],
+    ]),
+  );
+}
+
+function inheritedChannels(
+  end: Record<string, number>,
+  durationMs: number,
+  easing: "linear" | "ease_in" | "ease_out" | "ease_in_out",
+): TimelineChannels {
+  return Object.fromEntries(
+    Object.entries(end).map(([channel, value]) => [
+      channel,
+      [
+        {
+          at_ms: 0,
+          value: "inherit" as const,
+          easing: channel === "z" ? ("step" as const) : easing,
+        },
+        { at_ms: durationMs, value, easing: "linear" as const },
+      ],
+    ]),
+  );
+}
+
 export function uniqueNodeId(scene: SceneDefinition, prefix: string): string {
   const cleaned = prefix.replace(/[^A-Za-z0-9._-]/g, "_") || "node";
   if (scene.nodes[cleaned] === undefined) {
@@ -290,6 +488,42 @@ export function uniqueNodeId(scene: SceneDefinition, prefix: string): string {
     index += 1;
   }
   return `${cleaned}_${index}`;
+}
+
+export function splitDialogueAt(
+  scene: SceneDefinition,
+  nodeId: string,
+  offset: number,
+): { first: SceneNode; continuation: SceneNode; continuationId: string } {
+  const node = scene.nodes[nodeId];
+  if (node?.type !== "say") throw new Error("只能拆分对话节点。");
+  const before = node.text.slice(0, offset);
+  const after = node.text.slice(offset);
+  if (before.trim() === "" || after.trim() === "") {
+    throw new Error("请把光标放在对话正文内部；分段前后都必须有文本。");
+  }
+  const continuationId = uniqueNodeId(scene, `${nodeId}_continue`);
+  const pageId =
+    node.page_id === null || node.page_id === undefined || node.page_id === ""
+      ? nodeId
+      : node.page_id;
+  return {
+    continuationId,
+    first: {
+      ...node,
+      text: before,
+      mode: node.mode ?? "start",
+      page_id: pageId,
+      next: continuationId,
+    },
+    continuation: {
+      ...node,
+      text: after,
+      mode: "append",
+      page_id: pageId,
+      next: node.next,
+    },
+  };
 }
 
 /**
@@ -399,8 +633,12 @@ export function preparePastedNode(
       break;
     case "timeline":
       node.tracks = node.tracks.map((track) => {
-        if (track.type === "sprite" && !hasAsset(track.asset, "sprite"))
-          return { ...track, asset: "" };
+        if (
+          track.type === "sprite" &&
+          track.asset !== null &&
+          !hasAsset(track.asset, "sprite")
+        )
+          return { ...track, asset: null };
         if (track.type === "video" && !hasAsset(track.asset, "video"))
           return { ...track, asset: "" };
         return track;
@@ -416,6 +654,8 @@ export function preparePastedNode(
     case "camera":
     case "screen_effect":
     case "dialogue_ui":
+    case "ui_motion_set":
+    case "ui_motion_play":
     case "end":
       break;
   }
@@ -984,6 +1224,7 @@ export function projectRequest(project: EditorProject) {
   return {
     manifest: project.manifest,
     scenes: project.scenes,
+    ui_motions: project.ui_motions,
     layout: project.layout,
     expected_fingerprint: project.fingerprint,
   };

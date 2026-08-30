@@ -8,6 +8,7 @@ import type {
   ScalarValue,
   SceneNode,
   TimelineTrack,
+  UiMotionPreset,
   ValueOperand,
   VariableType,
 } from "./types";
@@ -65,6 +66,46 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
           error("invalid_character_color", `角色 ${id} 的${field}格式非法`),
         );
       }
+    }
+  }
+  const motionIds = new Set(
+    project.ui_motions.map((file) => file.definition.id),
+  );
+  const declaredMotionPaths = new Set(project.manifest.ui_motions);
+  for (const file of project.ui_motions) {
+    if (!declaredMotionPaths.has(file.path)) {
+      diagnostics.push(
+        error("undeclared_ui_motion", `UI 动效文件未登记：${file.path}`),
+      );
+    }
+    const preset = file.definition;
+    if (preset.schema_version !== 1 || !ID_PATTERN.test(preset.id)) {
+      diagnostics.push(
+        error("invalid_ui_motion", `UI 动效定义无效：${preset.id}`),
+      );
+    }
+    if (
+      !Number.isInteger(preset.duration_ms) ||
+      preset.duration_ms < 1 ||
+      preset.duration_ms > 1_800_000
+    ) {
+      diagnostics.push(
+        error("invalid_ui_motion_duration", `UI 动效 ${preset.id} 时长无效`),
+      );
+    }
+    validateUiMotionPreset(preset, diagnostics);
+  }
+  for (const [slot, motion] of [
+    ["dialogue_show", project.manifest.ui_motion_defaults.dialogue_show],
+    ["dialogue_hide", project.manifest.ui_motion_defaults.dialogue_hide],
+  ] as const) {
+    if (motion != null && !motionIds.has(motion)) {
+      diagnostics.push(
+        error(
+          "unknown_ui_motion",
+          `默认槽位 ${slot} 引用了未知 UI 动效 ${motion}`,
+        ),
+      );
     }
   }
 
@@ -199,6 +240,12 @@ function validateNode(
       break;
     case "say":
       if (node.text.trim() === "") issue("empty_dialogue", "对话文本不能为空");
+      if (node.page_id != null && !ID_PATTERN.test(node.page_id)) {
+        issue("invalid_dialogue_page", "对话页 ID 非法");
+      }
+      if (node.mode === "append" && !node.page_id) {
+        issue("missing_dialogue_page", "接续对话必须指定对话页 ID");
+      }
       if (
         node.speaker !== null &&
         project.manifest.characters[node.speaker] === undefined
@@ -268,8 +315,29 @@ function validateNode(
       }
       break;
     case "screen_effect":
-    case "dialogue_ui":
       checkDuration(node.duration_ms);
+      break;
+    case "dialogue_ui":
+      if (node.duration_ms !== null) checkDuration(node.duration_ms);
+      if (
+        node.motion !== null &&
+        !project.ui_motions.some((file) => file.definition.id === node.motion)
+      )
+        issue("unknown_ui_motion", `未知 UI 动效：${node.motion}`);
+      break;
+    case "ui_motion_set":
+      if (
+        node.motion !== null &&
+        !project.ui_motions.some((file) => file.definition.id === node.motion)
+      )
+        issue("unknown_ui_motion", `未知 UI 动效：${node.motion}`);
+      break;
+    case "ui_motion_play":
+      if (
+        !project.ui_motions.some((file) => file.definition.id === node.motion)
+      )
+        issue("unknown_ui_motion", `未知 UI 动效：${node.motion}`);
+      if (node.duration_ms !== null) checkDuration(node.duration_ms);
       break;
     case "timeline": {
       if (
@@ -304,7 +372,7 @@ function validateNode(
           if (!node.await)
             issue("video_requires_await", "视频时间线必须等待完成");
         } else if (track.type === "sprite")
-          checkAsset(track.asset, "sprite", true);
+          checkAsset(track.asset, "sprite", false);
         const allowed = timelineChannels(track);
         for (const [channel, frames] of Object.entries(track.channels)) {
           if (!allowed.includes(channel))
@@ -314,9 +382,10 @@ function validateNode(
             );
           keyframes += frames.length;
           let prior = -1;
-          for (const frame of frames) {
+          for (const [frameIndex, frame] of frames.entries()) {
+            const inherited = frame.value === "inherit";
             if (
-              !Number.isFinite(frame.value) ||
+              (!inherited && !Number.isFinite(frame.value)) ||
               frame.at_ms <= prior ||
               frame.at_ms > node.duration_ms
             ) {
@@ -326,8 +395,21 @@ function validateNode(
               );
             }
             if (
+              inherited &&
+              (track.type === "video" ||
+                frameIndex !== 0 ||
+                frame.at_ms !== 0 ||
+                frames.length < 2)
+            ) {
+              issue(
+                "invalid_timeline_inherit",
+                `${channel} 的继承值只能作为非视频轨的 0ms 起始帧`,
+              );
+            }
+            if (
+              !inherited &&
               ["opacity", "volume"].includes(channel) &&
-              (frame.value < 0 || frame.value > 1)
+              ((frame.value as number) < 0 || (frame.value as number) > 1)
             ) {
               issue(
                 "invalid_timeline_range",
@@ -335,6 +417,7 @@ function validateNode(
               );
             }
             if (
+              !inherited &&
               [
                 "scale",
                 "scale_x",
@@ -343,7 +426,7 @@ function validateNode(
                 "width",
                 "height",
               ].includes(channel) &&
-              frame.value <= 0
+              (frame.value as number) <= 0
             ) {
               issue("invalid_timeline_range", `${channel} 关键帧必须大于 0`);
             }
@@ -416,6 +499,92 @@ function timelineChannels(track: TimelineTrack): string[] {
       return ["x", "y", "width", "height", "opacity", "z", "volume"];
     case "bgm":
       return ["volume"];
+  }
+}
+
+function validateUiMotionPreset(
+  preset: UiMotionPreset,
+  output: EditorDiagnostic[],
+): void {
+  const targets = new Set<string>();
+  for (const track of preset.tracks) {
+    if (targets.has(track.target)) {
+      output.push(
+        error(
+          "duplicate_ui_motion_target",
+          `UI 动效 ${preset.id} 的目标 ${track.target} 重复`,
+        ),
+      );
+    }
+    targets.add(track.target);
+    if (Object.keys(track.channels).length === 0) {
+      output.push(
+        error(
+          "empty_ui_motion_track",
+          `UI 动效 ${preset.id} 的 ${track.target} 轨道没有通道`,
+        ),
+      );
+    }
+    for (const [channel, frames] of Object.entries(track.channels)) {
+      if (
+        ![
+          "offset_x",
+          "offset_y",
+          "scale_x",
+          "scale_y",
+          "rotation_deg",
+          "opacity",
+        ].includes(channel)
+      ) {
+        output.push(
+          error(
+            "invalid_ui_motion_channel",
+            `UI 动效 ${preset.id} 不支持通道 ${channel}`,
+          ),
+        );
+      }
+      let prior = -1;
+      for (const frame of frames) {
+        if (
+          typeof frame.value !== "number" ||
+          !Number.isFinite(frame.value) ||
+          frame.at_ms <= prior ||
+          frame.at_ms > preset.duration_ms
+        ) {
+          output.push(
+            error(
+              "invalid_ui_motion_keyframe",
+              `UI 动效 ${preset.id}/${channel} 的关键帧无效`,
+            ),
+          );
+        }
+        if (
+          channel === "opacity" &&
+          typeof frame.value === "number" &&
+          (frame.value < 0 || frame.value > 1)
+        ) {
+          output.push(
+            error(
+              "invalid_ui_motion_range",
+              `UI 动效 ${preset.id} 的透明度必须在 0–1`,
+            ),
+          );
+        }
+        if (
+          ["scale_x", "scale_y"].includes(channel) &&
+          typeof frame.value === "number" &&
+          frame.value <= 0
+        ) {
+          output.push(
+            error(
+              "invalid_ui_motion_range",
+              `UI 动效 ${preset.id} 的缩放必须大于 0`,
+            ),
+          );
+        }
+        prior = frame.at_ms;
+      }
+    }
   }
 }
 

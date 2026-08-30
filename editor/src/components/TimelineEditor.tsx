@@ -8,7 +8,13 @@ import {
   type ReactElement,
 } from "react";
 import { assetUrl } from "../api";
-import { evaluateChannel } from "../timeline";
+import {
+  copyTimelineKeyframes,
+  evaluateChannel,
+  pasteTimelineKeyframes,
+  snapTimelineTime,
+  type TimelineKeyframeClipboard,
+} from "../timeline";
 import type {
   EditorAsset,
   TimelineEasing,
@@ -29,6 +35,15 @@ export interface TimelineEventSelection {
   index: number;
   event: TimelineEvent;
 }
+
+interface MarqueeBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+let keyframeClipboard: TimelineKeyframeClipboard | null = null;
 
 const CHANNELS: Record<TimelineTrack["type"], string[]> = {
   sprite: [
@@ -67,6 +82,7 @@ export function TimelineEditor({
   hidePreview = false,
   hideTransport = false,
   playheadOverride,
+  playbackStartOverride,
   onPlayheadChange,
   snapOverride,
   onSnapChange,
@@ -79,6 +95,7 @@ export function TimelineEditor({
   hidePreview?: boolean;
   hideTransport?: boolean;
   playheadOverride?: number;
+  playbackStartOverride?: number;
   onPlayheadChange?(value: number): void;
   snapOverride?: number;
   onSnapChange?(value: number): void;
@@ -93,11 +110,16 @@ export function TimelineEditor({
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [marquee, setMarquee] = useState<MarqueeBox | null>(null);
+  const [clipboardStatus, setClipboardStatus] = useState<string | null>(null);
   const [trackType, setTrackType] = useState<TimelineTrack["type"]>("sprite");
   const [channelName, setChannelName] = useState("x");
   const rulerRef = useRef<HTMLDivElement>(null);
+  const tracksRef = useRef<HTMLDivElement>(null);
+  const clipboardStatusTimerRef = useRef<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const playhead = playheadOverride ?? internalPlayhead;
+  const playbackStart = playbackStartOverride ?? playhead;
   const snap = snapOverride ?? internalSnap;
   const setSnap = (value: number): void => {
     setInternalSnap(value);
@@ -167,6 +189,35 @@ export function TimelineEditor({
     tracks[index] = track;
     commit({ ...draft, tracks });
   };
+  const addKeyframe = (
+    trackIndex: number,
+    channel: string,
+    atMs: number,
+  ): void => {
+    const track = draft.tracks[trackIndex];
+    if (track === undefined) return;
+    const at = Math.max(
+      0,
+      Math.min(draft.duration_ms, snapTimelineTime(atMs, snap, playbackStart)),
+    );
+    const frames = [
+      ...(track.channels[channel] ?? []).filter((frame) => frame.at_ms !== at),
+      {
+        at_ms: at,
+        value: evaluateChannel(
+          track.channels,
+          channel,
+          at,
+          DEFAULTS[channel] ?? 0,
+        ),
+        easing: "linear" as const,
+      },
+    ].sort((left, right) => left.at_ms - right.at_ms);
+    updateTrack(trackIndex, {
+      ...track,
+      channels: { ...track.channels, [channel]: frames },
+    });
+  };
   const addTrack = (): void => {
     const sprite = assets.find((asset) => asset.kind === "sprite")?.id ?? "";
     const video = assets.find((asset) => asset.kind === "video")?.id ?? "";
@@ -225,7 +276,7 @@ export function TimelineEditor({
     // as keyframe selection above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onEventSelectionChange, selectedEventSignature]);
-  const deleteSelected = (): void => {
+  const deleteSelected = useCallback((): void => {
     if (selected.size === 0) return;
     const next = structuredClone(draft);
     for (const item of [...selected].sort(compareSelectionKeys)) {
@@ -233,7 +284,160 @@ export function TimelineEditor({
       next.tracks[Number(track)]?.channels[channel]?.splice(Number(frame), 1);
     }
     setSelected(new Set());
-    commit(next);
+    onChange(next);
+  }, [draft, onChange, selected]);
+
+  const showClipboardStatus = useCallback((message: string): void => {
+    setClipboardStatus(message);
+    if (clipboardStatusTimerRef.current !== null)
+      window.clearTimeout(clipboardStatusTimerRef.current);
+    clipboardStatusTimerRef.current = window.setTimeout(
+      () => setClipboardStatus(null),
+      2400,
+    );
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (clipboardStatusTimerRef.current !== null)
+        window.clearTimeout(clipboardStatusTimerRef.current);
+    },
+    [],
+  );
+
+  const copySelected = useCallback((): void => {
+    const clipboard = copyTimelineKeyframes(
+      draft,
+      [...selected].map(selectionAddress),
+    );
+    if (clipboard === null) {
+      showClipboardStatus("请先选择关键帧");
+      return;
+    }
+    keyframeClipboard = clipboard;
+    showClipboardStatus(`已复制 ${clipboard.items.length} 个关键帧`);
+  }, [draft, selected, showClipboardStatus]);
+
+  const pasteCopied = useCallback((): void => {
+    if (keyframeClipboard === null) {
+      showClipboardStatus("关键帧剪贴板为空");
+      return;
+    }
+    const result = pasteTimelineKeyframes(
+      draft,
+      keyframeClipboard,
+      playhead,
+      snap,
+      playbackStart,
+    );
+    if (result.pasted.length === 0) {
+      showClipboardStatus(
+        result.skipped > 0
+          ? "目标轨道不存在或关键帧超出时间线"
+          : "没有可粘贴的关键帧",
+      );
+      return;
+    }
+    setSelected(
+      new Set(
+        result.pasted.map(
+          ({ track, channel, index }) => `${track}:${channel}:${index}`,
+        ),
+      ),
+    );
+    setSelectedEventId(null);
+    onChange(result.node);
+    showClipboardStatus(
+      `已粘贴 ${result.pasted.length} 个关键帧${result.skipped > 0 ? `，跳过 ${result.skipped} 个` : ""}`,
+    );
+  }, [draft, onChange, playbackStart, playhead, showClipboardStatus, snap]);
+
+  useEffect(() => {
+    const handleClipboardKey = (event: KeyboardEvent): void => {
+      if (isEditableTarget(event.target)) return;
+      if (event.key === "Delete" && selected.size > 0) {
+        event.preventDefault();
+        deleteSelected();
+        return;
+      }
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "c" && selected.size > 0) {
+        event.preventDefault();
+        copySelected();
+      } else if (key === "v" && keyframeClipboard !== null) {
+        event.preventDefault();
+        pasteCopied();
+      }
+    };
+    window.addEventListener("keydown", handleClipboardKey);
+    return () => window.removeEventListener("keydown", handleClipboardKey);
+  }, [copySelected, deleteSelected, pasteCopied, selected.size]);
+
+  const beginMarquee = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0 || tracksRef.current === null) return;
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest(
+        "button, input, select, textarea, .timeline-track-head, .timeline-track-config",
+      ) !== null
+    ) {
+      return;
+    }
+    event.preventDefault();
+    setSelectedEventId(null);
+    const container = tracksRef.current;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const additive = event.ctrlKey || event.metaKey;
+    const base = additive ? new Set(selected) : new Set<string>();
+    let moved = false;
+    const move = (moveEvent: PointerEvent): void => {
+      if (
+        Math.abs(moveEvent.clientX - startX) > 2 ||
+        Math.abs(moveEvent.clientY - startY) > 2
+      ) {
+        moved = true;
+      }
+      const left = Math.min(startX, moveEvent.clientX);
+      const right = Math.max(startX, moveEvent.clientX);
+      const top = Math.min(startY, moveEvent.clientY);
+      const bottom = Math.max(startY, moveEvent.clientY);
+      const bounds = container.getBoundingClientRect();
+      setMarquee({
+        left: left - bounds.left + container.scrollLeft,
+        top: top - bounds.top + container.scrollTop,
+        width: right - left,
+        height: bottom - top,
+      });
+      const next = new Set(base);
+      for (const marker of container.querySelectorAll<HTMLElement>(
+        "[data-keyframe-key]",
+      )) {
+        const rect = marker.getBoundingClientRect();
+        if (
+          rect.right >= left &&
+          rect.left <= right &&
+          rect.bottom >= top &&
+          rect.top <= bottom
+        ) {
+          const key = marker.dataset.keyframeKey;
+          if (key !== undefined) next.add(key);
+        }
+      }
+      setSelected(next);
+    };
+    const finish = (): void => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      setMarquee(null);
+      if (!moved && !additive) setSelected(new Set());
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
   };
 
   const beginDrag = (
@@ -252,22 +456,22 @@ export function TimelineEditor({
           ? new Set(selected)
           : new Set([key]);
     setSelected(selection);
+    setSelectedEventId(null);
     if (!selection.has(key)) return;
-    const [selectedTrack, selectedChannel, selectedIndex] = key.split(":");
-    const selectedKeyframe =
-      draft.tracks[Number(selectedTrack)]?.channels[selectedChannel ?? ""]?.[
-        Number(selectedIndex)
-      ];
-    if (selectedKeyframe !== undefined) setPlayhead(selectedKeyframe.at_ms);
     const initial = structuredClone(draft);
     const startX = event.clientX;
     const width = Math.max(1, rulerRef.current?.clientWidth ?? 1);
     let latest = initial;
     const move = (moveEvent: PointerEvent): void => {
-      const delta =
-        Math.round(
-          (((moveEvent.clientX - startX) / width) * initial.duration_ms) / snap,
-        ) * snap;
+      const rawDelta =
+        ((moveEvent.clientX - startX) / width) * initial.duration_ms;
+      const delta = snapDragDelta(
+        rawDelta,
+        snap,
+        playbackStart,
+        initial,
+        selection,
+      );
       latest = structuredClone(initial);
       for (const item of selection) {
         const [trackIndex, channel, frameIndex] = item.split(":");
@@ -280,6 +484,7 @@ export function TimelineEditor({
             Number(frameIndex)
           ];
         if (frame !== undefined && original !== undefined) {
+          if (original.value === "inherit") continue;
           frame.at_ms = Math.max(
             0,
             Math.min(initial.duration_ms, original.at_ms + delta),
@@ -291,10 +496,26 @@ export function TimelineEditor({
     const up = (): void => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      const selectedFrames = [...selection].flatMap((item) => {
+        const { track, channel, index } = selectionAddress(item);
+        const frame = latest.tracks[track]?.channels[channel]?.[index];
+        return frame === undefined ? [] : [{ track, channel, frame }];
+      });
       for (const track of latest.tracks) {
         for (const frames of Object.values(track.channels))
           frames.sort((a, b) => a.at_ms - b.at_ms);
       }
+      setSelected(
+        new Set(
+          selectedFrames.flatMap(({ track, channel, frame }) => {
+            const index =
+              latest.tracks[track]?.channels[channel]?.indexOf(frame);
+            return index === undefined || index < 0
+              ? []
+              : [`${track}:${channel}:${index}`];
+          }),
+        ),
+      );
       onChange(latest);
       setDragDraft(null);
     };
@@ -305,23 +526,13 @@ export function TimelineEditor({
   return (
     <div
       className={`timeline-editor${hidePreview ? " timeline-editor-compact" : ""}`}
-      onKeyDown={(event) => {
-        if (
-          event.key === "Delete" &&
-          !(event.target instanceof HTMLInputElement) &&
-          !(event.target instanceof HTMLTextAreaElement)
-        ) {
-          event.preventDefault();
-          deleteSelected();
-        }
-      }}
       tabIndex={-1}
     >
       {!hidePreview && (
         <div className="timeline-preview-pane">
           <div className="timeline-preview-stage">
             {draft.tracks.map((track, index) =>
-              track.type === "sprite" ? (
+              track.type === "sprite" && track.asset !== null ? (
                 <img
                   alt={track.sprite_id}
                   key={`sprite-${index}`}
@@ -377,6 +588,13 @@ export function TimelineEditor({
             </label>
             {selectedFrame !== null && (
               <KeyframeInspector
+                allowInherit={
+                  selectedFrame.index === 0 &&
+                  draft.tracks[selectedFrame.track]?.type !== "video" &&
+                  (draft.tracks[selectedFrame.track]?.channels[
+                    selectedFrame.channel
+                  ]?.length ?? 0) >= 2
+                }
                 frame={selectedFrame.frame}
                 onChange={(frame) => {
                   const next = structuredClone(draft);
@@ -499,31 +717,61 @@ export function TimelineEditor({
           </button>
         </div>
       )}
-      <div
-        className="timeline-ruler"
-        ref={rulerRef}
-        onClick={(event) => {
-          if (event.target !== event.currentTarget) return;
-          const rect = event.currentTarget.getBoundingClientRect();
-          setPlayhead(
-            Math.round(
-              (((event.clientX - rect.left) / rect.width) * draft.duration_ms) /
-                snap,
-            ) * snap,
-          );
-        }}
-      >
-        {Array.from({ length: 11 }, (_, index) => (
-          <span key={index} style={{ left: `${index * 10}%` }}>
-            {Math.round((draft.duration_ms * index) / 10)}
+      <div className="timeline-ruler-row">
+        <div className="timeline-clipboard-tools">
+          <button
+            disabled={selected.size === 0}
+            onClick={copySelected}
+            type="button"
+          >
+            复制
+          </button>
+          <button
+            disabled={keyframeClipboard === null}
+            onClick={pasteCopied}
+            type="button"
+          >
+            粘贴
+          </button>
+          <span>
+            {selected.size > 0 ? `${selected.size} 已选` : "拖框多选"}
           </span>
-        ))}
-        <i
-          className="timeline-playhead"
-          style={{ left: `${(playhead / draft.duration_ms) * 100}%` }}
-        />
+        </div>
+        <div
+          className="timeline-ruler"
+          ref={rulerRef}
+          onClick={(event) => {
+            if (event.target !== event.currentTarget) return;
+            const rect = event.currentTarget.getBoundingClientRect();
+            setPlayhead(
+              Math.round(
+                (((event.clientX - rect.left) / rect.width) *
+                  draft.duration_ms) /
+                  snap,
+              ) * snap,
+            );
+          }}
+        >
+          {Array.from({ length: 11 }, (_, index) => (
+            <span key={index} style={{ left: `${index * 10}%` }}>
+              {Math.round((draft.duration_ms * index) / 10)}
+            </span>
+          ))}
+          <i
+            className="timeline-playback-start"
+            style={{ left: `${(playbackStart / draft.duration_ms) * 100}%` }}
+          />
+          <i
+            className="timeline-playhead"
+            style={{ left: `${(playhead / draft.duration_ms) * 100}%` }}
+          />
+        </div>
       </div>
-      <div className="timeline-tracks">
+      <div
+        className="timeline-tracks"
+        onPointerDown={beginMarquee}
+        ref={tracksRef}
+      >
         {draft.tracks.map((track, trackIndex) => (
           <div className="timeline-track" key={`${track.type}-${trackIndex}`}>
             <div className="timeline-track-head">
@@ -532,14 +780,22 @@ export function TimelineEditor({
               </strong>
               {(track.type === "sprite" || track.type === "video") && (
                 <select
-                  value={track.asset}
-                  onChange={(event) =>
-                    updateTrack(trackIndex, {
-                      ...track,
-                      asset: event.currentTarget.value,
-                    })
-                  }
+                  value={track.asset ?? ""}
+                  onChange={(event) => {
+                    const asset = event.currentTarget.value;
+                    if (track.type === "sprite") {
+                      updateTrack(trackIndex, {
+                        ...track,
+                        asset: asset === "" ? null : asset,
+                      });
+                    } else {
+                      updateTrack(trackIndex, { ...track, asset });
+                    }
+                  }}
                 >
+                  {track.type === "sprite" && (
+                    <option value="">继承进入时素材</option>
+                  )}
                   {assets
                     .filter((asset) => asset.kind === track.type)
                     .map((asset) => (
@@ -556,23 +812,7 @@ export function TimelineEditor({
                 ))}
               </select>
               <button
-                onClick={() => {
-                  const frames = [
-                    ...(track.channels[channelName] ?? []).filter(
-                      (frame) =>
-                        frame.at_ms !== Math.round(playhead / snap) * snap,
-                    ),
-                    {
-                      at_ms: Math.round(playhead / snap) * snap,
-                      value: DEFAULTS[channelName] ?? 0,
-                      easing: "linear" as const,
-                    },
-                  ].sort((a, b) => a.at_ms - b.at_ms);
-                  updateTrack(trackIndex, {
-                    ...track,
-                    channels: { ...track.channels, [channelName]: frames },
-                  });
-                }}
+                onClick={() => addKeyframe(trackIndex, channelName, playhead)}
                 type="button"
               >
                 ＋关键帧
@@ -698,29 +938,53 @@ export function TimelineEditor({
                 </label>
               </div>
             )}
-            {Object.entries(track.channels).map(([channel, frames]) => (
-              <div className="timeline-channel" key={channel}>
-                <label>{channel}</label>
-                <div>
-                  {frames.map((frame, frameIndex) => {
-                    const key = `${trackIndex}:${channel}:${frameIndex}`;
-                    return (
-                      <button
-                        aria-label={`${channel} ${frame.at_ms}ms`}
-                        className={selected.has(key) ? "selected" : ""}
-                        key={key}
-                        onPointerDown={(event) => beginDrag(event, key)}
-                        style={{
-                          left: `${(frame.at_ms / draft.duration_ms) * 100}%`,
-                        }}
-                        title={`${frame.at_ms} ms · ${frame.value}`}
-                        type="button"
-                      />
-                    );
-                  })}
+            {CHANNELS[track.type].map((channel) => {
+              const frames = track.channels[channel] ?? [];
+              return (
+                <div className="timeline-channel" key={channel}>
+                  <label title="双击轨道空白处可快速添加关键帧">
+                    {channel}
+                  </label>
+                  <div
+                    onDoubleClick={(event) => {
+                      if (event.target instanceof HTMLButtonElement) return;
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      const atMs =
+                        ((event.clientX - rect.left) / rect.width) *
+                        draft.duration_ms;
+                      const snapped = Math.max(
+                        0,
+                        Math.min(
+                          draft.duration_ms,
+                          snapTimelineTime(atMs, snap, playbackStart),
+                        ),
+                      );
+                      setPlayhead(snapped);
+                      addKeyframe(trackIndex, channel, snapped);
+                    }}
+                    title="双击空白处添加关键帧"
+                  >
+                    {frames.map((frame, frameIndex) => {
+                      const key = `${trackIndex}:${channel}:${frameIndex}`;
+                      return (
+                        <button
+                          aria-label={`${channel} ${frame.at_ms}ms`}
+                          className={`${selected.has(key) ? "selected" : ""}${frame.value === "inherit" ? " inherited" : ""}`}
+                          data-keyframe-key={key}
+                          key={key}
+                          onPointerDown={(event) => beginDrag(event, key)}
+                          style={{
+                            left: `${(frame.at_ms / draft.duration_ms) * 100}%`,
+                          }}
+                          title={`${frame.at_ms} ms · ${frame.value === "inherit" ? "继承入口值" : frame.value}`}
+                          type="button"
+                        />
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ))}
         <div className="timeline-track timeline-event-track">
@@ -759,21 +1023,73 @@ export function TimelineEditor({
             </div>
           </div>
         </div>
+        {marquee !== null && (
+          <div className="timeline-selection-marquee" style={marquee} />
+        )}
       </div>
+      {clipboardStatus !== null && (
+        <div className="timeline-clipboard-status" role="status">
+          {clipboardStatus}
+        </div>
+      )}
     </div>
   );
 }
 
+function selectionAddress(key: string): {
+  track: number;
+  channel: string;
+  index: number;
+} {
+  const [track, channel = "", index] = key.split(":");
+  return { track: Number(track), channel, index: Number(index) };
+}
+
+function snapDragDelta(
+  rawDelta: number,
+  snap: number,
+  snapPoint: number,
+  node: TimelineNode,
+  selection: ReadonlySet<string>,
+): number {
+  const gridDelta =
+    Math.round(rawDelta / Math.max(1, snap)) * Math.max(1, snap);
+  let closestMarkerDelta: number | null = null;
+  for (const key of selection) {
+    const { track, channel, index } = selectionAddress(key);
+    const frame = node.tracks[track]?.channels[channel]?.[index];
+    if (frame === undefined || frame.value === "inherit") continue;
+    const candidate = snapPoint - frame.at_ms;
+    if (
+      closestMarkerDelta === null ||
+      Math.abs(candidate - rawDelta) < Math.abs(closestMarkerDelta - rawDelta)
+    ) {
+      closestMarkerDelta = candidate;
+    }
+  }
+  return closestMarkerDelta !== null &&
+    Math.abs(closestMarkerDelta - rawDelta) <= Math.abs(gridDelta - rawDelta)
+    ? closestMarkerDelta
+    : gridDelta;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
 function KeyframeInspector({
+  allowInherit,
   frame,
   onChange,
 }: {
-  frame: { at_ms: number; value: number; easing: TimelineEasing };
-  onChange(frame: {
-    at_ms: number;
-    value: number;
-    easing: TimelineEasing;
-  }): void;
+  allowInherit: boolean;
+  frame: TimelineKeyframe;
+  onChange(frame: TimelineKeyframe): void;
 }): ReactElement {
   const cubic =
     typeof frame.easing === "object"
@@ -782,8 +1098,25 @@ function KeyframeInspector({
   return (
     <div className="keyframe-inspector">
       <label>
+        值来源{" "}
+        <select
+          value={frame.value === "inherit" ? "inherit" : "number"}
+          onChange={(event) =>
+            onChange({
+              ...frame,
+              at_ms: event.currentTarget.value === "inherit" ? 0 : frame.at_ms,
+              value: event.currentTarget.value === "inherit" ? "inherit" : 0,
+            })
+          }
+        >
+          <option value="number">固定数值</option>
+          {allowInherit && <option value="inherit">继承入口值</option>}
+        </select>
+      </label>
+      <label>
         时间{" "}
         <input
+          disabled={frame.value === "inherit"}
           type="number"
           value={frame.at_ms}
           onChange={(event) =>
@@ -794,14 +1127,18 @@ function KeyframeInspector({
       <label>
         数值{" "}
         <input
+          disabled={frame.value === "inherit"}
           type="number"
           step="0.01"
-          value={frame.value}
+          value={frame.value === "inherit" ? 0 : frame.value}
           onChange={(event) =>
             onChange({ ...frame, value: Number(event.currentTarget.value) })
           }
         />
       </label>
+      {frame.value === "inherit" && (
+        <small>0 ms 时从真实进入状态读取此通道。</small>
+      )}
       <label>
         缓动{" "}
         <select

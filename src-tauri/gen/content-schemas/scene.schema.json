@@ -277,6 +277,13 @@
         "block"
       ]
     },
+    "DialogueMode": {
+      "type": "string",
+      "enum": [
+        "start",
+        "append"
+      ]
+    },
     "Easing": {
       "type": "string",
       "enum": [
@@ -459,8 +466,18 @@
         {
           "type": "object",
           "properties": {
+            "mode": {
+              "$ref": "#/$defs/DialogueMode",
+              "default": "start"
+            },
             "next": {
               "type": "string"
+            },
+            "page_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "speaker": {
               "type": [
@@ -863,10 +880,20 @@
               "default": false
             },
             "duration_ms": {
-              "type": "integer",
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "uint64",
-              "default": 200,
+              "default": null,
               "minimum": 0
+            },
+            "motion": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
             },
             "next": {
               "type": "string"
@@ -883,6 +910,67 @@
           "required": [
             "type",
             "visible",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "motion": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "next": {
+              "type": "string"
+            },
+            "slot": {
+              "$ref": "#/$defs/UiMotionSlot"
+            },
+            "type": {
+              "type": "string",
+              "const": "ui_motion_set"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "slot",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "default": null,
+              "minimum": 0
+            },
+            "motion": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "ui_motion_play"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "motion",
             "next"
           ]
         },
@@ -1032,8 +1120,7 @@
           "default": "linear"
         },
         "value": {
-          "type": "number",
-          "format": "float"
+          "$ref": "#/$defs/TimelineKeyframeValue"
         }
       },
       "additionalProperties": false,
@@ -1042,13 +1129,34 @@
         "value"
       ]
     },
+    "TimelineKeyframeKeyword": {
+      "type": "string",
+      "enum": [
+        "inherit"
+      ]
+    },
+    "TimelineKeyframeValue": {
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "float"
+        },
+        {
+          "$ref": "#/$defs/TimelineKeyframeKeyword"
+        }
+      ]
+    },
     "TimelineTrack": {
       "oneOf": [
         {
           "type": "object",
           "properties": {
             "asset": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
             },
             "channels": {
               "type": "object",
@@ -1075,8 +1183,7 @@
           "additionalProperties": false,
           "required": [
             "type",
-            "sprite_id",
-            "asset"
+            "sprite_id"
           ]
         },
         {
@@ -1178,6 +1285,13 @@
             "type"
           ]
         }
+      ]
+    },
+    "UiMotionSlot": {
+      "type": "string",
+      "enum": [
+        "dialogue_show",
+        "dialogue_hide"
       ]
     },
     "ValueOperand": {

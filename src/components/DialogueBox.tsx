@@ -18,7 +18,8 @@ import {
   parseMarkup,
   revealCompletionTime,
 } from "../engine/markup";
-import type { DialoguePrompt } from "../engine/types";
+import type { DialoguePageSnapshot, DialoguePrompt } from "../engine/types";
+import type { UiMotionHost } from "../engine/uiMotion";
 import { MarkupText } from "./MarkupText";
 
 export interface DialogueBoxHandle {
@@ -27,7 +28,8 @@ export interface DialogueBoxHandle {
 }
 
 interface DialogueBoxProps {
-  prompt: DialoguePrompt;
+  prompt: DialoguePrompt | null;
+  page: DialoguePageSnapshot;
   initialCps: number;
   defaultCps: number;
   visible: boolean;
@@ -37,6 +39,7 @@ interface DialogueBoxProps {
   onTypingChange(typing: boolean, cps: number): void;
   onRevealComplete(promptId: string): void;
   revealImmediately: boolean;
+  motionHost?: UiMotionHost;
 }
 
 interface MathRevealMetric {
@@ -48,6 +51,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
   function DialogueBox(
     {
       prompt,
+      page,
       initialCps,
       defaultCps,
       visible,
@@ -57,10 +61,18 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       onTypingChange,
       onRevealComplete,
       revealImmediately,
+      motionHost,
     },
     ref,
   ): ReactElement {
-    const units = useMemo(() => parseMarkup(prompt.text), [prompt.text]);
+    const promptId = prompt?.prompt_id ?? `${page.page_id}:retained`;
+    const currentText = prompt?.text ?? "";
+    const completedText = useMemo(
+      () =>
+        (prompt === null ? page.segments : page.segments.slice(0, -1)).join(""),
+      [page.segments, prompt],
+    );
+    const units = useMemo(() => parseMarkup(currentText), [currentText]);
     const unitCps = useMemo(
       () => buildVisibleUnitCps(units, initialCps, defaultCps),
       [defaultCps, initialCps, units],
@@ -100,15 +112,15 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     const [revealFinished, setRevealFinished] = useState(
       () => revealImmediately || schedule.length === 0,
     );
-    const [activePromptId, setActivePromptId] = useState(prompt.prompt_id);
+    const [activePromptId, setActivePromptId] = useState(promptId);
     const [instantRevealPromptId, setInstantRevealPromptId] = useState<
       string | null
     >(null);
     const [paused, setPaused] = useState(() => isPauseAt(0, pauseWindows));
     const [typingCps, setTypingCps] = useState(() => unitCps[0] ?? initialCps);
-    const promptIdRef = useRef(prompt.prompt_id);
+    const promptIdRef = useRef(promptId);
     const visibleRef = useRef(0);
-    const promptIsActive = activePromptId === prompt.prompt_id;
+    const promptIsActive = activePromptId === promptId;
     const renderedVisibleCount = promptIsActive ? visibleCount : 0;
     const complete = promptIsActive && revealFinished;
     const completeRef = useRef(complete);
@@ -135,13 +147,13 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     useEffect(() => {
       const initialVisibleCount = revealImmediately ? schedule.length : 0;
       const initiallyFinished = revealImmediately || schedule.length === 0;
-      setActivePromptId(prompt.prompt_id);
+      setActivePromptId(promptId);
       visibleRef.current = initialVisibleCount;
       completeRef.current = initiallyFinished;
       setVisibleCount(initialVisibleCount);
       setRevealFinished(initiallyFinished);
-      setInstantRevealPromptId(revealImmediately ? prompt.prompt_id : null);
-      promptIdRef.current = prompt.prompt_id;
+      setInstantRevealPromptId(revealImmediately ? promptId : null);
+      promptIdRef.current = promptId;
       setPaused(isPauseAt(0, pauseWindows));
       setTypingCps(unitCps[0] ?? initialCps);
       if (initiallyFinished) return;
@@ -186,7 +198,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       pauseWindows,
       initialCps,
       mathRevealDurations,
-      prompt.prompt_id,
+      promptId,
       revealCompletionMs,
       revealImmediately,
       schedule,
@@ -201,25 +213,27 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           visibleRef.current = schedule.length;
           completeRef.current = true;
           setRevealFinished(true);
-          setInstantRevealPromptId(prompt.prompt_id);
+          setInstantRevealPromptId(promptId);
           setVisibleCount(schedule.length);
         },
         isComplete: () => completeRef.current,
       }),
-      [prompt.prompt_id, schedule.length],
+      [promptId, schedule.length],
     );
 
     useEffect(() => {
-      if (complete && reportedPromptRef.current !== prompt.prompt_id) {
-        reportedPromptRef.current = prompt.prompt_id;
-        onRevealComplete(prompt.prompt_id);
+      if (
+        prompt !== null &&
+        complete &&
+        reportedPromptRef.current !== promptId
+      ) {
+        reportedPromptRef.current = promptId;
+        onRevealComplete(promptId);
       }
-    }, [complete, onRevealComplete, prompt.prompt_id]);
+    }, [complete, onRevealComplete, prompt, promptId]);
 
     const effectivePaused =
-      promptIdRef.current === prompt.prompt_id
-        ? paused
-        : isPauseAt(0, pauseWindows);
+      promptIdRef.current === promptId ? paused : isPauseAt(0, pauseWindows);
     const typing =
       promptIsActive && visible && !disabled && !complete && !effectivePaused;
     useEffect(() => {
@@ -227,11 +241,40 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       return () => onTypingChange(false, typingCps);
     }, [onTypingChange, typing, typingCps]);
 
+    // Keep callback refs stable while the typewriter causes frequent React
+    // renders. Re-registering an element would reset an in-flight UI motion.
+    const dialogueRootRef = useCallback(
+      (element: HTMLElement | null) =>
+        motionHost?.register("dialogue_root", element),
+      [motionHost],
+    );
+    const dialogueFrameRef = useCallback(
+      (element: HTMLElement | null) =>
+        motionHost?.register("dialogue_frame", element),
+      [motionHost],
+    );
+    const dialogueNameplateRef = useCallback(
+      (element: HTMLElement | null) =>
+        motionHost?.register("dialogue_nameplate", element),
+      [motionHost],
+    );
+    const dialogueTextRef = useCallback(
+      (element: HTMLElement | null) =>
+        motionHost?.register("dialogue_text", element),
+      [motionHost],
+    );
+    const dialogueIndicatorRef = useCallback(
+      (element: HTMLElement | null) =>
+        motionHost?.register("dialogue_advance_indicator", element),
+      [motionHost],
+    );
+
     return (
       <section
         aria-hidden={!visible}
         aria-label="对话"
         className={`dialogue-box${visible ? " is-visible" : " is-hidden"}`}
+        ref={dialogueRootRef}
       >
         <img
           alt=""
@@ -240,12 +283,14 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           draggable={false}
           height={407}
           src={dialogueBoxUrl}
+          ref={dialogueFrameRef}
           width={1920}
         />
-        {prompt.speaker !== null && (
+        {page.speaker !== null && (
           <span
             className="speaker-name"
-            style={{ color: prompt.name_color ?? undefined }}
+            ref={dialogueNameplateRef}
+            style={{ color: page.name_color ?? undefined }}
           >
             <img
               alt=""
@@ -255,25 +300,32 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
               src={nameBoxUrl}
               width={364}
             />
-            <span>{prompt.speaker}</span>
+            <span>{page.speaker}</span>
           </span>
         )}
         <span
           className="dialogue-text"
-          style={{ color: prompt.text_color ?? undefined }}
+          ref={dialogueTextRef}
+          style={{ color: page.text_color ?? undefined }}
         >
+          <MarkupText source={completedText} />
           <MarkupText
             animateMath
-            instantMathReveal={instantRevealPromptId === prompt.prompt_id}
+            instantMathReveal={instantRevealPromptId === promptId}
             onMathMetrics={handleMathMetrics}
-            source={prompt.text}
+            source={currentText}
             unitCps={unitCps}
             visibleCount={renderedVisibleCount}
           />
         </span>
-        <span className={`advance-indicator${complete ? " is-ready" : ""}`}>
-          ◆
-        </span>
+        {prompt !== null && (
+          <span
+            className={`advance-indicator${complete ? " is-ready" : ""}`}
+            ref={dialogueIndicatorRef}
+          >
+            ◆
+          </span>
+        )}
       </section>
     );
   },

@@ -2,11 +2,12 @@ use crate::{
     content::ContentCatalog,
     model::{
         AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
-        ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, LoopingAudioSnapshot,
-        MutationValue, PlaybackAutoMode, PlaybackSnapshot, PresentationCue, PresentationCueKind,
-        PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate,
-        ScalarValue, SceneNode, SpriteAction, SpriteSnapshot, StoryLocation, TimelineChannels,
-        TimelineTrack, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
+        ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueMode,
+        DialoguePageSnapshot, LoopingAudioSnapshot, MutationValue, PlaybackAutoMode,
+        PlaybackSnapshot, PresentationCue, PresentationCueKind, PresentationOutcome, ProfileState,
+        PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, SceneNode, SpriteAction,
+        SpriteSnapshot, StoryLocation, TimelineChannels, TimelineTrack, UiMotionPreset,
+        UiMotionSlot, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
         WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
@@ -438,6 +439,7 @@ impl RuntimeEngine {
         content: &ContentCatalog,
         mut snapshot: RuntimeSnapshot,
     ) -> Result<RuntimeUpdate, RuntimeError> {
+        hydrate_legacy_dialogue_page(&mut snapshot);
         validate_snapshot(content, &snapshot)?;
         if let PromptSnapshot::Dialogue {
             prompt_id, is_read, ..
@@ -615,6 +617,8 @@ impl RuntimeEngine {
                 SceneNode::Say {
                     speaker,
                     text,
+                    mode,
+                    page_id,
                     speed_cps,
                     next,
                 } => {
@@ -632,6 +636,47 @@ impl RuntimeEngine {
                             None => (None, Some(source), None, None),
                         },
                     };
+                    let page = match mode {
+                        DialogueMode::Start => DialoguePageSnapshot {
+                            page_id: page_id.unwrap_or_else(|| prompt_id.clone()),
+                            speaker_id: speaker_id.clone(),
+                            speaker: speaker.clone(),
+                            name_color: name_color.clone(),
+                            text_color: text_color.clone(),
+                            segments: vec![text.clone()],
+                        },
+                        DialogueMode::Append => {
+                            let expected_page_id = page_id.ok_or_else(|| {
+                                RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: append 对话缺少 page_id"
+                                ))
+                            })?;
+                            let mut page =
+                                self.snapshot.dialogue_page.clone().ok_or_else(|| {
+                                    RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: 没有可接续的对话页 {expected_page_id}"
+                                ))
+                                })?;
+                            if page.page_id != expected_page_id {
+                                return Err(RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: 当前对话页是 {}，不能接续 {expected_page_id}",
+                                    page.page_id
+                                )));
+                            }
+                            if page.speaker_id != speaker_id
+                                || page.speaker != speaker
+                                || page.name_color != name_color
+                                || page.text_color != text_color
+                            {
+                                return Err(RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: 接续对话的说话人与样式必须和页面起始段一致"
+                                )));
+                            }
+                            page.segments.push(text.clone());
+                            page
+                        }
+                    };
+                    self.snapshot.dialogue_page = Some(page);
                     self.snapshot.location.node_id = next;
                     self.snapshot.prompt = PromptSnapshot::Dialogue {
                         prompt_id: prompt_id.clone(),
@@ -677,6 +722,7 @@ impl RuntimeEngine {
                             "{scene_id}/{node_id}: 没有任何可见且可用的选项"
                         )));
                     }
+                    self.snapshot.dialogue_page = None;
                     self.snapshot.prompt = PromptSnapshot::Choice {
                         prompt_id,
                         choices: visible_choices,
@@ -853,17 +899,62 @@ impl RuntimeEngine {
                 }
                 SceneNode::DialogueUi {
                     visible,
+                    motion,
                     duration_ms,
                     await_completion,
                     next,
                 } => {
                     self.snapshot.world.dialogue_ui_visible = visible;
                     self.snapshot.location.node_id = next;
+                    let preset = resolve_dialogue_motion(
+                        content,
+                        &self.snapshot,
+                        visible,
+                        motion.as_deref(),
+                    )?;
+                    if let Some(preset) = preset {
+                        let cue_duration = duration_ms.unwrap_or(preset.duration_ms);
+                        cues.push(self.cue(
+                            gate(await_completion),
+                            PresentationCueKind::DialogueUiTransition {
+                                visible,
+                                duration_ms: cue_duration,
+                                motion: Some(preset),
+                            },
+                        ));
+                        if await_completion {
+                            return Ok(cues);
+                        }
+                    }
+                }
+                SceneNode::UiMotionSet { slot, motion, next } => {
+                    match slot {
+                        UiMotionSlot::DialogueShow => {
+                            self.snapshot.world.ui_motion_bindings.dialogue_show = motion;
+                        }
+                        UiMotionSlot::DialogueHide => {
+                            self.snapshot.world.ui_motion_bindings.dialogue_hide = motion;
+                        }
+                    }
+                    self.snapshot.location.node_id = next;
+                }
+                SceneNode::UiMotionPlay {
+                    motion,
+                    duration_ms,
+                    await_completion,
+                    next,
+                } => {
+                    let preset =
+                        content.ui_motions.get(&motion).cloned().ok_or_else(|| {
+                            RuntimeError::Content(format!("未知 UI 动效 {motion}"))
+                        })?;
+                    let cue_duration = duration_ms.unwrap_or(preset.duration_ms);
+                    self.snapshot.location.node_id = next;
                     cues.push(self.cue(
                         gate(await_completion),
-                        PresentationCueKind::DialogueUiTransition {
-                            visible,
-                            duration_ms,
+                        PresentationCueKind::UiMotion {
+                            duration_ms: cue_duration,
+                            motion: preset,
                         },
                     ));
                     if await_completion {
@@ -900,6 +991,7 @@ impl RuntimeEngine {
                     }
                 }
                 SceneNode::End => {
+                    self.snapshot.dialogue_page = None;
                     self.snapshot.prompt = PromptSnapshot::End {
                         prompt_id: format!("{scene_id}/{node_id}"),
                     };
@@ -1176,7 +1268,13 @@ fn final_channel(channels: &TimelineChannels, id: &str) -> Option<f32> {
     channels
         .get(id)
         .and_then(|keyframes| keyframes.last())
-        .map(|keyframe| keyframe.value)
+        .and_then(|keyframe| keyframe.value.number())
+}
+
+fn has_inherited_channel(channels: &TimelineChannels) -> bool {
+    channels
+        .values()
+        .any(|frames| frames.first().is_some_and(|frame| frame.value.is_inherit()))
 }
 
 fn apply_timeline_final_state(
@@ -1191,17 +1289,24 @@ fn apply_timeline_final_state(
                 remove_at_end,
                 channels,
             } => {
+                if has_inherited_channel(channels)
+                    && !snapshot.world.sprites.contains_key(sprite_id)
+                {
+                    return Err(format!(
+                        "立绘 {sprite_id} 使用 inherit，但进入时间线时该实例不存在"
+                    ));
+                }
                 if *remove_at_end {
                     snapshot.world.sprites.remove(sprite_id);
                     continue;
                 }
-                let mut target =
-                    snapshot
-                        .world
-                        .sprites
-                        .get(sprite_id)
-                        .cloned()
-                        .unwrap_or(SpriteSnapshot {
+                let mut target = snapshot
+                    .world
+                    .sprites
+                    .get(sprite_id)
+                    .cloned()
+                    .or_else(|| {
+                        asset.as_ref().map(|asset| SpriteSnapshot {
                             asset: asset.clone(),
                             x: 960.0,
                             y: 1080.0,
@@ -1211,8 +1316,14 @@ fn apply_timeline_final_state(
                             rotation_deg: 0.0,
                             opacity: 1.0,
                             z: 0,
-                        });
-                target.asset.clone_from(asset);
+                        })
+                    })
+                    .ok_or_else(|| {
+                        format!("立绘 {sprite_id} 未指定素材，且进入时间线时实例不存在")
+                    })?;
+                if let Some(asset) = asset {
+                    target.asset.clone_from(asset);
+                }
                 if let Some(value) = final_channel(channels, "x") {
                     target.x = value;
                 }
@@ -1408,6 +1519,30 @@ fn compare_numeric(
     }
 }
 
+fn resolve_dialogue_motion(
+    content: &ContentCatalog,
+    snapshot: &RuntimeSnapshot,
+    visible: bool,
+    override_id: Option<&str>,
+) -> Result<Option<UiMotionPreset>, RuntimeError> {
+    let selected = override_id.or({
+        if visible {
+            snapshot.world.ui_motion_bindings.dialogue_show.as_deref()
+        } else {
+            snapshot.world.ui_motion_bindings.dialogue_hide.as_deref()
+        }
+    });
+    selected
+        .map(|id| {
+            content
+                .ui_motions
+                .get(id)
+                .cloned()
+                .ok_or_else(|| RuntimeError::Content(format!("未知 UI 动效 {id}")))
+        })
+        .transpose()
+}
+
 fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, RuntimeError> {
     let scene = content
         .scene(&content.manifest.entry_scene)
@@ -1419,11 +1554,41 @@ fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, Runtime
             node_id: scene.entry.clone(),
         },
         variables: defaults_for_scope(content, VariableScope::Save)?,
-        world: WorldSnapshot::default(),
+        world: WorldSnapshot {
+            ui_motion_bindings: content.manifest.ui_motion_defaults.clone(),
+            ..WorldSnapshot::default()
+        },
         audio: AudioSnapshot::default(),
         playback: PlaybackSnapshot::default(),
+        dialogue_page: None,
         prompt: PromptSnapshot::None,
     })
+}
+
+fn hydrate_legacy_dialogue_page(snapshot: &mut RuntimeSnapshot) {
+    if snapshot.dialogue_page.is_some() {
+        return;
+    }
+    let PromptSnapshot::Dialogue {
+        prompt_id,
+        speaker_id,
+        speaker,
+        name_color,
+        text_color,
+        text,
+        ..
+    } = &snapshot.prompt
+    else {
+        return;
+    };
+    snapshot.dialogue_page = Some(DialoguePageSnapshot {
+        page_id: prompt_id.clone(),
+        speaker_id: speaker_id.clone(),
+        speaker: speaker.clone(),
+        name_color: name_color.clone(),
+        text_color: text_color.clone(),
+        segments: vec![text.clone()],
+    });
 }
 
 fn validate_snapshot(
@@ -1431,6 +1596,56 @@ fn validate_snapshot(
     snapshot: &RuntimeSnapshot,
 ) -> Result<(), RuntimeError> {
     validate_variables_for_scope(content, &snapshot.variables, VariableScope::Save)?;
+    for motion in [
+        &snapshot.world.ui_motion_bindings.dialogue_show,
+        &snapshot.world.ui_motion_bindings.dialogue_hide,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !content.ui_motions.contains_key(motion) {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "UI 动效绑定引用了未知动效 {motion}"
+            )));
+        }
+    }
+    if let Some(page) = &snapshot.dialogue_page {
+        if page.page_id.is_empty()
+            || page.segments.is_empty()
+            || page
+                .segments
+                .iter()
+                .any(|segment| segment.trim().is_empty())
+        {
+            return Err(RuntimeError::InvalidSnapshot(
+                "对话页 ID 或分段无效".to_owned(),
+            ));
+        }
+        if let PromptSnapshot::Dialogue {
+            speaker_id,
+            speaker,
+            name_color,
+            text_color,
+            text,
+            ..
+        } = &snapshot.prompt
+        {
+            if &page.speaker_id != speaker_id
+                || &page.speaker != speaker
+                || &page.name_color != name_color
+                || &page.text_color != text_color
+                || page.segments.last() != Some(text)
+            {
+                return Err(RuntimeError::InvalidSnapshot(
+                    "当前对话提示与稳定对话页不一致".to_owned(),
+                ));
+            }
+        }
+    } else if matches!(snapshot.prompt, PromptSnapshot::Dialogue { .. }) {
+        return Err(RuntimeError::InvalidSnapshot(
+            "对话提示缺少稳定对话页".to_owned(),
+        ));
+    }
     let scene = content
         .scene(&snapshot.location.scene_id)
         .map_err(|error| RuntimeError::InvalidSnapshot(error.to_string()))?;
@@ -1798,6 +2013,83 @@ mod tests {
     }
 
     #[test]
+    fn dialogue_page_survives_animation_and_append_reveals_only_new_segment() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "segment_start".to_owned();
+        scene.nodes.insert(
+            "segment_start".to_owned(),
+            SceneNode::Say {
+                speaker: None,
+                text: "前半句——".to_owned(),
+                mode: DialogueMode::Start,
+                page_id: Some("realization".to_owned()),
+                speed_cps: None,
+                next: "segment_effect".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "segment_effect".to_owned(),
+            SceneNode::ScreenEffect {
+                effect: crate::model::ScreenEffectKind::Shake,
+                duration_ms: 200,
+                await_completion: true,
+                next: "segment_append".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "segment_append".to_owned(),
+            SceneNode::Say {
+                speaker: None,
+                text: "后半句。".to_owned(),
+                mode: DialogueMode::Append,
+                page_id: Some("realization".to_owned()),
+                speed_cps: Some(20.0),
+                next: "segment_end".to_owned(),
+            },
+        );
+        scene.nodes.insert("segment_end".to_owned(), SceneNode::End);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_new_game(&content).unwrap();
+        assert_eq!(
+            first.snapshot.dialogue_page.as_ref().unwrap().segments,
+            ["前半句——"]
+        );
+
+        let effect = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(effect.requires_ack);
+        assert!(matches!(effect.snapshot.prompt, PromptSnapshot::None));
+        assert_eq!(
+            effect.snapshot.dialogue_page.as_ref().unwrap().segments,
+            ["前半句——"]
+        );
+
+        let appended = runtime
+            .presentation_complete(&content, effect.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert_eq!(
+            appended.snapshot.dialogue_page.as_ref().unwrap().segments,
+            ["前半句——", "后半句。"]
+        );
+        let PromptSnapshot::Dialogue { text, .. } = &appended.snapshot.prompt else {
+            panic!("expected appended dialogue prompt")
+        };
+        assert_eq!(text, "后半句。");
+        assert!(appended.cues.iter().any(|cue| matches!(
+            &cue.kind,
+            PresentationCueKind::DialogueReveal { speed_cps, .. } if *speed_cps == 20.0
+        )));
+
+        let ended = runtime
+            .advance(&content, appended.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(ended.snapshot.dialogue_page.is_none());
+    }
+
+    #[test]
     fn old_dialogue_snapshots_default_new_character_fields() {
         let value = serde_json::json!({
             "kind": "dialogue",
@@ -1818,6 +2110,28 @@ mod tests {
         };
         assert_eq!((speaker_id, name_color, text_color), (None, None, None));
         assert!(!is_read);
+    }
+
+    #[test]
+    fn loading_an_old_dialogue_snapshot_rebuilds_the_stable_page() {
+        let content = catalog();
+        let mut source = RuntimeEngine::new(&content).unwrap();
+        source.snapshot.location.node_id = "introduction".to_owned();
+        source.run_until_boundary(&content).unwrap();
+        let current = source.snapshot.clone();
+        assert!(matches!(current.prompt, PromptSnapshot::Dialogue { .. }));
+        let mut value = serde_json::to_value(current).unwrap();
+        value.as_object_mut().unwrap().remove("dialogue_page");
+        let legacy: RuntimeSnapshot = serde_json::from_value(value).unwrap();
+        assert!(legacy.dialogue_page.is_none());
+
+        let mut target = RuntimeEngine::new(&content).unwrap();
+        let loaded = target.load_snapshot(&content, legacy).unwrap();
+        let page = loaded.snapshot.dialogue_page.unwrap();
+        let PromptSnapshot::Dialogue { text, .. } = loaded.snapshot.prompt else {
+            panic!("expected dialogue prompt")
+        };
+        assert_eq!(page.segments, [text]);
     }
 
     fn interactive_dialogue(content: &ContentCatalog) -> RuntimeEngine {
@@ -1997,6 +2311,37 @@ mod tests {
                 Err(RuntimeError::StaleRevision { .. })
             ));
         }
+    }
+
+    #[test]
+    fn dialogue_ui_uses_the_snapshot_binding_and_embeds_the_resolved_preset() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        assert_eq!(
+            runtime
+                .snapshot
+                .world
+                .ui_motion_bindings
+                .dialogue_show
+                .as_deref(),
+            Some("ui.dialogue.slide_in")
+        );
+
+        let first = runtime.start_new_game(&content).unwrap();
+        let dialogue = runtime
+            .presentation_complete(&content, first.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(matches!(
+            dialogue.snapshot.prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        assert!(dialogue.cues.iter().any(|cue| matches!(
+            &cue.kind,
+            PresentationCueKind::DialogueUiTransition {
+                motion: Some(motion),
+                ..
+            } if motion.id == "ui.dialogue.slide_in"
+        )));
     }
 
     #[test]
