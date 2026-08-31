@@ -24,8 +24,10 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. never watch Rust sources or Cargo artifacts. The workspace target
+      // directory contains executables that are locked while rustc links them
+      // on Windows, and attempting to watch them aborts the first dev launch.
+      ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
 }));

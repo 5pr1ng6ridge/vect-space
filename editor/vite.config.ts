@@ -12,6 +12,6 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1422 } : undefined,
     fs: { allow: [".."] },
-    watch: { ignored: ["**/src-tauri/**"] },
+    watch: { ignored: ["**/src-tauri/**", "**/target/**"] },
   },
 });
