@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "workspaces": [
+    "editor",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && vite build",
@@ -14,10 +18,14 @@
     "tauri": "tauri",
     "editor:dev": "npm --prefix editor run tauri dev",
     "editor:build": "npm --prefix editor run tauri build",
-    "editor:check": "npm --prefix editor run build"
+    "editor:check": "npm --prefix editor run build",
+    "codegen": "cargo run -p vectspace-core --bin export_schemas && cargo test -p vectspace-protocol export_bindings",
+    "codegen:check": "npm run codegen && git diff --exit-code -- src-tauri/gen/content-schemas shared/generated",
+    "check:all": "npm test && npm run build && npm --prefix editor test && npm --prefix editor run build && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
+    "@vectspace/presentation-core": "0.1.0",
     "katex": "0.18.4",
     "pixi.js": "8.20.0",
     "react": "19.2.8",

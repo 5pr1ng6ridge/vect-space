@@ -34,6 +34,7 @@ import type {
   StoryFlowSnapshot,
 } from "./engine/types";
 import { useViewportMetrics } from "./viewport/viewport";
+import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 
 const DEFAULT_SETTINGS: Settings = {
   master_volume: 1,
@@ -63,8 +64,8 @@ export default function App(): ReactElement {
   const uiMotionHost = useMemo(() => new UiMotionHost(), []);
   const phaseRef = useRef<Phase>("booting");
   const busyRef = useRef(false);
-  const acknowledgedUpdates = useRef(new Set<number>());
-  const autosavedRevisions = useRef(new Set<number>());
+  const acknowledgedUpdates = useRef(new BoundedLedger<number>(256));
+  const autosavedRevisions = useRef(new BoundedLedger<number>(256));
   const heldControlKeys = useRef(new Set<string>());
 
   const [phase, setPhase] = useState<Phase>("booting");
@@ -178,10 +179,9 @@ export default function App(): ReactElement {
       outcome: "completed" | "skipped" | "failed",
     ): void => {
       if (settled.requires_ack) {
-        if (acknowledgedUpdates.current.has(settled.update_id)) {
+        if (!acknowledgedUpdates.current.consume(settled.update_id)) {
           return;
         }
-        acknowledgedUpdates.current.add(settled.update_id);
         void runStoryCommand(() =>
           engineApi.presentationComplete(settled.update_id, outcome),
         );
@@ -196,7 +196,7 @@ export default function App(): ReactElement {
       ) {
         return;
       }
-      autosavedRevisions.current.add(settled.snapshot.revision);
+      autosavedRevisions.current.consume(settled.snapshot.revision);
       const thumbnail = sceneRef.current?.captureThumbnail() ?? null;
       void engineApi
         .saveSlot("auto", thumbnail)
@@ -207,6 +207,7 @@ export default function App(): ReactElement {
   );
 
   const startNewGame = (): void => {
+    autosavedRevisions.current.clear();
     setNormalAuto(false);
     setPhase("playing");
     phaseRef.current = "playing";
@@ -251,6 +252,7 @@ export default function App(): ReactElement {
   };
 
   const load = (slot: string): void => {
+    autosavedRevisions.current.clear();
     setNormalAuto(false);
     setPhase("playing");
     phaseRef.current = "playing";

@@ -143,7 +143,7 @@ export class TimelinePreviewSurface {
       backgroundColor: 0x05070c,
       preference: "webgl",
       powerPreference: "high-performance",
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: false,
     });
     this.#world.sortableChildren = true;
     this.#backgrounds.zIndex = -1_000_000;

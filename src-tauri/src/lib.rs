@@ -1,19 +1,21 @@
-mod content;
-mod model;
-mod runtime;
 mod save;
-mod text_template;
 
-use std::sync::{Mutex, MutexGuard};
-
-use content::ContentCatalog;
-use model::{
-    AdvanceSource, BootstrapPayload, DialogueHistoryEntry, PresentationOutcome, ResolvedAsset,
-    RuntimeSnapshot, RuntimeUpdate, SaveSlotRequest, SaveSlotSummary, Settings, StoryFlowSnapshot,
+use std::{
+    path::PathBuf,
+    sync::{Mutex, MutexGuard},
 };
-use runtime::RuntimeEngine;
+
 use save::{ProfileManager, SaveManager};
-use tauri::{Manager, State};
+use tauri::{path::BaseDirectory, Manager, State};
+use vectspace_core::{
+    content::ContentCatalog,
+    model::{
+        AdvanceSource, DialogueHistoryEntry, PresentationOutcome, ResolvedAsset, RuntimeUpdate,
+        SaveSlotRequest, SaveSlotSummary, Settings, StoryFlowSnapshot,
+    },
+    runtime::{self, RuntimeEngine},
+};
+use vectspace_protocol::{WireBootstrapPayload, WireRuntimeSnapshot, WireRuntimeUpdate};
 
 struct EngineState {
     content: ContentCatalog,
@@ -48,13 +50,15 @@ impl EngineState {
 }
 
 #[tauri::command]
-fn bootstrap(state: State<'_, EngineState>) -> Result<BootstrapPayload, String> {
-    Ok(state.runtime()?.bootstrap(&state.content))
+fn bootstrap(state: State<'_, EngineState>) -> Result<WireBootstrapPayload, String> {
+    Ok(state.runtime()?.bootstrap(&state.content).into())
 }
 
 #[tauri::command]
-fn start_new_game(state: State<'_, EngineState>) -> Result<RuntimeUpdate, String> {
-    state.transact_runtime(|runtime| runtime.start_new_game(&state.content))
+fn start_new_game(state: State<'_, EngineState>) -> Result<WireRuntimeUpdate, String> {
+    state
+        .transact_runtime(|runtime| runtime.start_new_game(&state.content))
+        .map(Into::into)
 }
 
 #[tauri::command]
@@ -62,8 +66,10 @@ fn advance(
     expected_revision: u64,
     source: AdvanceSource,
     state: State<'_, EngineState>,
-) -> Result<RuntimeUpdate, String> {
-    state.transact_runtime(|runtime| runtime.advance(&state.content, expected_revision, source))
+) -> Result<WireRuntimeUpdate, String> {
+    state
+        .transact_runtime(|runtime| runtime.advance(&state.content, expected_revision, source))
+        .map(Into::into)
 }
 
 #[tauri::command]
@@ -71,8 +77,10 @@ fn choose(
     choice_id: String,
     expected_revision: u64,
     state: State<'_, EngineState>,
-) -> Result<RuntimeUpdate, String> {
-    state.transact_runtime(|runtime| runtime.choose(&state.content, &choice_id, expected_revision))
+) -> Result<WireRuntimeUpdate, String> {
+    state
+        .transact_runtime(|runtime| runtime.choose(&state.content, &choice_id, expected_revision))
+        .map(Into::into)
 }
 
 #[tauri::command]
@@ -80,15 +88,17 @@ fn presentation_complete(
     update_id: u64,
     outcome: PresentationOutcome,
     state: State<'_, EngineState>,
-) -> Result<RuntimeUpdate, String> {
-    state.transact_runtime(|runtime| {
-        runtime.presentation_complete(&state.content, update_id, outcome)
-    })
+) -> Result<WireRuntimeUpdate, String> {
+    state
+        .transact_runtime(|runtime| {
+            runtime.presentation_complete(&state.content, update_id, outcome)
+        })
+        .map(Into::into)
 }
 
 #[tauri::command]
-fn get_snapshot(state: State<'_, EngineState>) -> Result<RuntimeSnapshot, String> {
-    Ok(state.runtime()?.snapshot().clone())
+fn get_snapshot(state: State<'_, EngineState>) -> Result<WireRuntimeSnapshot, String> {
+    Ok(state.runtime()?.snapshot().clone().into())
 }
 
 #[tauri::command]
@@ -142,9 +152,11 @@ fn save_slot(
 }
 
 #[tauri::command]
-fn load_slot(slot: String, state: State<'_, EngineState>) -> Result<RuntimeUpdate, String> {
+fn load_slot(slot: String, state: State<'_, EngineState>) -> Result<WireRuntimeUpdate, String> {
     let snapshot = state.saves.load(&slot).map_err(|error| error.to_string())?;
-    state.transact_runtime(|runtime| runtime.load_snapshot(&state.content, snapshot))
+    state
+        .transact_runtime(|runtime| runtime.load_snapshot(&state.content, snapshot))
+        .map(Into::into)
 }
 
 #[tauri::command]
@@ -195,8 +207,12 @@ pub fn run() {
                     .expect("main WebView window is missing");
                 disable_browser_features(&window)?;
             }
-            let content = ContentCatalog::load_for_app(app)?;
-            content.write_development_schemas()?;
+            let content_root = if cfg!(debug_assertions) {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game")
+            } else {
+                app.path().resolve("game", BaseDirectory::Resource)?
+            };
+            let content = ContentCatalog::from_root(content_root)?;
             app.asset_protocol_scope()
                 .allow_directory(content.assets_root(), true)?;
             let app_data_root = app.path().app_data_dir()?;
@@ -204,10 +220,23 @@ pub fn run() {
                 app_data_root.join("saves"),
                 content.manifest.content_version.clone(),
             )?;
-            let (profile, profile_state) = ProfileManager::new(
+            let valid_scenes = content.scenes.keys().cloned().collect();
+            let valid_locations = content
+                .scenes
+                .iter()
+                .flat_map(|(scene_id, scene)| {
+                    scene
+                        .nodes
+                        .keys()
+                        .map(move |node_id| format!("{scene_id}/{node_id}"))
+                })
+                .collect();
+            let (profile, profile_state) = ProfileManager::new_with_content(
                 app_data_root,
                 &content.manifest.variables,
                 content.manifest.content_version.clone(),
+                Some(valid_scenes),
+                Some(valid_locations),
             )?;
             let runtime = RuntimeEngine::with_profile(&content, profile_state)?;
             app.manage(EngineState {
@@ -245,7 +274,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::model::{AdvanceSource, MutationValue, ScalarValue, SceneNode, VariableOperation};
+    use vectspace_core::model::{
+        AdvanceSource, MutationValue, ScalarValue, SceneNode, VariableOperation,
+    };
 
     #[test]
     fn failed_profile_persistence_rolls_back_the_entire_runtime_command() {
@@ -292,7 +323,10 @@ mod tests {
         let runtime = state.runtime().unwrap();
         assert_eq!(runtime.snapshot(), &before);
         assert_eq!(
-            runtime.profile_variables().get("ending_seen"),
+            runtime
+                .profile_state(&state.content)
+                .variables
+                .get("ending_seen"),
             Some(&ScalarValue::Boolean(false))
         );
     }
@@ -387,7 +421,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             dialogue.snapshot.prompt,
-            crate::model::PromptSnapshot::Dialogue { .. }
+            vectspace_core::model::PromptSnapshot::Dialogue { .. }
         ));
         let before_snapshot = state.runtime().unwrap().snapshot().clone();
         let before_profile = state.runtime().unwrap().profile_state(&state.content);

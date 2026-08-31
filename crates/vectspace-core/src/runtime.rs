@@ -1,3 +1,5 @@
+//! Deterministic visual-novel runtime with no desktop-host dependencies.
+
 use crate::{
     content::ContentCatalog,
     model::{
@@ -1877,8 +1879,10 @@ mod tests {
     }
 
     fn catalog() -> ContentCatalog {
-        ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
-            .expect("demo content must be valid")
+        ContentCatalog::from_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game"),
+        )
+        .expect("demo content must be valid")
     }
 
     fn literal(value: ScalarValue) -> ValueOperand {
@@ -2048,7 +2052,8 @@ mod tests {
     #[test]
     fn timeline_easing_matches_the_shared_frontend_corpus() {
         let samples: Vec<TimelineConformanceSample> =
-            serde_json::from_str(include_str!("../../shared/timeline-conformance.json")).unwrap();
+            serde_json::from_str(include_str!("../../../shared/timeline-conformance.json"))
+                .unwrap();
         for sample in samples {
             let progress = sample.time / 1000.0;
             let value = 10.0 * test_timeline_ease(progress, &sample.easing);
@@ -2497,10 +2502,30 @@ mod tests {
 
     #[test]
     fn playback_nodes_apply_state_and_read_status_survives_new_game_and_load() {
-        let content = catalog();
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.nodes.insert(
+            "playback_policy_test".to_owned(),
+            SceneNode::Playback {
+                auto: PlaybackAutoMode::Forced,
+                ctrl_fast_forward: CtrlFastForwardMode::Block,
+                next: "playback_dialogue_test".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "playback_dialogue_test".to_owned(),
+            SceneNode::Say {
+                speaker: None,
+                text: "固定的测试对话".to_owned(),
+                mode: DialogueMode::Start,
+                page_id: None,
+                speed_cps: None,
+                next: "conclusion".to_owned(),
+            },
+        );
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         runtime.started = true;
-        runtime.snapshot.location.node_id = "forced_begin".to_owned();
+        runtime.snapshot.location.node_id = "playback_policy_test".to_owned();
         runtime.run_until_boundary(&content).unwrap();
         assert_eq!(runtime.snapshot.playback.auto, PlaybackAutoMode::Forced);
         assert_eq!(
@@ -2516,7 +2541,9 @@ mod tests {
         runtime
             .advance(&content, 0, AdvanceSource::ForcedAuto)
             .unwrap();
-        assert!(runtime.read_dialogues.contains("prologue/introduction"));
+        assert!(runtime
+            .read_dialogues
+            .contains("prologue/playback_dialogue_test"));
         runtime.start_new_game(&content).unwrap();
         let loaded = runtime.load_snapshot(&content, unread_snapshot).unwrap();
         let PromptSnapshot::Dialogue { is_read, text, .. } = loaded.snapshot.prompt else {

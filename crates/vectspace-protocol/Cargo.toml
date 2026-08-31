@@ -1,0 +1,10 @@
+[package]
+name = "vectspace-protocol"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+vectspace-core.workspace = true

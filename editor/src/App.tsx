@@ -1,10 +1,18 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  applyPatches,
+  enablePatches,
+  produceWithPatches,
+  type Patch,
+} from "immer";
+import {
   useCallback,
   useEffect,
+  lazy,
   useMemo,
   useRef,
   useState,
+  Suspense,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
@@ -13,12 +21,8 @@ import { editorApi } from "./api";
 import { NodeInspector } from "./components/NodeInspector";
 import { ProjectSidebar, type SidebarTab } from "./components/ProjectSidebar";
 import { StoryGraph } from "./components/StoryGraph";
-import { StoryFlowWorkspace } from "./components/StoryFlowWorkspace";
-import { TimelineWorkspace } from "./components/TimelineWorkspace";
-import { UiMotionWorkspace } from "./components/UiMotionWorkspace";
 import {
   NODE_TYPES,
-  cloneProject,
   convertToTimeline as convertQuickNodeToTimeline,
   countCharacterReferences,
   countVariableReferences,
@@ -50,6 +54,34 @@ import type {
 import { validateLive } from "./validation";
 
 type ResizeAxis = "left" | "right";
+
+enablePatches();
+
+interface HistoryEntry {
+  at: number;
+  redo: Patch[];
+  undo: Patch[];
+}
+
+const StoryFlowWorkspace = lazy(() =>
+  import("./components/StoryFlowWorkspace").then((module) => ({
+    default: module.StoryFlowWorkspace,
+  })),
+);
+const TimelineWorkspace = lazy(() =>
+  import("./components/TimelineWorkspace").then((module) => ({
+    default: module.TimelineWorkspace,
+  })),
+);
+const UiMotionWorkspace = lazy(() =>
+  import("./components/UiMotionWorkspace").then((module) => ({
+    default: module.UiMotionWorkspace,
+  })),
+);
+
+function WorkspaceFallback(): ReactElement {
+  return <main className="workspace-loading">正在载入工作区…</main>;
+}
 
 interface PanelSizes {
   left: number;
@@ -127,8 +159,8 @@ function ResizeHandle({
 
 export function App(): ReactElement {
   const [project, setProject] = useState<EditorProject | null>(null);
-  const [past, setPast] = useState<EditorProject[]>([]);
-  const [future, setFuture] = useState<EditorProject[]>([]);
+  const [past, setPast] = useState<HistoryEntry[]>([]);
+  const [future, setFuture] = useState<HistoryEntry[]>([]);
   const [dirty, setDirty] = useState(false);
   const [activeSceneId, setActiveSceneId] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -140,12 +172,15 @@ export function App(): ReactElement {
   } | null>(null);
   const [uiMotionTarget, setUiMotionTarget] = useState<string | null>(null);
   const [flowWorkspace, setFlowWorkspace] = useState(false);
+  const [flowSelectionId, setFlowSelectionId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [panelSizes, setPanelSizes] = useState<PanelSizes>(DEFAULT_PANEL_SIZES);
   const [resizeState, setResizeState] = useState<ResizeState | null>(null);
   const nodeClipboardRef = useRef<NodeClipboard | null>(null);
+  const savedContentRef = useRef("");
+  const savedContentVersionRef = useRef("");
 
   const resizeBy = (axis: ResizeAxis, delta: number): void => {
     setPanelSizes((current) => ({
@@ -208,16 +243,36 @@ export function App(): ReactElement {
   };
 
   const commit = useCallback(
-    (mutator: (draft: EditorProject) => void, history = true): void => {
+    (mutator: (draft: EditorProject) => unknown, history = true): void => {
       setProject((current) => {
         if (current === null) return current;
-        const next = cloneProject(current);
-        mutator(next);
-        if (history) {
-          setPast((items) => [...items.slice(-99), cloneProject(current)]);
+        const [next, redo, undo] = produceWithPatches(current, (draft) => {
+          const result = mutator(draft);
+          return result === undefined ? undefined : (result as EditorProject);
+        });
+        if (history && redo.length > 0) {
+          const entry = { at: performance.now(), redo, undo };
+          setPast((items) => {
+            const previous = items[items.length - 1];
+            if (
+              previous !== undefined &&
+              entry.at - previous.at < 1_000 &&
+              samePatchTargets(previous.redo, redo)
+            ) {
+              return [
+                ...items.slice(0, -1),
+                {
+                  at: entry.at,
+                  redo: [...previous.redo, ...redo],
+                  undo: [...undo, ...previous.undo],
+                },
+              ];
+            }
+            return [...items.slice(-99), entry];
+          });
           setFuture([]);
         }
-        setDirty(true);
+        if (redo.length > 0) setDirty(true);
         return next;
       });
     },
@@ -245,6 +300,8 @@ export function App(): ReactElement {
     try {
       const loaded = await editorApi.openProject(root);
       setProject(loaded);
+      savedContentRef.current = contentDocumentFingerprint(loaded);
+      savedContentVersionRef.current = loaded.manifest.content_version;
       const initialScene =
         loaded.manifest.entry_scene || loaded.scenes[0]?.definition.id || "";
       setActiveSceneId(initialScene);
@@ -252,6 +309,7 @@ export function App(): ReactElement {
       setTimelineTarget(null);
       setUiMotionTarget(null);
       setFlowWorkspace(false);
+      setFlowSelectionId(null);
       resetHistory();
       localStorage.setItem("vectspace-editor:last-project", loaded.root);
       setNotice(`已打开 ${loaded.root}`);
@@ -264,6 +322,15 @@ export function App(): ReactElement {
 
   const saveProject = useCallback(async (): Promise<void> => {
     if (project === null) return;
+    if (
+      contentDocumentFingerprint(project) !== savedContentRef.current &&
+      project.manifest.content_version === savedContentVersionRef.current &&
+      !window.confirm(
+        "剧情、动效或流程内容已经改变，但 content_version 没有更新。继续保存会保留旧的已读、历史和完成状态。仍要保存吗？",
+      )
+    ) {
+      return;
+    }
     const currentDiagnostics = validateLive(project);
     const errors = currentDiagnostics.filter(
       (diagnostic) => diagnostic.severity === "error",
@@ -279,6 +346,8 @@ export function App(): ReactElement {
       await editorApi.validateProject(projectRequest(project));
       const saved = await editorApi.saveProject(projectRequest(project));
       setProject(saved);
+      savedContentRef.current = contentDocumentFingerprint(saved);
+      savedContentVersionRef.current = saved.manifest.content_version;
       resetHistory();
       setNotice("项目已安全保存；备份文件保留在原文件旁。 ");
     } catch (reason) {
@@ -291,18 +360,24 @@ export function App(): ReactElement {
   const undo = useCallback((): void => {
     if (project === null || past.length === 0) return;
     const previous = past[past.length - 1];
+    if (previous === undefined) return;
     setPast((items) => items.slice(0, -1));
-    setFuture((items) => [cloneProject(project), ...items].slice(0, 100));
-    setProject(cloneProject(previous));
+    setFuture((items) => [previous, ...items].slice(0, 100));
+    setProject((current) =>
+      current === null ? current : applyPatches(current, previous.undo),
+    );
     setDirty(true);
   }, [past, project]);
 
   const redo = useCallback((): void => {
     if (project === null || future.length === 0) return;
     const next = future[0];
+    if (next === undefined) return;
     setFuture((items) => items.slice(1));
-    setPast((items) => [...items.slice(-99), cloneProject(project)]);
-    setProject(cloneProject(next));
+    setPast((items) => [...items.slice(-99), next]);
+    setProject((current) =>
+      current === null ? current : applyPatches(current, next.redo),
+    );
     setDirty(true);
   }, [future, project]);
 
@@ -465,10 +540,7 @@ export function App(): ReactElement {
       setError(result.error);
       return;
     }
-    setPast((items) => [...items.slice(-99), cloneProject(project)]);
-    setFuture([]);
-    setProject(result.project);
-    setDirty(true);
+    commit(() => result.project);
     setSelectedNodeId(result.nodeId);
     setNotice(
       `已在${side === "left" ? "左" : "右"}侧插入${nodeLabel(type)}节点。`,
@@ -685,8 +757,10 @@ export function App(): ReactElement {
     sceneId: string | null,
     nodeId: string | null,
     workspace?: "story" | "flow",
+    flowElementId?: string | null,
   ): void => {
     if (workspace === "flow") {
+      setFlowSelectionId(flowElementId ?? null);
       setFlowWorkspace(true);
       return;
     }
@@ -786,46 +860,61 @@ export function App(): ReactElement {
   );
   if (flowWorkspace && project.story_flow !== null) {
     return (
-      <StoryFlowWorkspace
-        projectManifest={project.manifest}
-        sceneIds={project.scenes.map((file) => file.definition.id)}
-        flow={project.story_flow.definition}
-        dirty={dirty}
-        onClose={() => setFlowWorkspace(false)}
-        onChange={(definition) =>
-          commit((draft) => {
-            if (draft.story_flow !== null)
-              draft.story_flow.definition = definition;
-          })
-        }
-        onSave={() => void saveProject()}
-        onUndo={undo}
-        onRedo={redo}
-        undoAvailable={past.length > 0}
-        redoAvailable={future.length > 0}
-      />
+      <Suspense fallback={<WorkspaceFallback />}>
+        <StoryFlowWorkspace
+          projectManifest={project.manifest}
+          sceneIds={project.scenes.map((file) => file.definition.id)}
+          flow={project.story_flow.definition}
+          dirty={dirty}
+          initialSelectionId={flowSelectionId}
+          onClose={() => setFlowWorkspace(false)}
+          onChange={(definition) =>
+            commit((draft) => {
+              if (draft.story_flow !== null)
+                draft.story_flow.definition = definition;
+            })
+          }
+          onSave={() => void saveProject()}
+          onValidate={() => {
+            void editorApi
+              .validateProject(projectRequest(project))
+              .then(() => setNotice("总流程已通过 Rust 权威校验。"))
+              .catch((reason: unknown) =>
+                setError(
+                  reason instanceof Error ? reason.message : String(reason),
+                ),
+              );
+          }}
+          onUndo={undo}
+          onRedo={redo}
+          undoAvailable={past.length > 0}
+          redoAvailable={future.length > 0}
+        />
+      </Suspense>
     );
   }
   if (uiMotionTarget !== null && uiMotionFile !== undefined) {
     return (
       <>
-        <UiMotionWorkspace
-          assets={project.assets}
-          dirty={dirty}
-          file={uiMotionFile}
-          onBack={() => setUiMotionTarget(null)}
-          onChange={(file) =>
-            commit((draft) => {
-              const index = draft.ui_motions.findIndex(
-                (candidate) => candidate.definition.id === uiMotionTarget,
-              );
-              if (index >= 0) draft.ui_motions[index] = file;
-            })
-          }
-          onRedo={redo}
-          onSave={() => void saveProject()}
-          onUndo={undo}
-        />
+        <Suspense fallback={<WorkspaceFallback />}>
+          <UiMotionWorkspace
+            assets={project.assets}
+            dirty={dirty}
+            file={uiMotionFile}
+            onBack={() => setUiMotionTarget(null)}
+            onChange={(file) =>
+              commit((draft) => {
+                const index = draft.ui_motions.findIndex(
+                  (candidate) => candidate.definition.id === uiMotionTarget,
+                );
+                if (index >= 0) draft.ui_motions[index] = file;
+              })
+            }
+            onRedo={redo}
+            onSave={() => void saveProject()}
+            onUndo={undo}
+          />
+        </Suspense>
         {error !== null && (
           <div className="error-toast" role="alert">
             <span>{error}</span>
@@ -848,28 +937,30 @@ export function App(): ReactElement {
     const previewKey = `${timelineTarget.sceneId}/${timelineTarget.nodeId}`;
     return (
       <>
-        <TimelineWorkspace
-          assets={project.assets}
-          dirty={dirty}
-          futureAvailable={future.length > 0}
-          node={timelineNode}
-          nodeId={timelineTarget.nodeId}
-          onBack={() => setTimelineTarget(null)}
-          onChange={(node) => changeNode(timelineTarget.nodeId, node)}
-          onError={setError}
-          onPreviewSettingsChange={(settings) =>
-            commit((draft) => {
-              draft.layout.timeline_previews ??= {};
-              draft.layout.timeline_previews[previewKey] = settings;
-            }, false)
-          }
-          onRedo={redo}
-          onSave={() => void saveProject()}
-          onUndo={undo}
-          project={project}
-          previewSettings={project.layout.timeline_previews?.[previewKey]}
-          sceneId={timelineTarget.sceneId}
-        />
+        <Suspense fallback={<WorkspaceFallback />}>
+          <TimelineWorkspace
+            assets={project.assets}
+            dirty={dirty}
+            futureAvailable={future.length > 0}
+            node={timelineNode}
+            nodeId={timelineTarget.nodeId}
+            onBack={() => setTimelineTarget(null)}
+            onChange={(node) => changeNode(timelineTarget.nodeId, node)}
+            onError={setError}
+            onPreviewSettingsChange={(settings) =>
+              commit((draft) => {
+                draft.layout.timeline_previews ??= {};
+                draft.layout.timeline_previews[previewKey] = settings;
+              }, false)
+            }
+            onRedo={redo}
+            onSave={() => void saveProject()}
+            onUndo={undo}
+            project={project}
+            previewSettings={project.layout.timeline_previews?.[previewKey]}
+            sceneId={timelineTarget.sceneId}
+          />
+        </Suspense>
         {error !== null && (
           <div className="error-toast" role="alert">
             <span>{error}</span>
@@ -1017,10 +1108,7 @@ export function App(): ReactElement {
             !window.confirm("重命名场景会更改文件路径并影响既有存档。继续吗？")
           )
             return;
-          setPast((items) => [...items.slice(-99), cloneProject(project)]);
-          setFuture([]);
-          setProject(renameScene(project, previousId, nextId));
-          setDirty(true);
+          commit(() => renameScene(project, previousId, nextId));
           setActiveSceneId(nextId);
         }}
         onRenameVariable={(previousId, nextId) => {
@@ -1031,10 +1119,7 @@ export function App(): ReactElement {
             setError("新变量 ID 非法或已经存在。");
             return;
           }
-          setPast((items) => [...items.slice(-99), cloneProject(project)]);
-          setFuture([]);
-          setProject(renameVariable(project, previousId, nextId));
-          setDirty(true);
+          commit(() => renameVariable(project, previousId, nextId));
         }}
         onAddCharacter={(id, definition) =>
           commit((draft) => {
@@ -1064,10 +1149,7 @@ export function App(): ReactElement {
             setError("新角色 ID 非法或已经存在。");
             return;
           }
-          setPast((items) => [...items.slice(-99), cloneProject(project)]);
-          setFuture([]);
-          setProject(renameCharacter(project, previousId, nextId));
-          setDirty(true);
+          commit(() => renameCharacter(project, previousId, nextId));
         }}
         onCreateUiMotion={createUiMotion}
         onEditUiMotion={setUiMotionTarget}
@@ -1177,11 +1259,10 @@ export function App(): ReactElement {
               setError("新节点 ID 非法或已经存在。");
               return;
             }
-            setPast((items) => [...items.slice(-99), cloneProject(project)]);
-            setFuture([]);
-            setProject(renameNode(project, activeSceneId, previousId, nextId));
+            commit(() =>
+              renameNode(project, activeSceneId, previousId, nextId),
+            );
             setSelectedNodeId(nextId);
-            setDirty(true);
           }}
           onSetEntry={(nodeId) =>
             commit((draft) => {
@@ -1205,4 +1286,20 @@ export function App(): ReactElement {
       {notice !== null && <div className="notice-toast">{notice}</div>}
     </main>
   );
+}
+
+function contentDocumentFingerprint(project: EditorProject): string {
+  return JSON.stringify({
+    manifest: project.manifest,
+    scenes: project.scenes,
+    ui_motions: project.ui_motions,
+    story_flow: project.story_flow,
+  });
+}
+
+function samePatchTargets(left: Patch[], right: Patch[]): boolean {
+  if (left.length === 0 || right.length === 0) return false;
+  const targets = (patches: Patch[]): string[] =>
+    patches.map((patch) => JSON.stringify(patch.path)).sort();
+  return JSON.stringify(targets(left)) === JSON.stringify(targets(right));
 }

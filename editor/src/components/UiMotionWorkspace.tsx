@@ -17,7 +17,7 @@ import type {
   UiMotionPreset,
   UiMotionTarget,
 } from "../types";
-import { UiMotionHost } from "../../../src/engine/uiMotion";
+import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import { MarkupPreview } from "./MarkupPreview";
 
 const TARGET_LABELS: Record<UiMotionTarget, string> = {

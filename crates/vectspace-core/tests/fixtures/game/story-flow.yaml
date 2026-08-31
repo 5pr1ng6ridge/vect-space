@@ -17,3 +17,4 @@ edges:
   from: prologue
   to: test_scene
   label: 后续章节
+

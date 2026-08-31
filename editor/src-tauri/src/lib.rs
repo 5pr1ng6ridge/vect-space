@@ -4,6 +4,7 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -12,13 +13,16 @@ use tauri::{AppHandle, Manager, State};
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AssetKind, ChoiceSnapshot, ContentManifest, ResolvedAsset, RuntimeSnapshot, RuntimeUpdate,
-        SceneDefinition, SceneNode, StoryFlowDefinition, StoryLocation, TimelineEvent,
-        TimelineTrack, UiMotionPreset, VariableMap,
+        AssetKind, ChoiceSnapshot, ContentManifest, ResolvedAsset, SceneDefinition, SceneNode,
+        StoryFlowDefinition, StoryLocation, TimelineEvent, TimelineTrack, UiMotionPreset,
+        VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
     },
+};
+use vectspace_protocol::{
+    variable_map_from_wire, WireRuntimeSnapshot, WireRuntimeUpdate, WireVariableMap,
 };
 
 const LAYOUT_RELATIVE_PATH: &str = ".vectspace/layout-v1.json";
@@ -139,7 +143,7 @@ struct TimelinePreviewRequest {
     project: SaveProjectRequest,
     target: StoryLocation,
     #[serde(default)]
-    variable_overrides: VariableMap,
+    variable_overrides: WireVariableMap,
     #[serde(default)]
     choices: Vec<PreviewChoiceDecision>,
 }
@@ -155,8 +159,8 @@ enum TimelinePreviewResult {
         trace: Vec<StoryLocation>,
     },
     Ready {
-        start_snapshot: RuntimeSnapshot,
-        update: RuntimeUpdate,
+        start_snapshot: WireRuntimeSnapshot,
+        update: WireRuntimeUpdate,
         trace: Vec<StoryLocation>,
     },
     Unreachable {
@@ -279,8 +283,8 @@ fn save_project(
     )
     .map_err(display_error)?;
 
-    let writes = serialize_project(&session.root, &request)?;
-    atomic_write_batch(&writes).map_err(display_error)?;
+    let writes = retain_changed_writes(serialize_project(&session.root, &request)?);
+    atomic_write_batch(&session.root, &writes).map_err(display_error)?;
 
     let fingerprint =
         project_fingerprint(&session.root, &request.manifest).map_err(display_error)?;
@@ -414,7 +418,9 @@ fn build_timeline_preview(
             choice_id: choice.choice_id.clone(),
         })
         .collect::<Vec<_>>();
-    let mut runtime = RuntimeEngine::with_preview_overrides(&catalog, &request.variable_overrides)
+    let variable_overrides =
+        variable_map_from_wire(request.variable_overrides).map_err(display_error)?;
+    let mut runtime = RuntimeEngine::with_preview_overrides(&catalog, &variable_overrides)
         .map_err(display_error)?;
     match runtime.preview_to(&catalog, &request.target, &decisions) {
         Ok(PreviewRunResult::NeedsChoice {
@@ -436,8 +442,8 @@ fn build_timeline_preview(
                 .preview_execute_current(&catalog)
                 .map_err(display_error)?;
             Ok(TimelinePreviewResult::Ready {
-                start_snapshot,
-                update,
+                start_snapshot: start_snapshot.into(),
+                update: update.into(),
                 trace,
             })
         }
@@ -632,7 +638,20 @@ fn yaml_bytes(value: &impl Serialize) -> Result<Vec<u8>, String> {
     Ok(text.into_bytes())
 }
 
-fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<(), std::io::Error> {
+fn retain_changed_writes(writes: Vec<(PathBuf, Vec<u8>)>) -> Vec<(PathBuf, Vec<u8>)> {
+    writes
+        .into_iter()
+        .filter(|(path, bytes)| match fs::read(path) {
+            Ok(existing) => existing != *bytes,
+            Err(_) => true,
+        })
+        .collect()
+}
+
+fn atomic_write_batch(root: &Path, writes: &[(PathBuf, Vec<u8>)]) -> Result<(), std::io::Error> {
+    if writes.is_empty() {
+        return Ok(());
+    }
     #[derive(Debug)]
     struct Prepared {
         target: PathBuf,
@@ -640,19 +659,38 @@ fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<(), std::io::Erro
         backup: PathBuf,
         existed: bool,
     }
-
+    let save_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string();
+    let metadata_root = root.join(".vectspace");
+    let temporary_root = metadata_root.join("tmp").join(&save_id);
+    let backup_root = metadata_root.join("backups").join(&save_id);
     let mut prepared = Vec::with_capacity(writes.len());
     for (target, bytes) in writes {
+        let relative = target.strip_prefix(root).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("保存目标不在项目目录内: {}", target.display()),
+            )
+        })?;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let temporary = sidecar_path(target, "vectspace.tmp");
-        let backup = sidecar_path(target, "vectspace.bak");
+        let temporary = temporary_root.join(relative);
+        let backup = backup_root.join(relative);
+        if let Some(parent) = temporary.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let mut file = File::create(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         let existed = target.exists();
         if existed {
+            if let Some(parent) = backup.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::copy(target, &backup)?;
         }
         prepared.push(Prepared {
@@ -683,18 +721,29 @@ fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<(), std::io::Erro
                     let _ = fs::remove_file(&cleanup.temporary);
                 }
             }
+            let _ = fs::remove_dir_all(&temporary_root);
             return Err(error);
         }
     }
+    let _ = fs::remove_dir_all(&temporary_root);
+    prune_backup_generations(&metadata_root.join("backups"), 10)?;
     Ok(())
 }
 
-fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(|value| value.to_string_lossy())
-        .unwrap_or_default();
-    path.with_file_name(format!("{file_name}.{suffix}"))
+fn prune_backup_generations(root: &Path, retain: usize) -> Result<(), std::io::Error> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut generations = fs::read_dir(root)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .collect::<Vec<_>>();
+    generations.sort_by_key(std::fs::DirEntry::file_name);
+    let remove_count = generations.len().saturating_sub(retain);
+    for generation in generations.into_iter().take(remove_count) {
+        fs::remove_dir_all(generation.path())?;
+    }
+    Ok(())
 }
 
 fn project_fingerprint(root: &Path, manifest: &ContentManifest) -> Result<String, std::io::Error> {
@@ -1159,16 +1208,36 @@ mod tests {
         let first = directory.path().join("first.yaml");
         let second = directory.path().join("nested/second.yaml");
         fs::write(&first, b"old").unwrap();
-        atomic_write_batch(&[
-            (first.clone(), b"new first".to_vec()),
-            (second.clone(), b"new second".to_vec()),
-        ])
+        atomic_write_batch(
+            directory.path(),
+            &[
+                (first.clone(), b"new first".to_vec()),
+                (second.clone(), b"new second".to_vec()),
+            ],
+        )
         .unwrap();
         assert_eq!(fs::read(&first).unwrap(), b"new first");
         assert_eq!(fs::read(&second).unwrap(), b"new second");
+        let backups = directory.path().join(".vectspace/backups");
+        let generation = fs::read_dir(backups).unwrap().next().unwrap().unwrap();
         assert_eq!(
-            fs::read(sidecar_path(&first, "vectspace.bak")).unwrap(),
+            fs::read(generation.path().join("first.yaml")).unwrap(),
             b"old"
         );
+    }
+
+    #[test]
+    fn unchanged_documents_are_excluded_before_atomic_save() {
+        let directory = tempdir().unwrap();
+        let unchanged = directory.path().join("unchanged.yaml");
+        let changed = directory.path().join("changed.yaml");
+        fs::write(&unchanged, b"same").unwrap();
+        fs::write(&changed, b"old").unwrap();
+
+        let writes = retain_changed_writes(vec![
+            (unchanged, b"same".to_vec()),
+            (changed.clone(), b"new".to_vec()),
+        ]);
+        assert_eq!(writes, vec![(changed, b"new".to_vec())]);
     }
 }

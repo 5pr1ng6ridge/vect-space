@@ -1,3 +1,5 @@
+//! Safe variable interpolation for dialogue and choice text.
+
 use std::{fmt, ops::Range};
 
 use crate::model::{ScalarValue, VariableType};
@@ -227,7 +229,8 @@ mod tests {
     #[test]
     fn shared_conformance_corpus_matches() {
         let fixtures: Vec<ConformanceCase> =
-            serde_json::from_str(include_str!("../../fixtures/text-template-cases.json")).unwrap();
+            serde_json::from_str(include_str!("../../../fixtures/text-template-cases.json"))
+                .unwrap();
         for fixture in fixtures {
             let rendered = interpolate(&fixture.source, |id| {
                 fixture

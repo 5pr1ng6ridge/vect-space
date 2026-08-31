@@ -20,7 +20,8 @@ sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 thiserror = "2"
-vectspace-core = { path = "../../crates/vectspace-core" }
+vectspace-core.workspace = true
+vectspace-protocol.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.38.2"

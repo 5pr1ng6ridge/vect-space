@@ -1,14 +1,9 @@
-// The game remains the canonical home of these modules during the editor
-// extraction. Both binaries compile these exact source files, so YAML and
-// runtime semantics cannot silently drift apart.
-#[path = "../../../src-tauri/src/model.rs"]
-pub mod model;
+//! Pure VECTSPACE content and runtime core.
+//!
+//! Desktop hosts depend on this crate; the core never depends on Tauri or on
+//! either host's resource and persistence layout.
 
-#[path = "../../../src-tauri/src/content.rs"]
 pub mod content;
-
-#[path = "../../../src-tauri/src/runtime.rs"]
+pub mod model;
 pub mod runtime;
-
-#[path = "../../../src-tauri/src/text_template.rs"]
 pub mod text_template;

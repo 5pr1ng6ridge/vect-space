@@ -1,0 +1,12 @@
+{
+  "name": "@vectspace/presentation-core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./timeline": "./src/timeline.ts",
+    "./ledger": "./src/ledger.ts",
+    "./ui-motion": "./src/uiMotion.ts"
+  }
+}

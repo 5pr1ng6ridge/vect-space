@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{
+use vectspace_core::model::{
     DialogueHistoryEntry, ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary,
     ScalarValue, Settings, VariableDefinition, VariableMap, VariableScope, VariableType,
 };
@@ -16,6 +16,8 @@ const SAVE_SCHEMA_VERSION: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const PROFILE_SCHEMA_VERSION: u32 = 4;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
+const MAX_HISTORY_ENTRIES: usize = 500;
+const MAX_HISTORY_TEXT_BYTES: usize = 64 * 1024;
 const SLOT_IDS: [&str; 4] = ["auto", "1", "2", "3"];
 
 #[derive(Debug, Error)]
@@ -46,6 +48,8 @@ pub struct ProfileManager {
     path: PathBuf,
     content_version: String,
     definitions: std::collections::BTreeMap<String, VariableDefinition>,
+    valid_scenes: Option<std::collections::BTreeSet<String>>,
+    valid_locations: Option<std::collections::BTreeSet<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -184,10 +188,21 @@ impl SaveManager {
 }
 
 impl ProfileManager {
+    #[cfg(test)]
     pub fn new(
         root: PathBuf,
         variables: &std::collections::BTreeMap<String, VariableDefinition>,
         content_version: String,
+    ) -> Result<(Self, ProfileState), SaveError> {
+        Self::new_with_content(root, variables, content_version, None, None)
+    }
+
+    pub fn new_with_content(
+        root: PathBuf,
+        variables: &std::collections::BTreeMap<String, VariableDefinition>,
+        content_version: String,
+        valid_scenes: Option<std::collections::BTreeSet<String>>,
+        valid_locations: Option<std::collections::BTreeSet<String>>,
     ) -> Result<(Self, ProfileState), SaveError> {
         fs::create_dir_all(&root).map_err(|source| SaveError::Io {
             path: root.clone(),
@@ -202,6 +217,8 @@ impl ProfileManager {
             path: root.join("profile.json"),
             content_version,
             definitions,
+            valid_scenes,
+            valid_locations,
         };
         let values = manager.load_reconciled()?;
         Ok((manager, values))
@@ -228,6 +245,13 @@ impl ProfileManager {
         }) {
             return Err(SaveError::InvalidData(
                 "profile 包含无效已观看表现 ID".to_owned(),
+            ));
+        }
+        let mut normalized_metadata = state.clone();
+        self.reconcile_metadata(&mut normalized_metadata);
+        if normalized_metadata != *state {
+            return Err(SaveError::InvalidData(
+                "profile 历史或场景完成记录不是规范格式".to_owned(),
             ));
         }
         self.write(state)
@@ -325,6 +349,7 @@ impl ProfileManager {
             reconciled.completed_scenes.clear();
             rewrite = true;
         }
+        rewrite |= self.reconcile_metadata(&mut reconciled);
         if rewrite {
             eprintln!("profile 已按当前声明与内容版本调整，并保留上一版本备份");
             self.write(&reconciled)?;
@@ -341,6 +366,40 @@ impl ProfileManager {
             dialogue_history: Default::default(),
             completed_scenes: Default::default(),
         })
+    }
+
+    fn reconcile_metadata(&self, state: &mut ProfileState) -> bool {
+        let mut changed = reconcile_profile_metadata(state);
+        if let Some(valid_locations) = &self.valid_locations {
+            let before_read = state.read_dialogues.len();
+            let before_seen = state.seen_presentations.len();
+            let before_history = state.dialogue_history.len();
+            state
+                .read_dialogues
+                .retain(|location| valid_locations.contains(location));
+            state
+                .seen_presentations
+                .retain(|location| valid_locations.contains(location));
+            state
+                .dialogue_history
+                .retain(|entry| valid_locations.contains(&entry.prompt_id));
+            for (index, entry) in state.dialogue_history.iter_mut().enumerate() {
+                let next_id = index as u64 + 1;
+                changed |= entry.entry_id != next_id;
+                entry.entry_id = next_id;
+            }
+            changed |= before_read != state.read_dialogues.len()
+                || before_seen != state.seen_presentations.len()
+                || before_history != state.dialogue_history.len();
+        }
+        if let Some(valid_scenes) = &self.valid_scenes {
+            let before = state.completed_scenes.len();
+            state
+                .completed_scenes
+                .retain(|scene| valid_scenes.contains(scene));
+            changed |= before != state.completed_scenes.len();
+        }
+        changed
     }
 
     fn defaults(&self) -> Result<VariableMap, SaveError> {
@@ -397,6 +456,59 @@ impl ProfileManager {
         })?;
         Ok(())
     }
+}
+
+fn reconcile_profile_metadata(state: &mut ProfileState) -> bool {
+    let before_history = state.dialogue_history.clone();
+    let before_scenes = state.completed_scenes.clone();
+    state.dialogue_history.retain(valid_history_entry);
+    if state.dialogue_history.len() > MAX_HISTORY_ENTRIES {
+        state
+            .dialogue_history
+            .drain(..state.dialogue_history.len() - MAX_HISTORY_ENTRIES);
+    }
+    for (index, entry) in state.dialogue_history.iter_mut().enumerate() {
+        entry.entry_id = index as u64 + 1;
+    }
+    state
+        .completed_scenes
+        .retain(|scene_id| valid_identifier(scene_id));
+    state.dialogue_history != before_history || state.completed_scenes != before_scenes
+}
+
+fn valid_history_entry(entry: &DialogueHistoryEntry) -> bool {
+    valid_story_location(&entry.prompt_id)
+        && entry.text.len() <= MAX_HISTORY_TEXT_BYTES
+        && entry.speaker_id.as_deref().is_none_or(valid_identifier)
+        && entry.speaker.as_deref().is_none_or(valid_display_name)
+        && entry.name_color.as_deref().is_none_or(valid_color)
+        && entry.text_color.as_deref().is_none_or(valid_color)
+}
+
+fn valid_story_location(value: &str) -> bool {
+    value
+        .split_once('/')
+        .is_some_and(|(scene, node)| valid_identifier(scene) && valid_identifier(node))
+}
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+}
+
+fn valid_display_name(value: &str) -> bool {
+    !value.trim().is_empty() && value.chars().count() <= 64 && !value.chars().any(char::is_control)
+}
+
+fn valid_color(value: &str) -> bool {
+    matches!(value.len(), 7 | 9)
+        && value.starts_with('#')
+        && value[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 fn normalize_profile_value(value: &ScalarValue, expected: VariableType) -> Option<ScalarValue> {
@@ -605,7 +717,10 @@ mod tests {
             "text_speed_cps": 30.0
         }))
         .unwrap();
-        assert_eq!(settings.skip_mode, crate::model::SkipMode::ReadOnly);
+        assert_eq!(
+            settings.skip_mode,
+            vectspace_core::model::SkipMode::ReadOnly
+        );
         assert_eq!(settings.video_volume, 1.0);
     }
 
@@ -689,6 +804,97 @@ mod tests {
             .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
         fs::remove_dir_all(directory.path()).unwrap();
         assert!(manager.save(&values).is_err());
+    }
+
+    #[test]
+    fn profile_history_is_bounded_validated_and_renumbered_on_load() {
+        let directory = tempdir().unwrap();
+        let mut history = (0..505)
+            .map(|index| DialogueHistoryEntry {
+                entry_id: 7,
+                prompt_id: format!("prologue/line_{index}"),
+                speaker_id: None,
+                speaker: None,
+                name_color: None,
+                text_color: None,
+                text: format!("line {index}"),
+            })
+            .collect::<Vec<_>>();
+        history.push(DialogueHistoryEntry {
+            entry_id: 8,
+            prompt_id: "invalid".to_owned(),
+            speaker_id: None,
+            speaker: None,
+            name_color: None,
+            text_color: None,
+            text: "discard me".to_owned(),
+        });
+        fs::write(
+            directory.path().join("profile.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 4,
+                "variables": {},
+                "read_content_version": "demo-2",
+                "read_dialogues": [],
+                "seen_presentations": [],
+                "dialogue_history": history,
+                "completed_scenes": ["prologue", "../invalid"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (_, state) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &std::collections::BTreeMap::new(),
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(state.dialogue_history.len(), MAX_HISTORY_ENTRIES);
+        assert_eq!(state.dialogue_history.first().unwrap().entry_id, 1);
+        assert_eq!(state.dialogue_history.last().unwrap().entry_id, 500);
+        assert_eq!(
+            state.completed_scenes,
+            std::collections::BTreeSet::from(["prologue".to_owned()])
+        );
+    }
+
+    #[test]
+    fn profile_reconciliation_drops_locations_removed_from_current_content() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("profile.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 4,
+                "variables": {},
+                "read_content_version": "demo-2",
+                "read_dialogues": ["prologue/kept", "removed/line"],
+                "seen_presentations": ["prologue/kept", "prologue/removed"],
+                "dialogue_history": [
+                    {"entry_id": 9, "prompt_id": "removed/line", "speaker": null, "text": "old"},
+                    {"entry_id": 11, "prompt_id": "prologue/kept", "speaker": null, "text": "kept"}
+                ],
+                "completed_scenes": ["prologue", "removed"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (_, state) = ProfileManager::new_with_content(
+            directory.path().to_path_buf(),
+            &std::collections::BTreeMap::new(),
+            "demo-2".to_owned(),
+            Some(std::collections::BTreeSet::from(["prologue".to_owned()])),
+            Some(std::collections::BTreeSet::from([
+                "prologue/kept".to_owned()
+            ])),
+        )
+        .unwrap();
+        assert_eq!(state.read_dialogues.len(), 1);
+        assert_eq!(state.seen_presentations.len(), 1);
+        assert_eq!(state.dialogue_history.len(), 1);
+        assert_eq!(state.dialogue_history[0].entry_id, 1);
+        assert_eq!(state.completed_scenes.len(), 1);
     }
 
     #[test]

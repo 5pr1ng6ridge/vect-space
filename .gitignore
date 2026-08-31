@@ -14,8 +14,15 @@ dist-ssr
 *.tsbuildinfo
 
 # Rust build output and generated application schemas
+target
 src-tauri/target
 editor/src-tauri/target
+
+# Story editor recovery data is local and must never become game content.
+game/.vectspace/backups/
+game/.vectspace/tmp/
+*.vectspace.bak
+*.vectspace.tmp
 
 # Editor directories and files
 .vscode/*

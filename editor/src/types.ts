@@ -445,7 +445,7 @@ export type PromptSnapshot =
 export interface RuntimeSnapshot {
   revision: number;
   location: StoryLocation;
-  variables: Record<string, ScalarValue>;
+  variables: Record<string, WireScalarValue>;
   world: {
     background: string | null;
     sprites: Record<string, SpriteSnapshot>;
@@ -517,3 +517,4 @@ export interface ImportedAsset {
   path: string;
   absolute_path: string;
 }
+import type { WireScalarValue } from "../../shared/generated/WireScalarValue";

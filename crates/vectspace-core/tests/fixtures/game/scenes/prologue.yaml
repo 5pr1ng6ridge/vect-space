@@ -162,7 +162,7 @@ nodes:
     duration_ms: 650
     easing: ease_in_out
     await: true
-    next: wait_move_jelly
+    next: sprite_move_jelly
   route_branch:
     type: condition
     condition:
@@ -505,7 +505,4 @@ nodes:
           easing: step
     events: []
     next: mark_ending
-  wait_move_jelly:
-    type: wait
-    duration_ms: 5000
-    next: sprite_move_jelly
+

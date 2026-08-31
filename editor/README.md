@@ -39,22 +39,26 @@ editor/src-tauri/target/release/bundle/nsis/
 ## 使用方式
 
 1. 选择仓库根目录或包含 `manifest.yaml` 的 `game/` 目录。
-2. 在左侧切换场景、素材或项目设置。
+2. 在左侧切换场景、素材、项目设置或问题列表。
 3. 从节点右侧端口拖线到目标节点。连线会直接修改 YAML 的跳转字段。
-4. 在右侧检查器编辑所选节点。所有 14 种运行时节点均有类型化表单，
+4. 在右侧检查器编辑所选节点。所有当前运行时节点均有类型化表单，
    `condition` 与条件选项使用可递归的条件构建器。
 5. 在“项目”页声明 `save` / `profile` 变量、类型和默认值。
 6. 使用左侧“问题”标签修复错误，再保存项目；点击问题可直接定位场景和节点。
 7. 双击时间线节点进入独占工作区。工作区会通过真实 Rust RuntimeEngine 从项目入口
    构造进入状态，并复用游戏的 Pixi、视频、音频和特效预览；预览路径只保存在
    `.vectspace/layout-v1.json`，不会写入剧情 YAML 或玩家进度。
+8. 顶栏“总流程”进入独占流程工作区；节点坐标吸附到 20px 网格，并直接对应游戏
+   1920×1080 流程页面的世界坐标。流程连接不会从剧情 Jump 自动生成。
 
 ## 文件与安全行为
 
 - YAML 使用游戏本身的 Rust 数据类型、严格解析器和跨引用校验器。
 - 保存前先验证完整候选项目，不会将已知无效的内容写入磁盘。
 - 保存检查打开项目时的 SHA-256 指纹，防止覆盖外部编辑。
-- 多文件保存先写相邻临时文件；旧文件保留为 `*.vectspace.bak`。
+- 只序列化并替换字节实际变化的文档。
+- 多文件保存先写入 `.vectspace/tmp/<save-id>/`；旧文件按相对路径备份到
+  `.vectspace/backups/<save-id>/`，最多保留最近 10 代。这两类恢复数据均被 Git 忽略。
 - 节点位置和画布视口写入 `game/.vectspace/layout-v1.json`，不污染剧情 YAML。
 - 删除场景或素材登记不会删除原素材/YAML 文件，以便恢复。
 - 第一次由可视化编辑器保存时，YAML 会被规范化输出，原注释和手工格式不会保留；
@@ -72,5 +76,5 @@ editor/src-tauri/target/release/bundle/nsis/
 ```powershell
 npm --prefix editor test
 npm --prefix editor run build
-cargo test --manifest-path editor/src-tauri/Cargo.toml
+cargo test --workspace
 ```

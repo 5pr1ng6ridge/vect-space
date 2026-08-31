@@ -10,6 +10,7 @@ import {
 } from "pixi.js";
 
 import { AudioManager } from "./audio";
+import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import type {
   AssetUrlMap,
   CameraSnapshot,
@@ -29,8 +30,7 @@ import { UiMotionHost } from "./uiMotion";
 import { advanceVirtualElapsed } from "./virtualClock";
 import { DESIGN_HEIGHT, DESIGN_WIDTH } from "../viewport/viewport";
 
-const oneShotLedger = new Set<string>();
-const texturePromises = new Map<string, Promise<Texture>>();
+const MAX_SESSION_TEXTURES = 256;
 
 export class PresentationController {
   readonly #application = new Application();
@@ -42,6 +42,8 @@ export class PresentationController {
   readonly #canvas: HTMLCanvasElement;
   readonly #diagnostic: (message: string) => void;
   readonly #uiMotionHost: UiMotionHost;
+  readonly #oneShotLedger = new BoundedLedger<string>(4_096);
+  readonly #texturePromises = new Map<string, Promise<Texture>>();
   #background: Sprite | null = null;
   #camera: CameraSnapshot = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
   #generation = 0;
@@ -79,7 +81,7 @@ export class PresentationController {
       backgroundColor: 0x05070c,
       preference: "webgl",
       powerPreference: "high-performance",
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: false,
     });
     this.#world.sortableChildren = true;
     this.#backgrounds.zIndex = -1_000_000;
@@ -190,6 +192,9 @@ export class PresentationController {
 
   captureThumbnail(): string | null {
     try {
+      const source = this.#application.renderer.extract.canvas(
+        this.#application.stage,
+      );
       const thumbnail = document.createElement("canvas");
       thumbnail.width = 320;
       thumbnail.height = 180;
@@ -197,7 +202,7 @@ export class PresentationController {
       if (context === null) {
         return null;
       }
-      context.drawImage(this.#canvas, 0, 0, 320, 180);
+      context.drawImage(source as CanvasImageSource, 0, 0, 320, 180);
       return thumbnail.toDataURL("image/png", 0.86);
     } catch (error) {
       console.error("Could not capture save thumbnail", error);
@@ -209,6 +214,13 @@ export class PresentationController {
     this.#abort.abort();
     this.#audio.destroy();
     this.#application.destroy({ removeView: false }, { children: true });
+    for (const texture of this.#texturePromises.values()) {
+      void texture
+        .then((resolved) => resolved.destroy(true))
+        .catch(() => undefined);
+    }
+    this.#texturePromises.clear();
+    this.#oneShotLedger.clear();
   }
 
   async #executeCue(
@@ -248,18 +260,14 @@ export class PresentationController {
         await this.#screenEffect(cue.effect, cue.duration_ms, signal);
         break;
       case "play_sfx":
-        if (!oneShotLedger.has(key)) {
-          oneShotLedger.add(key);
-          trimLedger();
+        if (this.#oneShotLedger.consume(key)) {
           if (!this.#suppressOneShots) {
             await this.#audio.playSfx(cue.asset, cue.volume, assets);
           }
         }
         break;
       case "bgm_transition":
-        if (!oneShotLedger.has(key)) {
-          oneShotLedger.add(key);
-          trimLedger();
+        if (this.#oneShotLedger.consume(key)) {
           await this.#audio.transitionBgm(
             cue.to,
             cue.duration_ms,
@@ -851,9 +859,7 @@ export class PresentationController {
     signal: AbortSignal,
   ): void {
     const key = `timeline:${cueId}:${event.id}`;
-    if (oneShotLedger.has(key)) return;
-    oneShotLedger.add(key);
-    trimLedger();
+    if (!this.#oneShotLedger.consume(key)) return;
     if (event.type === "sfx") {
       if (!this.#suppressOneShots) {
         void this.#audio
@@ -953,7 +959,7 @@ export class PresentationController {
 
   async #makeBackground(asset: string, assets: AssetUrlMap): Promise<Sprite> {
     const url = requireAssetUrl(assets, asset);
-    const texture = await loadTexture(url);
+    const texture = await this.#loadTexture(url);
     const sprite = new Sprite(texture);
     sprite.label = url;
     const scale = Math.max(
@@ -973,7 +979,7 @@ export class PresentationController {
     assets: AssetUrlMap,
   ): Promise<Sprite> {
     const url = requireAssetUrl(assets, state.asset);
-    const texture = await loadTexture(url);
+    const texture = await this.#loadTexture(url);
     const sprite = new Sprite(texture);
     sprite.anchor.set(0.5, 1);
     sprite.label = url;
@@ -1014,6 +1020,31 @@ export class PresentationController {
       signal,
       () => (this.#paused ? 0 : this.#playbackRate),
     );
+  }
+
+  #loadTexture(url: string): Promise<Texture> {
+    const existing = this.#texturePromises.get(url);
+    if (existing !== undefined) return existing;
+    if (this.#texturePromises.size >= MAX_SESSION_TEXTURES) {
+      return Promise.reject(
+        new Error(`单次游戏会话纹理数量超过 ${MAX_SESSION_TEXTURES} 个`),
+      );
+    }
+    const loading = withTimeout(
+      new Promise<Texture>((resolve, reject) => {
+        const image = new Image();
+        image.crossOrigin = "anonymous";
+        image.decoding = "async";
+        image.onload = () => resolve(Texture.from(image));
+        image.onerror = () => reject(new Error(`图像解码失败: ${url}`));
+        image.src = url;
+      }),
+      8_000,
+      `图像加载超时: ${url}`,
+    );
+    this.#texturePromises.set(url, loading);
+    void loading.catch(() => this.#texturePromises.delete(url));
+    return loading;
   }
 }
 
@@ -1240,42 +1271,8 @@ function mix(from: number, to: number, progress: number): number {
   return from + (to - from) * progress;
 }
 
-function trimLedger(): void {
-  if (oneShotLedger.size <= 10_000) {
-    return;
-  }
-  for (const key of oneShotLedger) {
-    oneShotLedger.delete(key);
-    if (oneShotLedger.size <= 5_000) {
-      break;
-    }
-  }
-}
-
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
-}
-
-function loadTexture(url: string): Promise<Texture> {
-  const existing = texturePromises.get(url);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const loading = withTimeout(
-    new Promise<Texture>((resolve, reject) => {
-      const image = new Image();
-      image.crossOrigin = "anonymous";
-      image.decoding = "async";
-      image.onload = () => resolve(Texture.from(image));
-      image.onerror = () => reject(new Error(`图像解码失败: ${url}`));
-      image.src = url;
-    }),
-    8_000,
-    `图像加载超时: ${url}`,
-  );
-  texturePromises.set(url, loading);
-  loading.catch(() => texturePromises.delete(url));
-  return loading;
 }
 
 function withTimeout<T>(

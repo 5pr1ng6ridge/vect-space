@@ -11,3 +11,8 @@ when replacing or redistributing them.
   `gui/nameboxtest.png`, and `audio/sfx_typing.wav` are project sample assets.
   Their redistribution status must be confirmed by the project owner before a
   public release.
+- `audio/test_bgm.ogg`, `videos/test_movie.mp4`,
+  `backgrounds/Photoshop_3a52oGnGn0.png`, and `sprites/omo.png` are development
+  samples whose ownership and redistribution terms have not yet been recorded.
+  They must not be included in a public distribution until the project owner
+  supplies that information or replaces them with licensed assets.

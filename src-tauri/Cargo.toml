@@ -24,6 +24,8 @@ serde_json = "1"
 serde-saphyr = "1"
 tauri = { version = "2", features = ["protocol-asset"] }
 thiserror = "2"
+vectspace-core.workspace = true
+vectspace-protocol.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

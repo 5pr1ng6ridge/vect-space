@@ -5,7 +5,6 @@ use std::{
 };
 
 use schemars::schema_for;
-use tauri::{path::BaseDirectory, App, Manager};
 use thiserror::Error;
 
 use crate::model::{
@@ -38,8 +37,6 @@ pub enum ContentError {
     Yaml { path: PathBuf, message: String },
     #[error("内容校验失败: {0}")]
     Validation(String),
-    #[error("无法定位应用资源: {0}")]
-    Resource(String),
 }
 
 #[derive(Debug)]
@@ -52,18 +49,6 @@ pub struct ContentCatalog {
 }
 
 impl ContentCatalog {
-    pub fn load_for_app(app: &App) -> Result<Self, ContentError> {
-        let root = if cfg!(debug_assertions) {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game")
-        } else {
-            app.path()
-                .resolve("game", BaseDirectory::Resource)
-                .map_err(|error| ContentError::Resource(error.to_string()))?
-        };
-
-        Self::from_root(root)
-    }
-
     pub fn from_root(root: PathBuf) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
         let manifest_path = root.join("manifest.yaml");
@@ -242,13 +227,9 @@ impl ContentCatalog {
         Ok(resolved)
     }
 
-    pub fn write_development_schemas(&self) -> Result<(), ContentError> {
-        if !cfg!(debug_assertions) {
-            return Ok(());
-        }
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gen/content-schemas");
-        fs::create_dir_all(&target).map_err(|source| ContentError::Read {
-            path: target.clone(),
+    pub fn write_schemas(&self, target: &Path) -> Result<(), ContentError> {
+        fs::create_dir_all(target).map_err(|source| ContentError::Read {
+            path: target.to_path_buf(),
             source,
         })?;
         write_schema(
@@ -1530,10 +1511,23 @@ mod tests {
 
     #[test]
     fn generated_development_schemas_are_current() {
-        let catalog =
-            ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
-                .unwrap();
-        catalog.write_development_schemas().unwrap();
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let catalog = ContentCatalog::from_root(crate_root.join("tests/fixtures/game")).unwrap();
+        let generated = tempfile::tempdir().unwrap();
+        catalog.write_schemas(generated.path()).unwrap();
+        let checked_in = crate_root.join("../../src-tauri/gen/content-schemas");
+        for name in [
+            "manifest.schema.json",
+            "scene.schema.json",
+            "story-flow.schema.json",
+            "ui-motion.schema.json",
+        ] {
+            assert_eq!(
+                fs::read(generated.path().join(name)).unwrap(),
+                fs::read(checked_in.join(name)).unwrap(),
+                "generated schema is stale: {name}"
+            );
+        }
     }
 
     #[test]

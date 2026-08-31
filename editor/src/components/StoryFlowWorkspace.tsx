@@ -5,6 +5,7 @@ import {
   MarkerType,
   ReactFlow,
   ReactFlowProvider,
+  type ReactFlowInstance,
   ViewportPortal,
   type Connection,
   type Edge,
@@ -31,9 +32,11 @@ export function StoryFlowWorkspace({
   sceneIds,
   flow,
   dirty,
+  initialSelectionId,
   onChange,
   onClose,
   onSave,
+  onValidate,
   onUndo,
   onRedo,
   undoAvailable,
@@ -43,9 +46,11 @@ export function StoryFlowWorkspace({
   sceneIds: string[];
   flow: StoryFlowDefinition;
   dirty: boolean;
+  initialSelectionId: string | null;
   onChange(flow: StoryFlowDefinition): void;
   onClose(): void;
   onSave(): void;
+  onValidate(): void;
   onUndo(): void;
   onRedo(): void;
   undoAvailable: boolean;
@@ -54,7 +59,17 @@ export function StoryFlowWorkspace({
   const [selected, setSelected] = useState<{
     kind: "node" | "edge";
     id: string;
-  } | null>(null);
+  } | null>(() => {
+    if (initialSelectionId === null) return null;
+    if (flow.nodes[initialSelectionId] !== undefined) {
+      return { kind: "node", id: initialSelectionId };
+    }
+    if (flow.edges.some((edge) => edge.id === initialSelectionId)) {
+      return { kind: "edge", id: initialSelectionId };
+    }
+    return null;
+  });
+  const [instance, setInstance] = useState<ReactFlowInstance | null>(null);
   const profileManifest = useMemo(
     () => ({
       ...projectManifest,
@@ -124,6 +139,10 @@ export function StoryFlowWorkspace({
         edge.id === id ? { ...edge, ...update } : edge,
       ),
     });
+  const renameEdge = (id: string, nextId: string): void => {
+    updateEdge(id, { id: nextId });
+    setSelected({ kind: "edge", id: nextId });
+  };
   const addScene = (id: string): void => {
     const index = Object.keys(flow.nodes).length;
     onChange({
@@ -184,6 +203,16 @@ export function StoryFlowWorkspace({
           重做
         </button>
         <button
+          disabled={instance === null}
+          onClick={() => void instance?.fitView({ padding: 0.18 })}
+          type="button"
+        >
+          适合画布
+        </button>
+        <button onClick={onValidate} type="button">
+          校验
+        </button>
+        <button
           className="primary-button"
           disabled={!dirty}
           onClick={onSave}
@@ -220,6 +249,7 @@ export function StoryFlowWorkspace({
               snapToGrid
               snapGrid={[GRID, GRID]}
               connectionLineType={ConnectionLineType.Straight}
+              onInit={setInstance}
               onConnect={connect}
               onNodeClick={(_, node) =>
                 setSelected({ kind: "node", id: node.id })
@@ -365,9 +395,21 @@ export function StoryFlowWorkspace({
                 >
                   <option value="completed">读完后揭示</option>
                   <option value="always">始终揭示</option>
-                  <option value="condition">变量条件</option>
+                  <option
+                    disabled={
+                      Object.keys(profileManifest.variables).length === 0
+                    }
+                    value="condition"
+                  >
+                    变量条件
+                  </option>
                 </select>
               </label>
+              {Object.keys(profileManifest.variables).length === 0 && (
+                <p className="flow-inspector-hint">
+                  项目没有 profile 变量，暂时不能创建条件揭示。
+                </p>
+              )}
               {selectedNode.reveal?.mode === "condition" &&
                 Object.keys(profileManifest.variables).length > 0 && (
                   <ConditionEditor
@@ -390,11 +432,43 @@ export function StoryFlowWorkspace({
                 <input
                   value={selectedEdge.id}
                   onChange={(event) =>
-                    updateEdge(selectedEdge.id, {
-                      id: event.currentTarget.value,
-                    })
+                    renameEdge(selectedEdge.id, event.currentTarget.value)
                   }
                 />
+              </label>
+              <label>
+                起点
+                <select
+                  value={selectedEdge.from}
+                  onChange={(event) =>
+                    updateEdge(selectedEdge.id, {
+                      from: event.currentTarget.value,
+                    })
+                  }
+                >
+                  {Object.keys(flow.nodes).map((id) => (
+                    <option key={id} value={id}>
+                      {id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                终点
+                <select
+                  value={selectedEdge.to}
+                  onChange={(event) =>
+                    updateEdge(selectedEdge.id, {
+                      to: event.currentTarget.value,
+                    })
+                  }
+                >
+                  {Object.keys(flow.nodes).map((id) => (
+                    <option key={id} value={id}>
+                      {id}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label>
                 标签

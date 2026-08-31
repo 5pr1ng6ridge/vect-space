@@ -1,0 +1,22 @@
+[workspace]
+members = [
+  "crates/vectspace-core",
+  "crates/vectspace-protocol",
+  "src-tauri",
+  "editor/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-saphyr = "1"
+thiserror = "2"
+ts-rs = { version = "12", features = ["serde-compat"] }
+vectspace-core = { path = "crates/vectspace-core" }
+vectspace-protocol = { path = "crates/vectspace-protocol" }

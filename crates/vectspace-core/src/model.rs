@@ -1,3 +1,5 @@
+//! Stable content, runtime and persistence models shared by both desktop hosts.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;

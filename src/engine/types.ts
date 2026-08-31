@@ -127,7 +127,7 @@ export type PromptSnapshot =
 export interface RuntimeSnapshot {
   revision: number;
   location: StoryLocation;
-  variables: Record<string, boolean | number | string>;
+  variables: Record<string, WireScalarValue>;
   world: WorldSnapshot;
   audio: AudioSnapshot;
   playback: PlaybackSnapshot;
@@ -334,3 +334,4 @@ export interface Settings {
   text_speed_cps: number;
   skip_mode: SkipMode;
 }
+import type { WireScalarValue } from "../../shared/generated/WireScalarValue";
