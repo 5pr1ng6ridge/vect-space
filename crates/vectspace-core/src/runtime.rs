@@ -5,12 +5,13 @@ use crate::{
     model::{
         AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
         ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueHistoryEntry,
-        DialogueMode, DialoguePageSnapshot, LoopingAudioSnapshot, MutationValue, PlaybackAutoMode,
-        PlaybackSnapshot, PresentationCue, PresentationCueKind, PresentationOutcome, ProfileState,
-        PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, SceneNode, SpriteAction,
-        SpriteSnapshot, StoryFlowReveal, StoryFlowSnapshot, StoryLocation, TimelineChannels,
-        TimelineTrack, UiMotionPreset, UiMotionSlot, ValueOperand, VariableMap, VariableOperation,
-        VariableScope, VariableType, WorldSnapshot,
+        DialogueMode, DialoguePageSnapshot, LongTextPageSnapshot, LongTextStepSnapshot,
+        LoopingAudioSnapshot, MutationValue, PlaybackAutoMode, PlaybackSnapshot, PresentationCue,
+        PresentationCueKind, PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot,
+        RuntimeUpdate, ScalarValue, SceneNode, SpriteAction, SpriteSnapshot, StoryFlowReveal,
+        StoryFlowSnapshot, StoryLocation, TimelineChannels, TimelineTrack, UiMotionPreset,
+        UiMotionSlot, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
+        WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
@@ -204,7 +205,7 @@ impl RuntimeEngine {
                     continue;
                 }
                 match &self.snapshot.prompt {
-                    PromptSnapshot::Dialogue { .. } => {
+                    PromptSnapshot::Dialogue { .. } | PromptSnapshot::LongText { .. } => {
                         let source = if self.snapshot.playback.auto == PlaybackAutoMode::Forced {
                             AdvanceSource::ForcedAuto
                         } else {
@@ -339,14 +340,94 @@ impl RuntimeEngine {
     ) -> Result<RuntimeUpdate, RuntimeError> {
         self.ensure_interactive(expected_revision)?;
         self.validate_advance_source(source)?;
-        let PromptSnapshot::Dialogue { prompt_id, .. } = &self.snapshot.prompt else {
+        let cues = match self.snapshot.prompt.clone() {
+            PromptSnapshot::Dialogue { prompt_id, .. } => {
+                self.read_dialogues.insert(prompt_id);
+                self.snapshot.prompt = PromptSnapshot::None;
+                self.run_until_boundary(content)?
+            }
+            PromptSnapshot::LongText {
+                prompt_id,
+                step_index,
+                ..
+            } => self.advance_long_text(content, prompt_id, step_index)?,
+            _ => return Err(RuntimeError::AdvanceNotAllowed),
+        };
+        Ok(self.finish_update(cues, true))
+    }
+
+    fn advance_long_text(
+        &mut self,
+        content: &ContentCatalog,
+        prompt_id: String,
+        step_index: u32,
+    ) -> Result<Vec<PresentationCue>, RuntimeError> {
+        self.read_dialogues.insert(prompt_id);
+        let scene_id = self.snapshot.location.scene_id.clone();
+        let node_id = self.snapshot.location.node_id.clone();
+        let scene = content
+            .scene(&scene_id)
+            .map_err(|error| RuntimeError::Content(error.to_string()))?;
+        let node =
+            scene.nodes.get(&node_id).cloned().ok_or_else(|| {
+                RuntimeError::Content(format!("节点不存在: {scene_id}/{node_id}"))
+            })?;
+        let SceneNode::LongText {
+            paper,
+            steps,
+            speed_cps,
+            next,
+        } = node
+        else {
             return Err(RuntimeError::AdvanceNotAllowed);
         };
-        let prompt_id = prompt_id.clone();
-        self.read_dialogues.insert(prompt_id);
+        let next_index = step_index
+            .checked_add(1)
+            .ok_or_else(|| RuntimeError::Content("长文本步骤索引溢出".to_owned()))?;
+        if let Some(step) = steps.get(next_index as usize) {
+            let text = self.interpolate_text(content, &step.text)?;
+            let document_id = format!("{scene_id}/{node_id}");
+            let mut page = self.snapshot.long_text_page.clone().ok_or_else(|| {
+                RuntimeError::Content(format!("{document_id}: 缺少长文本稳定页面"))
+            })?;
+            if page.document_id != document_id
+                || page.paper != paper
+                || page.active_step_index != step_index
+            {
+                return Err(RuntimeError::Content(format!(
+                    "{document_id}: 当前长文本稳定页面不一致"
+                )));
+            }
+            page.steps.push(LongTextStepSnapshot {
+                step_id: step.id.clone(),
+                text: text.clone(),
+                page_break_before: step.page_break_before,
+            });
+            page.active_step_index = next_index;
+            self.snapshot.long_text_page = Some(page);
+            let next_prompt_id = format!("{document_id}/{}", step.id);
+            self.append_history(next_prompt_id.clone(), None, None, None, None, text.clone());
+            self.snapshot.prompt = PromptSnapshot::LongText {
+                prompt_id: next_prompt_id.clone(),
+                document_id,
+                step_id: step.id.clone(),
+                step_index: next_index,
+                text,
+                is_read: self.read_dialogues.contains(&next_prompt_id),
+            };
+            return Ok(vec![self.cue(
+                CueGate::PlayerAdvance,
+                PresentationCueKind::LongTextReveal {
+                    prompt_id: next_prompt_id,
+                    speed_cps: speed_cps.unwrap_or(30.0),
+                },
+            )]);
+        }
+
+        self.snapshot.long_text_page = None;
         self.snapshot.prompt = PromptSnapshot::None;
-        let cues = self.run_until_boundary(content)?;
-        Ok(self.finish_update(cues, true))
+        self.snapshot.location.node_id = next;
+        self.run_until_boundary(content)
     }
 
     pub fn choose(
@@ -503,11 +584,16 @@ impl RuntimeEngine {
     ) -> Result<RuntimeUpdate, RuntimeError> {
         hydrate_legacy_dialogue_page(&mut snapshot);
         validate_snapshot(content, &snapshot)?;
-        if let PromptSnapshot::Dialogue {
-            prompt_id, is_read, ..
-        } = &mut snapshot.prompt
-        {
-            *is_read = self.read_dialogues.contains(prompt_id);
+        match &mut snapshot.prompt {
+            PromptSnapshot::Dialogue {
+                prompt_id, is_read, ..
+            }
+            | PromptSnapshot::LongText {
+                prompt_id, is_read, ..
+            } => {
+                *is_read = self.read_dialogues.contains(prompt_id);
+            }
+            _ => {}
         }
         snapshot.revision = self.snapshot.revision.saturating_add(1);
         self.snapshot = snapshot;
@@ -785,6 +871,49 @@ impl RuntimeEngine {
                     ));
                     return Ok(cues);
                 }
+                SceneNode::LongText {
+                    paper,
+                    steps,
+                    speed_cps,
+                    ..
+                } => {
+                    let step = steps.first().ok_or_else(|| {
+                        RuntimeError::Content(format!(
+                            "{scene_id}/{node_id}: 长文本没有可显示的步骤"
+                        ))
+                    })?;
+                    let text = self.interpolate_text(content, &step.text)?;
+                    let document_id = format!("{scene_id}/{node_id}");
+                    let prompt_id = format!("{document_id}/{}", step.id);
+                    self.snapshot.dialogue_page = None;
+                    self.snapshot.long_text_page = Some(LongTextPageSnapshot {
+                        document_id: document_id.clone(),
+                        paper,
+                        steps: vec![LongTextStepSnapshot {
+                            step_id: step.id.clone(),
+                            text: text.clone(),
+                            page_break_before: step.page_break_before,
+                        }],
+                        active_step_index: 0,
+                    });
+                    self.append_history(prompt_id.clone(), None, None, None, None, text.clone());
+                    self.snapshot.prompt = PromptSnapshot::LongText {
+                        prompt_id: prompt_id.clone(),
+                        document_id,
+                        step_id: step.id.clone(),
+                        step_index: 0,
+                        text,
+                        is_read: self.read_dialogues.contains(&prompt_id),
+                    };
+                    cues.push(self.cue(
+                        CueGate::PlayerAdvance,
+                        PresentationCueKind::LongTextReveal {
+                            prompt_id,
+                            speed_cps: speed_cps.unwrap_or(30.0),
+                        },
+                    ));
+                    return Ok(cues);
+                }
                 SceneNode::Choice { choices } => {
                     let prompt_id = format!("{scene_id}/{node_id}");
                     let mut visible_choices = Vec::new();
@@ -812,6 +941,7 @@ impl RuntimeEngine {
                         )));
                     }
                     self.snapshot.dialogue_page = None;
+                    self.snapshot.long_text_page = None;
                     self.snapshot.prompt = PromptSnapshot::Choice {
                         prompt_id,
                         choices: visible_choices,
@@ -1101,6 +1231,7 @@ impl RuntimeEngine {
                 SceneNode::End => {
                     self.completed_scenes.insert(scene_id.clone());
                     self.snapshot.dialogue_page = None;
+                    self.snapshot.long_text_page = None;
                     self.snapshot.prompt = PromptSnapshot::End {
                         prompt_id: format!("{scene_id}/{node_id}"),
                     };
@@ -1272,6 +1403,7 @@ impl RuntimeEngine {
         self.snapshot.world.camera = CameraSnapshot::default();
         self.snapshot.world.persistent_effects.clear();
         self.snapshot.dialogue_page = None;
+        self.snapshot.long_text_page = None;
     }
 
     fn finish_update(&mut self, cues: Vec<PresentationCue>, bump_revision: bool) -> RuntimeUpdate {
@@ -1709,6 +1841,7 @@ fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, Runtime
         audio: AudioSnapshot::default(),
         playback: PlaybackSnapshot::default(),
         dialogue_page: None,
+        long_text_page: None,
         prompt: PromptSnapshot::None,
     })
 }
@@ -1794,6 +1927,45 @@ fn validate_snapshot(
             "对话提示缺少稳定对话页".to_owned(),
         ));
     }
+    if let Some(page) = &snapshot.long_text_page {
+        if page.document_id.is_empty()
+            || page.steps.is_empty()
+            || page.active_step_index as usize >= page.steps.len()
+            || page
+                .steps
+                .iter()
+                .any(|step| step.step_id.is_empty() || step.text.trim().is_empty())
+        {
+            return Err(RuntimeError::InvalidSnapshot(
+                "长文本页面或步骤无效".to_owned(),
+            ));
+        }
+        if let PromptSnapshot::LongText {
+            prompt_id,
+            document_id,
+            step_id,
+            step_index,
+            text,
+            ..
+        } = &snapshot.prompt
+        {
+            let active = &page.steps[page.active_step_index as usize];
+            if &page.document_id != document_id
+                || page.active_step_index != *step_index
+                || active.step_id != *step_id
+                || active.text != *text
+                || prompt_id != &format!("{document_id}/{step_id}")
+            {
+                return Err(RuntimeError::InvalidSnapshot(
+                    "当前长文本提示与稳定长文本页面不一致".to_owned(),
+                ));
+            }
+        }
+    } else if matches!(snapshot.prompt, PromptSnapshot::LongText { .. }) {
+        return Err(RuntimeError::InvalidSnapshot(
+            "长文本提示缺少稳定长文本页面".to_owned(),
+        ));
+    }
     let scene = content
         .scene(&snapshot.location.scene_id)
         .map_err(|error| RuntimeError::InvalidSnapshot(error.to_string()))?;
@@ -1802,6 +1974,16 @@ fn validate_snapshot(
             "节点不存在: {}/{}",
             snapshot.location.scene_id, snapshot.location.node_id
         )));
+    }
+    if matches!(snapshot.prompt, PromptSnapshot::LongText { .. })
+        && !matches!(
+            scene.nodes.get(&snapshot.location.node_id),
+            Some(SceneNode::LongText { .. })
+        )
+    {
+        return Err(RuntimeError::InvalidSnapshot(
+            "长文本提示的位置不是 long_text 节点".to_owned(),
+        ));
     }
     let mut referenced_assets = Vec::new();
     if let Some(background) = &snapshot.world.background {
@@ -1816,6 +1998,13 @@ fn validate_snapshot(
     );
     if let Some(bgm) = &snapshot.audio.bgm {
         referenced_assets.push(bgm.asset.clone());
+    }
+    if let Some(paper) = snapshot
+        .long_text_page
+        .as_ref()
+        .and_then(|page| page.paper.clone())
+    {
+        referenced_assets.push(paper);
     }
     content
         .resolve_assets(&referenced_assets)
@@ -2438,6 +2627,112 @@ mod tests {
             panic!("expected dialogue prompt")
         };
         assert_eq!(page.segments, [text]);
+    }
+
+    #[test]
+    fn long_text_keeps_a_stable_paper_until_its_final_step() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "long_text_test".to_owned();
+        scene.nodes.insert(
+            "long_text_test".to_owned(),
+            SceneNode::LongText {
+                paper: None,
+                steps: vec![
+                    crate::model::LongTextStep {
+                        id: "definition".to_owned(),
+                        text: "设 $V$ 是一个向量空间。".to_owned(),
+                        page_break_before: false,
+                    },
+                    crate::model::LongTextStep {
+                        id: "consequence".to_owned(),
+                        text: "因此 $0\\in V$。".to_owned(),
+                        page_break_before: true,
+                    },
+                ],
+                speed_cps: Some(24.0),
+                next: "conclusion".to_owned(),
+            },
+        );
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_new_game(&content).unwrap();
+        let PromptSnapshot::LongText {
+            prompt_id,
+            step_id,
+            step_index,
+            is_read,
+            ..
+        } = &first.snapshot.prompt
+        else {
+            panic!("expected first long-text step")
+        };
+        assert_eq!(prompt_id, "prologue/long_text_test/definition");
+        assert_eq!(step_id, "definition");
+        assert_eq!(*step_index, 0);
+        assert!(!is_read);
+        assert_eq!(first.snapshot.location.node_id, "long_text_test");
+        assert_eq!(
+            first.snapshot.long_text_page.as_ref().unwrap().steps.len(),
+            1
+        );
+        assert!(first.cues.iter().any(|cue| matches!(
+            cue.kind,
+            PresentationCueKind::LongTextReveal { speed_cps, .. } if speed_cps == 24.0
+        )));
+
+        let second = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        let PromptSnapshot::LongText {
+            prompt_id,
+            step_id,
+            step_index,
+            ..
+        } = &second.snapshot.prompt
+        else {
+            panic!("expected second long-text step")
+        };
+        assert_eq!(prompt_id, "prologue/long_text_test/consequence");
+        assert_eq!(step_id, "consequence");
+        assert_eq!(*step_index, 1);
+        let page = second.snapshot.long_text_page.as_ref().unwrap();
+        assert_eq!(page.steps.len(), 2);
+        assert!(page.steps[1].page_break_before);
+        assert!(runtime
+            .read_dialogues
+            .contains("prologue/long_text_test/definition"));
+
+        let saved = second.snapshot.clone();
+        let profile = runtime.profile_state(&content);
+        let mut restored = RuntimeEngine::with_profile(&content, profile).unwrap();
+        let loaded = restored.load_snapshot(&content, saved).unwrap();
+        assert!(loaded.cues.is_empty());
+        assert!(!loaded.requires_ack);
+        assert!(matches!(
+            loaded.snapshot.prompt,
+            PromptSnapshot::LongText { is_read: false, .. }
+        ));
+
+        let completed = runtime
+            .advance(&content, second.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(completed.snapshot.long_text_page.is_none());
+        assert!(matches!(
+            completed.snapshot.prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        assert!(runtime
+            .read_dialogues
+            .contains("prologue/long_text_test/consequence"));
+        assert_eq!(
+            runtime
+                .dialogue_history()
+                .iter()
+                .filter(|entry| entry.prompt_id.starts_with("prologue/long_text_test/"))
+                .count(),
+            2
+        );
     }
 
     fn interactive_dialogue(content: &ContentCatalog) -> RuntimeEngine {

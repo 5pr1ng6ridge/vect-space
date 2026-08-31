@@ -305,6 +305,26 @@
         "value"
       ]
     },
+    "LongTextStep": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "page_break_before": {
+          "type": "boolean",
+          "default": false
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text"
+      ]
+    },
     "MutationValue": {
       "anyOf": [
         {
@@ -537,6 +557,45 @@
           "required": [
             "type",
             "text",
+            "next"
+          ]
+        },
+        {
+          "description": "A sequence of explanatory text blocks rendered on a vertically flowing\npaper surface. Unlike `say`, the runtime stays on this node until its\nfinal step has been advanced, so every step is revision-safe and can be\nsaved independently.",
+          "type": "object",
+          "properties": {
+            "next": {
+              "type": "string"
+            },
+            "paper": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "speed_cps": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LongTextStep"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "long_text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "steps",
             "next"
           ]
         },

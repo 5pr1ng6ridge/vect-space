@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
 use vectspace_core::model::{
-    AudioSnapshot, BootstrapPayload, DialoguePageSnapshot, PlaybackSnapshot, PresentationCue,
-    PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, StoryLocation, WorldSnapshot,
+    AudioSnapshot, BootstrapPayload, DialoguePageSnapshot, LongTextPageSnapshot, PlaybackSnapshot,
+    PresentationCue, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, StoryLocation,
+    WorldSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -32,6 +33,8 @@ pub struct WireRuntimeSnapshot {
     pub playback: PlaybackSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialogue_page: Option<DialoguePageSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long_text_page: Option<LongTextPageSnapshot>,
     pub prompt: PromptSnapshot,
 }
 
@@ -98,6 +101,7 @@ impl From<RuntimeSnapshot> for WireRuntimeSnapshot {
             audio: snapshot.audio,
             playback: snapshot.playback,
             dialogue_page: snapshot.dialogue_page,
+            long_text_page: snapshot.long_text_page,
             prompt: snapshot.prompt,
         }
     }

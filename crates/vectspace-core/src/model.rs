@@ -381,6 +381,18 @@ pub enum SceneNode {
         speed_cps: Option<f32>,
         next: String,
     },
+    /// A sequence of explanatory text blocks rendered on a vertically flowing
+    /// paper surface. Unlike `say`, the runtime stays on this node until its
+    /// final step has been advanced, so every step is revision-safe and can be
+    /// saved independently.
+    LongText {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paper: Option<String>,
+        steps: Vec<LongTextStep>,
+        #[serde(default)]
+        speed_cps: Option<f32>,
+        next: String,
+    },
     Choice {
         choices: Vec<ChoiceDefinition>,
     },
@@ -497,6 +509,15 @@ pub enum DialogueMode {
     #[default]
     Start,
     Append,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LongTextStep {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub page_break_before: bool,
 }
 
 fn default_short_duration() -> u64 {
@@ -711,6 +732,8 @@ pub struct RuntimeSnapshot {
     pub playback: PlaybackSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue_page: Option<DialoguePageSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_text_page: Option<LongTextPageSnapshot>,
     pub prompt: PromptSnapshot,
 }
 
@@ -726,6 +749,25 @@ pub struct DialoguePageSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_color: Option<String>,
     pub segments: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LongTextPageSnapshot {
+    pub document_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<String>,
+    pub steps: Vec<LongTextStepSnapshot>,
+    pub active_step_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LongTextStepSnapshot {
+    pub step_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub page_break_before: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -871,6 +913,15 @@ pub enum PromptSnapshot {
         #[serde(default)]
         is_read: bool,
     },
+    LongText {
+        prompt_id: String,
+        document_id: String,
+        step_id: String,
+        step_index: u32,
+        text: String,
+        #[serde(default)]
+        is_read: bool,
+    },
     Choice {
         prompt_id: String,
         choices: Vec<ChoiceSnapshot>,
@@ -947,6 +998,10 @@ pub enum PresentationCueKind {
         duration_ms: u64,
     },
     DialogueReveal {
+        prompt_id: String,
+        speed_cps: f32,
+    },
+    LongTextReveal {
         prompt_id: String,
         speed_cps: f32,
     },

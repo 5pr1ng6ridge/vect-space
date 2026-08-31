@@ -286,6 +286,7 @@ export class PresentationController {
         );
         break;
       case "dialogue_reveal":
+      case "long_text_reveal":
         break;
       case "dialogue_ui_transition":
         this.#uiMotionHost.beginDialogueTransition();

@@ -11,7 +11,7 @@ use vectspace_core::{
     content::ContentCatalog,
     model::{
         AdvanceSource, DialogueHistoryEntry, PresentationOutcome, ResolvedAsset, RuntimeUpdate,
-        SaveSlotRequest, SaveSlotSummary, Settings, StoryFlowSnapshot,
+        SaveSlotRequest, SaveSlotSummary, SceneNode, Settings, StoryFlowSnapshot,
     },
     runtime::{self, RuntimeEngine},
 };
@@ -225,10 +225,18 @@ pub fn run() {
                 .scenes
                 .iter()
                 .flat_map(|(scene_id, scene)| {
-                    scene
-                        .nodes
-                        .keys()
-                        .map(move |node_id| format!("{scene_id}/{node_id}"))
+                    scene.nodes.iter().flat_map(move |(node_id, node)| {
+                        let node_location = format!("{scene_id}/{node_id}");
+                        let mut locations = vec![node_location.clone()];
+                        if let SceneNode::LongText { steps, .. } = node {
+                            locations.extend(
+                                steps
+                                    .iter()
+                                    .map(|step| format!("{node_location}/{}", step.id)),
+                            );
+                        }
+                        locations
+                    })
                 })
                 .collect();
             let (profile, profile_state) = ProfileManager::new_with_content(

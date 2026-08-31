@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { DialoguePrompt, PlaybackSnapshot } from "./types";
+import type { DialoguePrompt, LongTextPrompt, PlaybackSnapshot } from "./types";
 import { canFastForwardPrompt } from "./playback";
 
 const normal: PlaybackSnapshot = {
@@ -12,6 +12,15 @@ const dialogue = (is_read: boolean): DialoguePrompt => ({
   prompt_id: "scene/line",
   speaker: null,
   text: "line",
+  is_read,
+});
+const longText = (is_read: boolean): LongTextPrompt => ({
+  kind: "long_text",
+  prompt_id: "scene/lecture/definition",
+  document_id: "scene/lecture",
+  step_id: "definition",
+  step_index: 0,
+  text: "definition",
   is_read,
 });
 
@@ -52,5 +61,15 @@ describe("Ctrl fast-forward policy", () => {
     expect(canFastForwardPrompt(normal, "read_only", { kind: "none" })).toBe(
       true,
     );
+  });
+
+  it("applies the same read policy to every long-text step", () => {
+    expect(canFastForwardPrompt(normal, "read_only", longText(false))).toBe(
+      false,
+    );
+    expect(canFastForwardPrompt(normal, "read_only", longText(true))).toBe(
+      true,
+    );
+    expect(canFastForwardPrompt(normal, "all", longText(false))).toBe(true);
   });
 });

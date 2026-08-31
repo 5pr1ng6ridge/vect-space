@@ -486,9 +486,18 @@ fn valid_history_entry(entry: &DialogueHistoryEntry) -> bool {
 }
 
 fn valid_story_location(value: &str) -> bool {
-    value
-        .split_once('/')
-        .is_some_and(|(scene, node)| valid_identifier(scene) && valid_identifier(node))
+    let mut parts = value.split('/');
+    let Some(scene) = parts.next() else {
+        return false;
+    };
+    let Some(node) = parts.next() else {
+        return false;
+    };
+    let step = parts.next();
+    parts.next().is_none()
+        && valid_identifier(scene)
+        && valid_identifier(node)
+        && step.is_none_or(valid_identifier)
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -669,6 +678,7 @@ fn prompt_preview(snapshot: &RuntimeSnapshot) -> Option<String> {
                 .map(|page| page.segments.concat());
             combined_dialogue.as_ref().unwrap_or(text)
         }
+        PromptSnapshot::LongText { text, .. } => text,
         PromptSnapshot::Choice { choices, .. } => choices.first().map(|choice| &choice.label)?,
         PromptSnapshot::None | PromptSnapshot::End { .. } => return None,
     };
@@ -895,6 +905,42 @@ mod tests {
         assert_eq!(state.dialogue_history.len(), 1);
         assert_eq!(state.dialogue_history[0].entry_id, 1);
         assert_eq!(state.completed_scenes.len(), 1);
+    }
+
+    #[test]
+    fn profile_reconciliation_keeps_long_text_step_locations() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("profile.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 4,
+                "variables": {},
+                "read_content_version": "demo-2",
+                "read_dialogues": ["prologue/lecture/definition"],
+                "seen_presentations": [],
+                "dialogue_history": [
+                    {"entry_id": 1, "prompt_id": "prologue/lecture/definition", "speaker": null, "text": "定义"}
+                ],
+                "completed_scenes": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (_, state) = ProfileManager::new_with_content(
+            directory.path().to_path_buf(),
+            &std::collections::BTreeMap::new(),
+            "demo-2".to_owned(),
+            Some(std::collections::BTreeSet::from(["prologue".to_owned()])),
+            Some(std::collections::BTreeSet::from([
+                "prologue/lecture/definition".to_owned(),
+            ])),
+        )
+        .unwrap();
+        assert!(state.read_dialogues.contains("prologue/lecture/definition"));
+        assert_eq!(state.dialogue_history.len(), 1);
+        assert!(valid_story_location("prologue/lecture/definition"));
+        assert!(!valid_story_location("prologue/lecture/definition/extra"));
     }
 
     #[test]

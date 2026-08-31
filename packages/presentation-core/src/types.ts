@@ -104,6 +104,29 @@ export interface DialoguePageSnapshot {
   segments: string[];
 }
 
+export interface LongTextStepSnapshot {
+  step_id: string;
+  text: string;
+  page_break_before: boolean;
+}
+
+export interface LongTextPageSnapshot {
+  document_id: string;
+  paper?: string | null;
+  steps: LongTextStepSnapshot[];
+  active_step_index: number;
+}
+
+export interface LongTextPrompt {
+  kind: "long_text";
+  prompt_id: string;
+  document_id: string;
+  step_id: string;
+  step_index: number;
+  text: string;
+  is_read: boolean;
+}
+
 export interface ChoiceSnapshot {
   id: string;
   label: string;
@@ -122,7 +145,7 @@ export interface EndPrompt {
 }
 
 export type PromptSnapshot =
-  EmptyPrompt | DialoguePrompt | ChoicePrompt | EndPrompt;
+  EmptyPrompt | DialoguePrompt | LongTextPrompt | ChoicePrompt | EndPrompt;
 
 export interface RuntimeSnapshot {
   revision: number;
@@ -132,6 +155,7 @@ export interface RuntimeSnapshot {
   audio: AudioSnapshot;
   playback: PlaybackSnapshot;
   dialogue_page?: DialoguePageSnapshot | null;
+  long_text_page?: LongTextPageSnapshot | null;
   prompt: PromptSnapshot;
 }
 
@@ -223,6 +247,11 @@ export type PresentationCue = CueBase &
       }
     | {
         type: "dialogue_reveal";
+        prompt_id: string;
+        speed_cps: number;
+      }
+    | {
+        type: "long_text_reveal";
         prompt_id: string;
         speed_cps: number;
       }

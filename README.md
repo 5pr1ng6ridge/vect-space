@@ -128,8 +128,8 @@ camera motion, screen effects, Runtime gates, and snapshot-only saves. Supported
 node types are:
 
 ```text
-background  sprite  say  choice  set  condition  jump  wait
-bgm  sfx  camera  screen_effect  dialogue_ui  end
+background  sprite  say  long_text  choice  set  condition  jump  wait
+playback  bgm  sfx  camera  screen_effect  dialogue_ui  timeline  end
 ```
 
 Schema v2 declares every variable in `manifest.yaml` with an explicit type,
@@ -149,6 +149,28 @@ Dialogue accepts `$...$`, `$$...$$`, `[pause=500ms]`, speed controls, and the
 `shake`, `wave`, and `glow` text effects. It never accepts HTML. The renderer lays
 out every Chinese character and KaTeX formula first, then reveals units with
 `visibility`; hidden content keeps its geometry and formulas reveal atomically.
+
+`long_text` is the full-screen alternative to `say` for mathematical exposition.
+It displays accumulated `steps` on a vertically flowing paper stack: every click
+reveals and confirms one step, text follows the paper upward when it reaches the
+reading line, and a `page_break_before: true` step begins a new sheet. Each step
+has a stable ID, so saving during a lecture restores the already-written paper
+without replaying typing or scrolling. `paper` is optional and must reference a
+registered GUI asset; without it the built-in neutral paper surface is used.
+
+```yaml
+lecture:
+  type: long_text
+  paper: gui.lecture_paper # optional
+  speed_cps: 28 # optional
+  steps:
+    - id: definition
+      text: "设 $V$ 是一个向量空间。"
+    - id: consequence
+      page_break_before: true
+      text: "因此 $0\\in V$。"
+  next: next_node
+```
 
 ## Current scope
 

@@ -416,6 +416,85 @@ button:disabled {
   animation: indicator 1s ease-in-out infinite;
 }
 
+.long-text-panel {
+  position: absolute;
+  z-index: 15;
+  inset: 0;
+  overflow: hidden;
+  color: #212533;
+  pointer-events: auto;
+}
+
+.long-text-measure-root {
+  position: absolute;
+  top: -100000px;
+  left: -100000px;
+  width: 1004px;
+  color: #212533;
+  visibility: hidden;
+  pointer-events: none;
+  font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
+  font-size: 32px;
+  line-height: 1.78;
+  letter-spacing: 0.035em;
+}
+
+.long-text-paper-stack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1920px;
+  padding-top: 70px;
+  transition-property: transform;
+  transition-timing-function: cubic-bezier(0.2, 0.68, 0.24, 1);
+  will-change: transform;
+}
+
+.long-text-paper {
+  box-sizing: border-box;
+  width: 1240px;
+  height: 1340px;
+  margin: 0 auto 92px;
+  padding: 112px 118px 128px;
+  overflow: hidden;
+  background-color: #f7f2e5;
+  background-position: center;
+  background-size: 100% 100%;
+  box-shadow: 0 18px 44px rgb(0 0 0 / 36%);
+  font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
+  font-size: 32px;
+  line-height: 1.78;
+  letter-spacing: 0.035em;
+}
+
+.long-text-paper-content {
+  min-height: 100%;
+}
+
+.long-text-step {
+  display: block;
+  white-space: pre-wrap;
+}
+
+.long-text-step + .long-text-step {
+  margin-top: 28px;
+}
+
+.long-text-indicator {
+  position: absolute;
+  z-index: 1;
+  right: 162px;
+  bottom: 82px;
+  color: rgb(31 43 66 / 25%);
+  font-size: 20px;
+  pointer-events: none;
+}
+
+.long-text-indicator.is-ready {
+  color: #2e4267;
+  animation: indicator 1s ease-in-out infinite;
+}
+
 @keyframes indicator {
   50% {
     transform: translateY(5px);

@@ -18,6 +18,7 @@ import type {
   ConditionExpression,
   ContentManifest,
   MutationValue,
+  LongTextStep,
   ScalarValue,
   SceneDefinition,
   SceneNode,
@@ -424,6 +425,39 @@ function renderFields(
         </>
       );
     }
+    case "long_text":
+      return (
+        <>
+          <AssetSelect
+            allowNone
+            kind="gui"
+            label="纸张素材"
+            manifest={manifest}
+            onChange={(paper) => update({ ...node, paper })}
+            value={node.paper ?? null}
+          />
+          <p className="field-note">
+            每一段在游戏中对应一次推进。纸张空间不足会自动续到下一页；勾选可强制从新页开始。
+          </p>
+          <LongTextStepsEditor
+            manifest={manifest}
+            onChange={(steps) => update({ ...node, steps })}
+            steps={node.steps}
+          />
+          <OptionalNumber
+            label="文字速度 CPS"
+            min={0.1}
+            onChange={(speed_cps) => update({ ...node, speed_cps })}
+            value={node.speed_cps}
+          />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
     case "choice":
       return (
         <>
@@ -1742,6 +1776,122 @@ function defaultScalar(type: VariableType): ScalarValue {
     case "string":
       return "";
   }
+}
+
+function LongTextStepsEditor({
+  manifest,
+  steps,
+  onChange,
+}: {
+  manifest: ContentManifest;
+  steps: LongTextStep[];
+  onChange(steps: LongTextStep[]): void;
+}): ReactElement {
+  const replace = (index: number, patch: Partial<LongTextStep>): void => {
+    onChange(
+      steps.map((step, current) =>
+        current === index ? { ...step, ...patch } : step,
+      ),
+    );
+  };
+  return (
+    <div className="long-text-steps-editor">
+      <div className="field-label">推进段落</div>
+      {steps.map((step, index) => (
+        <article className="long-text-step-editor" key={`${step.id}-${index}`}>
+          <header>
+            <strong>第 {index + 1} 段</strong>
+            <div className="compact-actions">
+              <button
+                disabled={index === 0}
+                onClick={() => {
+                  const next = [...steps];
+                  [next[index - 1], next[index]] = [
+                    next[index],
+                    next[index - 1],
+                  ];
+                  onChange(next);
+                }}
+                type="button"
+              >
+                ↑
+              </button>
+              <button
+                disabled={index === steps.length - 1}
+                onClick={() => {
+                  const next = [...steps];
+                  [next[index], next[index + 1]] = [
+                    next[index + 1],
+                    next[index],
+                  ];
+                  onChange(next);
+                }}
+                type="button"
+              >
+                ↓
+              </button>
+              <button
+                className="danger-text"
+                disabled={steps.length === 1}
+                onClick={() =>
+                  onChange(steps.filter((_, current) => current !== index))
+                }
+                type="button"
+              >
+                删除
+              </button>
+            </div>
+          </header>
+          <label>
+            <span>步骤 ID</span>
+            <input
+              onChange={(event) =>
+                replace(index, { id: event.currentTarget.value })
+              }
+              value={step.id}
+            />
+          </label>
+          <label className="long-text-break-toggle">
+            <input
+              checked={step.page_break_before}
+              disabled={index === 0}
+              onChange={(event) =>
+                replace(index, {
+                  page_break_before: event.currentTarget.checked,
+                })
+              }
+              type="checkbox"
+            />
+            <span>从新纸张开始</span>
+          </label>
+          <textarea
+            onChange={(event) =>
+              replace(index, { text: event.currentTarget.value })
+            }
+            rows={6}
+            value={step.text}
+          />
+          <MarkupPreview source={interpolatePreview(step.text, manifest)} />
+        </article>
+      ))}
+      <button
+        onClick={() => {
+          const nextNumber = steps.length + 1;
+          onChange([
+            ...steps,
+            {
+              id: `step_${nextNumber}`,
+              text: "新的长文本段落。",
+              page_break_before: false,
+            },
+          ]);
+        }}
+        type="button"
+      >
+        添加推进段落
+      </button>
+    </div>
+  );
 }
 
 function DialogueTextEditor({

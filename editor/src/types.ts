@@ -161,6 +161,19 @@ export interface SayNode extends NextNode {
   speed_cps: number | null;
 }
 
+export interface LongTextStep {
+  id: string;
+  text: string;
+  page_break_before: boolean;
+}
+
+export interface LongTextNode extends NextNode {
+  type: "long_text";
+  paper?: string | null;
+  steps: LongTextStep[];
+  speed_cps: number | null;
+}
+
 export interface ChoiceDefinition {
   id: string;
   label: string;
@@ -304,6 +317,7 @@ export type SceneNode =
   | SpriteNode
   | ClearNode
   | SayNode
+  | LongTextNode
   | ChoiceNode
   | SetNode
   | ConditionNode

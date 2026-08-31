@@ -352,6 +352,36 @@ function validateNode(
         issue("invalid_speed", "文字速度必须是正数");
       }
       break;
+    case "long_text": {
+      checkAsset(node.paper ?? null, "gui", false);
+      if (node.steps.length === 0 || node.steps.length > 1024) {
+        issue("invalid_long_text_steps", "长文本必须包含 1 到 1024 个步骤");
+      }
+      const ids = new Set<string>();
+      for (const [index, step] of node.steps.entries()) {
+        if (!ID_PATTERN.test(step.id)) {
+          issue("invalid_long_text_step", `第 ${index + 1} 段的 ID 非法`);
+        }
+        if (ids.has(step.id)) {
+          issue("duplicate_long_text_step", `步骤 ID 重复：${step.id}`);
+        }
+        if (step.text.trim() === "") {
+          issue("empty_long_text_step", `第 ${index + 1} 段不能为空`);
+        }
+        if (index === 0 && step.page_break_before) {
+          issue("leading_long_text_break", "第一段不应在前方强制分页");
+        }
+        validateTextTemplate(project, step.text, issue);
+        ids.add(step.id);
+      }
+      if (
+        node.speed_cps !== null &&
+        (!Number.isFinite(node.speed_cps) || node.speed_cps <= 0)
+      ) {
+        issue("invalid_long_text_speed", "文字速度必须是正数");
+      }
+      break;
+    }
     case "choice": {
       if (node.choices.length === 0) issue("empty_choice", "至少需要一个选项");
       const ids = new Set<string>();

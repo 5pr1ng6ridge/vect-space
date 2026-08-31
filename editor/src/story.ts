@@ -21,6 +21,7 @@ import {
 
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
+  { type: "long_text", label: "长文本", group: "叙事" },
   { type: "choice", label: "选择", group: "逻辑" },
   { type: "condition", label: "条件分支", group: "逻辑" },
   { type: "playback", label: "播放控制", group: "流程" },
@@ -128,6 +129,8 @@ export function summarizeNode(node: SceneNode): string {
   switch (node.type) {
     case "say":
       return `${node.mode === "append" ? "接续 · " : ""}${node.speaker ?? "旁白"}：${node.text}`;
+    case "long_text":
+      return `${node.steps.length} 段 · ${node.paper ?? "默认纸张"}`;
     case "choice":
       return `${node.choices.length} 个选项`;
     case "set":
@@ -210,6 +213,16 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         text: "新对话",
         mode: "start",
         page_id: null,
+        speed_cps: null,
+        next: fallback,
+      };
+    case "long_text":
+      return {
+        type,
+        paper: null,
+        steps: [
+          { id: "step_1", text: "新的长文本内容。", page_break_before: false },
+        ],
         speed_cps: null,
         next: fallback,
       };

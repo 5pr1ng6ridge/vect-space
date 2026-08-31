@@ -24,6 +24,7 @@ const MAX_TIMELINE_DURATION_MS: u64 = 30 * 60 * 1_000;
 const MAX_TIMELINE_TRACKS: usize = 64;
 const MAX_TIMELINE_KEYFRAMES: usize = 10_000;
 const MAX_TIMELINE_EVENTS: usize = 2_048;
+const MAX_LONG_TEXT_STEPS: usize = 1_024;
 const UI_MOTION_SCHEMA_VERSION: u32 = 1;
 const STORY_FLOW_SCHEMA_VERSION: u32 = 1;
 
@@ -702,6 +703,41 @@ fn validate_scenes(
                         return node_error(scene_id, node_id, "append 对话必须提供 page_id");
                     }
                     validate_text_markup(text, variables, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::LongText {
+                    paper,
+                    steps,
+                    speed_cps,
+                    next,
+                } => {
+                    if let Some(paper) = paper {
+                        require_asset(assets, paper, AssetKind::Gui, scene_id, node_id)?;
+                    }
+                    if steps.is_empty() || steps.len() > MAX_LONG_TEXT_STEPS {
+                        return node_error(scene_id, node_id, "长文本必须包含 1 到 1024 个步骤");
+                    }
+                    if speed_cps.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                        return node_error(scene_id, node_id, "speed_cps 必须是有限正数");
+                    }
+                    let mut ids = BTreeSet::new();
+                    for (index, step) in steps.iter().enumerate() {
+                        validate_identifier("long text step id", &step.id)?;
+                        if !ids.insert(&step.id) {
+                            return node_error(scene_id, node_id, "长文本 step id 重复");
+                        }
+                        if step.text.trim().is_empty() {
+                            return node_error(scene_id, node_id, "长文本步骤不能为空");
+                        }
+                        if index == 0 && step.page_break_before {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                "长文本第一步骤不能在前方强制分页",
+                            );
+                        }
+                        validate_text_markup(&step.text, variables, scene_id, node_id)?;
+                    }
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Choice { choices } => {
@@ -1576,6 +1612,68 @@ mod tests {
         assert!(validate_auto_advance_marker(r"\[auto]", "s", "n").is_ok());
         assert!(validate_auto_advance_marker("[auto] 不能在开头", "s", "n").is_err());
         assert!(validate_auto_advance_marker("[auto][auto]", "s", "n").is_err());
+    }
+
+    #[test]
+    fn long_text_steps_require_stable_ids_and_a_nonleading_page_break() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let ui_motion_files: BTreeMap<String, UiMotionPreset> = catalog
+            .manifest
+            .ui_motions
+            .iter()
+            .map(|path| (path.clone(), read_yaml(&root.join(path)).unwrap()))
+            .collect();
+        let mut scenes = catalog.scenes.clone();
+        let scene = scenes.get_mut("prologue").unwrap();
+        scene.nodes.insert(
+            "lecture".to_owned(),
+            SceneNode::LongText {
+                paper: Some("gui.dialogue_box".to_owned()),
+                steps: vec![
+                    crate::model::LongTextStep {
+                        id: "definition".to_owned(),
+                        text: "设 $V$ 是向量空间。".to_owned(),
+                        page_break_before: false,
+                    },
+                    crate::model::LongTextStep {
+                        id: "consequence".to_owned(),
+                        text: "则 $0\\in V$。".to_owned(),
+                        page_break_before: true,
+                    },
+                ],
+                speed_cps: Some(30.0),
+                next: "introduction".to_owned(),
+            },
+        );
+        let valid = ContentCatalog::from_documents(
+            root.clone(),
+            catalog.manifest.clone(),
+            scenes.clone(),
+            ui_motion_files.clone(),
+            catalog.story_flow.clone(),
+        );
+        assert!(valid.is_ok(), "{valid:?}");
+
+        let SceneNode::LongText { steps, .. } = scenes
+            .get_mut("prologue")
+            .unwrap()
+            .nodes
+            .get_mut("lecture")
+            .unwrap()
+        else {
+            panic!("fixture must contain long_text")
+        };
+        steps[0].page_break_before = true;
+        let error = ContentCatalog::from_documents(
+            root,
+            catalog.manifest.clone(),
+            scenes,
+            ui_motion_files,
+            catalog.story_flow.clone(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("第一步骤"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ export function canFastForwardPrompt(
   if (prompt.kind === "none") {
     return true;
   }
-  if (prompt.kind !== "dialogue") {
+  if (prompt.kind !== "dialogue" && prompt.kind !== "long_text") {
     return false;
   }
   return skipMode === "all" || prompt.is_read;

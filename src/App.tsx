@@ -13,6 +13,10 @@ import "./App.css";
 
 import { DialogueBox, type DialogueBoxHandle } from "./components/DialogueBox";
 import { HistoryPanel } from "./components/HistoryPanel";
+import {
+  LongTextPanel,
+  type LongTextPanelHandle,
+} from "./components/LongTextPanel";
 import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import { StoryFlowPage } from "./components/StoryFlowPage";
@@ -27,6 +31,7 @@ import type {
   ChoicePrompt,
   DialoguePrompt,
   DialogueHistoryEntry,
+  LongTextPrompt,
   PresentationCue,
   RuntimeUpdate,
   SaveSlotSummary,
@@ -61,6 +66,7 @@ export default function App(): ReactElement {
   const { style: viewportStyle } = useViewportMetrics();
   const sceneRef = useRef<SceneCanvasHandle>(null);
   const dialogueRef = useRef<DialogueBoxHandle>(null);
+  const longTextRef = useRef<LongTextPanelHandle>(null);
   const uiMotionHost = useMemo(() => new UiMotionHost(), []);
   const phaseRef = useRef<Phase>("booting");
   const busyRef = useRef(false);
@@ -219,7 +225,11 @@ export default function App(): ReactElement {
   const advance = useCallback(
     (source: AdvanceSource): void => {
       const snapshot = update?.snapshot;
-      if (snapshot === undefined || snapshot.prompt.kind !== "dialogue") {
+      if (
+        snapshot === undefined ||
+        (snapshot.prompt.kind !== "dialogue" &&
+          snapshot.prompt.kind !== "long_text")
+      ) {
         return;
       }
       void runStoryCommand(() => engineApi.advance(snapshot.revision, source));
@@ -322,6 +332,12 @@ export default function App(): ReactElement {
 
   const dialogue =
     update?.snapshot.prompt.kind === "dialogue" ? update.snapshot.prompt : null;
+  const longText =
+    update?.snapshot.prompt.kind === "long_text"
+      ? update.snapshot.prompt
+      : null;
+  const textPrompt: DialoguePrompt | LongTextPrompt | null =
+    dialogue ?? longText;
   const dialoguePage =
     update?.snapshot.dialogue_page ??
     (dialogue === null
@@ -340,24 +356,27 @@ export default function App(): ReactElement {
         cue.type === "dialogue_ui_transition" || cue.type === "ui_motion",
     ) ?? false;
   const renderedDialoguePage =
-    dialoguePage ??
-    (hasUiMotionCue
-      ? {
-          page_id: "ui_motion_preview",
-          speaker: null,
-          speaker_id: null,
-          name_color: null,
-          text_color: null,
-          segments: [""],
-        }
-      : null);
+    longText === null
+      ? (dialoguePage ??
+        (hasUiMotionCue
+          ? {
+              page_id: "ui_motion_preview",
+              speaker: null,
+              speaker_id: null,
+              name_color: null,
+              text_color: null,
+              segments: [""],
+            }
+          : null))
+      : null;
+  const longTextPage = update?.snapshot.long_text_page ?? null;
   const choice =
     update?.snapshot.prompt.kind === "choice" ? update.snapshot.prompt : null;
-  const dialogueCueCps = useMemo(
-    () => dialogueRevealSpeed(update, dialogue),
-    [dialogue, update],
+  const textCueCps = useMemo(
+    () => textRevealSpeed(update, textPrompt),
+    [textPrompt, update],
   );
-  const revealCps = dialogueCueCps ?? settings.text_speed_cps;
+  const revealCps = textCueCps ?? settings.text_speed_cps;
   const runtimeLocked = update?.requires_ack ?? false;
   const activeTimelineCue = update?.cues.find(
     (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
@@ -369,15 +388,15 @@ export default function App(): ReactElement {
   };
   const forcedAuto = playback.auto === "forced";
   const immediateAutoAdvance =
-    dialogue !== null && hasImmediateAutoAdvance(dialogue.text);
+    textPrompt !== null && hasImmediateAutoAdvance(textPrompt.text);
   const ctrlPolicyAllows =
     !forcedAuto && playback.ctrl_fast_forward === "allow";
   const fastForwardRequested =
     ctrlHeld && ctrlPolicyAllows && settings.skip_mode !== "disabled";
   const fastForwardDialogueAllowed =
-    dialogue !== null &&
+    textPrompt !== null &&
     (settings.skip_mode === "all" ||
-      (settings.skip_mode === "read_only" && dialogue.is_read));
+      (settings.skip_mode === "read_only" && textPrompt.is_read));
   const fastForwardActive =
     phase === "playing" &&
     panel === "none" &&
@@ -405,7 +424,8 @@ export default function App(): ReactElement {
       panel !== "none" ||
       busyRef.current ||
       (!runtimeLocked &&
-        (dialogue === null || !update?.snapshot.world.dialogue_ui_visible))
+        (textPrompt === null ||
+          (longText === null && !update?.snapshot.world.dialogue_ui_visible)))
     ) {
       return;
     }
@@ -418,13 +438,15 @@ export default function App(): ReactElement {
       sceneRef.current?.skipCurrentPresentation();
       return;
     }
-    if (dialogue === null) return;
-    if (!dialogueRef.current?.isComplete()) {
-      dialogueRef.current?.complete();
+    if (textPrompt === null) return;
+    const textHandle =
+      longText === null ? dialogueRef.current : longTextRef.current;
+    if (!textHandle?.isComplete()) {
+      textHandle?.complete();
       return;
     }
     advance("manual");
-  }, [advance, dialogue, forcedAuto, panel, runtimeLocked, update]);
+  }, [advance, forcedAuto, longText, panel, runtimeLocked, textPrompt, update]);
 
   const handleRevealComplete = useCallback((promptId: string): void => {
     setCompletedPromptId(promptId);
@@ -436,13 +458,13 @@ export default function App(): ReactElement {
       panel !== "none" ||
       busy ||
       runtimeLocked ||
-      dialogue === null
+      textPrompt === null
     ) {
       return;
     }
 
     let timer = 0;
-    if (completedPromptId !== dialogue.prompt_id) return;
+    if (completedPromptId !== textPrompt.prompt_id) return;
     if (immediateAutoAdvance) {
       timer = window.setTimeout(
         () => advance(forcedAuto ? "forced_auto" : "auto"),
@@ -451,16 +473,17 @@ export default function App(): ReactElement {
     } else if (forcedAuto) {
       timer = window.setTimeout(
         () => advance("forced_auto"),
-        autoReadingDelay(dialogue.text),
+        autoReadingDelay(textPrompt.text),
       );
     } else if (fastForwardRequested) {
       if (!fastForwardDialogueAllowed) return;
-      dialogueRef.current?.complete();
+      if (longText === null) dialogueRef.current?.complete();
+      else longTextRef.current?.complete();
       timer = window.setTimeout(() => advance("fast_forward"), 50);
-    } else if (normalAuto && completedPromptId === dialogue.prompt_id) {
+    } else if (normalAuto && completedPromptId === textPrompt.prompt_id) {
       timer = window.setTimeout(
         () => advance("auto"),
-        autoReadingDelay(dialogue.text),
+        autoReadingDelay(textPrompt.text),
       );
     }
     return () => window.clearTimeout(timer);
@@ -468,7 +491,7 @@ export default function App(): ReactElement {
     advance,
     busy,
     completedPromptId,
-    dialogue,
+    textPrompt,
     fastForwardDialogueAllowed,
     fastForwardRequested,
     forcedAuto,
@@ -477,6 +500,7 @@ export default function App(): ReactElement {
     panel,
     phase,
     runtimeLocked,
+    longText,
   ]);
 
   useEffect(() => {
@@ -665,8 +689,30 @@ export default function App(): ReactElement {
                 page={renderedDialoguePage}
                 prompt={dialogue}
                 ref={dialogueRef}
-                revealImmediately={dialogue === null || dialogueCueCps === null}
+                revealImmediately={dialogue === null || textCueCps === null}
                 visible={update.snapshot.world.dialogue_ui_visible}
+              />
+            )}
+
+            {longText !== null && longTextPage !== null && (
+              <LongTextPanel
+                defaultCps={settings.text_speed_cps}
+                disabled={busy || runtimeLocked}
+                fastForward={fastForwardActive}
+                initialCps={revealCps}
+                key={`${longTextPage.document_id}:${longText.prompt_id}:${update.snapshot.revision}`}
+                onRevealComplete={handleRevealComplete}
+                onTypingChange={handleTypingChange}
+                page={longTextPage}
+                paperUrl={
+                  longTextPage.paper === null ||
+                  longTextPage.paper === undefined
+                    ? undefined
+                    : assets[longTextPage.paper]
+                }
+                prompt={longText}
+                ref={longTextRef}
+                revealImmediately={textCueCps === null}
               />
             )}
 
@@ -911,19 +957,22 @@ function SettingsPanel({
   );
 }
 
-function dialogueRevealSpeed(
+function textRevealSpeed(
   update: RuntimeUpdate | null,
-  prompt: DialoguePrompt | null,
+  prompt: DialoguePrompt | LongTextPrompt | null,
 ): number | null {
   if (update === null || prompt === null) {
     return null;
   }
   const cue = update.cues.find(
     (candidate) =>
-      candidate.type === "dialogue_reveal" &&
+      (candidate.type === "dialogue_reveal" ||
+        candidate.type === "long_text_reveal") &&
       candidate.prompt_id === prompt.prompt_id,
   );
-  return cue?.type === "dialogue_reveal" ? cue.speed_cps : null;
+  return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
+    ? cue.speed_cps
+    : null;
 }
 
 function getInitialAppState(): Promise<InitialAppState> {

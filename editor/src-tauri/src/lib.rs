@@ -853,6 +853,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::Sprite { next, .. }
         | SceneNode::Clear { next, .. }
         | SceneNode::Say { next, .. }
+        | SceneNode::LongText { next, .. }
         | SceneNode::Set { next, .. }
         | SceneNode::Playback { next, .. }
         | SceneNode::Wait { next, .. }
@@ -881,6 +882,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
 fn is_immediate(node: &SceneNode) -> bool {
     match node {
         SceneNode::Say { .. }
+        | SceneNode::LongText { .. }
         | SceneNode::Choice { .. }
         | SceneNode::Wait { .. }
         | SceneNode::End => false,
@@ -991,6 +993,11 @@ fn collect_node_assets<'a>(node: &'a SceneNode, output: &mut BTreeSet<&'a str>) 
             asset: Some(id), ..
         }
         | SceneNode::Sfx { asset: id, .. } => {
+            output.insert(id);
+        }
+        SceneNode::LongText {
+            paper: Some(id), ..
+        } => {
             output.insert(id);
         }
         SceneNode::Timeline { tracks, events, .. } => {
