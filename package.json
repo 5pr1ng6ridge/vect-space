@@ -8,7 +8,10 @@
     "packages/*"
   ],
   "scripts": {
+    "assets:check": "node scripts/check-lfs-assets.mjs game/assets",
+    "predev": "npm run assets:check",
     "dev": "vite",
+    "prebuild": "npm run assets:check",
     "build": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && vite build",
     "test": "vitest run",
     "test:watch": "vitest",

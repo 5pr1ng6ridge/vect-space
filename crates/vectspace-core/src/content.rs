@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -543,7 +544,8 @@ fn validate_assets(
     for (id, definition) in assets {
         validate_identifier("asset id", id)?;
         let relative = validate_relative_path(&definition.path)?;
-        canonical_file_within(assets_root, &assets_root.join(relative))?;
+        let asset_path = canonical_file_within(assets_root, &assets_root.join(relative))?;
+        reject_git_lfs_pointer(id, &asset_path)?;
         if definition.kind == AssetKind::Video
             && Path::new(&definition.path)
                 .extension()
@@ -554,6 +556,28 @@ fn validate_assets(
                 "视频素材 {id} 必须使用 .mp4（H.264/AAC）"
             )));
         }
+    }
+    Ok(())
+}
+
+fn reject_git_lfs_pointer(id: &str, path: &Path) -> Result<(), ContentError> {
+    const LFS_SIGNATURE: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+    let mut file = fs::File::open(path).map_err(|source| ContentError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut header = [0_u8; 128];
+    let bytes_read = file
+        .read(&mut header)
+        .map_err(|source| ContentError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if header[..bytes_read].starts_with(LFS_SIGNATURE) {
+        return Err(ContentError::Validation(format!(
+            "素材 {id} 仍是 Git LFS 指针，尚未下载真实文件：{}。请在项目根目录运行 `git lfs pull` 后重试",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -1507,6 +1531,22 @@ mod tests {
         assert!(validate_relative_path("../secret.yaml").is_err());
         assert!(validate_relative_path("assets/../../secret").is_err());
         assert!(validate_relative_path("backgrounds/room.png").is_ok());
+    }
+
+    #[test]
+    fn unresolved_git_lfs_assets_are_rejected_with_an_actionable_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.png");
+        fs::write(
+            &path,
+            "version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\nsize 42\n",
+        )
+        .unwrap();
+
+        let error = reject_git_lfs_pointer("bg.missing", &path).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Git LFS 指针"));
+        assert!(message.contains("git lfs pull"));
     }
 
     #[test]

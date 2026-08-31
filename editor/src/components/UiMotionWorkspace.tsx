@@ -9,6 +9,7 @@ import {
 } from "react";
 import { assetUrl } from "../api";
 import { evaluateChannel } from "../timeline";
+import { useAssetFont } from "../useAssetFont";
 import type {
   EditorAsset,
   TimelineEasing,
@@ -74,6 +75,11 @@ export function UiMotionWorkspace({
   const [previewScale, setPreviewScale] = useState(0.5);
   const host = useMemo(() => new UiMotionHost(), []);
   const playheadRef = useRef(playhead);
+  const previewFont = assets.find((asset) => asset.kind === "font");
+  const font = useAssetFont(
+    previewFont === undefined ? undefined : assetUrl(previewFont.absolute_path),
+    `UI Preview ${previewFont?.id ?? "default"}`,
+  );
 
   useEffect(() => {
     playheadRef.current = playhead;
@@ -363,7 +369,10 @@ export function UiMotionWorkspace({
         <div className="ui-motion-preview" ref={previewRef}>
           <div
             className="ui-motion-design"
-            style={{ transform: `scale(${previewScale})` }}
+            style={{
+              fontFamily: font.fontFamily,
+              transform: `scale(${previewScale})`,
+            }}
           >
             <div className="ui-motion-background">1920 × 1080 UI PREVIEW</div>
             <section

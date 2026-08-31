@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useMemo, useState, type ReactElement } from "react";
 import { assetUrl } from "../api";
+import { useAssetFont } from "../useAssetFont";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import type {
   AssetKind,
@@ -373,6 +374,10 @@ function AssetsPanel({
 
 function AssetPreview({ asset }: { asset: EditorAsset }): ReactElement {
   const url = assetUrl(asset.absolute_path);
+  const font = useAssetFont(
+    asset.kind === "font" ? url : undefined,
+    `Asset ${asset.id}`,
+  );
   if (["background", "sprite", "gui"].includes(asset.kind)) {
     return <img alt={asset.id} className="asset-preview" src={url} />;
   }
@@ -385,8 +390,8 @@ function AssetPreview({ asset }: { asset: EditorAsset }): ReactElement {
     );
   }
   return (
-    <div className="font-preview" style={{ fontFamily: `url(${url})` }}>
-      Aa 数学 123
+    <div className="font-preview" style={{ fontFamily: font.fontFamily }}>
+      {font.error === null ? "Aa 数学 123" : `字体加载失败：${font.error}`}
     </div>
   );
 }

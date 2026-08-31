@@ -8,6 +8,7 @@ engine's scripts, saves, or runtime APIs.
 
 - Node.js `24.19.0` managed by Volta
 - Rust stable MSVC (`rustup default stable-msvc`)
+- Git LFS for binary game assets
 - Microsoft Edge WebView2 Runtime
 - Windows x64 and NSIS (`currentUser`) packaging
 
@@ -16,17 +17,25 @@ Install the host tools in PowerShell, then restart the terminal:
 ```powershell
 winget install --id Volta.Volta --exact
 winget install --id Rustlang.Rustup --exact
+winget install --id GitHub.GitLFS --exact
 winget install --id Microsoft.EdgeWebView2Runtime --exact
 volta install node@24.19.0
 rustup default stable-msvc
+git lfs install
 ```
 
 Install locked JavaScript packages and run the desktop app:
 
 ```powershell
+git lfs pull
 npm ci
 npm run tauri dev
 ```
+
+Both development apps and production builds run an asset preflight before
+Vite starts. If a clone contains LFS pointer text instead of real images,
+fonts, audio, or video, startup stops with the affected paths and recovery
+command instead of opening a partially broken preview.
 
 Useful checks:
 
