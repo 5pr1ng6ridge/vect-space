@@ -28,7 +28,6 @@ import {
   type TimelineEventSelection,
   type TimelineSelection,
 } from "./TimelineEditor";
-import type { RuntimeUpdate as GameRuntimeUpdate } from "@vectspace/presentation-core/types";
 import {
   DESIGN_HEIGHT,
   DESIGN_WIDTH,
@@ -268,11 +267,7 @@ export function TimelineWorkspace({
             // Set the requested audio policy before restoring a snapshot: the
             // snapshot can already contain a looping BGM from the story path.
             surface.setMuted(muted);
-            await surface.load(
-              result.start_snapshot,
-              result.update as unknown as GameRuntimeUpdate,
-              urls,
-            );
+            await surface.load(result.start_snapshot, result.update, urls);
             await surface.seek(desiredPlayhead, false);
           }
           setPreview(result);
@@ -309,9 +304,7 @@ export function TimelineWorkspace({
       const current = preview;
       const surface = surfaceRef.current;
       if (current === null || surface === null) return;
-      const update = structuredClone(
-        current.update,
-      ) as unknown as GameRuntimeUpdate;
+      const update = structuredClone(current.update);
       const timelineCue = update.cues.find(
         (cue) => (cue as { type?: string }).type === "timeline",
       ) as unknown as

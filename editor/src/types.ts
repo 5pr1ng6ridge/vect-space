@@ -423,71 +423,6 @@ export interface SpriteSnapshot {
   z: number;
 }
 
-export type PromptSnapshot =
-  | { kind: "none" }
-  | {
-      kind: "dialogue";
-      prompt_id: string;
-      speaker: string | null;
-      speaker_id?: string | null;
-      name_color?: string | null;
-      text_color?: string | null;
-      text: string;
-      is_read: boolean;
-    }
-  | {
-      kind: "choice";
-      prompt_id: string;
-      choices: { id: string; label: string; enabled: boolean }[];
-    }
-  | { kind: "end"; prompt_id: string };
-
-export interface RuntimeSnapshot {
-  revision: number;
-  location: StoryLocation;
-  variables: Record<string, WireScalarValue>;
-  world: {
-    background: string | null;
-    sprites: Record<string, SpriteSnapshot>;
-    camera: { x: number; y: number; zoom: number; rotation_deg: number };
-    dialogue_ui_visible: boolean;
-    ui_motion_bindings: UiMotionBindings;
-    persistent_effects: string[];
-  };
-  audio: {
-    bgm: {
-      asset: string;
-      volume: number;
-      start_ms: number;
-      loop_start_ms?: number | null;
-      loop_end_ms?: number | null;
-    } | null;
-  };
-  playback: {
-    auto: "normal" | "forced";
-    ctrl_fast_forward: "allow" | "block";
-  };
-  dialogue_page?: {
-    page_id: string;
-    speaker: string | null;
-    speaker_id?: string | null;
-    name_color?: string | null;
-    text_color?: string | null;
-    segments: string[];
-  } | null;
-  prompt: PromptSnapshot;
-}
-
-export interface RuntimeUpdate {
-  update_id: number;
-  snapshot: RuntimeSnapshot;
-  cues: ({
-    cue_id: number;
-    gate: "none" | "player_advance" | "runtime";
-  } & Record<string, unknown>)[];
-  requires_ack: boolean;
-}
-
 export interface TimelinePreviewRequest {
   project: SaveProjectRequest;
   target: StoryLocation;
@@ -517,4 +452,7 @@ export interface ImportedAsset {
   path: string;
   absolute_path: string;
 }
-import type { WireScalarValue } from "../../shared/generated/WireScalarValue";
+import type {
+  RuntimeSnapshot,
+  RuntimeUpdate,
+} from "@vectspace/presentation-core/types";
