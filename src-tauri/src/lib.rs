@@ -8,8 +8,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use content::ContentCatalog;
 use model::{
-    AdvanceSource, BootstrapPayload, PresentationOutcome, ResolvedAsset, RuntimeSnapshot,
-    RuntimeUpdate, SaveSlotRequest, SaveSlotSummary, Settings,
+    AdvanceSource, BootstrapPayload, DialogueHistoryEntry, PresentationOutcome, ResolvedAsset,
+    RuntimeSnapshot, RuntimeUpdate, SaveSlotRequest, SaveSlotSummary, Settings, StoryFlowSnapshot,
 };
 use runtime::RuntimeEngine;
 use save::{ProfileManager, SaveManager};
@@ -89,6 +89,21 @@ fn presentation_complete(
 #[tauri::command]
 fn get_snapshot(state: State<'_, EngineState>) -> Result<RuntimeSnapshot, String> {
     Ok(state.runtime()?.snapshot().clone())
+}
+
+#[tauri::command]
+fn get_dialogue_history(
+    state: State<'_, EngineState>,
+) -> Result<Vec<DialogueHistoryEntry>, String> {
+    Ok(state.runtime()?.dialogue_history().to_vec())
+}
+
+#[tauri::command]
+fn get_story_flow(state: State<'_, EngineState>) -> Result<Option<StoryFlowSnapshot>, String> {
+    let runtime = state.runtime()?;
+    runtime
+        .story_flow(&state.content)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -210,6 +225,8 @@ pub fn run() {
             choose,
             presentation_complete,
             get_snapshot,
+            get_dialogue_history,
+            get_story_flow,
             resolve_assets,
             list_save_slots,
             save_slot,

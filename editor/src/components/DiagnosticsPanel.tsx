@@ -6,7 +6,12 @@ export function DiagnosticsPanel({
   onNavigate,
 }: {
   diagnostics: EditorDiagnostic[];
-  onNavigate(sceneId: string | null, nodeId: string | null): void;
+  onNavigate(
+    sceneId: string | null,
+    nodeId: string | null,
+    workspace?: "story" | "flow",
+    flowElementId?: string | null,
+  ): void;
 }): ReactElement {
   if (diagnostics.length === 0) {
     return (
@@ -22,7 +27,14 @@ export function DiagnosticsPanel({
         <button
           className={`diagnostic-row diagnostic-${diagnostic.severity}`}
           key={`${diagnostic.code}-${diagnostic.scene_id}-${diagnostic.node_id}-${index}`}
-          onClick={() => onNavigate(diagnostic.scene_id, diagnostic.node_id)}
+          onClick={() =>
+            onNavigate(
+              diagnostic.scene_id,
+              diagnostic.node_id,
+              diagnostic.workspace,
+              diagnostic.flow_element_id,
+            )
+          }
           type="button"
         >
           <span className="diagnostic-icon">
@@ -35,9 +47,14 @@ export function DiagnosticsPanel({
           <code>{diagnostic.code}</code>
           <span>{diagnostic.message}</span>
           <small>
-            {[diagnostic.scene_id, diagnostic.node_id]
-              .filter(Boolean)
-              .join(" / ") || "project"}
+            {(() => {
+              const location = [diagnostic.scene_id, diagnostic.node_id]
+                .filter(Boolean)
+                .join(" / ");
+              return location !== ""
+                ? location
+                : (diagnostic.flow_element_id ?? "project");
+            })()}
           </small>
         </button>
       ))}

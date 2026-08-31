@@ -37,7 +37,12 @@ interface ProjectSidebarProps {
   onCreateUiMotion(): void;
   onEditUiMotion(id: string): void;
   onDeleteUiMotion(id: string): void;
-  onNavigate(sceneId: string | null, nodeId: string | null): void;
+  onNavigate(
+    sceneId: string | null,
+    nodeId: string | null,
+    workspace?: "story" | "flow",
+    flowElementId?: string | null,
+  ): void;
   onTabChange?(tab: SidebarTab): void;
 }
 

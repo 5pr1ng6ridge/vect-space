@@ -464,6 +464,38 @@
           ]
         },
         {
+          "description": "Fade the current scene's visual world to an empty state. Audio and the\ndialogue UI are deliberately left alone so a scene transition can keep\nits BGM and common UI chrome.",
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean",
+              "default": true
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 500,
+              "minimum": 0
+            },
+            "easing": {
+              "$ref": "#/$defs/Easing",
+              "default": "ease_in_out"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "clear"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "next"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "mode": {

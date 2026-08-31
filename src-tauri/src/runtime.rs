@@ -2,13 +2,13 @@ use crate::{
     content::ContentCatalog,
     model::{
         AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
-        ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueMode,
-        DialoguePageSnapshot, LoopingAudioSnapshot, MutationValue, PlaybackAutoMode,
+        ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueHistoryEntry,
+        DialogueMode, DialoguePageSnapshot, LoopingAudioSnapshot, MutationValue, PlaybackAutoMode,
         PlaybackSnapshot, PresentationCue, PresentationCueKind, PresentationOutcome, ProfileState,
         PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, SceneNode, SpriteAction,
-        SpriteSnapshot, StoryLocation, TimelineChannels, TimelineTrack, UiMotionPreset,
-        UiMotionSlot, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
-        WorldSnapshot,
+        SpriteSnapshot, StoryFlowReveal, StoryFlowSnapshot, StoryLocation, TimelineChannels,
+        TimelineTrack, UiMotionPreset, UiMotionSlot, ValueOperand, VariableMap, VariableOperation,
+        VariableScope, VariableType, WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
@@ -80,6 +80,8 @@ pub struct RuntimeEngine {
     profile_variables: VariableMap,
     read_dialogues: std::collections::BTreeSet<String>,
     seen_presentations: std::collections::BTreeSet<String>,
+    dialogue_history: Vec<DialogueHistoryEntry>,
+    completed_scenes: std::collections::BTreeSet<String>,
     started: bool,
     next_update_id: u64,
     next_cue_id: u64,
@@ -105,6 +107,8 @@ impl RuntimeEngine {
                 read_content_version: content.manifest.content_version.clone(),
                 read_dialogues: Default::default(),
                 seen_presentations: Default::default(),
+                dialogue_history: Default::default(),
+                completed_scenes: Default::default(),
             },
         )
     }
@@ -120,6 +124,8 @@ impl RuntimeEngine {
             profile_variables: profile.variables,
             read_dialogues: profile.read_dialogues,
             seen_presentations: profile.seen_presentations,
+            dialogue_history: profile.dialogue_history,
+            completed_scenes: profile.completed_scenes,
             started: false,
             next_update_id: 1,
             next_cue_id: 1,
@@ -306,6 +312,7 @@ impl RuntimeEngine {
             update,
             asset_ids: content.asset_ids(),
             content_version: content.manifest.content_version.clone(),
+            story_flow_available: content.story_flow.is_some(),
         }
     }
 
@@ -425,7 +432,60 @@ impl RuntimeEngine {
             read_content_version: content.manifest.content_version.clone(),
             read_dialogues: self.read_dialogues.clone(),
             seen_presentations: self.seen_presentations.clone(),
+            dialogue_history: self.dialogue_history.clone(),
+            completed_scenes: self.completed_scenes.clone(),
         }
+    }
+
+    pub fn dialogue_history(&self) -> &[DialogueHistoryEntry] {
+        &self.dialogue_history
+    }
+
+    pub fn story_flow(
+        &self,
+        content: &ContentCatalog,
+    ) -> Result<Option<StoryFlowSnapshot>, RuntimeError> {
+        let Some(flow) = &content.story_flow else {
+            return Ok(None);
+        };
+        let mut nodes = Vec::new();
+        for (scene_id, node) in &flow.nodes {
+            let completed = self.completed_scenes.contains(scene_id);
+            let visible = match &node.reveal {
+                StoryFlowReveal::Completed => completed,
+                StoryFlowReveal::Always => true,
+                StoryFlowReveal::Condition { condition } => {
+                    self.evaluate_condition(content, condition)?
+                }
+            };
+            if visible {
+                nodes.push(crate::model::VisibleStoryFlowNode {
+                    scene_id: scene_id.clone(),
+                    title: node.title.clone(),
+                    x: node.x,
+                    y: node.y,
+                    completed,
+                });
+            }
+        }
+        let visible = nodes
+            .iter()
+            .map(|node| node.scene_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let edges = flow
+            .edges
+            .iter()
+            .filter(|edge| {
+                visible.contains(edge.from.as_str()) && visible.contains(edge.to.as_str())
+            })
+            .map(|edge| crate::model::VisibleStoryFlowEdge {
+                id: edge.id.clone(),
+                from: edge.from.clone(),
+                to: edge.to.clone(),
+                label: edge.label.clone(),
+            })
+            .collect();
+        Ok(Some(StoryFlowSnapshot { nodes, edges }))
     }
 
     pub fn pending_runtime_update(&self) -> Option<u64> {
@@ -614,6 +674,25 @@ impl RuntimeEngine {
                         return Ok(cues);
                     }
                 }
+                SceneNode::Clear {
+                    duration_ms,
+                    easing,
+                    await_completion,
+                    next,
+                } => {
+                    self.clear_scene_visual_state();
+                    self.snapshot.location.node_id = next;
+                    cues.push(self.cue(
+                        gate(await_completion),
+                        PresentationCueKind::ClearScene {
+                            duration_ms,
+                            easing,
+                        },
+                    ));
+                    if await_completion {
+                        return Ok(cues);
+                    }
+                }
                 SceneNode::Say {
                     speaker,
                     text,
@@ -678,6 +757,14 @@ impl RuntimeEngine {
                     };
                     self.snapshot.dialogue_page = Some(page);
                     self.snapshot.location.node_id = next;
+                    self.append_history(
+                        prompt_id.clone(),
+                        speaker_id.clone(),
+                        speaker.clone(),
+                        name_color.clone(),
+                        text_color.clone(),
+                        text.clone(),
+                    );
                     self.snapshot.prompt = PromptSnapshot::Dialogue {
                         prompt_id: prompt_id.clone(),
                         speaker_id,
@@ -785,10 +872,29 @@ impl RuntimeEngine {
                     self.snapshot.location.node_id = next;
                 }
                 SceneNode::Jump { scene, target } => {
-                    if let Some(scene) = scene {
-                        self.snapshot.location.scene_id = scene;
+                    let crosses_scene = scene
+                        .as_ref()
+                        .is_some_and(|destination| destination != &scene_id);
+                    if let Some(destination) = scene {
+                        self.snapshot.location.scene_id = destination;
                     }
                     self.snapshot.location.node_id = target;
+                    // A scene is a visual ownership boundary. Establish an
+                    // explicit presentation boundary before evaluating the
+                    // destination so stale views cannot blend into its first
+                    // background or sprite cue.
+                    if crosses_scene {
+                        self.completed_scenes.insert(scene_id.clone());
+                        self.clear_scene_visual_state();
+                        cues.push(self.cue(
+                            CueGate::Runtime,
+                            PresentationCueKind::ClearScene {
+                                duration_ms: 0,
+                                easing: crate::model::Easing::Linear,
+                            },
+                        ));
+                        return Ok(cues);
+                    }
                 }
                 SceneNode::Wait { duration_ms, next } => {
                     self.snapshot.location.node_id = next;
@@ -991,6 +1097,7 @@ impl RuntimeEngine {
                     }
                 }
                 SceneNode::End => {
+                    self.completed_scenes.insert(scene_id.clone());
                     self.snapshot.dialogue_page = None;
                     self.snapshot.prompt = PromptSnapshot::End {
                         prompt_id: format!("{scene_id}/{node_id}"),
@@ -1124,6 +1231,45 @@ impl RuntimeEngine {
         };
         self.next_cue_id = self.next_cue_id.saturating_add(1);
         cue
+    }
+
+    fn append_history(
+        &mut self,
+        prompt_id: String,
+        speaker_id: Option<String>,
+        speaker: Option<String>,
+        name_color: Option<String>,
+        text_color: Option<String>,
+        text: String,
+    ) {
+        let entry_id = self
+            .dialogue_history
+            .last()
+            .map_or(1, |entry| entry.entry_id.saturating_add(1));
+        self.dialogue_history.push(DialogueHistoryEntry {
+            entry_id,
+            prompt_id,
+            speaker_id,
+            speaker,
+            name_color,
+            text_color,
+            text,
+        });
+        if self.dialogue_history.len() > 500 {
+            self.dialogue_history
+                .drain(..self.dialogue_history.len() - 500);
+        }
+    }
+
+    /// Reset only scene-owned visual state. BGM, dialogue UI visibility and UI
+    /// motion bindings are global presentation concerns and intentionally
+    /// survive a scene transition.
+    fn clear_scene_visual_state(&mut self) {
+        self.snapshot.world.background = None;
+        self.snapshot.world.sprites.clear();
+        self.snapshot.world.camera = CameraSnapshot::default();
+        self.snapshot.world.persistent_effects.clear();
+        self.snapshot.dialogue_page = None;
     }
 
     fn finish_update(&mut self, cues: Vec<PresentationCue>, bump_revision: bool) -> RuntimeUpdate {
@@ -1716,6 +1862,7 @@ fn validate_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use super::*;
@@ -1742,6 +1889,160 @@ mod tests {
         ValueOperand::Variable(VariableOperand {
             variable: id.to_owned(),
         })
+    }
+
+    #[test]
+    fn clear_node_fades_to_an_empty_scene_owned_world() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.nodes.insert(
+            "clear_test".to_owned(),
+            SceneNode::Clear {
+                duration_ms: 700,
+                easing: crate::model::Easing::EaseOut,
+                await_completion: true,
+                next: "introduction".to_owned(),
+            },
+        );
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.snapshot.location.node_id = "clear_test".to_owned();
+        runtime.snapshot.world.background = Some("bg.classroom".to_owned());
+        runtime.snapshot.world.sprites.insert(
+            "alice".to_owned(),
+            SpriteSnapshot {
+                asset: "sprite.jelly".to_owned(),
+                x: 960.0,
+                y: 1080.0,
+                scale: 1.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                rotation_deg: 0.0,
+                opacity: 1.0,
+                z: 4,
+            },
+        );
+        runtime.snapshot.world.camera = CameraSnapshot {
+            x: 40.0,
+            y: -20.0,
+            zoom: 1.3,
+            rotation_deg: 10.0,
+        };
+        runtime.snapshot.world.persistent_effects = vec!["rain".to_owned()];
+        runtime.snapshot.dialogue_page = Some(DialoguePageSnapshot {
+            page_id: "old_page".to_owned(),
+            speaker_id: None,
+            speaker: None,
+            name_color: None,
+            text_color: None,
+            segments: vec!["旧文本".to_owned()],
+        });
+
+        let cues = runtime.run_until_boundary(&content).unwrap();
+        assert_eq!(runtime.snapshot.world.background, None);
+        assert!(runtime.snapshot.world.sprites.is_empty());
+        assert_eq!(runtime.snapshot.world.camera, CameraSnapshot::default());
+        assert!(runtime.snapshot.world.persistent_effects.is_empty());
+        assert_eq!(runtime.snapshot.dialogue_page, None);
+        assert!(matches!(
+            cues.as_slice(),
+            [PresentationCue {
+                gate: CueGate::Runtime,
+                kind: PresentationCueKind::ClearScene {
+                    duration_ms: 700,
+                    easing: crate::model::Easing::EaseOut,
+                },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn cross_scene_jump_clears_visual_state_before_running_destination() {
+        let mut content = catalog();
+        let source = content.scenes.get_mut("prologue").unwrap();
+        source.entry = "source_sprite".to_owned();
+        source.nodes.insert(
+            "source_sprite".to_owned(),
+            SceneNode::Sprite {
+                sprite_id: "alice".to_owned(),
+                action: SpriteAction::Show,
+                asset: Some("sprite.jelly".to_owned()),
+                x: None,
+                y: None,
+                scale: None,
+                opacity: None,
+                z: None,
+                duration_ms: 0,
+                easing: crate::model::Easing::Linear,
+                await_completion: false,
+                next: "source_line".to_owned(),
+            },
+        );
+        source.nodes.insert(
+            "source_line".to_owned(),
+            SceneNode::Say {
+                speaker: None,
+                text: "离开当前场景。".to_owned(),
+                mode: DialogueMode::Start,
+                page_id: None,
+                speed_cps: None,
+                next: "cross_scene_test".to_owned(),
+            },
+        );
+        source.nodes.insert(
+            "cross_scene_test".to_owned(),
+            SceneNode::Jump {
+                scene: Some("destination".to_owned()),
+                target: "end".to_owned(),
+            },
+        );
+        content.scenes.insert(
+            "destination".to_owned(),
+            crate::model::SceneDefinition {
+                schema_version: 2,
+                id: "destination".to_owned(),
+                entry: "end".to_owned(),
+                nodes: BTreeMap::from([("end".to_owned(), SceneNode::End)]),
+            },
+        );
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let source_update = runtime.start_new_game(&content).unwrap();
+        assert!(source_update.snapshot.world.sprites.contains_key("alice"));
+        let update = runtime
+            .advance(
+                &content,
+                source_update.snapshot.revision,
+                AdvanceSource::Manual,
+            )
+            .unwrap();
+
+        assert!(update.requires_ack);
+        assert_eq!(
+            update.snapshot.location,
+            StoryLocation {
+                scene_id: "destination".to_owned(),
+                node_id: "end".to_owned(),
+            }
+        );
+        assert_eq!(update.snapshot.world.background, None);
+        assert!(update.snapshot.world.sprites.is_empty());
+        assert!(matches!(
+            update.cues.as_slice(),
+            [PresentationCue {
+                gate: CueGate::Runtime,
+                kind: PresentationCueKind::ClearScene { duration_ms: 0, .. },
+                ..
+            }]
+        ));
+
+        let destination = runtime
+            .presentation_complete(&content, update.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(matches!(
+            destination.snapshot.prompt,
+            PromptSnapshot::End { .. }
+        ));
     }
 
     #[test]
@@ -2348,7 +2649,8 @@ mod tests {
     fn snapshots_round_trip_as_json() {
         let content = catalog();
         let mut runtime = RuntimeEngine::new(&content).unwrap();
-        runtime.start_new_game(&content).unwrap();
+        runtime.snapshot.location.node_id = "introduction".to_owned();
+        runtime.run_until_boundary(&content).unwrap();
         let json = serde_json::to_string(runtime.snapshot()).unwrap();
         let decoded: RuntimeSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, *runtime.snapshot());
@@ -2629,5 +2931,33 @@ mod tests {
         runtime.snapshot.location.node_id = "route_choice".to_owned();
         let error = runtime.run_until_boundary(&content).unwrap_err();
         assert!(error.to_string().contains("没有任何可见且可用的选项"));
+    }
+
+    #[test]
+    fn dialogue_history_and_story_flow_are_profile_scoped() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.snapshot.location.node_id = "introduction".to_owned();
+        runtime.run_until_boundary(&content).unwrap();
+        assert_eq!(runtime.dialogue_history().len(), 1);
+        let first = runtime.dialogue_history()[0].clone();
+        assert_eq!(first.prompt_id, "prologue/introduction");
+
+        let before = runtime.story_flow(&content).unwrap().unwrap();
+        assert!(before
+            .nodes
+            .iter()
+            .any(|node| node.scene_id == "test_scene"));
+        assert!(!before.nodes.iter().any(|node| node.scene_id == "prologue"));
+        runtime.completed_scenes.insert("prologue".to_owned());
+        let after = runtime.story_flow(&content).unwrap().unwrap();
+        assert!(after
+            .nodes
+            .iter()
+            .any(|node| node.scene_id == "prologue" && node.completed));
+
+        runtime.start_new_game(&content).unwrap();
+        assert_eq!(runtime.dialogue_history().len(), 1);
+        assert!(runtime.completed_scenes.contains("prologue"));
     }
 }

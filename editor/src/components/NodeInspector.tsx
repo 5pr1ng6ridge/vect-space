@@ -288,6 +288,21 @@ function renderFields(
           />
         </>
       );
+    case "clear":
+      return (
+        <>
+          <p className="field-note">
+            淡出背景、立绘、镜头与持续视觉效果；BGM 和对话框 UI 会保留。
+          </p>
+          <AnimationFields node={node} onChange={update} />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
     case "say": {
       const speakerMode =
         node.speaker === null
@@ -1081,7 +1096,10 @@ function AnimationFields({
   node,
   onChange,
 }: {
-  node: Extract<SceneNode, { type: "background" | "sprite" | "camera" }>;
+  node: Extract<
+    SceneNode,
+    { type: "background" | "sprite" | "clear" | "camera" }
+  >;
   onChange(node: SceneNode): void;
 }): ReactElement {
   return (
@@ -1411,7 +1429,7 @@ function OptionalConditionEditor({
   );
 }
 
-function ConditionEditor({
+export function ConditionEditor({
   manifest,
   onChange,
   value,

@@ -238,6 +238,9 @@ export class PresentationController {
           signal,
         );
         break;
+      case "clear_scene":
+        await this.#clearScene(cue.duration_ms, cue.easing, signal);
+        break;
       case "camera_tween":
         await this.#tweenCamera(cue.to, cue.duration_ms, cue.easing, signal);
         break;
@@ -417,6 +420,60 @@ export class PresentationController {
       },
       signal,
     );
+  }
+
+  /** Fade every scene-owned Pixi view, then remove it. The authoritative
+   * snapshot is reconciled immediately afterwards, so this method never has
+   * to guess which new scene content should be created. */
+  async #clearScene(
+    durationMs: number,
+    easing: Easing,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const backgrounds = [...this.#backgrounds.children];
+    const sprites = [...this.#spriteViews.entries()];
+    const backgroundAlpha = new Map(
+      backgrounds.map((view) => [view, view.alpha]),
+    );
+    const spriteAlpha = new Map(sprites.map(([id, view]) => [id, view.alpha]));
+
+    if (durationMs > 0 && (backgrounds.length > 0 || sprites.length > 0)) {
+      await this.#animate(
+        durationMs,
+        easing,
+        (progress) => {
+          for (const view of backgrounds) {
+            view.alpha = (backgroundAlpha.get(view) ?? 1) * (1 - progress);
+          }
+          for (const [id, view] of sprites) {
+            view.alpha = (spriteAlpha.get(id) ?? 1) * (1 - progress);
+          }
+        },
+        signal,
+      );
+    }
+    if (signal.aborted) return;
+
+    for (const view of backgrounds) {
+      if (view.parent === this.#backgrounds)
+        this.#backgrounds.removeChild(view);
+      view.destroy();
+    }
+    if (
+      this.#background !== null &&
+      !this.#backgrounds.children.includes(this.#background)
+    ) {
+      this.#background = null;
+    }
+    for (const [id, view] of sprites) {
+      if (this.#spriteViews.get(id) === view) {
+        this.#spriteViews.delete(id);
+        if (view.parent === this.#world) this.#world.removeChild(view);
+        view.destroy();
+      }
+    }
+    for (const effect of this.#effects.removeChildren()) effect.destroy();
+    this.#application.render();
   }
 
   async #tweenCamera(

@@ -13,6 +13,25 @@ pub struct ProfileState {
     pub read_dialogues: BTreeSet<String>,
     #[serde(default)]
     pub seen_presentations: BTreeSet<String>,
+    #[serde(default)]
+    pub dialogue_history: Vec<DialogueHistoryEntry>,
+    #[serde(default)]
+    pub completed_scenes: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DialogueHistoryEntry {
+    pub entry_id: u64,
+    pub prompt_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -154,6 +173,76 @@ pub struct ContentManifest {
     pub ui_motions: Vec<String>,
     #[serde(default)]
     pub ui_motion_defaults: UiMotionBindings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub story_flow: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoryFlowDefinition {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub nodes: BTreeMap<String, StoryFlowNode>,
+    #[serde(default)]
+    pub edges: Vec<StoryFlowEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoryFlowNode {
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    #[serde(default)]
+    pub reveal: StoryFlowReveal,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoryFlowReveal {
+    #[default]
+    Completed,
+    Always,
+    Condition {
+        condition: ConditionExpression,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoryFlowEdge {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoryFlowSnapshot {
+    pub nodes: Vec<VisibleStoryFlowNode>,
+    pub edges: Vec<VisibleStoryFlowEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VisibleStoryFlowNode {
+    pub scene_id: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VisibleStoryFlowEdge {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -264,6 +353,18 @@ pub enum SceneNode {
         #[serde(default)]
         easing: Easing,
         #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    /// Fade the current scene's visual world to an empty state. Audio and the
+    /// dialogue UI are deliberately left alone so a scene transition can keep
+    /// its BGM and common UI chrome.
+    Clear {
+        #[serde(default = "default_medium_duration")]
+        duration_ms: u64,
+        #[serde(default)]
+        easing: Easing,
+        #[serde(default = "default_clear_await", rename = "await")]
         await_completion: bool,
         next: String,
     },
@@ -402,6 +503,10 @@ fn default_short_duration() -> u64 {
 
 fn default_medium_duration() -> u64 {
     500
+}
+
+fn default_clear_await() -> bool {
+    true
 }
 
 fn default_volume() -> f32 {
@@ -823,6 +928,12 @@ pub enum PresentationCueKind {
         duration_ms: u64,
         easing: Easing,
     },
+    /// Clears backgrounds, sprites and persistent visual state as one
+    /// coordinated fade. The resulting world always comes from the snapshot.
+    ClearScene {
+        duration_ms: u64,
+        easing: Easing,
+    },
     CameraTween {
         from: CameraSnapshot,
         to: CameraSnapshot,
@@ -882,6 +993,7 @@ pub struct BootstrapPayload {
     pub update: RuntimeUpdate,
     pub asset_ids: Vec<String>,
     pub content_version: String,
+    pub story_flow_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

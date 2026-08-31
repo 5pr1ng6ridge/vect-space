@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 import type {
   BootstrapPayload,
+  DialogueHistoryEntry,
   AdvanceSource,
   ResolvedAsset,
   RuntimeSnapshot,
@@ -9,6 +10,7 @@ import type {
   SaveSlotSummary,
   Settings,
   PresentationOutcome,
+  StoryFlowSnapshot,
 } from "./types";
 
 function messageFrom(error: unknown): string {
@@ -36,6 +38,9 @@ export const engineApi = {
   presentationComplete: (updateId: number, outcome: PresentationOutcome) =>
     command<RuntimeUpdate>("presentation_complete", { updateId, outcome }),
   getSnapshot: () => command<RuntimeSnapshot>("get_snapshot"),
+  getDialogueHistory: () =>
+    command<DialogueHistoryEntry[]>("get_dialogue_history"),
+  getStoryFlow: () => command<StoryFlowSnapshot | null>("get_story_flow"),
   resolveAssets: (assetIds: string[]) =>
     command<ResolvedAsset[]>("resolve_assets", { assetIds }),
   listSaveSlots: () => command<SaveSlotSummary[]>("list_save_slots"),

@@ -12,8 +12,10 @@ import "katex/dist/katex.min.css";
 import "./App.css";
 
 import { DialogueBox, type DialogueBoxHandle } from "./components/DialogueBox";
+import { HistoryPanel } from "./components/HistoryPanel";
 import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
+import { StoryFlowPage } from "./components/StoryFlowPage";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
 import { autoReadingDelay, hasImmediateAutoAdvance } from "./engine/markup";
 import { canFastForwardPrompt } from "./engine/playback";
@@ -24,10 +26,12 @@ import type {
   BootstrapPayload,
   ChoicePrompt,
   DialoguePrompt,
+  DialogueHistoryEntry,
   PresentationCue,
   RuntimeUpdate,
   SaveSlotSummary,
   Settings,
+  StoryFlowSnapshot,
 } from "./engine/types";
 import { useViewportMetrics } from "./viewport/viewport";
 
@@ -40,8 +44,8 @@ const DEFAULT_SETTINGS: Settings = {
   skip_mode: "read_only",
 };
 
-type Phase = "booting" | "title" | "playing";
-type Panel = "none" | "saves" | "settings";
+type Phase = "booting" | "title" | "story_flow" | "playing";
+type Panel = "none" | "saves" | "settings" | "history";
 
 interface InitialAppState {
   bootstrap: BootstrapPayload;
@@ -84,6 +88,9 @@ export default function App(): ReactElement {
   const [completedPromptId, setCompletedPromptId] = useState<string | null>(
     null,
   );
+  const [history, setHistory] = useState<DialogueHistoryEntry[]>([]);
+  const [storyFlow, setStoryFlow] = useState<StoryFlowSnapshot | null>(null);
+  const [storyFlowAvailable, setStoryFlowAvailable] = useState(false);
 
   useEffect(() => {
     phaseRef.current = phase;
@@ -102,6 +109,7 @@ export default function App(): ReactElement {
         setSaveSlots(slots);
         setUpdate(bootstrap.update);
         setContentVersion(bootstrap.content_version);
+        setStoryFlowAvailable(bootstrap.story_flow_available);
         setPhase("title");
       })
       .catch((reason: unknown) => {
@@ -274,6 +282,38 @@ export default function App(): ReactElement {
   const returnToTitle = (): void => {
     setNormalAuto(false);
     setPanel("none");
+    setPhase("title");
+    phaseRef.current = "title";
+  };
+
+  const openHistory = (): void => {
+    void engineApi
+      .getDialogueHistory()
+      .then((entries) => {
+        setHistory(entries);
+        setPanel("history");
+      })
+      .catch((reason: unknown) => setError(errorMessage(reason)));
+  };
+
+  const openStoryFlow = (): void => {
+    void engineApi
+      .getStoryFlow()
+      .then((flow) => {
+        if (flow === null) {
+          setError("当前内容未配置剧情流程。");
+          return;
+        }
+        setStoryFlow(flow);
+        setNormalAuto(false);
+        setPanel("none");
+        setPhase("story_flow");
+        phaseRef.current = "story_flow";
+      })
+      .catch((reason: unknown) => setError(errorMessage(reason)));
+  };
+
+  const closeStoryFlow = (): void => {
     setPhase("title");
     phaseRef.current = "title";
   };
@@ -490,6 +530,21 @@ export default function App(): ReactElement {
     };
   }, [handlePlayerAdvance]);
 
+  useEffect(() => {
+    const closePanel = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && panel === "history") {
+        event.preventDefault();
+        setPanel("none");
+      } else if (event.key === "Escape" && phase === "story_flow") {
+        event.preventDefault();
+        setPhase("title");
+        phaseRef.current = "title";
+      }
+    };
+    window.addEventListener("keydown", closePanel);
+    return () => window.removeEventListener("keydown", closePanel);
+  }, [panel, phase]);
+
   return (
     <main className="app-shell">
       <section className="game-viewport" style={viewportStyle}>
@@ -506,6 +561,7 @@ export default function App(): ReactElement {
           typingSfxCps={typingSfxCps}
           update={update}
           uiMotionHost={uiMotionHost}
+          visible={phase === "playing"}
         />
 
         {phase === "booting" && (
@@ -544,10 +600,21 @@ export default function App(): ReactElement {
                 <button onClick={() => setPanel("settings")} type="button">
                   设置
                 </button>
+                <button
+                  disabled={!storyFlowAvailable}
+                  onClick={openStoryFlow}
+                  type="button"
+                >
+                  剧情流程
+                </button>
               </div>
               <small>内容版本 {contentVersion || "未载入"}</small>
             </div>
           </div>
+        )}
+
+        {phase === "story_flow" && storyFlow !== null && (
+          <StoryFlowPage flow={storyFlow} onClose={closeStoryFlow} />
         )}
 
         {phase === "playing" && update !== null && (
@@ -570,6 +637,9 @@ export default function App(): ReactElement {
               </button>
               <button onClick={() => setPanel("settings")} type="button">
                 设置
+              </button>
+              <button onClick={openHistory} type="button">
+                历史
               </button>
               <button onClick={() => void toggleFullscreen()} type="button">
                 全屏
@@ -641,6 +711,9 @@ export default function App(): ReactElement {
           />
         )}
 
+        {panel === "history" && (
+          <HistoryPanel entries={history} onClose={() => setPanel("none")} />
+        )}
         {error !== null && (
           <div className="error-toast" role="alert">
             <span>{error}</span>

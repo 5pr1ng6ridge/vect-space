@@ -11,9 +11,9 @@ use thiserror::Error;
 use crate::model::{
     AssetDefinition, AssetKind, AudioAction, CharacterDefinition, ConditionExpression,
     ContentManifest, DialogueMode, MutationValue, ResolvedAsset, ScalarValue, SceneDefinition,
-    SceneNode, SpriteAction, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack,
-    UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation,
-    VariableType,
+    SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal, TimelineChannels,
+    TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings, UiMotionPreset, ValueOperand,
+    VariableDefinition, VariableOperation, VariableScope, VariableType,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -25,6 +25,7 @@ const MAX_TIMELINE_TRACKS: usize = 64;
 const MAX_TIMELINE_KEYFRAMES: usize = 10_000;
 const MAX_TIMELINE_EVENTS: usize = 2_048;
 const UI_MOTION_SCHEMA_VERSION: u32 = 1;
+const STORY_FLOW_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum ContentError {
@@ -47,6 +48,7 @@ pub struct ContentCatalog {
     pub manifest: ContentManifest,
     pub scenes: BTreeMap<String, SceneDefinition>,
     pub ui_motions: BTreeMap<String, UiMotionPreset>,
+    pub story_flow: Option<StoryFlowDefinition>,
 }
 
 impl ContentCatalog {
@@ -115,12 +117,19 @@ impl ContentCatalog {
             &manifest.characters,
             &ui_motions,
         )?;
+        let story_flow = load_story_flow(
+            &root,
+            manifest.story_flow.as_deref(),
+            &scenes,
+            &manifest.variables,
+        )?;
 
         Ok(Self {
             assets_root,
             manifest,
             scenes,
             ui_motions,
+            story_flow,
         })
     }
 
@@ -134,6 +143,7 @@ impl ContentCatalog {
         manifest: ContentManifest,
         scenes: BTreeMap<String, SceneDefinition>,
         ui_motion_files: BTreeMap<String, UiMotionPreset>,
+        story_flow: Option<StoryFlowDefinition>,
     ) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
         if manifest.schema_version != CONTENT_SCHEMA_VERSION {
@@ -179,12 +189,21 @@ impl ContentCatalog {
             &manifest.characters,
             &ui_motions,
         )?;
+        if manifest.story_flow.is_some() != story_flow.is_some() {
+            return Err(ContentError::Validation(
+                "manifest 的 story_flow 与编辑器文档不一致".to_owned(),
+            ));
+        }
+        if let Some(flow) = &story_flow {
+            validate_story_flow(flow, &scenes, &manifest.variables)?;
+        }
 
         Ok(Self {
             assets_root,
             manifest,
             scenes,
             ui_motions,
+            story_flow,
         })
     }
 
@@ -237,6 +256,10 @@ impl ContentCatalog {
             &schema_for!(ContentManifest),
         )?;
         write_schema(
+            &target.join("story-flow.schema.json"),
+            &schema_for!(StoryFlowDefinition),
+        )?;
+        write_schema(
             &target.join("scene.schema.json"),
             &schema_for!(SceneDefinition),
         )?;
@@ -282,6 +305,132 @@ fn load_ui_motions(
         files.insert(path.clone(), read_yaml(&full_path)?);
     }
     validate_ui_motion_files(paths, &files)
+}
+
+fn load_story_flow(
+    root: &Path,
+    path: Option<&str>,
+    scenes: &BTreeMap<String, SceneDefinition>,
+    variables: &BTreeMap<String, VariableDefinition>,
+) -> Result<Option<StoryFlowDefinition>, ContentError> {
+    let Some(path) = path else { return Ok(None) };
+    let relative = validate_relative_path(path)?;
+    let full_path = canonical_file_within(root, &root.join(relative))?;
+    let flow: StoryFlowDefinition = read_yaml(&full_path)?;
+    validate_story_flow(&flow, scenes, variables)?;
+    Ok(Some(flow))
+}
+
+fn validate_story_flow(
+    flow: &StoryFlowDefinition,
+    scenes: &BTreeMap<String, SceneDefinition>,
+    variables: &BTreeMap<String, VariableDefinition>,
+) -> Result<(), ContentError> {
+    if flow.schema_version != STORY_FLOW_SCHEMA_VERSION {
+        return Err(ContentError::Validation(format!(
+            "不支持 story flow schema_version {}",
+            flow.schema_version
+        )));
+    }
+    for (scene_id, node) in &flow.nodes {
+        validate_identifier("story flow scene id", scene_id)?;
+        if !scenes.contains_key(scene_id) {
+            return Err(ContentError::Validation(format!(
+                "流程图引用未知场景 {scene_id}"
+            )));
+        }
+        validate_display_name(&node.title).map_err(|message| {
+            ContentError::Validation(format!("流程节点 {scene_id} 标题无效: {message}"))
+        })?;
+        if node.x % 20 != 0 || node.y % 20 != 0 {
+            return Err(ContentError::Validation(format!(
+                "流程节点 {scene_id} 坐标必须吸附到 20px 网格"
+            )));
+        }
+        if !(-100_000..=100_000).contains(&node.x) || !(-100_000..=100_000).contains(&node.y) {
+            return Err(ContentError::Validation(format!(
+                "流程节点 {scene_id} 坐标超出允许范围"
+            )));
+        }
+        if let StoryFlowReveal::Condition { condition } = &node.reveal {
+            validate_condition(condition, variables, "story_flow", scene_id)?;
+            validate_profile_only_condition(condition, variables, scene_id)?;
+        }
+    }
+    let mut ids = BTreeSet::new();
+    let mut connections = BTreeSet::new();
+    for edge in &flow.edges {
+        validate_identifier("story flow edge id", &edge.id)?;
+        if !ids.insert(&edge.id) {
+            return Err(ContentError::Validation(format!(
+                "流程边 ID 重复: {}",
+                edge.id
+            )));
+        }
+        if edge.from == edge.to {
+            return Err(ContentError::Validation(format!(
+                "流程边 {} 不能自连接",
+                edge.id
+            )));
+        }
+        if !flow.nodes.contains_key(&edge.from) || !flow.nodes.contains_key(&edge.to) {
+            return Err(ContentError::Validation(format!(
+                "流程边 {} 存在悬空端点",
+                edge.id
+            )));
+        }
+        if !connections.insert((&edge.from, &edge.to)) {
+            return Err(ContentError::Validation(format!(
+                "流程连接重复: {} -> {}",
+                edge.from, edge.to
+            )));
+        }
+        if let Some(label) = &edge.label {
+            validate_display_name(label).map_err(|message| {
+                ContentError::Validation(format!("流程边 {} 标签无效: {message}", edge.id))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_profile_only_condition(
+    condition: &ConditionExpression,
+    variables: &BTreeMap<String, VariableDefinition>,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    let operands: Vec<&ValueOperand> = match condition {
+        ConditionExpression::Eq { left, right }
+        | ConditionExpression::Ne { left, right }
+        | ConditionExpression::Lt { left, right }
+        | ConditionExpression::Le { left, right }
+        | ConditionExpression::Gt { left, right }
+        | ConditionExpression::Ge { left, right } => vec![left, right],
+        ConditionExpression::And { conditions } | ConditionExpression::Or { conditions } => {
+            for child in conditions {
+                validate_profile_only_condition(child, variables, node_id)?;
+            }
+            Vec::new()
+        }
+        ConditionExpression::Not { condition } => {
+            validate_profile_only_condition(condition, variables, node_id)?;
+            Vec::new()
+        }
+    };
+    for operand in operands {
+        if let ValueOperand::Variable(reference) = operand {
+            if variables
+                .get(&reference.variable)
+                .is_none_or(|definition| definition.scope != VariableScope::Profile)
+            {
+                return Err(ContentError::Validation(format!(
+                    "流程节点 {node_id} 的揭示条件只能引用 profile 变量: {}",
+                    reference.variable
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_ui_motion_files(
@@ -512,6 +661,12 @@ fn validate_scenes(
                     if opacity.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
                         return node_error(scene_id, node_id, "opacity 必须在 0 到 1 之间");
                     }
+                    validate_duration(*duration_ms, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::Clear {
+                    duration_ms, next, ..
+                } => {
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }

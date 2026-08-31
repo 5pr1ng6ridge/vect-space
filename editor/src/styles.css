@@ -2622,6 +2622,100 @@ body.timeline-resizing {
   justify-content: flex-end;
   gap: 7px;
 }
+
+.flow-workspace {
+  height: 100%;
+  display: grid;
+  grid-template-rows: 48px minmax(0, 1fr);
+  background: #0b0d12;
+}
+.flow-workspace-body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 320px;
+}
+.flow-scene-list,
+.flow-inspector {
+  overflow: auto;
+  padding: 14px;
+  background: #12151d;
+  border-right: 1px solid var(--line);
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+.flow-inspector {
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+.flow-scene-list h3,
+.flow-inspector h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.flow-scene-list button {
+  text-align: left;
+}
+.flow-inspector label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.flow-inspector input,
+.flow-inspector select {
+  width: 100%;
+}
+.flow-graph {
+  min-width: 0;
+  min-height: 0;
+}
+.flow-editor-card {
+  height: 100%;
+  padding: 16px;
+  display: grid;
+  gap: 8px;
+  border: 1px solid #5670a0;
+  border-radius: 6px;
+  background: #172134;
+}
+.flow-editor-card.main-axis {
+  border-width: 2px;
+  border-color: #7f9fda;
+  box-shadow: 0 0 0 5px rgb(50 75 116 / 18%);
+}
+.flow-editor-card.branch {
+  border-color: #52698f;
+}
+.flow-editor-card span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.flow-main-axis-guide {
+  position: absolute;
+  left: -100000px;
+  width: 200000px;
+  height: 2px;
+  border-top: 2px solid rgb(105 139 195 / 42%);
+  pointer-events: none;
+}
+.flow-main-axis-guide span {
+  position: sticky;
+  left: 16px;
+  display: inline-block;
+  transform: translateY(-22px);
+  color: rgb(145 172 218 / 70%);
+  font-size: 10px;
+}
+.flow-axis-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 5px;
+}
+.flow-axis-actions button {
+  padding: 6px 4px;
+  font-size: 10px;
+}
 .timeline-exit-dialog button {
   padding: 6px 9px;
   font-size: 10px;

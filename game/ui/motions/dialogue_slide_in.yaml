@@ -6,24 +6,24 @@ tracks:
   channels:
     offset_y:
     - at_ms: 0
-      value: 72
+      value: 72.0
       easing: ease_out
     - at_ms: 280
-      value: 0
+      value: 0.0
       easing: linear
     opacity:
     - at_ms: 0
-      value: 0
+      value: 0.0
       easing: ease_out
     - at_ms: 280
-      value: 1
+      value: 1.0
       easing: linear
 - target: dialogue_nameplate
   channels:
     offset_x:
     - at_ms: 0
-      value: -36
+      value: -36.0
       easing: ease_out
     - at_ms: 280
-      value: 0
+      value: 0.0
       easing: linear

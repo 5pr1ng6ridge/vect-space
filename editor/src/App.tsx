@@ -13,6 +13,7 @@ import { editorApi } from "./api";
 import { NodeInspector } from "./components/NodeInspector";
 import { ProjectSidebar, type SidebarTab } from "./components/ProjectSidebar";
 import { StoryGraph } from "./components/StoryGraph";
+import { StoryFlowWorkspace } from "./components/StoryFlowWorkspace";
 import { TimelineWorkspace } from "./components/TimelineWorkspace";
 import { UiMotionWorkspace } from "./components/UiMotionWorkspace";
 import {
@@ -138,6 +139,7 @@ export function App(): ReactElement {
     nodeId: string;
   } | null>(null);
   const [uiMotionTarget, setUiMotionTarget] = useState<string | null>(null);
+  const [flowWorkspace, setFlowWorkspace] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -249,6 +251,7 @@ export function App(): ReactElement {
       setSelectedNodeId(null);
       setTimelineTarget(null);
       setUiMotionTarget(null);
+      setFlowWorkspace(false);
       resetHistory();
       localStorage.setItem("vectspace-editor:last-project", loaded.root);
       setNotice(`已打开 ${loaded.root}`);
@@ -646,6 +649,13 @@ export function App(): ReactElement {
           );
         }
       }
+      if (draft.story_flow !== null) {
+        Reflect.deleteProperty(draft.story_flow.definition.nodes, sceneId);
+        draft.story_flow.definition.edges =
+          draft.story_flow.definition.edges.filter(
+            (edge) => edge.from !== sceneId && edge.to !== sceneId,
+          );
+      }
     });
     const next =
       project.scenes.find((file) => file.definition.id !== sceneId)?.definition
@@ -671,7 +681,15 @@ export function App(): ReactElement {
     }
   };
 
-  const navigate = (sceneId: string | null, nodeId: string | null): void => {
+  const navigate = (
+    sceneId: string | null,
+    nodeId: string | null,
+    workspace?: "story" | "flow",
+  ): void => {
+    if (workspace === "flow") {
+      setFlowWorkspace(true);
+      return;
+    }
     if (sceneId !== null && findScene(project, sceneId) !== undefined) {
       setActiveSceneId(sceneId);
       setSidebarTab("scenes");
@@ -766,6 +784,28 @@ export function App(): ReactElement {
   const uiMotionFile = project.ui_motions.find(
     (file) => file.definition.id === uiMotionTarget,
   );
+  if (flowWorkspace && project.story_flow !== null) {
+    return (
+      <StoryFlowWorkspace
+        projectManifest={project.manifest}
+        sceneIds={project.scenes.map((file) => file.definition.id)}
+        flow={project.story_flow.definition}
+        dirty={dirty}
+        onClose={() => setFlowWorkspace(false)}
+        onChange={(definition) =>
+          commit((draft) => {
+            if (draft.story_flow !== null)
+              draft.story_flow.definition = definition;
+          })
+        }
+        onSave={() => void saveProject()}
+        onUndo={undo}
+        onRedo={redo}
+        undoAvailable={past.length > 0}
+        redoAvailable={future.length > 0}
+      />
+    );
+  }
   if (uiMotionTarget !== null && uiMotionFile !== undefined) {
     return (
       <>
@@ -867,6 +907,36 @@ export function App(): ReactElement {
           {dirty && <span className="dirty-dot" title="有未保存的更改" />}
         </div>
         <div className="toolbar-actions">
+          <button
+            disabled={busy}
+            onClick={() => {
+              if (project.story_flow === null) {
+                commit((draft) => {
+                  const entry = draft.manifest.entry_scene;
+                  draft.manifest.story_flow = "story-flow.yaml";
+                  draft.story_flow = {
+                    path: "story-flow.yaml",
+                    definition: {
+                      schema_version: 1,
+                      nodes: {
+                        [entry]: {
+                          title: entry,
+                          x: 240,
+                          y: 540,
+                          reveal: { mode: "completed" },
+                        },
+                      },
+                      edges: [],
+                    },
+                  };
+                });
+              }
+              setFlowWorkspace(true);
+            }}
+            type="button"
+          >
+            总流程
+          </button>
           <button
             disabled={busy}
             onClick={() => void openProject()}

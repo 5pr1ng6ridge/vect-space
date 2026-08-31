@@ -205,6 +205,11 @@ export type PresentationCue = CueBase &
         easing: Easing;
       }
     | {
+        type: "clear_scene";
+        duration_ms: number;
+        easing: Easing;
+      }
+    | {
         type: "camera_tween";
         from: CameraSnapshot;
         to: CameraSnapshot;
@@ -271,6 +276,37 @@ export interface BootstrapPayload {
   update: RuntimeUpdate;
   asset_ids: string[];
   content_version: string;
+  story_flow_available: boolean;
+}
+
+export interface DialogueHistoryEntry {
+  entry_id: number;
+  prompt_id: string;
+  speaker_id?: string | null;
+  speaker: string | null;
+  name_color?: string | null;
+  text_color?: string | null;
+  text: string;
+}
+
+export interface VisibleStoryFlowNode {
+  scene_id: string;
+  title: string;
+  x: number;
+  y: number;
+  completed: boolean;
+}
+
+export interface VisibleStoryFlowEdge {
+  id: string;
+  from: string;
+  to: string;
+  label?: string | null;
+}
+
+export interface StoryFlowSnapshot {
+  nodes: VisibleStoryFlowNode[];
+  edges: VisibleStoryFlowEdge[];
 }
 
 export interface ResolvedAsset {

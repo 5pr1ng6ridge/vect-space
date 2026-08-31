@@ -70,6 +70,7 @@ function project(): EditorProject {
       },
     ],
     ui_motions: [],
+    story_flow: null,
     layout: { version: 1, scenes: {} },
     assets: [],
     diagnostics: [],
@@ -310,6 +311,21 @@ describe("story graph mapping", () => {
     expect(outputPorts(node)).toEqual([
       { id: "next", label: "下一步", target: "end", targetScene: null },
     ]);
+  });
+
+  it("creates and pastes clear nodes as independent visual transitions", () => {
+    const clear = defaultNode("clear", "end");
+    expect(clear).toEqual({
+      type: "clear",
+      duration_ms: 500,
+      easing: "ease_in_out",
+      await: true,
+      next: "end",
+    });
+    expect(preparePastedNode(clear, project().manifest)).toMatchObject({
+      type: "clear",
+      next: "",
+    });
   });
 
   it("inserts a node on the right and preserves the original destination", () => {

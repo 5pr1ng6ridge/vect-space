@@ -31,6 +31,7 @@ interface SceneCanvasProps {
   playbackRate: number;
   suppressOneShots: boolean;
   paused: boolean;
+  visible: boolean;
   onSettled(update: RuntimeUpdate, outcome: PresentationOutcome): void;
   onDiagnostic(message: string): void;
   uiMotionHost: UiMotionHost;
@@ -52,6 +53,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       playbackRate,
       suppressOneShots,
       paused,
+      visible,
       onSettled,
       onDiagnostic,
       uiMotionHost,
@@ -203,7 +205,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
 
     return (
       <canvas
-        className="scene-canvas"
+        className={`scene-canvas${visible ? "" : " scene-canvas-hidden"}`}
         height={1080}
         ref={canvasRef}
         width={1920}

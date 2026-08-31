@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary, ScalarValue, Settings,
-    VariableDefinition, VariableMap, VariableScope, VariableType,
+    DialogueHistoryEntry, ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary,
+    ScalarValue, Settings, VariableDefinition, VariableMap, VariableScope, VariableType,
 };
 
 const SAVE_SCHEMA_VERSION: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
-const PROFILE_SCHEMA_VERSION: u32 = 3;
+const PROFILE_SCHEMA_VERSION: u32 = 4;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
 const SLOT_IDS: [&str; 4] = ["auto", "1", "2", "3"];
 
@@ -73,6 +73,10 @@ struct ProfileFile {
     read_content_version: String,
     read_dialogues: std::collections::BTreeSet<String>,
     seen_presentations: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    dialogue_history: Vec<DialogueHistoryEntry>,
+    #[serde(default)]
+    completed_scenes: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -238,7 +242,13 @@ impl ProfileManager {
 
         let loaded = read_json_with_backup::<serde_json::Value>(&self.path);
         let (stored, mut rewrite) = match loaded {
-            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(3) => {
+            Ok(value)
+                if matches!(
+                    value.get("schema_version").and_then(|v| v.as_u64()),
+                    Some(4) | Some(3)
+                ) =>
+            {
+                let is_v3 = value.get("schema_version").and_then(|v| v.as_u64()) == Some(3);
                 let file: ProfileFile = serde_json::from_value(value)
                     .map_err(|error| SaveError::InvalidData(error.to_string()))?;
                 (
@@ -247,8 +257,10 @@ impl ProfileManager {
                         read_content_version: file.read_content_version,
                         read_dialogues: file.read_dialogues,
                         seen_presentations: file.seen_presentations,
+                        dialogue_history: file.dialogue_history,
+                        completed_scenes: file.completed_scenes,
                     },
-                    false,
+                    is_v3,
                 )
             }
             Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(2) => {
@@ -261,6 +273,8 @@ impl ProfileManager {
                         read_content_version: file.read_content_version,
                         read_dialogues: file.read_dialogues,
                         seen_presentations: Default::default(),
+                        dialogue_history: Default::default(),
+                        completed_scenes: Default::default(),
                     },
                     true,
                 )
@@ -275,6 +289,8 @@ impl ProfileManager {
                         read_content_version: self.content_version.clone(),
                         read_dialogues: Default::default(),
                         seen_presentations: Default::default(),
+                        dialogue_history: Default::default(),
+                        completed_scenes: Default::default(),
                     },
                     true,
                 )
@@ -305,6 +321,8 @@ impl ProfileManager {
                 .clone_from(&self.content_version);
             reconciled.read_dialogues.clear();
             reconciled.seen_presentations.clear();
+            reconciled.dialogue_history.clear();
+            reconciled.completed_scenes.clear();
             rewrite = true;
         }
         if rewrite {
@@ -320,6 +338,8 @@ impl ProfileManager {
             read_content_version: self.content_version.clone(),
             read_dialogues: Default::default(),
             seen_presentations: Default::default(),
+            dialogue_history: Default::default(),
+            completed_scenes: Default::default(),
         })
     }
 
@@ -358,6 +378,8 @@ impl ProfileManager {
             read_content_version: state.read_content_version.clone(),
             read_dialogues: state.read_dialogues.clone(),
             seen_presentations: state.seen_presentations.clone(),
+            dialogue_history: state.dialogue_history.clone(),
+            completed_scenes: state.completed_scenes.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| SaveError::InvalidData(error.to_string()))?;

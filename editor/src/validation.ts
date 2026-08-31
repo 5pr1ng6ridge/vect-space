@@ -175,8 +175,95 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
     }
   }
 
+  validateStoryFlow(project, sceneById, diagnostics);
+
   diagnostics.push(...reachabilityWarnings(project, sceneById));
   return deduplicate([...diagnostics, ...project.diagnostics]);
+}
+
+function validateStoryFlow(
+  project: EditorProject,
+  scenes: Map<string, EditorProject["scenes"][number]["definition"]>,
+  output: EditorDiagnostic[],
+): void {
+  const file = project.story_flow;
+  if (file === null) {
+    if (project.manifest.story_flow != null)
+      output.push(
+        flowError(
+          "missing_story_flow",
+          "manifest 声明了 story_flow，但编辑器文档不存在",
+          null,
+        ),
+      );
+    return;
+  }
+  if (project.manifest.story_flow !== file.path)
+    output.push(
+      flowError(
+        "story_flow_path",
+        "story_flow 文件路径与 manifest 不一致",
+        null,
+      ),
+    );
+  if (file.definition.schema_version !== 1)
+    output.push(
+      flowError(
+        "story_flow_schema",
+        "story flow schema_version 必须为 1",
+        null,
+      ),
+    );
+  const edges = new Set<string>();
+  const ids = new Set<string>();
+  for (const [id, node] of Object.entries(file.definition.nodes)) {
+    if (!scenes.has(id))
+      output.push(
+        flowError("flow_unknown_scene", `流程节点引用未知场景：${id}`, id),
+      );
+    if (
+      !ID_PATTERN.test(id) ||
+      !node.title.trim() ||
+      /[\x00-\x1f]/.test(node.title)
+    )
+      output.push(flowError("flow_invalid_node", `流程节点 ${id} 无效`, id));
+    if (
+      !Number.isInteger(node.x) ||
+      !Number.isInteger(node.y) ||
+      node.x % 20 !== 0 ||
+      node.y % 20 !== 0
+    )
+      output.push(
+        flowError(
+          "flow_invalid_position",
+          `流程节点 ${id} 必须吸附到 20px 网格`,
+          id,
+        ),
+      );
+  }
+  for (const edge of file.definition.edges) {
+    if (!ID_PATTERN.test(edge.id) || !ids.add(edge.id))
+      output.push(
+        flowError(
+          "flow_invalid_edge",
+          `流程边 ID 非法或重复：${edge.id}`,
+          edge.id,
+        ),
+      );
+    if (
+      edge.from === edge.to ||
+      !file.definition.nodes[edge.from] ||
+      !file.definition.nodes[edge.to] ||
+      !edges.add(`${edge.from}\u0000${edge.to}`)
+    )
+      output.push(
+        flowError(
+          "flow_invalid_connection",
+          `流程连接无效：${edge.from} → ${edge.to}`,
+          edge.id,
+        ),
+      );
+  }
 }
 
 function validateNode(
@@ -237,6 +324,9 @@ function validateNode(
       ) {
         issue("invalid_opacity", "透明度必须在 0–1 之间");
       }
+      break;
+    case "clear":
+      checkDuration(node.duration_ms);
       break;
     case "say":
       if (node.text.trim() === "") issue("empty_dialogue", "对话文本不能为空");
@@ -845,6 +935,22 @@ function error(
     message,
     scene_id: sceneId,
     node_id: nodeId,
+  };
+}
+
+function flowError(
+  code: string,
+  message: string,
+  flowElementId: string | null,
+): EditorDiagnostic {
+  return {
+    severity: "error",
+    code,
+    message,
+    scene_id: null,
+    node_id: null,
+    workspace: "flow",
+    flow_element_id: flowElementId,
   };
 }
 

@@ -28,6 +28,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "jump", label: "跳转", group: "逻辑" },
   { type: "background", label: "背景", group: "画面" },
   { type: "sprite", label: "立绘", group: "画面" },
+  { type: "clear", label: "清除画面", group: "画面" },
   { type: "camera", label: "镜头", group: "画面" },
   { type: "screen_effect", label: "屏幕效果", group: "画面" },
   { type: "timeline", label: "关键帧时间线", group: "画面" },
@@ -141,6 +142,8 @@ export function summarizeNode(node: SceneNode): string {
       return node.background ?? "清除背景";
     case "sprite":
       return `${node.action} ${node.sprite_id}`;
+    case "clear":
+      return `淡出全部内容 · ${node.duration_ms} ms`;
     case "wait":
       return `${node.duration_ms} ms`;
     case "bgm":
@@ -190,6 +193,14 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         duration_ms: 500,
         easing: "ease_in_out",
         await: false,
+        next: fallback,
+      };
+    case "clear":
+      return {
+        type,
+        duration_ms: 500,
+        easing: "ease_in_out",
+        await: true,
         next: fallback,
       };
     case "say":
@@ -651,6 +662,7 @@ export function preparePastedNode(
       break;
     case "playback":
     case "wait":
+    case "clear":
     case "camera":
     case "screen_effect":
     case "dialogue_ui":
@@ -1193,6 +1205,18 @@ export function renameScene(
     updated.layout.scenes[nextId] = updated.layout.scenes[previousId];
     Reflect.deleteProperty(updated.layout.scenes, previousId);
   }
+  if (
+    updated.story_flow !== null &&
+    updated.story_flow.definition.nodes[previousId] !== undefined
+  ) {
+    updated.story_flow.definition.nodes[nextId] =
+      updated.story_flow.definition.nodes[previousId];
+    Reflect.deleteProperty(updated.story_flow.definition.nodes, previousId);
+    for (const edge of updated.story_flow.definition.edges) {
+      if (edge.from === previousId) edge.from = nextId;
+      if (edge.to === previousId) edge.to = nextId;
+    }
+  }
   const previews = updated.layout.timeline_previews;
   if (previews !== undefined) {
     for (const key of Object.keys(previews)) {
@@ -1225,6 +1249,7 @@ export function projectRequest(project: EditorProject) {
     manifest: project.manifest,
     scenes: project.scenes,
     ui_motions: project.ui_motions,
+    story_flow: project.story_flow,
     layout: project.layout,
     expected_fingerprint: project.fingerprint,
   };

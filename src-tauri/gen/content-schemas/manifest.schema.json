@@ -37,6 +37,12 @@
       "format": "uint32",
       "minimum": 0
     },
+    "story_flow": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "ui_motion_defaults": {
       "$ref": "#/$defs/UiMotionBindings",
       "default": {}

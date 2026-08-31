@@ -84,6 +84,37 @@ export interface ContentManifest {
   scenes: string[];
   ui_motions: string[];
   ui_motion_defaults: UiMotionBindings;
+  story_flow?: string | null;
+}
+
+export type StoryFlowReveal =
+  | { mode: "completed" }
+  | { mode: "always" }
+  | { mode: "condition"; condition: ConditionExpression };
+
+export interface StoryFlowNode {
+  title: string;
+  x: number;
+  y: number;
+  reveal?: StoryFlowReveal;
+}
+
+export interface StoryFlowEdge {
+  id: string;
+  from: string;
+  to: string;
+  label?: string | null;
+}
+
+export interface StoryFlowDefinition {
+  schema_version: number;
+  nodes: Record<string, StoryFlowNode>;
+  edges: StoryFlowEdge[];
+}
+
+export interface StoryFlowFile {
+  path: string;
+  definition: StoryFlowDefinition;
 }
 
 interface NextNode {
@@ -112,6 +143,12 @@ export interface SpriteNode extends AwaitedNode {
   scale: number | null;
   opacity: number | null;
   z: number | null;
+  easing: Easing;
+}
+
+/** Fade all scene-owned visual content to an empty world. */
+export interface ClearNode extends AwaitedNode {
+  type: "clear";
   easing: Easing;
 }
 
@@ -265,6 +302,7 @@ export interface EndNode {
 export type SceneNode =
   | BackgroundNode
   | SpriteNode
+  | ClearNode
   | SayNode
   | ChoiceNode
   | SetNode
@@ -343,6 +381,8 @@ export interface EditorDiagnostic {
   message: string;
   scene_id: string | null;
   node_id: string | null;
+  workspace?: "story" | "flow";
+  flow_element_id?: string | null;
 }
 
 export interface EditorProject {
@@ -350,6 +390,7 @@ export interface EditorProject {
   manifest: ContentManifest;
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
+  story_flow: StoryFlowFile | null;
   layout: EditorLayout;
   assets: EditorAsset[];
   diagnostics: EditorDiagnostic[];
@@ -360,6 +401,7 @@ export interface SaveProjectRequest {
   manifest: ContentManifest;
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
+  story_flow: StoryFlowFile | null;
   layout: EditorLayout;
   expected_fingerprint: string;
 }

@@ -59,6 +59,19 @@ nodes:
     auto: normal
     ctrl_fast_forward: allow
     next: timeline_showcase
+  dialogue_emphasis:
+    type: ui_motion_play
+    motion: ui.dialogue.emphasis
+    duration_ms: null
+    await: true
+    next: forced_end
+  dialogue_show:
+    type: dialogue_ui
+    visible: true
+    motion: null
+    duration_ms: null
+    await: false
+    next: say
   ending:
     type: jump
     scene: null
@@ -99,24 +112,12 @@ nodes:
     easing: ease_in_out
     await: true
     next: dialogue_show
-  dialogue_show:
-    type: dialogue_ui
-    visible: true
-    motion: null
-    duration_ms: null
-    await: false
-    next: forced_begin
   flash_result:
     type: screen_effect
     effect: flash
     duration_ms: 260
     await: false
     next: camera_move
-  forced_begin:
-    type: playback
-    auto: forced
-    ctrl_fast_forward: block
-    next: say
   forced_end:
     type: playback
     auto: normal
@@ -138,12 +139,6 @@ nodes:
     mode: start
     speed_cps: 28.0
     next: dialogue_emphasis
-  dialogue_emphasis:
-    type: ui_motion_play
-    motion: ui.dialogue.emphasis
-    duration_ms: null
-    await: true
-    next: forced_end
   jump_say_3:
     type: jump
     scene: test_scene
@@ -167,7 +162,7 @@ nodes:
     duration_ms: 650
     easing: ease_in_out
     await: true
-    next: wait_move_jelly
+    next: sprite_move_jelly
   route_branch:
     type: condition
     condition:
@@ -510,7 +505,3 @@ nodes:
           easing: step
     events: []
     next: mark_ending
-  wait_move_jelly:
-    type: wait
-    duration_ms: 5000
-    next: sprite_move_jelly
