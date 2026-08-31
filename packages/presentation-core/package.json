@@ -5,8 +5,15 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./audio": "./src/audio.ts",
     "./timeline": "./src/timeline.ts",
     "./ledger": "./src/ledger.ts",
-    "./ui-motion": "./src/uiMotion.ts"
+    "./timeline-preview": "./src/timelinePreview.ts",
+    "./types": "./src/types.ts",
+    "./ui-motion": "./src/uiMotion.ts",
+    "./virtual-clock": "./src/virtualClock.ts"
+  },
+  "peerDependencies": {
+    "pixi.js": "8.20.0"
   }
 }

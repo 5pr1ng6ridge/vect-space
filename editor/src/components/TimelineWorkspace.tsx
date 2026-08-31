@@ -28,14 +28,14 @@ import {
   type TimelineEventSelection,
   type TimelineSelection,
 } from "./TimelineEditor";
-import type { RuntimeUpdate as GameRuntimeUpdate } from "../../../src/engine/types";
+import type { RuntimeUpdate as GameRuntimeUpdate } from "@vectspace/presentation-core/types";
 import {
   DESIGN_HEIGHT,
   DESIGN_WIDTH,
   TimelinePreviewSurface,
   type PreviewObjectFrame,
   type TimelinePreviewFrame,
-} from "../../../src/engine/timelinePreview";
+} from "@vectspace/presentation-core/timeline-preview";
 
 interface TimelineWorkspaceProps {
   project: EditorProject;
