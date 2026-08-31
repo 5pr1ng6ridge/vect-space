@@ -2,11 +2,14 @@ import { createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import { LongTextPanel, type LongTextPanelHandle } from "./LongTextPanel";
 import {
-  LongTextPanel,
+  LONG_TEXT_PAGE_HEIGHT,
+  LONG_TEXT_PAGE_PADDING_BOTTOM,
+  LONG_TEXT_PAGE_PADDING_TOP,
+  LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
-  type LongTextPanelHandle,
-} from "./LongTextPanel";
+} from "./longTextPagination";
 
 describe("LongTextPanel", () => {
   it("keeps revealed steps on paper and starts a new paper at manual breaks", () => {
@@ -69,5 +72,37 @@ describe("LongTextPanel", () => {
     expect(pages).toHaveLength(2);
     expect(pages[0]?.steps.map((step) => step.step_id)).toEqual(["first"]);
     expect(pages[1]?.steps.map((step) => step.step_id)).toEqual(["second"]);
+  });
+
+  it("accounts for the visible gap between steps at the paper boundary", () => {
+    const capacity =
+      LONG_TEXT_PAGE_HEIGHT -
+      LONG_TEXT_PAGE_PADDING_TOP -
+      LONG_TEXT_PAGE_PADDING_BOTTOM;
+    const pages = paginateLongTextSteps(
+      [
+        { step_id: "first", text: "第一段", page_break_before: false },
+        { step_id: "second", text: "第二段", page_break_before: false },
+      ],
+      { first: 400, second: capacity - 400 },
+    );
+
+    expect(LONG_TEXT_STEP_GAP).toBeGreaterThan(0);
+    expect(pages).toHaveLength(2);
+  });
+
+  it("expands a paper rather than clipping one oversized text step", () => {
+    const capacity =
+      LONG_TEXT_PAGE_HEIGHT -
+      LONG_TEXT_PAGE_PADDING_TOP -
+      LONG_TEXT_PAGE_PADDING_BOTTOM;
+    const pages = paginateLongTextSteps(
+      [{ step_id: "large", text: "很长的证明", page_break_before: false }],
+      { large: capacity + 240 },
+    );
+
+    expect(pages).toHaveLength(1);
+    expect(pages[0]?.contentHeight).toBe(capacity + 240);
+    expect(pages[0]?.height).toBe(LONG_TEXT_PAGE_HEIGHT + 240);
   });
 });

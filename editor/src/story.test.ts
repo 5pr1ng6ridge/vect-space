@@ -433,6 +433,87 @@ describe("story graph mapping", () => {
     ).toBe(true);
   });
 
+  it("matches Rust by rejecting non-finite story node numbers", () => {
+    const invalid = project();
+    invalid.scenes[0].definition.nodes.bad_sprite = {
+      type: "sprite",
+      sprite_id: "bad",
+      action: "move",
+      asset: null,
+      x: Number.NaN,
+      y: null,
+      scale: null,
+      opacity: null,
+      z: null,
+      duration_ms: 0,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    invalid.scenes[0].definition.nodes.bad_speed = {
+      type: "say",
+      speaker: null,
+      text: "速度错误",
+      speed_cps: Number.POSITIVE_INFINITY,
+      next: "end",
+    };
+
+    const codes = validateLive(invalid).map((diagnostic) => diagnostic.code);
+    expect(codes).toContain("invalid_sprite_position");
+    expect(codes).toContain("invalid_speed");
+  });
+
+  it("surfaces timeline and BGM data Rust would reject on save", () => {
+    const invalid = project();
+    invalid.scenes[0].definition.nodes.bad_bgm = {
+      type: "bgm",
+      action: "start",
+      asset: null,
+      volume: 1,
+      duration_ms: 0,
+      await: false,
+      start_ms: 50,
+      loop_start_ms: 100,
+      loop_end_ms: null,
+      next: "end",
+    };
+    invalid.scenes[0].definition.nodes.bad_timeline = {
+      type: "timeline",
+      duration_ms: 100,
+      await: true,
+      skippable: true,
+      tracks: [
+        {
+          type: "video",
+          asset: "",
+          clip_start_ms: 60,
+          clip_end_ms: 40,
+          loop: false,
+          fit: "contain",
+          audio_enabled: false,
+          channels: { opacity: [] },
+        },
+      ],
+      events: [
+        {
+          type: "screen_effect",
+          id: "bad-event",
+          at_ms: Number.NaN,
+          effect: "flash",
+          duration_ms: 60_001,
+        },
+      ],
+      next: "end",
+    };
+
+    const codes = validateLive(invalid).map((diagnostic) => diagnostic.code);
+    expect(codes).toContain("invalid_bgm_loop");
+    expect(codes).toContain("invalid_video_clip");
+    expect(codes).toContain("empty_timeline_channel");
+    expect(codes).toContain("invalid_timeline_event_time");
+    expect(codes).toContain("invalid_duration");
+  });
+
   it("renames nested condition and choice variable references", () => {
     const source = project();
     source.scenes[0].definition.nodes.guard = {

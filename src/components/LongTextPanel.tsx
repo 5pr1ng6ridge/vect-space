@@ -20,12 +20,14 @@ import {
   parseMarkup,
   revealCompletionTime,
 } from "../engine/markup";
-import type {
-  LongTextPageSnapshot,
-  LongTextPrompt,
-  LongTextStepSnapshot,
-} from "../engine/types";
+import type { LongTextPageSnapshot, LongTextPrompt } from "../engine/types";
 import { MarkupText } from "./MarkupText";
+import {
+  LONG_TEXT_PAGE_GAP,
+  LONG_TEXT_PAGE_PADDING_TOP,
+  LONG_TEXT_STEP_GAP,
+  paginateLongTextSteps,
+} from "./longTextPagination";
 
 export interface LongTextPanelHandle {
   complete(): void;
@@ -50,16 +52,6 @@ interface MathRevealMetric {
   fontSizePx: number;
 }
 
-interface PaperPage {
-  steps: LongTextStepSnapshot[];
-  index: number;
-}
-
-const PAGE_HEIGHT = 1_340;
-const PAGE_GAP = 92;
-const PAGE_PADDING_TOP = 112;
-const PAGE_PADDING_BOTTOM = 128;
-const STEP_GAP = 28;
 const VIEWPORT_HEIGHT = 1_080;
 const FOLLOW_LINE = 785;
 
@@ -286,13 +278,23 @@ export const LongTextPanel = forwardRef<
   const activePageIndex = pages.findIndex((candidate) =>
     candidate.steps.some((step) => step.step_id === activeStep?.step_id),
   );
-  const maxScroll = Math.max(
+  const pageOffsets = useMemo(() => {
+    let offset = 0;
+    return pages.map((paper, index) => {
+      const current = offset;
+      offset += paper.height;
+      if (index < pages.length - 1) offset += LONG_TEXT_PAGE_GAP;
+      return current;
+    });
+  }, [pages]);
+  const paperStackHeight = pages.reduce(
+    (total, paper, index) =>
+      total +
+      paper.height +
+      (index < pages.length - 1 ? LONG_TEXT_PAGE_GAP : 0),
     0,
-    pages.length * PAGE_HEIGHT +
-      Math.max(0, pages.length - 1) * PAGE_GAP -
-      VIEWPORT_HEIGHT +
-      70,
   );
+  const maxScroll = Math.max(0, paperStackHeight - VIEWPORT_HEIGHT + 70);
 
   useEffect(() => {
     const activePage = pages[activePageIndex];
@@ -314,7 +316,7 @@ export const LongTextPanel = forwardRef<
       .reduce(
         (sum, step, index) =>
           sum +
-          (index === 0 ? 0 : STEP_GAP) +
+          (index === 0 ? 0 : LONG_TEXT_STEP_GAP) +
           (stepHeights[step.step_id] ?? 180),
         0,
       );
@@ -323,8 +325,8 @@ export const LongTextPanel = forwardRef<
       schedule.length === 0 ? 1 : renderedVisibleCount / schedule.length;
     const cursorY =
       70 +
-      activePageIndex * (PAGE_HEIGHT + PAGE_GAP) +
-      PAGE_PADDING_TOP +
+      (pageOffsets[activePageIndex] ?? 0) +
+      LONG_TEXT_PAGE_PADDING_TOP +
       beforeActive +
       activeHeight * visibleRatio;
     const target = clamp(cursorY - FOLLOW_LINE, 0, maxScroll);
@@ -339,6 +341,7 @@ export const LongTextPanel = forwardRef<
     activeStep,
     maxScroll,
     pages,
+    pageOffsets,
     renderedVisibleCount,
     schedule.length,
     stepHeights,
@@ -387,11 +390,12 @@ export const LongTextPanel = forwardRef<
           <article
             className="long-text-paper"
             key={paper.index}
-            style={
-              paperUrl === undefined
-                ? undefined
-                : { backgroundImage: `url(${JSON.stringify(paperUrl)})` }
-            }
+            style={{
+              height: `${paper.height}px`,
+              ...(paperUrl === undefined
+                ? {}
+                : { backgroundImage: `url(${JSON.stringify(paperUrl)})` }),
+            }}
           >
             <div className="long-text-paper-content">
               {paper.steps.map((step) => {
@@ -428,33 +432,6 @@ export const LongTextPanel = forwardRef<
     </section>
   );
 });
-
-export function paginateLongTextSteps(
-  steps: readonly LongTextStepSnapshot[],
-  heights: Readonly<Record<string, number>>,
-): PaperPage[] {
-  const capacity = PAGE_HEIGHT - PAGE_PADDING_TOP - PAGE_PADDING_BOTTOM;
-  const pages: PaperPage[] = [];
-  let current: LongTextStepSnapshot[] = [];
-  let used = 0;
-  for (const step of steps) {
-    const height = heights[step.step_id] ?? 180;
-    const gap = current.length === 0 ? 0 : STEP_GAP;
-    if (
-      current.length > 0 &&
-      (step.page_break_before || used + gap + height > capacity)
-    ) {
-      pages.push({ steps: current, index: pages.length });
-      current = [];
-      used = 0;
-    }
-    const nextGap = current.length === 0 ? 0 : STEP_GAP;
-    current.push(step);
-    used += nextGap + height;
-  }
-  if (current.length > 0) pages.push({ steps: current, index: pages.length });
-  return pages;
-}
 
 function sameMeasurements(
   left: Readonly<Record<string, number>>,

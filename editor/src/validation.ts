@@ -276,8 +276,13 @@ function validateNode(
   const issue = (code: string, message: string) =>
     output.push(error(code, message, sceneId, nodeId));
   const checkDuration = (duration: number) => {
-    if (!Number.isFinite(duration) || duration < 0 || duration > 60_000) {
+    if (!Number.isInteger(duration) || duration < 0 || duration > 60_000) {
       issue("invalid_duration", "时长必须在 0–60000 ms 之间");
+    }
+  };
+  const checkTimestamp = (timestamp: number, label: string) => {
+    if (!Number.isInteger(timestamp) || timestamp < 0) {
+      issue("invalid_timestamp", `${label} 必须是非负整数毫秒数`);
     }
   };
   const checkVolume = (volume: number) => {
@@ -312,6 +317,12 @@ function validateNode(
         issue("invalid_sprite_id", "立绘实例 ID 非法");
       checkAsset(node.asset, "sprite", node.action === "show");
       checkDuration(node.duration_ms);
+      if (
+        (node.x !== null && !Number.isFinite(node.x)) ||
+        (node.y !== null && !Number.isFinite(node.y))
+      ) {
+        issue("invalid_sprite_position", "立绘坐标必须是有限数");
+      }
       if (
         node.scale !== null &&
         (!Number.isFinite(node.scale) || node.scale <= 0)
@@ -420,6 +431,19 @@ function validateNode(
       checkAsset(node.asset, "bgm", node.action === "start");
       checkVolume(node.volume);
       checkDuration(node.duration_ms);
+      checkTimestamp(node.start_ms ?? 0, "BGM 起始点");
+      if ((node.loop_start_ms == null) !== (node.loop_end_ms == null)) {
+        issue("invalid_bgm_loop", "BGM 循环起止点必须同时提供");
+      } else if (node.loop_start_ms != null && node.loop_end_ms != null) {
+        checkTimestamp(node.loop_start_ms, "BGM 循环起点");
+        checkTimestamp(node.loop_end_ms, "BGM 循环终点");
+        if (
+          node.loop_start_ms >= node.loop_end_ms ||
+          (node.start_ms ?? 0) > node.loop_end_ms
+        ) {
+          issue("invalid_bgm_loop", "BGM 循环点顺序无效");
+        }
+      }
       break;
     case "sfx":
       checkAsset(node.asset, "sfx", true);
@@ -491,6 +515,13 @@ function validateNode(
           checkAsset(track.asset, "video", true);
           if (!node.await)
             issue("video_requires_await", "视频时间线必须等待完成");
+          checkTimestamp(track.clip_start_ms, "视频裁剪起点");
+          if (track.clip_end_ms != null) {
+            checkTimestamp(track.clip_end_ms, "视频裁剪终点");
+            if (track.clip_end_ms <= track.clip_start_ms) {
+              issue("invalid_video_clip", "视频裁剪终点必须晚于起点");
+            }
+          }
         } else if (track.type === "sprite")
           checkAsset(track.asset, "sprite", false);
         const allowed = timelineChannels(track);
@@ -500,12 +531,17 @@ function validateNode(
               "invalid_timeline_channel",
               `${track.type} 不支持 ${channel} 通道`,
             );
+          if (frames.length === 0) {
+            issue("empty_timeline_channel", `${channel} 通道不能为空`);
+          }
           keyframes += frames.length;
           let prior = -1;
           for (const [frameIndex, frame] of frames.entries()) {
             const inherited = frame.value === "inherit";
             if (
               (!inherited && !Number.isFinite(frame.value)) ||
+              !Number.isInteger(frame.at_ms) ||
+              frame.at_ms < 0 ||
               frame.at_ms <= prior ||
               frame.at_ms > node.duration_ms
             ) {
@@ -578,16 +614,24 @@ function validateNode(
       for (const event of node.events) {
         if (!ID_PATTERN.test(event.id) || ids.has(event.id))
           issue("invalid_timeline_event", `事件 ID 无效或重复：${event.id}`);
-        if (event.at_ms < priorEvent || event.at_ms > node.duration_ms)
+        if (
+          !Number.isInteger(event.at_ms) ||
+          event.at_ms < 0 ||
+          event.at_ms < priorEvent ||
+          event.at_ms > node.duration_ms
+        )
           issue("invalid_timeline_event_time", `事件 ${event.id} 未排序或越界`);
         if (event.type === "sfx") {
           checkAsset(event.asset, "sfx", true);
           checkVolume(event.volume);
-        } else if (event.at_ms + event.duration_ms > node.duration_ms) {
-          issue(
-            "invalid_timeline_event_time",
-            `事件 ${event.id} 超出时间线时长`,
-          );
+        } else {
+          checkDuration(event.duration_ms);
+          if (event.at_ms + event.duration_ms > node.duration_ms) {
+            issue(
+              "invalid_timeline_event_time",
+              `事件 ${event.id} 超出时间线时长`,
+            );
+          }
         }
         ids.add(event.id);
         priorEvent = event.at_ms;
@@ -668,6 +712,8 @@ function validateUiMotionPreset(
         if (
           typeof frame.value !== "number" ||
           !Number.isFinite(frame.value) ||
+          !Number.isInteger(frame.at_ms) ||
+          frame.at_ms < 0 ||
           frame.at_ms <= prior ||
           frame.at_ms > preset.duration_ms
         ) {

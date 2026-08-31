@@ -649,6 +649,8 @@ fn validate_scenes(
                 SceneNode::Sprite {
                     action,
                     asset,
+                    x,
+                    y,
                     scale,
                     opacity,
                     duration_ms,
@@ -661,8 +663,13 @@ fn validate_scenes(
                     if let Some(id) = asset {
                         require_asset(assets, id, AssetKind::Sprite, scene_id, node_id)?;
                     }
-                    if scale.is_some_and(|value| value <= 0.0) {
-                        return node_error(scene_id, node_id, "scale 必须大于 0");
+                    if x.is_some_and(|value| !value.is_finite())
+                        || y.is_some_and(|value| !value.is_finite())
+                    {
+                        return node_error(scene_id, node_id, "sprite 坐标必须是有限数");
+                    }
+                    if scale.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                        return node_error(scene_id, node_id, "scale 必须是有限正数");
                     }
                     if opacity.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
                         return node_error(scene_id, node_id, "opacity 必须在 0 到 1 之间");
@@ -681,6 +688,7 @@ fn validate_scenes(
                     text,
                     mode,
                     page_id,
+                    speed_cps,
                     next,
                     ..
                 } => {
@@ -701,6 +709,9 @@ fn validate_scenes(
                     }
                     if *mode == DialogueMode::Append && page_id.is_none() {
                         return node_error(scene_id, node_id, "append 对话必须提供 page_id");
+                    }
+                    if speed_cps.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                        return node_error(scene_id, node_id, "speed_cps 必须是有限正数");
                     }
                     validate_text_markup(text, variables, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
@@ -851,13 +862,19 @@ fn validate_scenes(
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Camera {
+                    x,
+                    y,
                     zoom,
                     duration_ms,
                     next,
                     ..
                 } => {
-                    if *zoom <= 0.0 {
-                        return node_error(scene_id, node_id, "camera zoom 必须大于 0");
+                    if !x.is_finite() || !y.is_finite() || !zoom.is_finite() || *zoom <= 0.0 {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            "camera 坐标必须有限，zoom 必须为正数",
+                        );
                     }
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
@@ -1050,6 +1067,7 @@ fn validate_timeline(
                 duration_ms: effect_duration,
                 ..
             } => {
+                validate_duration(*effect_duration, scene_id, node_id)?;
                 if at_ms.saturating_add(*effect_duration) > duration_ms {
                     return node_error(scene_id, node_id, "屏幕效果事件超出时间线时长");
                 }
@@ -1674,6 +1692,104 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("第一步骤"));
+    }
+
+    #[test]
+    fn story_node_numeric_fields_reject_non_finite_values() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
+        let catalog = ContentCatalog::from_root(root).unwrap();
+        let validate = |scenes: &BTreeMap<String, SceneDefinition>| {
+            validate_scenes(
+                scenes,
+                &catalog.manifest.assets,
+                &catalog.manifest.variables,
+                &catalog.manifest.characters,
+                &catalog.ui_motions,
+            )
+        };
+
+        let mut sprite_scenes = catalog.scenes.clone();
+        sprite_scenes.get_mut("prologue").unwrap().nodes.insert(
+            "invalid_sprite_position".to_owned(),
+            SceneNode::Sprite {
+                sprite_id: "nan".to_owned(),
+                action: SpriteAction::Show,
+                asset: Some("sprite.jelly".to_owned()),
+                x: Some(f32::NAN),
+                y: None,
+                scale: Some(1.0),
+                opacity: Some(1.0),
+                z: None,
+                duration_ms: 0,
+                easing: crate::model::Easing::Linear,
+                await_completion: false,
+                next: "introduction".to_owned(),
+            },
+        );
+        assert!(validate(&sprite_scenes)
+            .unwrap_err()
+            .to_string()
+            .contains("sprite 坐标"));
+
+        let mut speed_scenes = catalog.scenes.clone();
+        speed_scenes.get_mut("prologue").unwrap().nodes.insert(
+            "invalid_say_speed".to_owned(),
+            SceneNode::Say {
+                speaker: None,
+                text: "无效速度".to_owned(),
+                mode: DialogueMode::Start,
+                page_id: None,
+                speed_cps: Some(f32::INFINITY),
+                next: "introduction".to_owned(),
+            },
+        );
+        assert!(validate(&speed_scenes)
+            .unwrap_err()
+            .to_string()
+            .contains("speed_cps"));
+
+        let mut camera_scenes = catalog.scenes.clone();
+        camera_scenes.get_mut("prologue").unwrap().nodes.insert(
+            "invalid_camera_position".to_owned(),
+            SceneNode::Camera {
+                x: f32::NEG_INFINITY,
+                y: 0.0,
+                zoom: f32::NAN,
+                duration_ms: 0,
+                easing: crate::model::Easing::Linear,
+                await_completion: false,
+                next: "introduction".to_owned(),
+            },
+        );
+        assert!(validate(&camera_scenes)
+            .unwrap_err()
+            .to_string()
+            .contains("camera 坐标"));
+    }
+
+    #[test]
+    fn timeline_screen_effects_follow_the_single_animation_duration_limit() {
+        let catalog = ContentCatalog::from_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game"),
+        )
+        .unwrap();
+        let error = validate_timeline(
+            120_000,
+            true,
+            false,
+            &[],
+            &[TimelineEvent::ScreenEffect {
+                id: "too_long".to_owned(),
+                at_ms: 1,
+                effect: crate::model::ScreenEffectKind::Flash,
+                duration_ms: 60_001,
+            }],
+            &catalog.manifest.assets,
+            "prologue",
+            "timeline_limit_test",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("不能超过 60 秒"));
     }
 
     #[test]

@@ -2735,6 +2735,179 @@ mod tests {
         );
     }
 
+    #[test]
+    fn feature_lab_yaml_exercises_presentation_text_and_cross_scene_boundaries() {
+        let mut content = catalog();
+        content.manifest.entry_scene = "feature_lab".to_owned();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+
+        let opening = runtime.start_new_game(&content).unwrap();
+        assert!(opening.requires_ack);
+        assert_eq!(opening.snapshot.location.node_id, "timeline");
+        assert_eq!(
+            opening.snapshot.world.background.as_deref(),
+            Some("bg.nvctsp")
+        );
+        assert_eq!(opening.snapshot.world.sprites["lab"].x, 600.0);
+        assert_eq!(opening.snapshot.world.camera.zoom, 1.1);
+        assert_eq!(opening.snapshot.audio.bgm.as_ref().unwrap().volume, 0.25);
+        assert_eq!(
+            opening
+                .snapshot
+                .world
+                .ui_motion_bindings
+                .dialogue_show
+                .as_deref(),
+            Some("ui.dialogue.emphasis")
+        );
+        assert!(opening
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::BackgroundTransition { .. })));
+        assert!(opening
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::PlaySfx { .. })));
+        assert!(opening
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::UiMotion { .. })));
+
+        let timeline = runtime
+            .presentation_complete(&content, opening.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(timeline.requires_ack);
+        assert_eq!(timeline.snapshot.location.node_id, "wait_after_timeline");
+        assert_eq!(timeline.snapshot.world.sprites["lab"].x, 800.0);
+        assert_eq!(timeline.snapshot.world.sprites["lab"].scale, 1.2);
+        assert_eq!(timeline.snapshot.world.camera.x, 0.0);
+        assert_eq!(timeline.snapshot.audio.bgm.as_ref().unwrap().volume, 0.4);
+        assert!(timeline.cues.iter().any(|cue| matches!(
+            cue.kind,
+            PresentationCueKind::Timeline {
+                duration_ms: 100,
+                skippable: true,
+                ..
+            }
+        )));
+
+        let waiting = runtime
+            .presentation_complete(&content, timeline.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(waiting.requires_ack);
+        assert!(runtime.seen_presentations.contains("feature_lab/timeline"));
+        assert!(waiting
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::Delay { duration_ms: 10 })));
+
+        let first_page = runtime
+            .presentation_complete(&content, waiting.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        let PromptSnapshot::Dialogue { text, .. } = &first_page.snapshot.prompt else {
+            panic!("expected the first dialogue page")
+        };
+        assert_eq!(text, "第一段，变量为 0。");
+        assert!(!first_page.requires_ack);
+
+        let appended = runtime
+            .advance(
+                &content,
+                first_page.snapshot.revision,
+                AdvanceSource::Manual,
+            )
+            .unwrap();
+        assert_eq!(
+            appended.snapshot.dialogue_page.as_ref().unwrap().segments,
+            vec!["第一段，变量为 0。", "第二段，公式 $1+1=2$。"]
+        );
+
+        let first_long_text = runtime
+            .advance(&content, appended.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        let PromptSnapshot::LongText { step_id, .. } = &first_long_text.snapshot.prompt else {
+            panic!("expected first long-text step")
+        };
+        assert_eq!(step_id, "definition");
+        assert_eq!(
+            first_long_text
+                .snapshot
+                .long_text_page
+                .as_ref()
+                .unwrap()
+                .steps
+                .len(),
+            1
+        );
+
+        let second_long_text = runtime
+            .advance(
+                &content,
+                first_long_text.snapshot.revision,
+                AdvanceSource::Manual,
+            )
+            .unwrap();
+        assert_eq!(
+            second_long_text
+                .snapshot
+                .long_text_page
+                .as_ref()
+                .unwrap()
+                .steps
+                .len(),
+            2
+        );
+
+        let choice = runtime
+            .advance(
+                &content,
+                second_long_text.snapshot.revision,
+                AdvanceSource::Manual,
+            )
+            .unwrap();
+        assert_eq!(choice.snapshot.variables["score"], ScalarValue::Integer(2));
+        assert_eq!(
+            runtime.profile_variables["ending_seen"],
+            ScalarValue::Boolean(true)
+        );
+        let PromptSnapshot::Choice { choices, .. } = &choice.snapshot.prompt else {
+            panic!("expected feature-lab choice")
+        };
+        assert_eq!(choices.len(), 2);
+        assert!(
+            !choices
+                .iter()
+                .find(|choice| choice.id == "disabled")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            choices
+                .iter()
+                .find(|choice| choice.id == "proceed")
+                .unwrap()
+                .enabled
+        );
+
+        let leaving = runtime
+            .choose(&content, "proceed", choice.snapshot.revision)
+            .unwrap();
+        assert!(leaving.requires_ack);
+        assert_eq!(leaving.snapshot.location.scene_id, "test_scene");
+        assert!(runtime.completed_scenes.contains("feature_lab"));
+        assert!(leaving.cues.iter().any(|cue| matches!(
+            cue.kind,
+            PresentationCueKind::ClearScene { duration_ms: 0, .. }
+        )));
+
+        let ending = runtime
+            .presentation_complete(&content, leaving.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(matches!(ending.snapshot.prompt, PromptSnapshot::End { .. }));
+        assert!(runtime.completed_scenes.contains("test_scene"));
+        assert_eq!(runtime.dialogue_history().len(), 4);
+    }
+
     fn interactive_dialogue(content: &ContentCatalog) -> RuntimeEngine {
         let mut runtime = RuntimeEngine::new(content).unwrap();
         runtime.started = true;

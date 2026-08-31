@@ -1,0 +1,255 @@
+schema_version: 2
+id: feature_lab
+entry: establish
+nodes:
+  establish:
+    type: background
+    background: bg.nvctsp
+    transition: cut
+    duration_ms: 0
+    easing: linear
+    await: false
+    next: show_sprite
+  show_sprite:
+    type: sprite
+    sprite_id: lab
+    action: show
+    asset: sprite.jelly
+    x: 600.0
+    "y": 920.0
+    scale: 1.0
+    opacity: 1.0
+    z: 3
+    duration_ms: 0
+    easing: linear
+    await: false
+    next: music_start
+  music_start:
+    type: bgm
+    action: start
+    asset: bgm.test1
+    volume: 0.25
+    start_ms: 15
+    loop_start_ms: 100
+    loop_end_ms: 1000
+    duration_ms: 0
+    await: false
+    next: click
+  click:
+    type: sfx
+    asset: sfx.typing
+    volume: 0.2
+    next: camera
+  camera:
+    type: camera
+    x: 15.0
+    "y": -7.0
+    zoom: 1.1
+    duration_ms: 0
+    easing: linear
+    await: false
+    next: flash
+  flash:
+    type: screen_effect
+    effect: flash
+    duration_ms: 10
+    await: false
+    next: bind_show_motion
+  bind_show_motion:
+    type: ui_motion_set
+    slot: dialogue_show
+    motion: ui.dialogue.emphasis
+    next: dialogue_ui
+  dialogue_ui:
+    type: dialogue_ui
+    visible: true
+    motion: ui.dialogue.slide_in
+    duration_ms: 10
+    await: false
+    next: emphasis
+  emphasis:
+    type: ui_motion_play
+    motion: ui.dialogue.emphasis
+    duration_ms: 10
+    await: true
+    next: timeline
+  timeline:
+    type: timeline
+    duration_ms: 100
+    await: true
+    skippable: true
+    tracks:
+    - type: sprite
+      sprite_id: lab
+      asset: null
+      remove_at_end: false
+      channels:
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 100
+          value: 800.0
+          easing: ease_out
+        scale:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 100
+          value: 1.2
+          easing: linear
+    - type: camera
+      channels:
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 100
+          value: 0.0
+          easing: linear
+    - type: bgm
+      channels:
+        volume:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 100
+          value: 0.4
+          easing: linear
+    - type: video
+      asset: video.test
+      clip_start_ms: 0
+      clip_end_ms: 80
+      loop: false
+      fit: contain
+      audio_enabled: false
+      channels:
+        x:
+        - at_ms: 0
+          value: 120.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: 90.0
+          easing: linear
+        width:
+        - at_ms: 0
+          value: 640.0
+          easing: linear
+        height:
+        - at_ms: 0
+          value: 360.0
+          easing: linear
+        opacity:
+        - at_ms: 0
+          value: 1.0
+          easing: linear
+        z:
+        - at_ms: 0
+          value: 20.0
+          easing: step
+    events:
+    - type: sfx
+      id: tick
+      at_ms: 50
+      asset: sfx.typing
+      volume: 0.2
+    - type: screen_effect
+      id: shake
+      at_ms: 60
+      effect: shake
+      duration_ms: 10
+    next: wait_after_timeline
+  wait_after_timeline:
+    type: wait
+    duration_ms: 10
+    next: page_start
+  page_start:
+    type: say
+    speaker: test
+    text: 第一段，变量为 [var=score]。
+    mode: start
+    page_id: lab_page
+    speed_cps: 24.0
+    next: page_append
+  page_append:
+    type: say
+    speaker: test
+    text: 第二段，公式 $1+1=2$。
+    mode: append
+    page_id: lab_page
+    speed_cps: 24.0
+    next: lecture
+  lecture:
+    type: long_text
+    paper: gui.dialogue_box
+    steps:
+    - id: definition
+      text: 第一张纸：$V$ 是向量空间。
+      page_break_before: false
+    - id: consequence
+      text: 第二张纸：所以 $0\in V$。
+      page_break_before: true
+    speed_cps: 20.0
+    next: add_score
+  add_score:
+    type: set
+    variable: score
+    op: add
+    value: 2
+    next: flip_profile
+  flip_profile:
+    type: set
+    variable: ending_seen
+    op: toggle
+    next: guard
+  guard:
+    type: condition
+    condition:
+      op: and
+      conditions:
+      - op: ge
+        left:
+          variable: score
+        right:
+          value: 2
+      - op: eq
+        left:
+          variable: ending_seen
+        right:
+          value: true
+    then: choose_exit
+    otherwise: failure
+  choose_exit:
+    type: choice
+    choices:
+    - id: disabled
+      label: 禁用选项
+      enabled_if:
+        op: eq
+        left:
+          variable: score
+        right:
+          value: 0
+      next: failure
+    - id: proceed
+      label: 继续到下一个场景
+      visible_if:
+        op: gt
+        left:
+          variable: score
+        right:
+          value: 1
+      next: leave_scene
+  leave_scene:
+    type: jump
+    scene: test_scene
+    target: end
+  failure:
+    type: clear
+    duration_ms: 0
+    easing: linear
+    await: true
+    next: end
+  end:
+    type: end
