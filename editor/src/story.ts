@@ -221,6 +221,7 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         type,
         paper: null,
         pagination: "auto",
+        font_size: 32,
         steps: [
           { id: "step_1", text: "新的长文本内容。", page_break_before: false },
         ],

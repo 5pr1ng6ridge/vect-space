@@ -571,6 +571,10 @@
           "description": "A sequence of explanatory text blocks rendered on a vertically flowing\npaper surface. Unlike `say`, the runtime stays on this node until its\nfinal step has been advanced, so every step is revision-safe and can be\nsaved independently.",
           "type": "object",
           "properties": {
+            "font_size": {
+              "type": "number",
+              "format": "float"
+            },
             "next": {
               "type": "string"
             },

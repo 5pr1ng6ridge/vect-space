@@ -372,6 +372,14 @@ function validateNode(
       ) {
         issue("invalid_long_text_pagination", "长文本分页方式无效");
       }
+      if (
+        node.font_size !== undefined &&
+        (!Number.isFinite(node.font_size) ||
+          node.font_size < 16 ||
+          node.font_size > 72)
+      ) {
+        issue("invalid_long_text_font_size", "长文本字号必须在 16 到 72 之间");
+      }
       if (node.steps.length === 0 || node.steps.length > 1024) {
         issue("invalid_long_text_steps", "长文本必须包含 1 到 1024 个步骤");
       }

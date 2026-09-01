@@ -171,6 +171,7 @@ export interface LongTextNode extends NextNode {
   type: "long_text";
   paper?: string | null;
   pagination?: "auto" | "manual";
+  font_size?: number;
   steps: LongTextStep[];
   speed_cps: number | null;
 }

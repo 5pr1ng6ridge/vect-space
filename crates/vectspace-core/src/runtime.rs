@@ -375,6 +375,7 @@ impl RuntimeEngine {
         let SceneNode::LongText {
             paper,
             pagination,
+            font_size,
             steps,
             speed_cps,
             next,
@@ -394,6 +395,7 @@ impl RuntimeEngine {
             if page.document_id != document_id
                 || page.paper != paper
                 || page.pagination != pagination
+                || page.font_size != font_size
                 || page.active_step_index != step_index
             {
                 return Err(RuntimeError::Content(format!(
@@ -876,6 +878,7 @@ impl RuntimeEngine {
                 SceneNode::LongText {
                     paper,
                     pagination,
+                    font_size,
                     steps,
                     speed_cps,
                     ..
@@ -893,6 +896,7 @@ impl RuntimeEngine {
                         document_id: document_id.clone(),
                         paper,
                         pagination,
+                        font_size,
                         steps: vec![LongTextStepSnapshot {
                             step_id: step.id.clone(),
                             text: text.clone(),
@@ -2651,6 +2655,7 @@ mod tests {
             SceneNode::LongText {
                 paper: None,
                 pagination: crate::model::LongTextPagination::Manual,
+                font_size: 36.0,
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),
@@ -2712,6 +2717,7 @@ mod tests {
         assert_eq!(*step_index, 1);
         let page = second.snapshot.long_text_page.as_ref().unwrap();
         assert_eq!(page.steps.len(), 2);
+        assert_eq!(page.font_size, 36.0);
         assert_eq!(page.pagination, crate::model::LongTextPagination::Manual);
         assert!(page.steps[1].page_break_before);
         assert!(runtime
@@ -2765,6 +2771,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(page.pagination, crate::model::LongTextPagination::Auto);
+        assert_eq!(page.font_size, crate::model::LONG_TEXT_FONT_SIZE_DEFAULT);
     }
 
     #[test]

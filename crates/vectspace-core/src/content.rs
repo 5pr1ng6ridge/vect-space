@@ -13,7 +13,8 @@ use crate::model::{
     ContentManifest, DialogueMode, MutationValue, ResolvedAsset, ScalarValue, SceneDefinition,
     SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal, TimelineChannels,
     TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings, UiMotionPreset, ValueOperand,
-    VariableDefinition, VariableOperation, VariableScope, VariableType,
+    VariableDefinition, VariableOperation, VariableScope, VariableType, LONG_TEXT_FONT_SIZE_MAX,
+    LONG_TEXT_FONT_SIZE_MIN,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -719,6 +720,7 @@ fn validate_scenes(
                 SceneNode::LongText {
                     paper,
                     pagination: _,
+                    font_size,
                     steps,
                     speed_cps,
                     next,
@@ -731,6 +733,16 @@ fn validate_scenes(
                     }
                     if speed_cps.is_some_and(|value| !value.is_finite() || value <= 0.0) {
                         return node_error(scene_id, node_id, "speed_cps 必须是有限正数");
+                    }
+                    if !font_size.is_finite()
+                        || *font_size < LONG_TEXT_FONT_SIZE_MIN
+                        || *font_size > LONG_TEXT_FONT_SIZE_MAX
+                    {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            "长文本 font_size 必须在 16 到 72 之间",
+                        );
                     }
                     let mut ids = BTreeSet::new();
                     for (index, step) in steps.iter().enumerate() {
@@ -1650,6 +1662,7 @@ mod tests {
             SceneNode::LongText {
                 paper: Some("gui.dialogue_box".to_owned()),
                 pagination: crate::model::LongTextPagination::Auto,
+                font_size: crate::model::LONG_TEXT_FONT_SIZE_DEFAULT,
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),
@@ -1749,6 +1762,27 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("speed_cps"));
+
+        let mut long_text_scenes = catalog.scenes.clone();
+        long_text_scenes.get_mut("prologue").unwrap().nodes.insert(
+            "invalid_long_text_font_size".to_owned(),
+            SceneNode::LongText {
+                paper: None,
+                pagination: crate::model::LongTextPagination::Auto,
+                font_size: 73.0,
+                steps: vec![crate::model::LongTextStep {
+                    id: "step".to_owned(),
+                    text: "无效字号".to_owned(),
+                    page_break_before: false,
+                }],
+                speed_cps: None,
+                next: "introduction".to_owned(),
+            },
+        );
+        assert!(validate(&long_text_scenes)
+            .unwrap_err()
+            .to_string()
+            .contains("font_size"));
 
         let mut camera_scenes = catalog.scenes.clone();
         camera_scenes.get_mut("prologue").unwrap().nodes.insert(

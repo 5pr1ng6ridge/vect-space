@@ -434,7 +434,7 @@ button:disabled {
   visibility: hidden;
   pointer-events: none;
   font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
-  font-size: 32px;
+  font-size: var(--long-text-font-size, 32px);
   line-height: 1.78;
   letter-spacing: 0.035em;
   overflow-wrap: anywhere;
@@ -464,7 +464,7 @@ button:disabled {
   background-size: 100% 100%;
   box-shadow: 0 18px 44px rgb(0 0 0 / 36%);
   font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
-  font-size: 32px;
+  font-size: var(--long-text-font-size, 32px);
   line-height: 1.78;
   letter-spacing: 0.035em;
 }

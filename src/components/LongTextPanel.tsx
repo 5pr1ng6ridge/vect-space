@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactElement,
   type WheelEvent,
 } from "react";
@@ -400,6 +401,11 @@ export const LongTextPanel = forwardRef<
       aria-label="长文本"
       className="long-text-panel"
       onWheel={handleWheel}
+      style={
+        {
+          "--long-text-font-size": `${page.font_size}px`,
+        } as CSSProperties
+      }
     >
       <div
         aria-hidden="true"

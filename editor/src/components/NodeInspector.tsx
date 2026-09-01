@@ -450,6 +450,13 @@ function renderFields(
               <option value="manual">仅手动分页</option>
             </select>
           </Field>
+          <NumberField
+            label="字号（设计像素）"
+            max={72}
+            min={16}
+            onChange={(font_size) => update({ ...node, font_size })}
+            value={node.font_size ?? 32}
+          />
           <p className="field-note">
             每一段在游戏中对应一次推进。自动分页会在空间不足时续页；仅手动分页只响应段落的强制分页标记。
           </p>

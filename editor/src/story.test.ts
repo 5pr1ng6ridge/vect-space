@@ -457,10 +457,20 @@ describe("story graph mapping", () => {
       speed_cps: Number.POSITIVE_INFINITY,
       next: "end",
     };
+    invalid.scenes[0].definition.nodes.bad_long_text_font_size = {
+      type: "long_text",
+      paper: null,
+      pagination: "auto",
+      font_size: 73,
+      steps: [{ id: "step", text: "字号错误", page_break_before: false }],
+      speed_cps: null,
+      next: "end",
+    };
 
     const codes = validateLive(invalid).map((diagnostic) => diagnostic.code);
     expect(codes).toContain("invalid_sprite_position");
     expect(codes).toContain("invalid_speed");
+    expect(codes).toContain("invalid_long_text_font_size");
   });
 
   it("surfaces timeline and BGM data Rust would reject on save", () => {

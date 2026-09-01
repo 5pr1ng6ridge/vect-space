@@ -390,6 +390,11 @@ pub enum SceneNode {
         paper: Option<String>,
         #[serde(default, skip_serializing_if = "LongTextPagination::is_automatic")]
         pagination: LongTextPagination,
+        #[serde(
+            default = "default_long_text_font_size",
+            skip_serializing_if = "is_default_long_text_font_size"
+        )]
+        font_size: f32,
         steps: Vec<LongTextStep>,
         #[serde(default)]
         speed_cps: Option<f32>,
@@ -525,6 +530,18 @@ impl LongTextPagination {
     fn is_automatic(value: &Self) -> bool {
         *value == Self::Auto
     }
+}
+
+pub const LONG_TEXT_FONT_SIZE_DEFAULT: f32 = 32.0;
+pub const LONG_TEXT_FONT_SIZE_MIN: f32 = 16.0;
+pub const LONG_TEXT_FONT_SIZE_MAX: f32 = 72.0;
+
+fn default_long_text_font_size() -> f32 {
+    LONG_TEXT_FONT_SIZE_DEFAULT
+}
+
+fn is_default_long_text_font_size(value: &f32) -> bool {
+    *value == LONG_TEXT_FONT_SIZE_DEFAULT
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -775,6 +792,8 @@ pub struct LongTextPageSnapshot {
     pub paper: Option<String>,
     #[serde(default)]
     pub pagination: LongTextPagination,
+    #[serde(default = "default_long_text_font_size")]
+    pub font_size: f32,
     pub steps: Vec<LongTextStepSnapshot>,
     pub active_step_index: u32,
 }

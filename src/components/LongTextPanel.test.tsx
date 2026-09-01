@@ -30,6 +30,7 @@ describe("LongTextPanel", () => {
           document_id: "prologue/lecture",
           paper: null,
           pagination: "auto",
+          font_size: 32,
           active_step_index: 1,
           steps: [
             {
