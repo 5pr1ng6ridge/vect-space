@@ -129,6 +129,7 @@ export const LongTextPanel = forwardRef<
   const reportedPromptRef = useRef<string | null>(null);
   const measuringRootRef = useRef<HTMLDivElement>(null);
   const stepMeasureRefs = useRef(new Map<string, HTMLDivElement>());
+  const activeStepRef = useRef<HTMLDivElement>(null);
   const manuallyBrowsingRef = useRef(false);
   const initialScrollPlacedRef = useRef(false);
   const promptIsActive = activePromptId === prompt.prompt_id;
@@ -328,23 +329,26 @@ export const LongTextPanel = forwardRef<
           (stepHeights[step.step_id] ?? 180),
         0,
       );
-    const activeHeight = stepHeights[activeStep.step_id] ?? 180;
-    const visibleRatio =
-      schedule.length === 0 ? 1 : renderedVisibleCount / schedule.length;
-    const cursorY =
+    const stepStartY =
       70 +
       (pageOffsets[activePageIndex] ?? 0) +
       LONG_TEXT_PAGE_PADDING_TOP +
-      beforeActive +
-      activeHeight * visibleRatio;
+      beforeActive;
+    const activeHeight = stepHeights[activeStep.step_id] ?? 180;
+    const cursorOffset = renderedUnitBottomOffset(
+      activeStepRef.current,
+      renderedVisibleCount,
+    );
+    const cursorY =
+      stepStartY +
+      (cursorOffset ??
+        (schedule.length === 0
+          ? activeHeight
+          : activeHeight * (renderedVisibleCount / schedule.length)));
     const decision = resolveLongTextScroll({
       initialPositioned: initialScrollPlacedRef.current,
       manuallyBrowsing: manuallyBrowsingRef.current,
-      stepStartY:
-        70 +
-        (pageOffsets[activePageIndex] ?? 0) +
-        LONG_TEXT_PAGE_PADDING_TOP +
-        beforeActive,
+      stepStartY,
       cursorY,
       currentOffset: scrollOffset,
       maxScroll,
@@ -425,7 +429,11 @@ export const LongTextPanel = forwardRef<
               {paper.steps.map((step) => {
                 const current = step.step_id === prompt.step_id;
                 return (
-                  <div className="long-text-step" key={step.step_id}>
+                  <div
+                    className="long-text-step"
+                    key={step.step_id}
+                    ref={current ? activeStepRef : null}
+                  >
                     <MarkupText
                       source={step.text}
                       visibleCount={
@@ -467,6 +475,19 @@ function sameMeasurements(
     leftIds.length === rightIds.length &&
     leftIds.every((id) => left[id] === right[id])
   );
+}
+
+function renderedUnitBottomOffset(
+  step: HTMLDivElement | null,
+  visibleCount: number,
+): number | null {
+  if (step === null || visibleCount <= 0) return null;
+  const units = step.querySelectorAll<HTMLElement>(
+    ":scope > span > .markup-unit",
+  );
+  const unit = units.item(Math.min(visibleCount, units.length) - 1);
+  if (unit === null) return null;
+  return unit.getBoundingClientRect().bottom - step.getBoundingClientRect().top;
 }
 
 function clamp(value: number, min: number, max: number): number {
