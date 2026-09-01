@@ -459,14 +459,22 @@ button:disabled {
   margin: 0 auto 92px;
   padding: 112px 118px 128px;
   overflow: hidden;
-  background-color: #f7f2e5;
+  background-color: transparent;
   background-position: center;
   background-size: 100% 100%;
-  box-shadow: 0 18px 44px rgb(0 0 0 / 36%);
+  box-shadow: none;
   font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
   font-size: var(--long-text-font-size, 32px);
   line-height: 1.78;
   letter-spacing: 0.035em;
+}
+
+.long-text-paper.has-paper-art {
+  box-shadow: 0 18px 44px rgb(0 0 0 / 36%);
+}
+
+.long-text-paper.is-waiting-for-paper-art {
+  visibility: hidden;
 }
 
 .long-text-paper-content {

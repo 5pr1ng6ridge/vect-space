@@ -42,7 +42,8 @@ interface LongTextPanelProps {
   initialCps: number;
   defaultCps: number;
   disabled: boolean;
-  paperUrl: string | undefined;
+  /** `null` means a configured asset is still resolving; `undefined` is transparent. */
+  paperUrl: string | null | undefined;
   revealImmediately: boolean;
   fastForward: boolean;
   onTypingChange(typing: boolean, cps: number): void;
@@ -52,6 +53,54 @@ interface LongTextPanelProps {
 interface MathRevealMetric {
   widthPx: number;
   fontSizePx: number;
+}
+
+const readyPaperArtworkUrls = new Set<string>();
+const paperArtworkLoads = new Map<string, Promise<void>>();
+
+function preloadPaperArtwork(url: string): Promise<void> {
+  if (readyPaperArtworkUrls.has(url)) return Promise.resolve();
+  const existing = paperArtworkLoads.get(url);
+  if (existing !== undefined) return existing;
+  const load = new Promise<void>((resolve) => {
+    const image = new Image();
+    const finish = (): void => {
+      readyPaperArtworkUrls.add(url);
+      resolve();
+    };
+    image.addEventListener("load", () => {
+      void image
+        .decode()
+        .catch(() => undefined)
+        .finally(finish);
+    });
+    // A broken optional paper should not leave the reading UI hidden forever.
+    image.addEventListener("error", finish);
+    image.src = url;
+  });
+  paperArtworkLoads.set(url, load);
+  return load;
+}
+
+function usePaperArtworkReady(paperUrl: string | null | undefined): boolean {
+  const [readyUrl, setReadyUrl] = useState<string | undefined>(
+    typeof paperUrl === "string" && readyPaperArtworkUrls.has(paperUrl)
+      ? paperUrl
+      : undefined,
+  );
+
+  useEffect(() => {
+    if (typeof paperUrl !== "string") return;
+    let active = true;
+    void preloadPaperArtwork(paperUrl).then(() => {
+      if (active) setReadyUrl(paperUrl);
+    });
+    return () => {
+      active = false;
+    };
+  }, [paperUrl]);
+
+  return paperUrl === undefined || readyUrl === paperUrl;
 }
 
 export const LongTextPanel = forwardRef<
@@ -137,6 +186,7 @@ export const LongTextPanel = forwardRef<
   const renderedVisibleCount = promptIsActive ? visibleCount : 0;
   const complete = promptIsActive && revealFinished;
   const activeStep = page.steps[page.active_step_index];
+  const paperArtworkReady = usePaperArtworkReady(paperUrl);
 
   useLayoutEffect(() => {
     if (scrollPromptRef.current === prompt.prompt_id) return;
@@ -168,52 +218,54 @@ export const LongTextPanel = forwardRef<
   );
 
   useEffect(() => {
-    const initialVisibleCount = revealImmediately ? schedule.length : 0;
-    const initiallyFinished = revealImmediately || schedule.length === 0;
-    setActivePromptId(prompt.prompt_id);
-    visibleRef.current = initialVisibleCount;
-    completeRef.current = initiallyFinished;
-    setVisibleCount(initialVisibleCount);
-    setRevealFinished(initiallyFinished);
-    setInstantRevealPromptId(revealImmediately ? prompt.prompt_id : null);
-    setPaused(isPauseAt(0, pauseWindows));
-    setTypingCps(unitCps[0] ?? initialCps);
-    manuallyBrowsingRef.current = false;
-    if (initiallyFinished) return;
-    const startedAt = performance.now();
     let frame = 0;
-    const tick = (now: number): void => {
-      const elapsed = now - startedAt;
-      const nextPaused = isPauseAt(elapsed, pauseWindows);
-      setPaused((current) => (current === nextPaused ? current : nextPaused));
-      const nextCps = typingCpsAt(
-        elapsed,
-        units,
-        schedule,
-        unitCps,
-        mathRevealDurations,
-        initialCps,
-      );
-      setTypingCps((current) => (current === nextCps ? current : nextCps));
-      let next = visibleRef.current;
-      while (
-        next < schedule.length &&
-        (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
-      ) {
-        next += 1;
-      }
-      if (next !== visibleRef.current) {
-        visibleRef.current = next;
-        setVisibleCount(next);
-      }
-      if (next >= schedule.length && elapsed >= revealCompletionMs) {
-        completeRef.current = true;
-        setRevealFinished(true);
-      } else {
-        frame = requestAnimationFrame(tick);
-      }
-    };
-    frame = requestAnimationFrame(tick);
+    frame = requestAnimationFrame(() => {
+      const initialVisibleCount = revealImmediately ? schedule.length : 0;
+      const initiallyFinished = revealImmediately || schedule.length === 0;
+      setActivePromptId(prompt.prompt_id);
+      visibleRef.current = initialVisibleCount;
+      completeRef.current = initiallyFinished;
+      setVisibleCount(initialVisibleCount);
+      setRevealFinished(initiallyFinished);
+      setInstantRevealPromptId(revealImmediately ? prompt.prompt_id : null);
+      setPaused(isPauseAt(0, pauseWindows));
+      setTypingCps(unitCps[0] ?? initialCps);
+      manuallyBrowsingRef.current = false;
+      if (initiallyFinished) return;
+      const startedAt = performance.now();
+      const tick = (now: number): void => {
+        const elapsed = now - startedAt;
+        const nextPaused = isPauseAt(elapsed, pauseWindows);
+        setPaused((current) => (current === nextPaused ? current : nextPaused));
+        const nextCps = typingCpsAt(
+          elapsed,
+          units,
+          schedule,
+          unitCps,
+          mathRevealDurations,
+          initialCps,
+        );
+        setTypingCps((current) => (current === nextCps ? current : nextCps));
+        let next = visibleRef.current;
+        while (
+          next < schedule.length &&
+          (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
+        ) {
+          next += 1;
+        }
+        if (next !== visibleRef.current) {
+          visibleRef.current = next;
+          setVisibleCount(next);
+        }
+        if (next >= schedule.length && elapsed >= revealCompletionMs) {
+          completeRef.current = true;
+          setRevealFinished(true);
+        } else {
+          frame = requestAnimationFrame(tick);
+        }
+      };
+      frame = requestAnimationFrame(tick);
+    });
     return () => cancelAnimationFrame(frame);
   }, [
     defaultCps,
@@ -295,13 +347,14 @@ export const LongTextPanel = forwardRef<
     candidate.steps.some((step) => step.step_id === activeStep?.step_id),
   );
   const pageOffsets = useMemo(() => {
-    let offset = 0;
-    return pages.map((paper, index) => {
-      const current = offset;
-      offset += paper.height;
-      if (index < pages.length - 1) offset += LONG_TEXT_PAGE_GAP;
-      return current;
-    });
+    return pages.map((_, index) =>
+      pages
+        .slice(0, index)
+        .reduce(
+          (offset, paper) => offset + paper.height + LONG_TEXT_PAGE_GAP,
+          0,
+        ),
+    );
   }, [pages]);
   const paperStackHeight = pages.reduce(
     (total, paper, index) =>
@@ -437,11 +490,13 @@ export const LongTextPanel = forwardRef<
       >
         {pages.map((paper) => (
           <article
-            className="long-text-paper"
+            className={`long-text-paper${
+              paperUrl === undefined ? "" : " has-paper-art"
+            }${paperArtworkReady ? "" : " is-waiting-for-paper-art"}`}
             key={paper.index}
             style={{
               height: `${paper.height}px`,
-              ...(paperUrl === undefined
+              ...(typeof paperUrl !== "string"
                 ? {}
                 : { backgroundImage: `url(${JSON.stringify(paperUrl)})` }),
             }}

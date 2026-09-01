@@ -710,7 +710,7 @@ export default function App(): ReactElement {
                   longTextPage.paper === null ||
                   longTextPage.paper === undefined
                     ? undefined
-                    : assets[longTextPage.paper]
+                    : (assets[longTextPage.paper] ?? null)
                 }
                 prompt={longText}
                 ref={longTextRef}
