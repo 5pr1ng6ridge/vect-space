@@ -10,6 +10,7 @@ import {
   LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
 } from "./longTextPagination";
+import { resolveLongTextScroll } from "./longTextScroll";
 
 describe("LongTextPanel", () => {
   it("keeps revealed steps on paper and starts a new paper at manual breaks", () => {
@@ -104,5 +105,40 @@ describe("LongTextPanel", () => {
     expect(pages).toHaveLength(1);
     expect(pages[0]?.contentHeight).toBe(capacity + 240);
     expect(pages[0]?.height).toBe(LONG_TEXT_PAGE_HEIGHT + 240);
+  });
+
+  it("jumps once for a new step, then waits for a long step to cross again", () => {
+    expect(
+      resolveLongTextScroll({
+        initialPositioned: false,
+        manuallyBrowsing: false,
+        stepStartY: 1_100,
+        cursorY: 1_100,
+        currentOffset: 0,
+        maxScroll: 900,
+      }),
+    ).toEqual({ offset: 540, instant: true });
+
+    expect(
+      resolveLongTextScroll({
+        initialPositioned: true,
+        manuallyBrowsing: false,
+        stepStartY: 1_100,
+        cursorY: 1_324,
+        currentOffset: 540,
+        maxScroll: 900,
+      }),
+    ).toBeNull();
+
+    expect(
+      resolveLongTextScroll({
+        initialPositioned: true,
+        manuallyBrowsing: false,
+        stepStartY: 1_100,
+        cursorY: 1_326,
+        currentOffset: 540,
+        maxScroll: 900,
+      }),
+    ).toEqual({ offset: 766, instant: false });
   });
 });

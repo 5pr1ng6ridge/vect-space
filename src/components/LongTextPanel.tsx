@@ -28,6 +28,7 @@ import {
   LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
 } from "./longTextPagination";
+import { resolveLongTextScroll } from "./longTextScroll";
 
 export interface LongTextPanelHandle {
   complete(): void;
@@ -53,7 +54,6 @@ interface MathRevealMetric {
 }
 
 const VIEWPORT_HEIGHT = 1_080;
-const FOLLOW_LINE = 785;
 
 export const LongTextPanel = forwardRef<
   LongTextPanelHandle,
@@ -122,12 +122,15 @@ export const LongTextPanel = forwardRef<
     Readonly<Record<string, number>>
   >({});
   const [scrollOffset, setScrollOffset] = useState(0);
+  const [smoothScrolling, setSmoothScrolling] = useState(false);
+  const [initialScrollApplied, setInitialScrollApplied] = useState(false);
   const visibleRef = useRef(0);
   const completeRef = useRef(revealImmediately || schedule.length === 0);
   const reportedPromptRef = useRef<string | null>(null);
   const measuringRootRef = useRef<HTMLDivElement>(null);
   const stepMeasureRefs = useRef(new Map<string, HTMLDivElement>());
   const manuallyBrowsingRef = useRef(false);
+  const initialScrollPlacedRef = useRef(false);
   const promptIsActive = activePromptId === prompt.prompt_id;
   const renderedVisibleCount = promptIsActive ? visibleCount : 0;
   const complete = promptIsActive && revealFinished;
@@ -256,7 +259,7 @@ export const LongTextPanel = forwardRef<
   useLayoutEffect(() => {
     const root = measuringRootRef.current;
     if (root === null) return;
-    const frame = requestAnimationFrame(updateMeasurements);
+    updateMeasurements();
     const observer =
       typeof ResizeObserver === "undefined"
         ? null
@@ -266,7 +269,6 @@ export const LongTextPanel = forwardRef<
       void document.fonts.ready.then(updateMeasurements);
     }
     return () => {
-      cancelAnimationFrame(frame);
       observer?.disconnect();
     };
   }, [page.steps, updateMeasurements]);
@@ -297,12 +299,18 @@ export const LongTextPanel = forwardRef<
   const maxScroll = Math.max(0, paperStackHeight - VIEWPORT_HEIGHT + 70);
 
   useEffect(() => {
+    if (!initialScrollApplied) return;
+    const frame = requestAnimationFrame(() => setSmoothScrolling(true));
+    return () => cancelAnimationFrame(frame);
+  }, [initialScrollApplied]);
+
+  useLayoutEffect(() => {
     const activePage = pages[activePageIndex];
     if (
-      manuallyBrowsingRef.current ||
       activePageIndex < 0 ||
       activeStep === undefined ||
-      activePage === undefined
+      activePage === undefined ||
+      page.steps.some((step) => stepHeights[step.step_id] === undefined)
     ) {
       return;
     }
@@ -329,21 +337,35 @@ export const LongTextPanel = forwardRef<
       LONG_TEXT_PAGE_PADDING_TOP +
       beforeActive +
       activeHeight * visibleRatio;
-    const target = clamp(cursorY - FOLLOW_LINE, 0, maxScroll);
-    const frame = requestAnimationFrame(() => {
-      setScrollOffset((current) =>
-        Math.abs(current - target) < 1 ? current : target,
-      );
+    const decision = resolveLongTextScroll({
+      initialPositioned: initialScrollPlacedRef.current,
+      manuallyBrowsing: manuallyBrowsingRef.current,
+      stepStartY:
+        70 +
+        (pageOffsets[activePageIndex] ?? 0) +
+        LONG_TEXT_PAGE_PADDING_TOP +
+        beforeActive,
+      cursorY,
+      currentOffset: scrollOffset,
+      maxScroll,
     });
-    return () => cancelAnimationFrame(frame);
+    if (decision === null) return;
+    if (decision.instant) {
+      initialScrollPlacedRef.current = true;
+      setSmoothScrolling(false);
+      setInitialScrollApplied(true);
+    }
+    setScrollOffset(decision.offset);
   }, [
     activePageIndex,
     activeStep,
     maxScroll,
     pages,
     pageOffsets,
+    page.steps,
     renderedVisibleCount,
     schedule.length,
+    scrollOffset,
     stepHeights,
   ]);
 
@@ -383,7 +405,9 @@ export const LongTextPanel = forwardRef<
         className="long-text-paper-stack"
         style={{
           transform: `translateY(${-scrollOffset}px)`,
-          transitionDuration: `${fastForward ? 55 : 360}ms`,
+          transitionDuration: `${
+            smoothScrolling ? (fastForward ? 55 : 360) : 0
+          }ms`,
         }}
       >
         {pages.map((paper) => (
