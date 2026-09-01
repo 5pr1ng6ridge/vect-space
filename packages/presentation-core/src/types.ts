@@ -248,12 +248,12 @@ export type PresentationCue = CueBase &
     | {
         type: "dialogue_reveal";
         prompt_id: string;
-        speed_cps: number;
+        speed_cps: number | null;
       }
     | {
         type: "long_text_reveal";
         prompt_id: string;
-        speed_cps: number;
+        speed_cps: number | null;
       }
     | {
         type: "dialogue_ui_transition";

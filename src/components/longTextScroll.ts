@@ -1,5 +1,7 @@
 export const LONG_TEXT_SCROLL_TRIGGER_LINE = 785;
 const LONG_TEXT_SCROLL_RESET_LINE = 560;
+export const LONG_TEXT_BOTTOM_BROWSING_SPACE = 240;
+const LONG_TEXT_VIEWPORT_HEIGHT = 1_080;
 
 export interface LongTextScrollInput {
   initialPositioned: boolean;
@@ -13,6 +15,15 @@ export interface LongTextScrollInput {
 export interface LongTextScrollDecision {
   offset: number;
   instant: boolean;
+}
+
+export function longTextMaxScroll(paperStackHeight: number): number {
+  return Math.max(
+    0,
+    paperStackHeight -
+      LONG_TEXT_VIEWPORT_HEIGHT +
+      LONG_TEXT_BOTTOM_BROWSING_SPACE,
+  );
 }
 
 /**

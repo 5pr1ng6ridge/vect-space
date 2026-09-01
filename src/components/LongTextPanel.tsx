@@ -28,7 +28,7 @@ import {
   LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
 } from "./longTextPagination";
-import { resolveLongTextScroll } from "./longTextScroll";
+import { longTextMaxScroll, resolveLongTextScroll } from "./longTextScroll";
 
 export interface LongTextPanelHandle {
   complete(): void;
@@ -52,8 +52,6 @@ interface MathRevealMetric {
   widthPx: number;
   fontSizePx: number;
 }
-
-const VIEWPORT_HEIGHT = 1_080;
 
 export const LongTextPanel = forwardRef<
   LongTextPanelHandle,
@@ -132,10 +130,21 @@ export const LongTextPanel = forwardRef<
   const activeStepRef = useRef<HTMLDivElement>(null);
   const manuallyBrowsingRef = useRef(false);
   const initialScrollPlacedRef = useRef(false);
+  const scrollPromptRef = useRef(prompt.prompt_id);
   const promptIsActive = activePromptId === prompt.prompt_id;
   const renderedVisibleCount = promptIsActive ? visibleCount : 0;
   const complete = promptIsActive && revealFinished;
   const activeStep = page.steps[page.active_step_index];
+
+  useLayoutEffect(() => {
+    if (scrollPromptRef.current === prompt.prompt_id) return;
+    scrollPromptRef.current = prompt.prompt_id;
+    manuallyBrowsingRef.current = false;
+    initialScrollPlacedRef.current = false;
+    setInitialScrollApplied(false);
+    setSmoothScrolling(false);
+    setMathRevealMetrics(new Map());
+  }, [prompt.prompt_id]);
 
   const handleMathMetrics = useCallback(
     (unitIndex: number, widthPx: number, fontSizePx: number): void => {
@@ -250,7 +259,9 @@ export const LongTextPanel = forwardRef<
   const updateMeasurements = useCallback((): void => {
     const next: Record<string, number> = {};
     for (const [id, element] of stepMeasureRefs.current) {
-      next[id] = Math.ceil(element.getBoundingClientRect().height);
+      next[id] = Math.ceil(
+        Math.max(element.getBoundingClientRect().height, element.scrollHeight),
+      );
     }
     setStepHeights((current) =>
       sameMeasurements(current, next) ? current : next,
@@ -297,7 +308,7 @@ export const LongTextPanel = forwardRef<
       (index < pages.length - 1 ? LONG_TEXT_PAGE_GAP : 0),
     0,
   );
-  const maxScroll = Math.max(0, paperStackHeight - VIEWPORT_HEIGHT + 70);
+  const maxScroll = longTextMaxScroll(paperStackHeight);
 
   useEffect(() => {
     if (!initialScrollApplied) return;
@@ -377,6 +388,7 @@ export const LongTextPanel = forwardRef<
     if (event.deltaY === 0) return;
     event.preventDefault();
     manuallyBrowsingRef.current = true;
+    setSmoothScrolling(false);
     setScrollOffset((current) => clamp(current + event.deltaY, 0, maxScroll));
   };
 

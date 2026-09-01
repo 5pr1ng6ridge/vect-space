@@ -689,7 +689,9 @@ export default function App(): ReactElement {
                 page={renderedDialoguePage}
                 prompt={dialogue}
                 ref={dialogueRef}
-                revealImmediately={dialogue === null || textCueCps === null}
+                revealImmediately={
+                  dialogue === null || textCueCps === undefined
+                }
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
             )}
@@ -700,7 +702,7 @@ export default function App(): ReactElement {
                 disabled={busy || runtimeLocked}
                 fastForward={fastForwardActive}
                 initialCps={revealCps}
-                key={`${longTextPage.document_id}:${longText.prompt_id}:${update.snapshot.revision}`}
+                key={longTextPage.document_id}
                 onRevealComplete={handleRevealComplete}
                 onTypingChange={handleTypingChange}
                 page={longTextPage}
@@ -712,7 +714,7 @@ export default function App(): ReactElement {
                 }
                 prompt={longText}
                 ref={longTextRef}
-                revealImmediately={textCueCps === null}
+                revealImmediately={textCueCps === undefined}
               />
             )}
 
@@ -960,9 +962,9 @@ function SettingsPanel({
 function textRevealSpeed(
   update: RuntimeUpdate | null,
   prompt: DialoguePrompt | LongTextPrompt | null,
-): number | null {
+): number | null | undefined {
   if (update === null || prompt === null) {
-    return null;
+    return undefined;
   }
   const cue = update.cues.find(
     (candidate) =>
@@ -972,7 +974,7 @@ function textRevealSpeed(
   );
   return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
     ? cue.speed_cps
-    : null;
+    : undefined;
 }
 
 function getInitialAppState(): Promise<InitialAppState> {

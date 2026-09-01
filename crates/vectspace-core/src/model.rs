@@ -999,11 +999,13 @@ pub enum PresentationCueKind {
     },
     DialogueReveal {
         prompt_id: String,
-        speed_cps: f32,
+        /// `None` delegates the base reveal speed to the player's settings.
+        speed_cps: Option<f32>,
     },
     LongTextReveal {
         prompt_id: String,
-        speed_cps: f32,
+        /// `None` delegates the base reveal speed to the player's settings.
+        speed_cps: Option<f32>,
     },
     DialogueUiTransition {
         visible: bool,

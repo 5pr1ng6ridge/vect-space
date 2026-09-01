@@ -10,7 +10,11 @@ import {
   LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
 } from "./longTextPagination";
-import { resolveLongTextScroll } from "./longTextScroll";
+import {
+  LONG_TEXT_BOTTOM_BROWSING_SPACE,
+  longTextMaxScroll,
+  resolveLongTextScroll,
+} from "./longTextScroll";
 
 describe("LongTextPanel", () => {
   it("keeps revealed steps on paper and starts a new paper at manual breaks", () => {
@@ -105,6 +109,13 @@ describe("LongTextPanel", () => {
     expect(pages).toHaveLength(1);
     expect(pages[0]?.contentHeight).toBe(capacity + 240);
     expect(pages[0]?.height).toBe(LONG_TEXT_PAGE_HEIGHT + 240);
+  });
+
+  it("leaves browsing space below the final sheet", () => {
+    expect(longTextMaxScroll(LONG_TEXT_PAGE_HEIGHT)).toBe(
+      LONG_TEXT_PAGE_HEIGHT - 1_080 + LONG_TEXT_BOTTOM_BROWSING_SPACE,
+    );
+    expect(LONG_TEXT_BOTTOM_BROWSING_SPACE).toBeGreaterThan(70);
   });
 
   it("jumps once for a new step, then waits for a long step to cross again", () => {

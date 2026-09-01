@@ -437,6 +437,8 @@ button:disabled {
   font-size: 32px;
   line-height: 1.78;
   letter-spacing: 0.035em;
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .long-text-paper-stack {
@@ -473,6 +475,9 @@ button:disabled {
 
 .long-text-step {
   display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
   white-space: pre-wrap;
 }
 

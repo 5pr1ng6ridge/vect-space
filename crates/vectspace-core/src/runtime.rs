@@ -419,7 +419,7 @@ impl RuntimeEngine {
                 CueGate::PlayerAdvance,
                 PresentationCueKind::LongTextReveal {
                     prompt_id: next_prompt_id,
-                    speed_cps: speed_cps.unwrap_or(30.0),
+                    speed_cps,
                 },
             )]);
         }
@@ -866,7 +866,7 @@ impl RuntimeEngine {
                         CueGate::PlayerAdvance,
                         PresentationCueKind::DialogueReveal {
                             prompt_id,
-                            speed_cps: speed_cps.unwrap_or(30.0),
+                            speed_cps,
                         },
                     ));
                     return Ok(cues);
@@ -909,7 +909,7 @@ impl RuntimeEngine {
                         CueGate::PlayerAdvance,
                         PresentationCueKind::LongTextReveal {
                             prompt_id,
-                            speed_cps: speed_cps.unwrap_or(30.0),
+                            speed_cps,
                         },
                     ));
                     return Ok(cues);
@@ -2551,6 +2551,13 @@ mod tests {
             first.snapshot.dialogue_page.as_ref().unwrap().segments,
             ["前半句——"]
         );
+        assert!(first.cues.iter().any(|cue| matches!(
+            cue.kind,
+            PresentationCueKind::DialogueReveal {
+                speed_cps: None,
+                ..
+            }
+        )));
 
         let effect = runtime
             .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
@@ -2575,7 +2582,8 @@ mod tests {
         assert_eq!(text, "后半句。");
         assert!(appended.cues.iter().any(|cue| matches!(
             &cue.kind,
-            PresentationCueKind::DialogueReveal { speed_cps, .. } if *speed_cps == 20.0
+            PresentationCueKind::DialogueReveal { speed_cps, .. }
+                if *speed_cps == Some(20.0)
         )));
 
         let ended = runtime
@@ -2678,7 +2686,8 @@ mod tests {
         );
         assert!(first.cues.iter().any(|cue| matches!(
             cue.kind,
-            PresentationCueKind::LongTextReveal { speed_cps, .. } if speed_cps == 24.0
+            PresentationCueKind::LongTextReveal { speed_cps, .. }
+                if speed_cps == Some(24.0)
         )));
 
         let second = runtime
@@ -3194,7 +3203,7 @@ mod tests {
             gate: CueGate::PlayerAdvance,
             kind: PresentationCueKind::DialogueReveal {
                 prompt_id: "scene/line".to_owned(),
-                speed_cps: 30.0,
+                speed_cps: Some(30.0),
             },
         };
         let value = serde_json::to_value(cue).unwrap();
@@ -3202,6 +3211,17 @@ mod tests {
         assert_eq!(value["gate"], "player_advance");
         assert_eq!(value["cue_id"], 9);
         assert!(value.get("kind").is_none());
+
+        let default_speed = PresentationCue {
+            cue_id: 10,
+            gate: CueGate::PlayerAdvance,
+            kind: PresentationCueKind::DialogueReveal {
+                prompt_id: "scene/default-speed".to_owned(),
+                speed_cps: None,
+            },
+        };
+        let value = serde_json::to_value(default_speed).unwrap();
+        assert!(value["speed_cps"].is_null());
     }
 
     #[test]
