@@ -305,6 +305,13 @@
         "value"
       ]
     },
+    "LongTextPagination": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "manual"
+      ]
+    },
     "LongTextStep": {
       "type": "object",
       "properties": {
@@ -566,6 +573,9 @@
           "properties": {
             "next": {
               "type": "string"
+            },
+            "pagination": {
+              "$ref": "#/$defs/LongTextPagination"
             },
             "paper": {
               "type": [

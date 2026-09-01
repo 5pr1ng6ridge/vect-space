@@ -113,6 +113,7 @@ export interface LongTextStepSnapshot {
 export interface LongTextPageSnapshot {
   document_id: string;
   paper?: string | null;
+  pagination: "auto" | "manual";
   steps: LongTextStepSnapshot[];
   active_step_index: number;
 }

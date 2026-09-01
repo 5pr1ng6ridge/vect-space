@@ -436,8 +436,22 @@ function renderFields(
             onChange={(paper) => update({ ...node, paper })}
             value={node.paper ?? null}
           />
+          <Field label="分页方式">
+            <select
+              onChange={(event) =>
+                update({
+                  ...node,
+                  pagination: event.currentTarget.value as "auto" | "manual",
+                })
+              }
+              value={node.pagination ?? "auto"}
+            >
+              <option value="auto">自动分页</option>
+              <option value="manual">仅手动分页</option>
+            </select>
+          </Field>
           <p className="field-note">
-            每一段在游戏中对应一次推进。纸张空间不足会自动续到下一页；勾选可强制从新页开始。
+            每一段在游戏中对应一次推进。自动分页会在空间不足时续页；仅手动分页只响应段落的强制分页标记。
           </p>
           <LongTextStepsEditor
             manifest={manifest}

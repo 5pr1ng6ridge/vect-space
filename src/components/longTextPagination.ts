@@ -16,6 +16,7 @@ export const LONG_TEXT_STEP_GAP = 28;
 export function paginateLongTextSteps(
   steps: readonly LongTextStepSnapshot[],
   heights: Readonly<Record<string, number>>,
+  mode: "auto" | "manual" = "auto",
 ): LongTextPaperPage[] {
   const capacity =
     LONG_TEXT_PAGE_HEIGHT -
@@ -40,7 +41,8 @@ export function paginateLongTextSteps(
     const gap = current.length === 0 ? 0 : LONG_TEXT_STEP_GAP;
     if (
       current.length > 0 &&
-      (step.page_break_before || used + gap + height > capacity)
+      (step.page_break_before ||
+        (mode === "auto" && used + gap + height > capacity))
     ) {
       completePage();
       current = [];

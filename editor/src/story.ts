@@ -130,7 +130,7 @@ export function summarizeNode(node: SceneNode): string {
     case "say":
       return `${node.mode === "append" ? "接续 · " : ""}${node.speaker ?? "旁白"}：${node.text}`;
     case "long_text":
-      return `${node.steps.length} 段 · ${node.paper ?? "默认纸张"}`;
+      return `${node.steps.length} 段 · ${node.pagination === "manual" ? "仅手动分页" : "自动分页"} · ${node.paper ?? "默认纸张"}`;
     case "choice":
       return `${node.choices.length} 个选项`;
     case "set":
@@ -220,6 +220,7 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
       return {
         type,
         paper: null,
+        pagination: "auto",
         steps: [
           { id: "step_1", text: "新的长文本内容。", page_break_before: false },
         ],

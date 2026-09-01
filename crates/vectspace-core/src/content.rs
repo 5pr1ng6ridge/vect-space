@@ -718,6 +718,7 @@ fn validate_scenes(
                 }
                 SceneNode::LongText {
                     paper,
+                    pagination: _,
                     steps,
                     speed_cps,
                     next,
@@ -1648,6 +1649,7 @@ mod tests {
             "lecture".to_owned(),
             SceneNode::LongText {
                 paper: Some("gui.dialogue_box".to_owned()),
+                pagination: crate::model::LongTextPagination::Auto,
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),

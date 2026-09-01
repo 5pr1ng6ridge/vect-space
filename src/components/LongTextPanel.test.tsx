@@ -29,6 +29,7 @@ describe("LongTextPanel", () => {
         page={{
           document_id: "prologue/lecture",
           paper: null,
+          pagination: "auto",
           active_step_index: 1,
           steps: [
             {
@@ -96,6 +97,31 @@ describe("LongTextPanel", () => {
     expect(pages).toHaveLength(2);
   });
 
+  it("only honors explicit breaks in manual pagination mode", () => {
+    const capacity =
+      LONG_TEXT_PAGE_HEIGHT -
+      LONG_TEXT_PAGE_PADDING_TOP -
+      LONG_TEXT_PAGE_PADDING_BOTTOM;
+    const steps = [
+      { step_id: "first", text: "第一段", page_break_before: false },
+      { step_id: "second", text: "第二段", page_break_before: false },
+      { step_id: "third", text: "第三段", page_break_before: true },
+    ];
+    const pages = paginateLongTextSteps(
+      steps,
+      { first: capacity - 100, second: 300, third: 200 },
+      "manual",
+    );
+
+    expect(pages).toHaveLength(2);
+    expect(pages[0]?.steps.map((step) => step.step_id)).toEqual([
+      "first",
+      "second",
+    ]);
+    expect(pages[0]?.height).toBeGreaterThan(LONG_TEXT_PAGE_HEIGHT);
+    expect(pages[1]?.steps.map((step) => step.step_id)).toEqual(["third"]);
+  });
+
   it("expands a paper rather than clipping one oversized text step", () => {
     const capacity =
       LONG_TEXT_PAGE_HEIGHT -
@@ -151,5 +177,19 @@ describe("LongTextPanel", () => {
         maxScroll: 900,
       }),
     ).toEqual({ offset: 766, instant: false });
+  });
+
+  it("animates a new placement after the document has already been positioned", () => {
+    expect(
+      resolveLongTextScroll({
+        initialPositioned: false,
+        initialPlacementInstant: false,
+        manuallyBrowsing: false,
+        stepStartY: 1_700,
+        cursorY: 1_700,
+        currentOffset: 420,
+        maxScroll: 1_500,
+      }),
+    ).toEqual({ offset: 1_140, instant: false });
   });
 });

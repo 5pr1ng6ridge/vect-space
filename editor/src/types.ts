@@ -170,6 +170,7 @@ export interface LongTextStep {
 export interface LongTextNode extends NextNode {
   type: "long_text";
   paper?: string | null;
+  pagination?: "auto" | "manual";
   steps: LongTextStep[];
   speed_cps: number | null;
 }

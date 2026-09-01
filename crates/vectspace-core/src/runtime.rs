@@ -374,6 +374,7 @@ impl RuntimeEngine {
             })?;
         let SceneNode::LongText {
             paper,
+            pagination,
             steps,
             speed_cps,
             next,
@@ -392,6 +393,7 @@ impl RuntimeEngine {
             })?;
             if page.document_id != document_id
                 || page.paper != paper
+                || page.pagination != pagination
                 || page.active_step_index != step_index
             {
                 return Err(RuntimeError::Content(format!(
@@ -873,6 +875,7 @@ impl RuntimeEngine {
                 }
                 SceneNode::LongText {
                     paper,
+                    pagination,
                     steps,
                     speed_cps,
                     ..
@@ -889,6 +892,7 @@ impl RuntimeEngine {
                     self.snapshot.long_text_page = Some(LongTextPageSnapshot {
                         document_id: document_id.clone(),
                         paper,
+                        pagination,
                         steps: vec![LongTextStepSnapshot {
                             step_id: step.id.clone(),
                             text: text.clone(),
@@ -2646,6 +2650,7 @@ mod tests {
             "long_text_test".to_owned(),
             SceneNode::LongText {
                 paper: None,
+                pagination: crate::model::LongTextPagination::Manual,
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),
@@ -2707,6 +2712,7 @@ mod tests {
         assert_eq!(*step_index, 1);
         let page = second.snapshot.long_text_page.as_ref().unwrap();
         assert_eq!(page.steps.len(), 2);
+        assert_eq!(page.pagination, crate::model::LongTextPagination::Manual);
         assert!(page.steps[1].page_break_before);
         assert!(runtime
             .read_dialogues
@@ -2742,6 +2748,23 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn old_long_text_pages_default_to_automatic_pagination() {
+        let page: LongTextPageSnapshot = serde_json::from_value(serde_json::json!({
+            "document_id": "prologue/lecture",
+            "paper": null,
+            "steps": [{
+                "step_id": "definition",
+                "text": "定义",
+                "page_break_before": false
+            }],
+            "active_step_index": 0
+        }))
+        .unwrap();
+
+        assert_eq!(page.pagination, crate::model::LongTextPagination::Auto);
     }
 
     #[test]

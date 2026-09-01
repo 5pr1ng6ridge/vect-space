@@ -365,6 +365,13 @@ function validateNode(
       break;
     case "long_text": {
       checkAsset(node.paper ?? null, "gui", false);
+      if (
+        node.pagination !== undefined &&
+        node.pagination !== "auto" &&
+        node.pagination !== "manual"
+      ) {
+        issue("invalid_long_text_pagination", "长文本分页方式无效");
+      }
       if (node.steps.length === 0 || node.steps.length > 1024) {
         issue("invalid_long_text_steps", "长文本必须包含 1 到 1024 个步骤");
       }

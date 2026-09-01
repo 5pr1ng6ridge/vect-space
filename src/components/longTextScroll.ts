@@ -5,6 +5,8 @@ const LONG_TEXT_VIEWPORT_HEIGHT = 1_080;
 
 export interface LongTextScrollInput {
   initialPositioned: boolean;
+  /** Only the first placement of a document should bypass the transition. */
+  initialPlacementInstant?: boolean;
   manuallyBrowsing: boolean;
   stepStartY: number;
   cursorY: number;
@@ -41,7 +43,7 @@ export function resolveLongTextScroll(
         0,
         input.maxScroll,
       ),
-      instant: true,
+      instant: input.initialPlacementInstant ?? true,
     };
   }
   if (

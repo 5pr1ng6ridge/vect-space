@@ -388,6 +388,8 @@ pub enum SceneNode {
     LongText {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         paper: Option<String>,
+        #[serde(default, skip_serializing_if = "LongTextPagination::is_automatic")]
+        pagination: LongTextPagination,
         steps: Vec<LongTextStep>,
         #[serde(default)]
         speed_cps: Option<f32>,
@@ -509,6 +511,20 @@ pub enum DialogueMode {
     #[default]
     Start,
     Append,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTextPagination {
+    #[default]
+    Auto,
+    Manual,
+}
+
+impl LongTextPagination {
+    fn is_automatic(value: &Self) -> bool {
+        *value == Self::Auto
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -757,6 +773,8 @@ pub struct LongTextPageSnapshot {
     pub document_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<String>,
+    #[serde(default)]
+    pub pagination: LongTextPagination,
     pub steps: Vec<LongTextStepSnapshot>,
     pub active_step_index: u32,
 }

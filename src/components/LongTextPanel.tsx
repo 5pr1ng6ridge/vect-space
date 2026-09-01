@@ -130,6 +130,7 @@ export const LongTextPanel = forwardRef<
   const activeStepRef = useRef<HTMLDivElement>(null);
   const manuallyBrowsingRef = useRef(false);
   const initialScrollPlacedRef = useRef(false);
+  const documentPositionedRef = useRef(false);
   const scrollPromptRef = useRef(prompt.prompt_id);
   const promptIsActive = activePromptId === prompt.prompt_id;
   const renderedVisibleCount = promptIsActive ? visibleCount : 0;
@@ -286,8 +287,8 @@ export const LongTextPanel = forwardRef<
   }, [page.steps, updateMeasurements]);
 
   const pages = useMemo(
-    () => paginateLongTextSteps(page.steps, stepHeights),
-    [page.steps, stepHeights],
+    () => paginateLongTextSteps(page.steps, stepHeights, page.pagination),
+    [page.pagination, page.steps, stepHeights],
   );
   const activePageIndex = pages.findIndex((candidate) =>
     candidate.steps.some((step) => step.step_id === activeStep?.step_id),
@@ -358,6 +359,7 @@ export const LongTextPanel = forwardRef<
           : activeHeight * (renderedVisibleCount / schedule.length)));
     const decision = resolveLongTextScroll({
       initialPositioned: initialScrollPlacedRef.current,
+      initialPlacementInstant: !documentPositionedRef.current,
       manuallyBrowsing: manuallyBrowsingRef.current,
       stepStartY,
       cursorY,
@@ -365,9 +367,10 @@ export const LongTextPanel = forwardRef<
       maxScroll,
     });
     if (decision === null) return;
-    if (decision.instant) {
+    if (!initialScrollPlacedRef.current) {
       initialScrollPlacedRef.current = true;
-      setSmoothScrolling(false);
+      documentPositionedRef.current = true;
+      setSmoothScrolling(!decision.instant);
       setInitialScrollApplied(true);
     }
     setScrollOffset(decision.offset);
