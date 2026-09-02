@@ -27,6 +27,7 @@ interface MarkupTextProps {
   unitCps?: readonly number[];
   onMathMetrics?(unitIndex: number, widthPx: number, fontSizePx: number): void;
   revealAnimation?: TextRevealAnimation;
+  fontReady?: boolean;
 }
 
 export const MarkupText = memo(function MarkupText({
@@ -38,15 +39,18 @@ export const MarkupText = memo(function MarkupText({
   unitCps = [],
   onMathMetrics,
   revealAnimation = "typewriter",
+  fontReady = true,
 }: MarkupTextProps): ReactElement {
   const units = useMemo(() => visibleUnits(parseMarkup(source)), [source]);
   const lineSweep =
     revealAnimation === "line_sweep" &&
-    visibleCount !== Number.POSITIVE_INFINITY;
+    visibleCount !== Number.POSITIVE_INFINITY &&
+    fontReady;
   const unitElementsRef = useRef(new Map<number, HTMLElement>());
-  const [lineGroups, setLineGroups] = useState<
-    readonly (readonly number[])[] | null
-  >(null);
+  const [lineGroups, setLineGroups] = useState<{
+    source: string;
+    groups: readonly (readonly number[])[];
+  } | null>(null);
 
   useLayoutEffect(() => {
     let frame = 0;
@@ -56,12 +60,19 @@ export const MarkupText = memo(function MarkupText({
     }
     frame = requestAnimationFrame(() => {
       const groups = resolveVisualLineGroups(units, unitElementsRef.current);
+      const measuredUnitCount = groups.reduce(
+        (total, group) => total + group.length,
+        0,
+      );
+      if (groups.length === 0 || measuredUnitCount !== units.length) return;
       setLineGroups((current) =>
-        sameLineGroups(current, groups) ? current : groups,
+        current?.source === source && sameLineGroups(current.groups, groups)
+          ? current
+          : { source, groups },
       );
     });
     return () => cancelAnimationFrame(frame);
-  }, [lineSweep, source, units]);
+  }, [fontReady, lineSweep, source, units]);
 
   const renderUnit = (
     unit: (typeof units)[number],
@@ -102,6 +113,7 @@ export const MarkupText = memo(function MarkupText({
           unit={unit}
           visible={visible}
           revealAnimation={revealAnimation}
+          fontReady={fontReady}
         />
       );
     }
@@ -118,11 +130,16 @@ export const MarkupText = memo(function MarkupText({
     );
   };
 
-  const groupedLineSweep = lineSweep && lineGroups !== null;
+  const activeLineGroups =
+    lineGroups?.source === source ? lineGroups.groups : null;
+  const groupedUnitCount =
+    activeLineGroups?.reduce((total, group) => total + group.length, 0) ?? 0;
+  const groupedLineSweep =
+    lineSweep && activeLineGroups !== null && groupedUnitCount === units.length;
   return (
     <span className={className} aria-label={source}>
       {groupedLineSweep
-        ? lineGroups.map((indices, lineIndex) => {
+        ? activeLineGroups.map((indices, lineIndex) => {
             const finalUnit = indices[indices.length - 1] ?? -1;
             const visible = finalUnit < visibleCount;
             return (
@@ -160,6 +177,7 @@ function MathMarkupUnit({
   unit,
   visible,
   revealAnimation,
+  fontReady,
 }: {
   animate: boolean;
   cps: number;
@@ -175,6 +193,7 @@ function MathMarkupUnit({
   unit: MathUnit;
   visible: boolean;
   revealAnimation: TextRevealAnimation;
+  fontReady: boolean;
 }): ReactElement {
   const contentRef = useRef<HTMLSpanElement>(null);
   const html = useMemo(
@@ -214,7 +233,7 @@ function MathMarkupUnit({
     const observer = new ResizeObserver(measure);
     observer.observe(katexElement);
     return () => observer.disconnect();
-  }, [animate, cps, html, index, onMetrics]);
+  }, [animate, cps, fontReady, html, index, onMetrics]);
 
   return (
     <span
