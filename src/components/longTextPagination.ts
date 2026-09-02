@@ -13,6 +13,11 @@ export interface LongTextPaperPage {
   height: number;
 }
 
+export interface LongTextPageWindow {
+  start: number;
+  end: number;
+}
+
 export const LONG_TEXT_STEP_GAP = 28;
 
 export function paginateLongTextSteps(
@@ -52,4 +57,35 @@ export function paginateLongTextSteps(
   }
   if (current.length > 0) completePage();
   return pages;
+}
+
+/** Returns an end-exclusive page window with two viewports of overscan. */
+export function resolveLongTextPageWindow(
+  pages: readonly LongTextPaperPage[],
+  pageOffsets: readonly number[],
+  scrollOffset: number,
+  viewportHeight: number,
+  overscan = viewportHeight * 2,
+): LongTextPageWindow {
+  if (pages.length === 0) return { start: 0, end: 0 };
+  const lower = Math.max(0, scrollOffset - overscan);
+  const upper = scrollOffset + viewportHeight + overscan;
+
+  let low = 0;
+  let high = pages.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const bottom = (pageOffsets[middle] ?? 0) + (pages[middle]?.height ?? 0);
+    if (bottom < lower) low = middle + 1;
+    else high = middle;
+  }
+  const start = low;
+  low = start;
+  high = pages.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if ((pageOffsets[middle] ?? 0) <= upper) low = middle + 1;
+    else high = middle;
+  }
+  return { start, end: Math.max(start, low) };
 }

@@ -10,10 +10,30 @@ import {
   hasImmediateAutoAdvance,
   parseMarkup,
   revealCompletionTime,
+  resolveInstantRevealPromptId,
   visibleUnits,
 } from "./markup";
 
 describe("VN markup", () => {
+  it("keeps a skipped formula instant when its measurements refresh", () => {
+    expect(
+      resolveInstantRevealPromptId(
+        "scene/formula",
+        "scene/formula",
+        "scene/formula",
+        false,
+      ),
+    ).toBe("scene/formula");
+    expect(
+      resolveInstantRevealPromptId(
+        "scene/formula",
+        "scene/next",
+        "scene/formula",
+        false,
+      ),
+    ).toBeNull();
+  });
+
   it("treats a formula as one atomic reveal unit", () => {
     const units = visibleUnits(parseMarkup("甲$V=\\mathbb R^2$乙"));
     expect(units).toHaveLength(3);

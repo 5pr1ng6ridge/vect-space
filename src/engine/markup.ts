@@ -296,6 +296,17 @@ export function autoReadingDelay(source: string): number {
   );
 }
 
+/** Keeps an explicit skip stable when formula measurement refreshes a prompt. */
+export function resolveInstantRevealPromptId(
+  current: string | null,
+  promptId: string,
+  previousPromptId: string,
+  revealImmediately: boolean,
+): string | null {
+  if (revealImmediately) return promptId;
+  return previousPromptId === promptId ? current : null;
+}
+
 function character(value: string, effects: TextEffect[]): CharacterUnit {
   return { kind: "character", value, effect: currentEffect(effects) };
 }

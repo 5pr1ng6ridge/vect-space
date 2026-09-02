@@ -9,6 +9,7 @@ import {
   LONG_TEXT_PAGE_PADDING_TOP,
   LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
+  resolveLongTextPageWindow,
 } from "./longTextPagination";
 import {
   advanceLongTextScroll,
@@ -288,5 +289,25 @@ describe("LongTextPanel", () => {
         currentOffset: 320,
       }),
     ).toBe(true);
+  });
+
+  it("renders only a bounded page window for large long-text documents", () => {
+    const pages = Array.from({ length: 1_000 }, (_, index) => ({
+      steps: [],
+      index,
+      contentHeight: 1_000,
+      height: 1_340,
+    }));
+    const offsets = pages.map((_page, index) => index * 1_432);
+    const window = resolveLongTextPageWindow(
+      pages,
+      offsets,
+      offsets[500] ?? 0,
+      1_080,
+    );
+    expect(window.start).toBeGreaterThanOrEqual(498);
+    expect(window.end - window.start).toBeLessThanOrEqual(6);
+    expect(window.start).toBeLessThanOrEqual(500);
+    expect(window.end).toBeGreaterThan(500);
   });
 });

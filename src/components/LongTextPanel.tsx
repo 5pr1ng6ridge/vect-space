@@ -21,6 +21,7 @@ import {
   formulaRevealDurationMs,
   parseMarkup,
   revealCompletionTime,
+  resolveInstantRevealPromptId,
 } from "../engine/markup";
 import type {
   LongTextPageSnapshot,
@@ -31,6 +32,7 @@ import { MarkupText } from "./MarkupText";
 import {
   LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
+  resolveLongTextPageWindow,
 } from "./longTextPagination";
 import {
   advanceLongTextScroll,
@@ -177,18 +179,22 @@ export const LongTextPanel = forwardRef<
   const [stepHeights, setStepHeights] = useState<
     Readonly<Record<string, number>>
   >({});
-  const [scrollOffset, setScrollOffset] = useState(0);
   const [scrollPreparedPromptId, setScrollPreparedPromptId] = useState<
     string | null
   >(null);
+  const [pageWindow, setPageWindow] = useState({ start: 0, end: 0 });
   const [presentedDocumentId, setPresentedDocumentId] = useState<string | null>(
     null,
   );
   const visibleRef = useRef(0);
   const completeRef = useRef(revealImmediately || schedule.length === 0);
+  const pageWindowRef = useRef(pageWindow);
+  const revealPromptRef = useRef(prompt.prompt_id);
   const reportedPromptRef = useRef<string | null>(null);
   const measuringRootRef = useRef<HTMLDivElement>(null);
   const stepMeasureRefs = useRef(new Map<string, HTMLDivElement>());
+  const surfaceStackRef = useRef<HTMLDivElement>(null);
+  const textStackRef = useRef<HTMLDivElement>(null);
   const scrollOffsetRef = useRef(0);
   const scrollStartOffsetRef = useRef(0);
   const scrollTargetRef = useRef(0);
@@ -207,19 +213,40 @@ export const LongTextPanel = forwardRef<
   const activeStep = page.steps[page.active_step_index];
   const paperArtworkReady = usePaperArtworkReady(paperUrl);
   const layout = page.layout;
+  const applyScrollOffset = useCallback((offset: number): void => {
+    scrollOffsetRef.current = offset;
+    const transform = `translate3d(0, ${-offset}px, 0)`;
+    if (surfaceStackRef.current !== null) {
+      surfaceStackRef.current.style.transform = transform;
+    }
+    if (textStackRef.current !== null) {
+      textStackRef.current.style.transform = transform;
+    }
+  }, []);
 
   useLayoutEffect(() => {
     if (documentRef.current === page.document_id) return;
     documentRef.current = page.document_id;
     manuallyBrowsingRef.current = false;
-    scrollOffsetRef.current = 0;
+    applyScrollOffset(0);
     scrollStartOffsetRef.current = 0;
     scrollTargetRef.current = 0;
-    setScrollOffset(0);
     setStepHeights({});
     setMathRevealMetrics(new Map());
     setScrollPreparedPromptId(null);
-  }, [page.document_id]);
+    const emptyWindow = { start: 0, end: 0 };
+    pageWindowRef.current = emptyWindow;
+    setPageWindow(emptyWindow);
+  }, [applyScrollOffset, page.document_id]);
+
+  const unmeasuredSteps = useMemo(
+    () => page.steps.filter((step) => stepHeights[step.step_id] === undefined),
+    [page.steps, stepHeights],
+  );
+  const measurementBatch = useMemo(
+    () => unmeasuredSteps.slice(0, 16),
+    [unmeasuredSteps],
+  );
 
   const measureSteps = useCallback(() => {
     const measured: Record<string, number> = {};
@@ -258,11 +285,9 @@ export const LongTextPanel = forwardRef<
     return () => {
       active = false;
     };
-  }, [measureSteps, page.steps]);
+  }, [measureSteps, measurementBatch]);
 
-  const layoutReady = page.steps.every(
-    (step) => stepHeights[step.step_id] !== undefined,
-  );
+  const layoutReady = unmeasuredSteps.length === 0;
   const pages = useMemo(
     () =>
       paginateLongTextSteps(
@@ -281,17 +306,14 @@ export const LongTextPanel = forwardRef<
     ],
   );
   const pageOffsets = useMemo(() => {
-    return pages.reduce<number[]>((offsets, _paper, index) => {
-      const previousOffset = offsets[index - 1] ?? 0;
-      const previousPaper = pages[index - 1];
-      const offset =
-        index === 0
-          ? 0
-          : previousOffset +
-            (previousPaper?.height ?? 0) +
-            (page.pagination === "continuous" ? 0 : layout.page_gap);
-      return [...offsets, offset];
-    }, []);
+    const offsets: number[] = [];
+    let nextOffset = 0;
+    for (const paper of pages) {
+      offsets.push(nextOffset);
+      nextOffset +=
+        paper.height + (page.pagination === "continuous" ? 0 : layout.page_gap);
+    }
+    return offsets;
   }, [layout.page_gap, page.pagination, pages]);
   const surfaceHeight = useMemo(
     () =>
@@ -307,6 +329,40 @@ export const LongTextPanel = forwardRef<
     [layout.page_gap, page.pagination, pages],
   );
   const maxScroll = longTextMaxScroll(surfaceHeight, layout.height);
+  const updatePageWindow = useCallback(
+    (offset: number): void => {
+      const next = resolveLongTextPageWindow(
+        pages,
+        pageOffsets,
+        offset,
+        layout.height,
+      );
+      const current = pageWindowRef.current;
+      if (current.start === next.start && current.end === next.end) return;
+      pageWindowRef.current = next;
+      setPageWindow(next);
+    },
+    [layout.height, pageOffsets, pages],
+  );
+  const effectivePageWindow =
+    pageWindow.end === 0 && pages.length > 0
+      ? resolveLongTextPageWindow(pages, pageOffsets, 0, layout.height)
+      : pageWindow;
+  const renderedPages = useMemo(
+    () =>
+      pages
+        .slice(effectivePageWindow.start, effectivePageWindow.end)
+        .map((paper, offset) => {
+          const index = effectivePageWindow.start + offset;
+          return { paper, index, top: pageOffsets[index] ?? 0 };
+        }),
+    [effectivePageWindow.end, effectivePageWindow.start, pageOffsets, pages],
+  );
+
+  useLayoutEffect(() => {
+    applyScrollOffset(scrollOffsetRef.current);
+    updatePageWindow(scrollOffsetRef.current);
+  }, [applyScrollOffset, updatePageWindow]);
 
   useEffect(() => {
     if (!layoutReady || !paperArtworkReady) return;
@@ -337,6 +393,10 @@ export const LongTextPanel = forwardRef<
 
   useEffect(() => {
     if (scrollPreparedPromptId !== prompt.prompt_id) return;
+    if (revealPromptRef.current === prompt.prompt_id && completeRef.current) {
+      return;
+    }
+    const previousPromptId = revealPromptRef.current;
     const initialVisibleCount = revealImmediately ? schedule.length : 0;
     const initiallyFinished = revealImmediately || schedule.length === 0;
     let frame = 0;
@@ -346,7 +406,15 @@ export const LongTextPanel = forwardRef<
       completeRef.current = initiallyFinished;
       setVisibleCount(initialVisibleCount);
       setRevealFinished(initiallyFinished);
-      setInstantRevealPromptId(revealImmediately ? prompt.prompt_id : null);
+      setInstantRevealPromptId((current) =>
+        resolveInstantRevealPromptId(
+          current,
+          prompt.prompt_id,
+          previousPromptId,
+          revealImmediately,
+        ),
+      );
+      revealPromptRef.current = prompt.prompt_id;
       setPaused(isPauseAt(0, pauseWindows));
       setTypingCps(unitCps[0] ?? initialCps);
       manuallyBrowsingRef.current = false;
@@ -467,8 +535,8 @@ export const LongTextPanel = forwardRef<
     scrollStartOffsetRef.current = scrollOffsetRef.current;
     scrollTargetRef.current = target;
     if (revealImmediately) {
-      scrollOffsetRef.current = target;
-      setScrollOffset(target);
+      applyScrollOffset(target);
+      updatePageWindow(target);
     }
     if (
       revealImmediately ||
@@ -486,6 +554,7 @@ export const LongTextPanel = forwardRef<
     return undefined;
   }, [
     activeStep,
+    applyScrollOffset,
     layout.height,
     layout.padding_y,
     layoutReady,
@@ -496,6 +565,7 @@ export const LongTextPanel = forwardRef<
     revealImmediately,
     scrollPreparedPromptId,
     stepHeights,
+    updatePageWindow,
   ]);
 
   useEffect(() => {
@@ -515,8 +585,8 @@ export const LongTextPanel = forwardRef<
       );
       previous = now;
       if (Math.abs(next - scrollOffsetRef.current) > 0.01) {
-        scrollOffsetRef.current = next;
-        setScrollOffset(next);
+        applyScrollOffset(next);
+        updatePageWindow(next);
       }
       if (
         scrollPreparedPromptId !== prompt.prompt_id &&
@@ -540,10 +610,12 @@ export const LongTextPanel = forwardRef<
     return () => cancelAnimationFrame(frame);
   }, [
     fastForward,
+    applyScrollOffset,
     layoutReady,
     maxScroll,
     prompt.prompt_id,
     scrollPreparedPromptId,
+    updatePageWindow,
   ]);
 
   const handleWheel = (event: WheelEvent<HTMLElement>): void => {
@@ -551,9 +623,9 @@ export const LongTextPanel = forwardRef<
     event.preventDefault();
     manuallyBrowsingRef.current = true;
     const next = clamp(scrollOffsetRef.current + event.deltaY, 0, maxScroll);
-    scrollOffsetRef.current = next;
+    applyScrollOffset(next);
     scrollTargetRef.current = next;
-    setScrollOffset(next);
+    updatePageWindow(next);
   };
 
   const handlePointerDown = (event: PointerEvent<HTMLElement>): void => {
@@ -575,9 +647,9 @@ export const LongTextPanel = forwardRef<
     drag.moved = true;
     manuallyBrowsingRef.current = true;
     const next = clamp(drag.startOffset - delta, 0, maxScroll);
-    scrollOffsetRef.current = next;
+    applyScrollOffset(next);
     scrollTargetRef.current = next;
-    setScrollOffset(next);
+    updatePageWindow(next);
     event.preventDefault();
   };
 
@@ -627,7 +699,7 @@ export const LongTextPanel = forwardRef<
         className="long-text-measure-root"
         ref={measuringRootRef}
       >
-        {page.steps.map((step) => (
+        {measurementBatch.map((step) => (
           <div
             className="long-text-step"
             key={step.step_id}
@@ -646,18 +718,19 @@ export const LongTextPanel = forwardRef<
       >
         <div
           className="long-text-surface-stack"
-          style={{ transform: `translateY(${-scrollOffset}px)` }}
+          ref={surfaceStackRef}
+          style={{
+            height: `${surfaceHeight}px`,
+          }}
         >
-          {pages.map((paper, index) => (
+          {renderedPages.map(({ paper, top }) => (
             <article
               className={`long-text-paper${paperUrl === undefined ? "" : " has-paper-art"}`}
               key={paper.index}
               style={{
                 height: `${paper.height}px`,
-                marginBottom:
-                  page.pagination === "continuous" || index === pages.length - 1
-                    ? 0
-                    : `${layout.page_gap}px`,
+                position: "absolute",
+                top: `${top}px`,
                 ...(typeof paperUrl === "string"
                   ? { backgroundImage: `url(${JSON.stringify(paperUrl)})` }
                   : {}),
@@ -668,19 +741,19 @@ export const LongTextPanel = forwardRef<
         <div className="long-text-text-clip">
           <div
             className="long-text-text-stack"
-            style={{ transform: `translateY(${-scrollOffset}px)` }}
+            ref={textStackRef}
+            style={{
+              height: `${surfaceHeight}px`,
+            }}
           >
-            {pages.map((paper, index) => (
+            {renderedPages.map(({ paper, top }) => (
               <article
                 className="long-text-paper-content"
                 key={paper.index}
                 style={{
                   height: `${paper.height}px`,
-                  marginBottom:
-                    page.pagination === "continuous" ||
-                    index === pages.length - 1
-                      ? 0
-                      : `${layout.page_gap}px`,
+                  position: "absolute",
+                  top: `${top}px`,
                 }}
               >
                 {paper.steps.map((step) => {

@@ -1,5 +1,6 @@
 import katex from "katex";
 import {
+  memo,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -27,7 +28,7 @@ interface MarkupTextProps {
   revealAnimation?: TextRevealAnimation;
 }
 
-export function MarkupText({
+export const MarkupText = memo(function MarkupText({
   source,
   visibleCount = Number.POSITIVE_INFINITY,
   className,
@@ -139,7 +140,7 @@ export function MarkupText({
           )}
     </span>
   );
-}
+});
 
 function MathMarkupUnit({
   animate,

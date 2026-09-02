@@ -17,6 +17,7 @@ import {
   formulaRevealDurationMs,
   parseMarkup,
   revealCompletionTime,
+  resolveInstantRevealPromptId,
 } from "../engine/markup";
 import type {
   DialoguePageSnapshot,
@@ -151,6 +152,8 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     );
 
     useEffect(() => {
+      if (promptIdRef.current === promptId && completeRef.current) return;
+      const previousPromptId = promptIdRef.current;
       const initialVisibleCount = revealImmediately ? schedule.length : 0;
       const initiallyFinished = revealImmediately || schedule.length === 0;
       setActivePromptId(promptId);
@@ -158,7 +161,14 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       completeRef.current = initiallyFinished;
       setVisibleCount(initialVisibleCount);
       setRevealFinished(initiallyFinished);
-      setInstantRevealPromptId(revealImmediately ? promptId : null);
+      setInstantRevealPromptId((current) =>
+        resolveInstantRevealPromptId(
+          current,
+          promptId,
+          previousPromptId,
+          revealImmediately,
+        ),
+      );
       promptIdRef.current = promptId;
       setPaused(isPauseAt(0, pauseWindows));
       setTypingCps(unitCps[0] ?? initialCps);

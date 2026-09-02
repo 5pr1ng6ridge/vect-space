@@ -1413,6 +1413,9 @@ impl RuntimeEngine {
         if self.dialogue_history.len() > 500 {
             self.dialogue_history
                 .drain(..self.dialogue_history.len() - 500);
+            for (index, entry) in self.dialogue_history.iter_mut().enumerate() {
+                entry.entry_id = index as u64 + 1;
+            }
         }
     }
 
@@ -2094,6 +2097,37 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game"),
         )
         .expect("demo content must be valid")
+    }
+
+    #[test]
+    fn bounded_history_remains_canonical_after_trimming() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.dialogue_history = (1..=500)
+            .map(|entry_id| DialogueHistoryEntry {
+                entry_id,
+                prompt_id: "prologue/introduction".to_owned(),
+                speaker_id: None,
+                speaker: None,
+                name_color: None,
+                text_color: None,
+                text: format!("history {entry_id}"),
+            })
+            .collect();
+
+        runtime.append_history(
+            "prologue/introduction".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            "newest".to_owned(),
+        );
+
+        assert_eq!(runtime.dialogue_history.len(), 500);
+        assert_eq!(runtime.dialogue_history.first().unwrap().entry_id, 1);
+        assert_eq!(runtime.dialogue_history.last().unwrap().entry_id, 500);
+        assert_eq!(runtime.dialogue_history.last().unwrap().text, "newest");
     }
 
     fn literal(value: ScalarValue) -> ValueOperand {
