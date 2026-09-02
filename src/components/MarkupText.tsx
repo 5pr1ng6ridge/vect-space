@@ -209,7 +209,7 @@ function MathMarkupUnit({
   );
 
   useLayoutEffect(() => {
-    if (!animate) return;
+    if (!animate || !fontReady) return;
     const content = contentRef.current;
     const katexElement = content?.querySelector<HTMLElement>(".katex");
     if (

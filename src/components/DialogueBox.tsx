@@ -45,6 +45,7 @@ interface DialogueBoxProps {
   onRevealComplete(promptId: string): void;
   revealImmediately: boolean;
   revealAnimation?: TextRevealAnimation;
+  fontReady?: boolean;
   motionHost?: UiMotionHost;
 }
 
@@ -68,6 +69,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       onRevealComplete,
       revealImmediately,
       revealAnimation = "typewriter",
+      fontReady = true,
       motionHost,
     },
     ref,
@@ -112,8 +114,14 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       [defaultCps, initialCps, mathRevealDurations, units],
     );
     const revealCompletionMs = useMemo(
-      () => revealCompletionTime(units, schedule, mathRevealDurations),
-      [mathRevealDurations, schedule, units],
+      () =>
+        revealCompletionTime(
+          units,
+          schedule,
+          mathRevealDurations,
+          revealAnimation,
+        ),
+      [mathRevealDurations, revealAnimation, schedule, units],
     );
     const [visibleCount, setVisibleCount] = useState(0);
     const [revealFinished, setRevealFinished] = useState(
@@ -330,6 +338,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
             instantMathReveal={instantRevealPromptId === promptId}
             onMathMetrics={handleMathMetrics}
             revealAnimation={revealAnimation}
+            fontReady={fontReady}
             source={currentText}
             unitCps={unitCps}
             visibleCount={renderedVisibleCount}

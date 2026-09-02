@@ -21,7 +21,12 @@ import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import { StoryFlowPage } from "./components/StoryFlowPage";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
-import { autoReadingDelay, hasImmediateAutoAdvance } from "./engine/markup";
+import {
+  autoReadingDelay,
+  buildRevealSchedule,
+  hasImmediateAutoAdvance,
+  parseMarkup,
+} from "./engine/markup";
 import { canFastForwardPrompt } from "./engine/playback";
 import { UiMotionHost } from "./engine/uiMotion";
 import type {
@@ -62,10 +67,18 @@ interface InitialAppState {
   assets: AssetUrlMap;
 }
 
+interface LockedTextSettings {
+  promptId: string;
+  defaultCps: number;
+  initialCps: number;
+  animation: TextRevealAnimation;
+}
+
 let initialAppStatePromise: Promise<InitialAppState> | null = null;
 
 export default function App(): ReactElement {
-  const { style: viewportStyle } = useViewportMetrics();
+  const { metrics: viewportMetrics, style: viewportStyle } =
+    useViewportMetrics();
   const sceneRef = useRef<SceneCanvasHandle>(null);
   const dialogueRef = useRef<DialogueBoxHandle>(null);
   const longTextRef = useRef<LongTextPanelHandle>(null);
@@ -80,6 +93,7 @@ export default function App(): ReactElement {
   const [panel, setPanel] = useState<Panel>("none");
   const [update, setUpdate] = useState<RuntimeUpdate | null>(null);
   const [assets, setAssets] = useState<AssetUrlMap>({});
+  const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [draftSettings, setDraftSettings] =
     useState<Settings>(DEFAULT_SETTINGS);
@@ -142,16 +156,24 @@ export default function App(): ReactElement {
       display: "swap",
     });
     document.fonts.add(face);
-    void face.load().catch((reason: unknown) => {
-      if (active) {
-        setError(`中文字体加载失败：${errorMessage(reason)}`);
-      }
-    });
+    void face
+      .load()
+      .catch((reason: unknown) => {
+        if (active) {
+          setError(`中文字体加载失败：${errorMessage(reason)}`);
+        }
+      })
+      .finally(() => {
+        if (active) setLoadedFontUrl(fontUrl);
+      });
     return () => {
       active = false;
       document.fonts.delete(face);
     };
   }, [assets]);
+
+  const fontUrl = assets["font.fusion_pixel"];
+  const fontReady = fontUrl === undefined || loadedFontUrl === fontUrl;
 
   const refreshSlots = useCallback(async (): Promise<void> => {
     setSaveSlots(await engineApi.listSaveSlots());
@@ -378,9 +400,42 @@ export default function App(): ReactElement {
     () => textRevealSpeed(update, textPrompt),
     [textPrompt, update],
   );
-  const revealCps = textCueCps ?? settings.text_speed_cps;
+  const cueRevealAnimation = textRevealAnimation(update, textPrompt);
+  const currentTextSettings = useMemo<LockedTextSettings | null>(() => {
+    if (textPrompt === null) return null;
+    return {
+      promptId: textPrompt.prompt_id,
+      defaultCps: settings.text_speed_cps,
+      initialCps: textCueCps ?? settings.text_speed_cps,
+      animation: cueRevealAnimation ?? settings.text_reveal_animation,
+    };
+  }, [cueRevealAnimation, settings, textCueCps, textPrompt]);
+  const [lockedTextSettings, setLockedTextSettings] =
+    useState<LockedTextSettings | null>(null);
+  useEffect(() => {
+    if (currentTextSettings === null) {
+      const frame = requestAnimationFrame(() => setLockedTextSettings(null));
+      return () => cancelAnimationFrame(frame);
+    }
+    const frame = requestAnimationFrame(() => {
+      setLockedTextSettings((previous) =>
+        previous?.promptId === currentTextSettings.promptId
+          ? previous
+          : currentTextSettings,
+      );
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [currentTextSettings]);
+  const effectiveTextSettings =
+    lockedTextSettings?.promptId === currentTextSettings?.promptId
+      ? lockedTextSettings
+      : currentTextSettings;
+  const revealCps =
+    effectiveTextSettings?.initialCps ?? settings.text_speed_cps;
+  const revealDefaultCps =
+    effectiveTextSettings?.defaultCps ?? settings.text_speed_cps;
   const revealAnimation =
-    textRevealAnimation(update, textPrompt) ?? settings.text_reveal_animation;
+    effectiveTextSettings?.animation ?? settings.text_reveal_animation;
   const runtimeLocked = update?.requires_ack ?? false;
   const activeTimelineCue = update?.cues.find(
     (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
@@ -681,7 +736,7 @@ export default function App(): ReactElement {
 
             {renderedDialoguePage !== null && (
               <DialogueBox
-                defaultCps={settings.text_speed_cps}
+                defaultCps={revealDefaultCps}
                 dialogueBoxUrl={assets["gui.dialogue_box"] ?? ""}
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
@@ -693,6 +748,7 @@ export default function App(): ReactElement {
                 page={renderedDialoguePage}
                 prompt={dialogue}
                 revealAnimation={revealAnimation}
+                fontReady={fontReady}
                 ref={dialogueRef}
                 revealImmediately={
                   dialogue === null || textCueCps === undefined
@@ -703,7 +759,7 @@ export default function App(): ReactElement {
 
             {longText !== null && longTextPage !== null && (
               <LongTextPanel
-                defaultCps={settings.text_speed_cps}
+                defaultCps={revealDefaultCps}
                 disabled={busy || runtimeLocked}
                 fastForward={fastForwardActive}
                 initialCps={revealCps}
@@ -719,6 +775,8 @@ export default function App(): ReactElement {
                 }
                 prompt={longText}
                 revealAnimation={revealAnimation}
+                designScale={viewportMetrics.scale}
+                fontReady={fontReady}
                 ref={longTextRef}
                 revealImmediately={textCueCps === undefined}
               />
@@ -892,6 +950,40 @@ function SettingsPanel({
   onClose,
 }: SettingsPanelProps): ReactElement {
   const [animationPreviewRevision, setAnimationPreviewRevision] = useState(0);
+  const [animationPreviewVisibleCount, setAnimationPreviewVisibleCount] =
+    useState(0);
+  const animationPreviewSource = "示例：$A \\cong B$，文字";
+  useEffect(() => {
+    const units = parseMarkup(animationPreviewSource);
+    const schedule = buildRevealSchedule(
+      units,
+      settings.text_speed_cps,
+      settings.text_speed_cps,
+    );
+    let frame = 0;
+    const startedAt = performance.now();
+    const tick = (now: number): void => {
+      const elapsed = now - startedAt;
+      let next = 0;
+      while (
+        next < schedule.length &&
+        (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
+      ) {
+        next += 1;
+      }
+      setAnimationPreviewVisibleCount(next);
+      if (next < schedule.length) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(() => {
+      setAnimationPreviewVisibleCount(0);
+      frame = requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    animationPreviewRevision,
+    settings.text_reveal_animation,
+    settings.text_speed_cps,
+  ]);
   const rows: {
     key:
       | "master_volume"
@@ -959,12 +1051,15 @@ function SettingsPanel({
           </select>
           <output />
         </label>
-        <div className="text-animation-preview" key={animationPreviewRevision}>
+        <div
+          className="text-animation-preview"
+          key={`${animationPreviewRevision}:${settings.text_reveal_animation}`}
+        >
           <MarkupText
             animateMath
             revealAnimation={settings.text_reveal_animation}
-            source={"示例：$A \\cong B$"}
-            visibleCount={Number.MAX_SAFE_INTEGER}
+            source={animationPreviewSource}
+            visibleCount={animationPreviewVisibleCount}
           />
           <button
             onClick={() =>

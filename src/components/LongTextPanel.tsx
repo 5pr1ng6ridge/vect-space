@@ -40,6 +40,7 @@ import {
   hasReachedLongTextRevealThreshold,
   longTextMaxScroll,
   longTextParagraphTarget,
+  longTextFollowTarget,
 } from "./longTextScroll";
 
 export interface LongTextPanelHandle {
@@ -57,6 +58,10 @@ interface LongTextPanelProps {
   paperUrl: string | null | undefined;
   revealImmediately: boolean;
   revealAnimation?: TextRevealAnimation;
+  /** The game viewport scale, used to translate pointer deltas to design pixels. */
+  designScale?: number;
+  /** Rendering is held until the runtime font has finished loading. */
+  fontReady?: boolean;
   fastForward: boolean;
   onTypingChange(typing: boolean, cps: number): void;
   onRevealComplete(promptId: string): void;
@@ -125,6 +130,8 @@ export const LongTextPanel = forwardRef<
     paperUrl,
     revealImmediately,
     revealAnimation = "typewriter",
+    designScale = 1,
+    fontReady = true,
     fastForward,
     onTypingChange,
     onRevealComplete,
@@ -163,8 +170,14 @@ export const LongTextPanel = forwardRef<
     [defaultCps, initialCps, mathRevealDurations, units],
   );
   const revealCompletionMs = useMemo(
-    () => revealCompletionTime(units, schedule, mathRevealDurations),
-    [mathRevealDurations, schedule, units],
+    () =>
+      revealCompletionTime(
+        units,
+        schedule,
+        mathRevealDurations,
+        revealAnimation,
+      ),
+    [mathRevealDurations, revealAnimation, schedule, units],
   );
   const [visibleCount, setVisibleCount] = useState(0);
   const [revealFinished, setRevealFinished] = useState(
@@ -211,6 +224,7 @@ export const LongTextPanel = forwardRef<
   const renderedVisibleCount = promptIsActive ? visibleCount : 0;
   const complete = promptIsActive && revealFinished;
   const activeStep = page.steps[page.active_step_index];
+  const activeStepRef = useRef<HTMLDivElement>(null);
   const paperArtworkReady = usePaperArtworkReady(paperUrl);
   const layout = page.layout;
   const applyScrollOffset = useCallback((offset: number): void => {
@@ -277,6 +291,7 @@ export const LongTextPanel = forwardRef<
     const measureWhenFontsReady = (): void => {
       if (active) measureSteps();
     };
+    if (!fontReady) return;
     if ("fonts" in document) {
       void document.fonts.ready.then(measureWhenFontsReady);
     } else {
@@ -285,9 +300,9 @@ export const LongTextPanel = forwardRef<
     return () => {
       active = false;
     };
-  }, [measureSteps, measurementBatch]);
+  }, [fontReady, measureSteps, measurementBatch]);
 
-  const layoutReady = unmeasuredSteps.length === 0;
+  const layoutReady = fontReady && unmeasuredSteps.length === 0;
   const pages = useMemo(
     () =>
       paginateLongTextSteps(
@@ -329,6 +344,39 @@ export const LongTextPanel = forwardRef<
     [layout.page_gap, page.pagination, pages],
   );
   const maxScroll = longTextMaxScroll(surfaceHeight, layout.height);
+  const activeStepGeometry = useMemo(() => {
+    if (!layoutReady || activeStep === undefined) return null;
+    const pageIndex = pages.findIndex((candidate) =>
+      candidate.steps.some((step) => step.step_id === activeStep.step_id),
+    );
+    if (pageIndex < 0) return null;
+    const activePage = pages[pageIndex];
+    if (activePage === undefined) return null;
+    const activeIndex = activePage.steps.findIndex(
+      (step) => step.step_id === activeStep.step_id,
+    );
+    if (activeIndex < 0) return null;
+    const before = activePage.steps
+      .slice(0, activeIndex)
+      .reduce(
+        (total, step, index) =>
+          total +
+          (index === 0 ? 0 : LONG_TEXT_STEP_GAP) +
+          (stepHeights[step.step_id] ?? 0),
+        0,
+      );
+    return {
+      start: (pageOffsets[pageIndex] ?? 0) + layout.padding_y + before,
+      height: stepHeights[activeStep.step_id] ?? 0,
+    };
+  }, [
+    activeStep,
+    layout.padding_y,
+    layoutReady,
+    pageOffsets,
+    pages,
+    stepHeights,
+  ]);
   const updatePageWindow = useCallback(
     (offset: number): void => {
       const next = resolveLongTextPageWindow(
@@ -365,12 +413,12 @@ export const LongTextPanel = forwardRef<
   }, [applyScrollOffset, updatePageWindow]);
 
   useEffect(() => {
-    if (!layoutReady || !paperArtworkReady) return;
+    if (!layoutReady || !paperArtworkReady || !fontReady) return;
     const frame = requestAnimationFrame(() => {
       setPresentedDocumentId(page.document_id);
     });
     return () => cancelAnimationFrame(frame);
-  }, [layoutReady, page.document_id, paperArtworkReady]);
+  }, [fontReady, layoutReady, page.document_id, paperArtworkReady]);
 
   const handleMathMetrics = useCallback(
     (index: number, widthPx: number, fontSizePx: number): void => {
@@ -504,26 +552,8 @@ export const LongTextPanel = forwardRef<
   useLayoutEffect(() => {
     if (!layoutReady || activeStep === undefined) return;
     if (scrollPreparedPromptId === prompt.prompt_id) return;
-    const pageIndex = pages.findIndex((candidate) =>
-      candidate.steps.some((step) => step.step_id === activeStep.step_id),
-    );
-    if (pageIndex < 0) return;
-    const activePage = pages[pageIndex];
-    if (activePage === undefined) return;
-    const activeIndex = activePage.steps.findIndex(
-      (step) => step.step_id === activeStep.step_id,
-    );
-    const before = activePage.steps
-      .slice(0, activeIndex)
-      .reduce(
-        (total, step, index) =>
-          total +
-          (index === 0 ? 0 : LONG_TEXT_STEP_GAP) +
-          (stepHeights[step.step_id] ?? 0),
-        0,
-      );
-    const start = (pageOffsets[pageIndex] ?? 0) + layout.padding_y + before;
-    const activeHeight = stepHeights[activeStep.step_id] ?? 0;
+    if (activeStepGeometry === null) return;
+    const { start, height: activeHeight } = activeStepGeometry;
     const target = longTextParagraphTarget({
       stepStartY: start,
       stepHeight: activeHeight,
@@ -560,11 +590,70 @@ export const LongTextPanel = forwardRef<
     layoutReady,
     maxScroll,
     pageOffsets,
-    pages,
     prompt.prompt_id,
     revealImmediately,
     scrollPreparedPromptId,
-    stepHeights,
+    activeStepGeometry,
+    updatePageWindow,
+  ]);
+
+  // Once a paragraph has started revealing, follow its actual rendered cursor
+  // instead of aligning the whole paragraph again. This is what keeps a very
+  // tall paragraph readable without a second teleport at the page boundary.
+  useLayoutEffect(() => {
+    if (
+      !layoutReady ||
+      revealImmediately ||
+      activeStepGeometry === null ||
+      scrollPreparedPromptId !== prompt.prompt_id ||
+      manuallyBrowsingRef.current ||
+      renderedVisibleCount <= 0
+    ) {
+      return;
+    }
+    const stepElement = activeStepRef.current;
+    if (stepElement === null) return;
+    const visibleElements =
+      stepElement.querySelectorAll<HTMLElement>(".markup-unit");
+    const visibleIndex = Math.min(renderedVisibleCount, visibleElements.length);
+    if (visibleIndex <= 0) return;
+    const cursorElement = visibleElements.item(visibleIndex - 1);
+    const scale =
+      Number.isFinite(designScale) && designScale > 0 ? designScale : 1;
+    const stepRect = stepElement.getBoundingClientRect();
+    const cursorRect = cursorElement?.getBoundingClientRect();
+    const measuredOffset =
+      cursorRect === undefined
+        ? Number.NaN
+        : (cursorRect.bottom - stepRect.top) / scale;
+    const cursorY =
+      activeStepGeometry.start +
+      (Number.isFinite(measuredOffset)
+        ? measuredOffset
+        : activeStepGeometry.height *
+          (visibleIndex / Math.max(1, schedule.length)));
+    const currentOffset = scrollOffsetRef.current;
+    const followDelta = longTextFollowTarget({
+      cursorY: cursorY - currentOffset,
+      viewportHeight: layout.height,
+      maxScroll,
+    });
+    if (followDelta === null) return;
+    const target = clamp(currentOffset + followDelta, 0, maxScroll);
+    if (Math.abs(target - scrollTargetRef.current) <= 0.5) return;
+    scrollTargetRef.current = target;
+    updatePageWindow(currentOffset);
+  }, [
+    activeStepGeometry,
+    designScale,
+    layout.height,
+    layoutReady,
+    maxScroll,
+    prompt.prompt_id,
+    renderedVisibleCount,
+    revealImmediately,
+    scrollPreparedPromptId,
+    schedule.length,
     updatePageWindow,
   ]);
 
@@ -614,6 +703,7 @@ export const LongTextPanel = forwardRef<
     layoutReady,
     maxScroll,
     prompt.prompt_id,
+    renderedVisibleCount,
     scrollPreparedPromptId,
     updatePageWindow,
   ]);
@@ -622,7 +712,13 @@ export const LongTextPanel = forwardRef<
     if (event.deltaY === 0) return;
     event.preventDefault();
     manuallyBrowsingRef.current = true;
-    const next = clamp(scrollOffsetRef.current + event.deltaY, 0, maxScroll);
+    const scale =
+      Number.isFinite(designScale) && designScale > 0 ? designScale : 1;
+    const next = clamp(
+      scrollOffsetRef.current + event.deltaY / scale,
+      0,
+      maxScroll,
+    );
     applyScrollOffset(next);
     scrollTargetRef.current = next;
     updatePageWindow(next);
@@ -642,7 +738,9 @@ export const LongTextPanel = forwardRef<
   const handlePointerMove = (event: PointerEvent<HTMLElement>): void => {
     const drag = pointerDragRef.current;
     if (drag === null || drag.pointerId !== event.pointerId) return;
-    const delta = event.clientY - drag.startClientY;
+    const scale =
+      Number.isFinite(designScale) && designScale > 0 ? designScale : 1;
+    const delta = (event.clientY - drag.startClientY) / scale;
     if (!drag.moved && Math.abs(delta) < 5) return;
     drag.moved = true;
     manuallyBrowsingRef.current = true;
@@ -759,13 +857,18 @@ export const LongTextPanel = forwardRef<
                 {paper.steps.map((step) => {
                   const current = step.step_id === prompt.step_id;
                   return (
-                    <div className="long-text-step" key={step.step_id}>
+                    <div
+                      className="long-text-step"
+                      key={step.step_id}
+                      ref={current ? activeStepRef : undefined}
+                    >
                       <MarkupText
                         animateMath={current}
                         instantMathReveal={
                           instantRevealPromptId === prompt.prompt_id
                         }
                         revealAnimation={revealAnimation}
+                        fontReady={fontReady}
                         source={step.text}
                         {...(current
                           ? { onMathMetrics: handleMathMetrics }

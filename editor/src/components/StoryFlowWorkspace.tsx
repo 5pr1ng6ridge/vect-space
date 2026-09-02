@@ -11,7 +11,7 @@ import {
   type Edge,
   type Node,
 } from "@xyflow/react";
-import { useMemo, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { ConditionEditor } from "./NodeInspector";
 import { defaultCondition } from "../story";
 import type {
@@ -70,6 +70,34 @@ export function StoryFlowWorkspace({
     return null;
   });
   const [instance, setInstance] = useState<ReactFlowInstance | null>(null);
+  const previousSelectionRequest = useRef(initialSelectionId);
+  useEffect(() => {
+    if (previousSelectionRequest.current === initialSelectionId) return;
+    previousSelectionRequest.current = initialSelectionId;
+    const frame = requestAnimationFrame(() => {
+      if (initialSelectionId === null) {
+        setSelected(null);
+      } else if (flow.nodes[initialSelectionId] !== undefined) {
+        setSelected({ kind: "node", id: initialSelectionId });
+      } else if (flow.edges.some((edge) => edge.id === initialSelectionId)) {
+        setSelected({ kind: "edge", id: initialSelectionId });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [flow.edges, flow.nodes, initialSelectionId]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      setSelected((current) => {
+        if (current === null) return current;
+        const exists =
+          current.kind === "node"
+            ? flow.nodes[current.id] !== undefined
+            : flow.edges.some((edge) => edge.id === current.id);
+        return exists ? current : null;
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [flow.edges, flow.nodes]);
   const profileManifest = useMemo(
     () => ({
       ...projectManifest,

@@ -2834,6 +2834,24 @@ body.timeline-resizing {
   cursor: nwse-resize;
 }
 
+.long-text-layout-preview-content {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  padding: 4px 6px;
+  color: #d7efff;
+  pointer-events: none;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+.long-text-layout-preview-content .markup-preview {
+  max-height: 100%;
+  overflow: hidden;
+  font-size: clamp(8px, 1.4vw, 16px);
+}
+
 .long-text-layout-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;

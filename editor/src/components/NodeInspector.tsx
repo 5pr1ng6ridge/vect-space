@@ -456,13 +456,23 @@ function renderFields(
           />
           <Field label="分页方式">
             <select
-              onChange={(event) =>
+              onChange={(event) => {
+                const pagination = event.currentTarget.value as
+                  "continuous" | "auto" | "manual";
                 update({
                   ...node,
-                  pagination: event.currentTarget.value as
-                    "continuous" | "auto" | "manual",
-                })
-              }
+                  pagination,
+                  ...(pagination === "continuous"
+                    ? {
+                        steps: node.steps.map((step) =>
+                          step.page_break_before
+                            ? { ...step, page_break_before: false }
+                            : step,
+                        ),
+                      }
+                    : {}),
+                });
+              }}
               value={node.pagination ?? "auto"}
             >
               <option value="continuous">连续长卷</option>
@@ -485,11 +495,16 @@ function renderFields(
           <LongTextLayoutEditor
             layout={node.layout ?? DEFAULT_LONG_TEXT_LAYOUT}
             onChange={(layout) => update({ ...node, layout })}
+            previewText={interpolatePreview(
+              node.steps[0]?.text ?? "长文本预览",
+              manifest,
+            )}
           />
           <p className="field-note">
             每一段在游戏中对应一次推进。自动分页会在空间不足时续页；仅手动分页只响应段落的强制分页标记。
           </p>
           <LongTextStepsEditor
+            allowManualBreaks={node.pagination !== "continuous"}
             manifest={manifest}
             onChange={(steps) => update({ ...node, steps })}
             steps={node.steps}
@@ -1835,10 +1850,12 @@ function defaultScalar(type: VariableType): ScalarValue {
 }
 
 function LongTextStepsEditor({
+  allowManualBreaks,
   manifest,
   steps,
   onChange,
 }: {
+  allowManualBreaks: boolean;
   manifest: ContentManifest;
   steps: LongTextStep[];
   onChange(steps: LongTextStep[]): void;
@@ -1910,7 +1927,7 @@ function LongTextStepsEditor({
           <label className="long-text-break-toggle">
             <input
               checked={step.page_break_before}
-              disabled={index === 0}
+              disabled={index === 0 || !allowManualBreaks}
               onChange={(event) =>
                 replace(index, {
                   page_break_before: event.currentTarget.checked,
@@ -2032,9 +2049,11 @@ function RevealAnimationField({
 function LongTextLayoutEditor({
   layout,
   onChange,
+  previewText,
 }: {
   layout: LongTextLayout;
   onChange(layout: LongTextLayout): void;
+  previewText: string;
 }): ReactElement {
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<
@@ -2100,6 +2119,9 @@ function LongTextLayoutEditor({
           onPointerUp={() => {
             dragRef.current = undefined;
           }}
+          onPointerCancel={() => {
+            dragRef.current = undefined;
+          }}
           ref={canvasRef}
         >
           <button
@@ -2113,8 +2135,19 @@ function LongTextLayoutEditor({
             }}
             type="button"
           >
-            <span>长文本</span>
-            <i onPointerDown={(event) => begin(event, "resize")} />
+            <div className="long-text-layout-preview-content">
+              <MarkupPreview source={previewText} />
+            </div>
+            <i
+              onPointerDown={(event) => {
+                // The resize handle lives inside the draggable button. Stop
+                // bubbling so the parent cannot replace the resize gesture
+                // with a move gesture.
+                event.stopPropagation();
+                event.preventDefault();
+                begin(event, "resize");
+              }}
+            />
           </button>
         </div>
       </Field>

@@ -82,6 +82,23 @@ describe("VN markup", () => {
     expect(revealCompletionTime(units, schedule, durations)).toBe(340);
   });
 
+  it("waits for the selected text animation to finish", () => {
+    const units = parseMarkup("甲乙");
+    const schedule = buildRevealSchedule(units, 20, 20);
+    expect(revealCompletionTime(units, schedule, new Map(), "line_sweep")).toBe(
+      280,
+    );
+    expect(revealCompletionTime(units, schedule, new Map(), "drop_fade")).toBe(
+      260,
+    );
+  });
+
+  it("never completes a typewriter formula before its CSS fade", () => {
+    const units = parseMarkup("$x$");
+    const schedule = buildRevealSchedule(units, 20, 20, new Map([[0, 80]]));
+    expect(revealCompletionTime(units, schedule, new Map([[0, 80]]))).toBe(230);
+  });
+
   it("scales formula reveal duration with rendered width and CPS", () => {
     const normal = formulaRevealDurationMs(340, 34, 40);
     expect(formulaRevealDurationMs(680, 34, 40)).toBeGreaterThan(normal);

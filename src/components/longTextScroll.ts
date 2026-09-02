@@ -24,8 +24,8 @@ export interface LongTextRevealThresholdInput {
 /**
  * Places a complete paragraph before its reveal begins. Short paragraphs use
  * the smallest movement that fits them between the two reading guards. A
- * paragraph taller than the safe area is aligned to the upper guard and is
- * not followed again while it is typing.
+ * paragraph taller than the safe area is aligned to the upper guard; the
+ * cursor follower takes over once its reveal starts.
  */
 export function longTextParagraphTarget({
   stepStartY,

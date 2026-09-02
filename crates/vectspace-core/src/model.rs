@@ -28,6 +28,7 @@ pub struct DialogueHistoryEntry {
     pub prompt_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_id: Option<String>,
+    #[serde(default)]
     pub speaker: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_color: Option<String>,

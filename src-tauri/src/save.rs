@@ -18,6 +18,10 @@ const PROFILE_SCHEMA_VERSION: u32 = 4;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
 const MAX_HISTORY_ENTRIES: usize = 500;
 const MAX_HISTORY_TEXT_BYTES: usize = 64 * 1024;
+// A profile can legitimately contain 500 long entries, but should never be
+// allowed to make the WebView parse an unbounded JSON document.
+const MAX_PROFILE_FILE_BYTES: usize =
+    MAX_HISTORY_ENTRIES * MAX_HISTORY_TEXT_BYTES + 2 * 1024 * 1024;
 const SLOT_IDS: [&str; 4] = ["auto", "1", "2", "3"];
 
 #[derive(Debug, Error)]
@@ -264,7 +268,8 @@ impl ProfileManager {
             return Ok(defaults);
         }
 
-        let loaded = read_json_with_backup::<serde_json::Value>(&self.path);
+        let loaded =
+            read_json_with_backup_limit::<serde_json::Value>(&self.path, MAX_PROFILE_FILE_BYTES);
         let (stored, mut rewrite) = match loaded {
             Ok(value)
                 if matches!(
@@ -477,7 +482,8 @@ fn reconcile_profile_metadata(state: &mut ProfileState) -> bool {
 }
 
 fn valid_history_entry(entry: &DialogueHistoryEntry) -> bool {
-    valid_story_location(&entry.prompt_id)
+    entry.entry_id > 0
+        && valid_story_location(&entry.prompt_id)
         && entry.text.len() <= MAX_HISTORY_TEXT_BYTES
         && entry.speaker_id.as_deref().is_none_or(valid_identifier)
         && entry.speaker.as_deref().is_none_or(valid_display_name)
@@ -604,6 +610,19 @@ fn read_json_with_backup<T: serde::de::DeserializeOwned>(path: &Path) -> Result<
     }
 }
 
+fn read_json_with_backup_limit<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<T, SaveError> {
+    match read_json_limited(path, maximum_bytes) {
+        Ok(value) => Ok(value),
+        Err(primary_error) => {
+            let backup = backup_path(path);
+            read_json_limited(&backup, maximum_bytes).map_err(|_| primary_error)
+        }
+    }
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, SaveError> {
     let bytes = fs::read(path).map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
@@ -615,6 +634,30 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, SaveError
             }
         }
     })?;
+    serde_json::from_slice(&bytes).map_err(|error| SaveError::InvalidData(error.to_string()))
+}
+
+fn read_json_limited<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<T, SaveError> {
+    let bytes = fs::read(path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            SaveError::MissingSlot(path.display().to_string())
+        } else {
+            SaveError::Io {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+    if bytes.len() > maximum_bytes {
+        return Err(SaveError::InvalidData(format!(
+            "文件 {} 超过 {} 字节限制",
+            path.display(),
+            maximum_bytes
+        )));
+    }
     serde_json::from_slice(&bytes).map_err(|error| SaveError::InvalidData(error.to_string()))
 }
 

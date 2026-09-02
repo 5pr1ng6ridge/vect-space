@@ -1,3 +1,5 @@
+import type { TextRevealAnimation } from "./types";
+
 export type TextEffect = "shake" | "wave" | "glow";
 
 interface VisibleUnitBase {
@@ -234,14 +236,25 @@ export function revealCompletionTime(
   units: MarkupUnit[],
   schedule: readonly number[],
   mathRevealDurations: ReadonlyMap<number, number> = new Map(),
+  revealAnimation: TextRevealAnimation = "typewriter",
 ): number {
   const visible = visibleUnits(units);
   const finalAppearance = schedule[schedule.length - 1] ?? 0;
   const finalIndex = visible.length - 1;
-  return visible[finalIndex]?.kind === "math"
-    ? finalAppearance +
-        validMathRevealDuration(mathRevealDurations.get(finalIndex))
-    : finalAppearance;
+  const finalUnit = visible[finalIndex];
+  if (finalUnit === undefined) return 0;
+  const animationDuration =
+    revealAnimation === "line_sweep"
+      ? 180
+      : revealAnimation === "drop_fade"
+        ? 160
+        : finalUnit?.kind === "math"
+          ? Math.max(
+              180,
+              validMathRevealDuration(mathRevealDurations.get(finalIndex)),
+            )
+          : 0;
+  return finalAppearance + animationDuration;
 }
 
 export function formulaRevealDurationMs(
