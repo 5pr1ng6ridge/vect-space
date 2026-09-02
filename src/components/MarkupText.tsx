@@ -92,8 +92,12 @@ export const MarkupText = memo(function MarkupText({
           key={`${index}-math-${unit.latex}`}
           onMetrics={onMathMetrics}
           registerElement={registerElement}
+          revealActive={
+            !suppressReveal &&
+            visible &&
+            visibleCount !== Number.POSITIVE_INFINITY
+          }
           style={style}
-          suppressReveal={suppressReveal}
           unit={unit}
           visible={visible}
           revealAnimation={revealAnimation}
@@ -150,8 +154,8 @@ function MathMarkupUnit({
   instant,
   onMetrics,
   registerElement,
+  revealActive,
   style,
-  suppressReveal,
   unit,
   visible,
   revealAnimation,
@@ -165,8 +169,8 @@ function MathMarkupUnit({
     | ((unitIndex: number, widthPx: number, fontSizePx: number) => void)
     | undefined;
   registerElement(element: HTMLSpanElement | null): void;
+  revealActive: boolean;
   style: CSSProperties;
-  suppressReveal: boolean;
   unit: MathUnit;
   visible: boolean;
   revealAnimation: TextRevealAnimation;
@@ -214,7 +218,7 @@ function MathMarkupUnit({
   return (
     <span
       aria-hidden="true"
-      className={`markup-unit math-unit${unit.display ? " display-math" : ""}${effectClass}${animate && visible ? " is-math-revealed" : ""}${visible && !suppressReveal ? ` is-reveal-${revealAnimation}` : ""}${instant ? " is-math-instant" : ""}`}
+      className={`markup-unit math-unit${unit.display ? " display-math" : ""}${effectClass}${animate && visible ? " is-math-revealed" : ""}${revealActive ? ` is-reveal-${revealAnimation}` : ""}${instant ? " is-math-instant" : ""}`}
       ref={registerElement}
       style={style}
     >

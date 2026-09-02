@@ -685,7 +685,7 @@ export default function App(): ReactElement {
                 dialogueBoxUrl={assets["gui.dialogue_box"] ?? ""}
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
-                key={`${renderedDialoguePage.page_id}:${dialogue?.prompt_id ?? "retained"}:${update.snapshot.revision}`}
+                key={`${renderedDialoguePage.page_id}:${dialogue?.prompt_id ?? `retained:${update.snapshot.revision}`}`}
                 motionHost={uiMotionHost}
                 nameBoxUrl={assets["gui.name_box"] ?? ""}
                 onTypingChange={handleTypingChange}

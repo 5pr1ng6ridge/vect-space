@@ -30,4 +30,13 @@ describe("MarkupText math reveal", () => {
     expect(animated).not.toContain("is-math-instant");
     expect(instant).toContain("is-math-instant");
   });
+
+  it("never gives completed static formulas a reveal animation class", () => {
+    const html = renderToStaticMarkup(
+      <MarkupText animateMath source="$x+y$" />,
+    );
+    expect(html).not.toContain("is-reveal-typewriter");
+    expect(html).not.toContain("is-reveal-drop_fade");
+    expect(html).not.toContain("is-reveal-line_sweep");
+  });
 });
