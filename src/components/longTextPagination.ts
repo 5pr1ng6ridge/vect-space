@@ -1,5 +1,11 @@
 import type { LongTextStepSnapshot } from "../engine/types";
 
+// Kept as exported compatibility defaults for content tests and tools.
+export const LONG_TEXT_PAGE_HEIGHT = 1_340;
+export const LONG_TEXT_PAGE_PADDING_TOP = 112;
+export const LONG_TEXT_PAGE_PADDING_BOTTOM = 128;
+export const LONG_TEXT_PAGE_GAP = 92;
+
 export interface LongTextPaperPage {
   steps: LongTextStepSnapshot[];
   index: number;
@@ -7,21 +13,16 @@ export interface LongTextPaperPage {
   height: number;
 }
 
-export const LONG_TEXT_PAGE_HEIGHT = 1_340;
-export const LONG_TEXT_PAGE_GAP = 92;
-export const LONG_TEXT_PAGE_PADDING_TOP = 112;
-export const LONG_TEXT_PAGE_PADDING_BOTTOM = 128;
 export const LONG_TEXT_STEP_GAP = 28;
 
 export function paginateLongTextSteps(
   steps: readonly LongTextStepSnapshot[],
   heights: Readonly<Record<string, number>>,
-  mode: "auto" | "manual" = "auto",
+  mode: "continuous" | "auto" | "manual" = "auto",
+  pageHeight = 1_340,
+  paddingY = 112,
 ): LongTextPaperPage[] {
-  const capacity =
-    LONG_TEXT_PAGE_HEIGHT -
-    LONG_TEXT_PAGE_PADDING_TOP -
-    LONG_TEXT_PAGE_PADDING_BOTTOM;
+  const capacity = pageHeight - paddingY * 2;
   const pages: LongTextPaperPage[] = [];
   let current: LongTextStepSnapshot[] = [];
   let used = 0;
@@ -30,10 +31,7 @@ export function paginateLongTextSteps(
       steps: current,
       index: pages.length,
       contentHeight: used,
-      height: Math.max(
-        LONG_TEXT_PAGE_HEIGHT,
-        LONG_TEXT_PAGE_PADDING_TOP + used + LONG_TEXT_PAGE_PADDING_BOTTOM,
-      ),
+      height: Math.max(pageHeight, paddingY * 2 + used),
     });
   };
   for (const step of steps) {
@@ -41,7 +39,7 @@ export function paginateLongTextSteps(
     const gap = current.length === 0 ? 0 : LONG_TEXT_STEP_GAP;
     if (
       current.length > 0 &&
-      (step.page_break_before ||
+      ((mode !== "continuous" && step.page_break_before) ||
         (mode === "auto" && used + gap + height > capacity))
     ) {
       completePage();

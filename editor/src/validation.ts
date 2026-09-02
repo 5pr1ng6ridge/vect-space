@@ -367,6 +367,7 @@ function validateNode(
       checkAsset(node.paper ?? null, "gui", false);
       if (
         node.pagination !== undefined &&
+        node.pagination !== "continuous" &&
         node.pagination !== "auto" &&
         node.pagination !== "manual"
       ) {
@@ -379,6 +380,36 @@ function validateNode(
           node.font_size > 72)
       ) {
         issue("invalid_long_text_font_size", "长文本字号必须在 16 到 72 之间");
+      }
+      if (
+        node.text_color !== undefined &&
+        !/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/.test(node.text_color)
+      ) {
+        issue(
+          "invalid_long_text_color",
+          "长文本颜色必须是 #RRGGBB 或 #RRGGBBAA",
+        );
+      }
+      if (node.layout !== undefined) {
+        const layout = node.layout;
+        const values = Object.values(layout);
+        if (
+          values.some((value) => !Number.isFinite(value)) ||
+          layout.x < 0 ||
+          layout.y < 0 ||
+          layout.width < 160 ||
+          layout.height < 240 ||
+          layout.x + layout.width > 1920 ||
+          layout.y + layout.height > 1080 ||
+          layout.padding_x < 0 ||
+          layout.padding_y < 0 ||
+          layout.width <= layout.padding_x * 2 + 80 ||
+          layout.height <= layout.padding_y * 2 + 80 ||
+          layout.page_height <= layout.padding_y * 2 + 80 ||
+          layout.page_gap < 0
+        ) {
+          issue("invalid_long_text_layout", "长文本位置、边距或页尺寸无效");
+        }
       }
       if (node.steps.length === 0 || node.steps.length > 1024) {
         issue("invalid_long_text_steps", "长文本必须包含 1 到 1024 个步骤");
@@ -396,6 +427,9 @@ function validateNode(
         }
         if (index === 0 && step.page_break_before) {
           issue("leading_long_text_break", "第一段不应在前方强制分页");
+        }
+        if (node.pagination === "continuous" && step.page_break_before) {
+          issue("continuous_long_text_break", "连续长卷不能使用强制分页");
         }
         validateTextTemplate(project, step.text, issue);
         ids.add(step.id);

@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type PointerEvent,
   type ReactElement,
   type WheelEvent,
 } from "react";
@@ -21,15 +22,22 @@ import {
   parseMarkup,
   revealCompletionTime,
 } from "../engine/markup";
-import type { LongTextPageSnapshot, LongTextPrompt } from "../engine/types";
+import type {
+  LongTextPageSnapshot,
+  LongTextPrompt,
+  TextRevealAnimation,
+} from "../engine/types";
 import { MarkupText } from "./MarkupText";
 import {
-  LONG_TEXT_PAGE_GAP,
-  LONG_TEXT_PAGE_PADDING_TOP,
   LONG_TEXT_STEP_GAP,
   paginateLongTextSteps,
 } from "./longTextPagination";
-import { longTextMaxScroll, resolveLongTextScroll } from "./longTextScroll";
+import {
+  advanceLongTextScroll,
+  clamp,
+  longTextFollowTarget,
+  longTextMaxScroll,
+} from "./longTextScroll";
 
 export interface LongTextPanelHandle {
   complete(): void;
@@ -42,9 +50,10 @@ interface LongTextPanelProps {
   initialCps: number;
   defaultCps: number;
   disabled: boolean;
-  /** `null` means a configured asset is still resolving; `undefined` is transparent. */
+  /** null means a configured asset is still resolving; undefined is transparent. */
   paperUrl: string | null | undefined;
   revealImmediately: boolean;
+  revealAnimation?: TextRevealAnimation;
   fastForward: boolean;
   onTypingChange(typing: boolean, cps: number): void;
   onRevealComplete(promptId: string): void;
@@ -74,7 +83,6 @@ function preloadPaperArtwork(url: string): Promise<void> {
         .catch(() => undefined)
         .finally(finish);
     });
-    // A broken optional paper should not leave the reading UI hidden forever.
     image.addEventListener("error", finish);
     image.src = url;
   });
@@ -88,7 +96,6 @@ function usePaperArtworkReady(paperUrl: string | null | undefined): boolean {
       ? paperUrl
       : undefined,
   );
-
   useEffect(() => {
     if (typeof paperUrl !== "string") return;
     let active = true;
@@ -99,7 +106,6 @@ function usePaperArtworkReady(paperUrl: string | null | undefined): boolean {
       active = false;
     };
   }, [paperUrl]);
-
   return paperUrl === undefined || readyUrl === paperUrl;
 }
 
@@ -115,6 +121,7 @@ export const LongTextPanel = forwardRef<
     disabled,
     paperUrl,
     revealImmediately,
+    revealAnimation = "typewriter",
     fastForward,
     onTypingChange,
     onRevealComplete,
@@ -131,13 +138,13 @@ export const LongTextPanel = forwardRef<
   >(() => new Map());
   const mathRevealDurations = useMemo(() => {
     const result = new Map<number, number>();
-    for (const [unitIndex, metric] of mathRevealMetrics) {
+    for (const [index, metric] of mathRevealMetrics) {
       result.set(
-        unitIndex,
+        index,
         formulaRevealDurationMs(
           metric.widthPx,
           metric.fontSizePx,
-          unitCps[unitIndex] ?? 30,
+          unitCps[index] ?? 30,
         ),
       );
     }
@@ -170,39 +177,133 @@ export const LongTextPanel = forwardRef<
     Readonly<Record<string, number>>
   >({});
   const [scrollOffset, setScrollOffset] = useState(0);
-  const [smoothScrolling, setSmoothScrolling] = useState(false);
-  const [initialScrollApplied, setInitialScrollApplied] = useState(false);
   const visibleRef = useRef(0);
   const completeRef = useRef(revealImmediately || schedule.length === 0);
   const reportedPromptRef = useRef<string | null>(null);
   const measuringRootRef = useRef<HTMLDivElement>(null);
   const stepMeasureRefs = useRef(new Map<string, HTMLDivElement>());
   const activeStepRef = useRef<HTMLDivElement>(null);
+  const scrollOffsetRef = useRef(0);
+  const scrollTargetRef = useRef(0);
   const manuallyBrowsingRef = useRef(false);
-  const initialScrollPlacedRef = useRef(false);
-  const documentPositionedRef = useRef(false);
-  const scrollPromptRef = useRef(prompt.prompt_id);
+  const pointerDragRef = useRef<{
+    pointerId: number;
+    startClientY: number;
+    startOffset: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressAdvanceClickRef = useRef(false);
+  const documentRef = useRef(page.document_id);
   const promptIsActive = activePromptId === prompt.prompt_id;
   const renderedVisibleCount = promptIsActive ? visibleCount : 0;
   const complete = promptIsActive && revealFinished;
   const activeStep = page.steps[page.active_step_index];
   const paperArtworkReady = usePaperArtworkReady(paperUrl);
+  const layout = page.layout;
 
   useLayoutEffect(() => {
-    if (scrollPromptRef.current === prompt.prompt_id) return;
-    scrollPromptRef.current = prompt.prompt_id;
+    if (documentRef.current === page.document_id) return;
+    documentRef.current = page.document_id;
     manuallyBrowsingRef.current = false;
-    initialScrollPlacedRef.current = false;
-    setInitialScrollApplied(false);
-    setSmoothScrolling(false);
+    scrollOffsetRef.current = 0;
+    scrollTargetRef.current = 0;
+    setScrollOffset(0);
+    setStepHeights({});
     setMathRevealMetrics(new Map());
-  }, [prompt.prompt_id]);
+  }, [page.document_id]);
+
+  const measureSteps = useCallback(() => {
+    const measured: Record<string, number> = {};
+    for (const [id, element] of stepMeasureRefs.current) {
+      measured[id] = Math.ceil(
+        Math.max(element.getBoundingClientRect().height, element.scrollHeight),
+      );
+    }
+    setStepHeights((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [id, height] of Object.entries(measured)) {
+        // A committed step never changes height later: this is the layout
+        // boundary that prevents image/font settling from moving old pages.
+        if (next[id] === undefined) {
+          next[id] = height;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = measuringRootRef.current;
+    if (root === null) return;
+    let active = true;
+    const measureWhenFontsReady = (): void => {
+      if (active) measureSteps();
+    };
+    if ("fonts" in document) {
+      void document.fonts.ready.then(measureWhenFontsReady);
+    } else {
+      measureWhenFontsReady();
+    }
+    return () => {
+      active = false;
+    };
+  }, [measureSteps, page.steps]);
+
+  const layoutReady = page.steps.every(
+    (step) => stepHeights[step.step_id] !== undefined,
+  );
+  const pages = useMemo(
+    () =>
+      paginateLongTextSteps(
+        page.steps,
+        stepHeights,
+        page.pagination,
+        layout.page_height,
+        layout.padding_y,
+      ),
+    [
+      layout.page_height,
+      layout.padding_y,
+      page.pagination,
+      page.steps,
+      stepHeights,
+    ],
+  );
+  const pageOffsets = useMemo(() => {
+    return pages.reduce<number[]>((offsets, _paper, index) => {
+      const previousOffset = offsets[index - 1] ?? 0;
+      const previousPaper = pages[index - 1];
+      const offset =
+        index === 0
+          ? 0
+          : previousOffset +
+            (previousPaper?.height ?? 0) +
+            (page.pagination === "continuous" ? 0 : layout.page_gap);
+      return [...offsets, offset];
+    }, []);
+  }, [layout.page_gap, page.pagination, pages]);
+  const surfaceHeight = useMemo(
+    () =>
+      pages.reduce(
+        (total, paper, index) =>
+          total +
+          paper.height +
+          (page.pagination !== "continuous" && index < pages.length - 1
+            ? layout.page_gap
+            : 0),
+        0,
+      ),
+    [layout.page_gap, page.pagination, pages],
+  );
+  const maxScroll = longTextMaxScroll(surfaceHeight, layout.height);
 
   const handleMathMetrics = useCallback(
-    (unitIndex: number, widthPx: number, fontSizePx: number): void => {
+    (index: number, widthPx: number, fontSizePx: number): void => {
       if (visibleRef.current > 0) return;
       setMathRevealMetrics((current) => {
-        const previous = current.get(unitIndex);
+        const previous = current.get(index);
         if (
           previous?.widthPx === widthPx &&
           previous.fontSizePx === fontSizePx
@@ -210,7 +311,7 @@ export const LongTextPanel = forwardRef<
           return current;
         }
         const next = new Map(current);
-        next.set(unitIndex, { widthPx, fontSizePx });
+        next.set(index, { widthPx, fontSizePx });
         return next;
       });
     },
@@ -218,10 +319,10 @@ export const LongTextPanel = forwardRef<
   );
 
   useEffect(() => {
+    const initialVisibleCount = revealImmediately ? schedule.length : 0;
+    const initiallyFinished = revealImmediately || schedule.length === 0;
     let frame = 0;
-    frame = requestAnimationFrame(() => {
-      const initialVisibleCount = revealImmediately ? schedule.length : 0;
-      const initiallyFinished = revealImmediately || schedule.length === 0;
+    const start = (): void => {
       setActivePromptId(prompt.prompt_id);
       visibleRef.current = initialVisibleCount;
       completeRef.current = initiallyFinished;
@@ -231,13 +332,15 @@ export const LongTextPanel = forwardRef<
       setPaused(isPauseAt(0, pauseWindows));
       setTypingCps(unitCps[0] ?? initialCps);
       manuallyBrowsingRef.current = false;
-      if (initiallyFinished) return;
-      const startedAt = performance.now();
-      const tick = (now: number): void => {
-        const elapsed = now - startedAt;
-        const nextPaused = isPauseAt(elapsed, pauseWindows);
-        setPaused((current) => (current === nextPaused ? current : nextPaused));
-        const nextCps = typingCpsAt(
+      if (!initiallyFinished) frame = requestAnimationFrame(tick);
+    };
+    const startedAt = performance.now();
+    const tick = (now: number): void => {
+      const elapsed = now - startedAt;
+      const nextPaused = isPauseAt(elapsed, pauseWindows);
+      setPaused((current) => (current === nextPaused ? current : nextPaused));
+      setTypingCps((current) => {
+        const next = typingCpsAt(
           elapsed,
           units,
           schedule,
@@ -245,27 +348,27 @@ export const LongTextPanel = forwardRef<
           mathRevealDurations,
           initialCps,
         );
-        setTypingCps((current) => (current === nextCps ? current : nextCps));
-        let next = visibleRef.current;
-        while (
-          next < schedule.length &&
-          (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
-        ) {
-          next += 1;
-        }
-        if (next !== visibleRef.current) {
-          visibleRef.current = next;
-          setVisibleCount(next);
-        }
-        if (next >= schedule.length && elapsed >= revealCompletionMs) {
-          completeRef.current = true;
-          setRevealFinished(true);
-        } else {
-          frame = requestAnimationFrame(tick);
-        }
-      };
-      frame = requestAnimationFrame(tick);
-    });
+        return current === next ? current : next;
+      });
+      let next = visibleRef.current;
+      while (
+        next < schedule.length &&
+        (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
+      ) {
+        next += 1;
+      }
+      if (next !== visibleRef.current) {
+        visibleRef.current = next;
+        setVisibleCount(next);
+      }
+      if (next >= schedule.length && elapsed >= revealCompletionMs) {
+        completeRef.current = true;
+        setRevealFinished(true);
+      } else {
+        frame = requestAnimationFrame(tick);
+      }
+    };
+    frame = requestAnimationFrame(start);
     return () => cancelAnimationFrame(frame);
   }, [
     defaultCps,
@@ -289,7 +392,6 @@ export const LongTextPanel = forwardRef<
         setRevealFinished(true);
         setInstantRevealPromptId(prompt.prompt_id);
         setVisibleCount(schedule.length);
-        manuallyBrowsingRef.current = false;
       },
       isComplete: () => completeRef.current,
     }),
@@ -310,155 +412,174 @@ export const LongTextPanel = forwardRef<
     return () => onTypingChange(false, typingCps);
   }, [onTypingChange, typing, typingCps]);
 
-  const updateMeasurements = useCallback((): void => {
-    const next: Record<string, number> = {};
-    for (const [id, element] of stepMeasureRefs.current) {
-      next[id] = Math.ceil(
-        Math.max(element.getBoundingClientRect().height, element.scrollHeight),
-      );
-    }
-    setStepHeights((current) =>
-      sameMeasurements(current, next) ? current : next,
-    );
-  }, []);
-
   useLayoutEffect(() => {
-    const root = measuringRootRef.current;
-    if (root === null) return;
-    updateMeasurements();
-    const observer =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(() => updateMeasurements());
-    observer?.observe(root);
-    if ("fonts" in document) {
-      void document.fonts.ready.then(updateMeasurements);
-    }
-    return () => {
-      observer?.disconnect();
-    };
-  }, [page.steps, updateMeasurements]);
-
-  const pages = useMemo(
-    () => paginateLongTextSteps(page.steps, stepHeights, page.pagination),
-    [page.pagination, page.steps, stepHeights],
-  );
-  const activePageIndex = pages.findIndex((candidate) =>
-    candidate.steps.some((step) => step.step_id === activeStep?.step_id),
-  );
-  const pageOffsets = useMemo(() => {
-    return pages.map((_, index) =>
-      pages
-        .slice(0, index)
-        .reduce(
-          (offset, paper) => offset + paper.height + LONG_TEXT_PAGE_GAP,
-          0,
-        ),
+    if (!layoutReady || activeStep === undefined) return;
+    const activeElement = activeStepRef.current;
+    const pageIndex = pages.findIndex((candidate) =>
+      candidate.steps.some((step) => step.step_id === activeStep.step_id),
     );
-  }, [pages]);
-  const paperStackHeight = pages.reduce(
-    (total, paper, index) =>
-      total +
-      paper.height +
-      (index < pages.length - 1 ? LONG_TEXT_PAGE_GAP : 0),
-    0,
-  );
-  const maxScroll = longTextMaxScroll(paperStackHeight);
-
-  useEffect(() => {
-    if (!initialScrollApplied) return;
-    const frame = requestAnimationFrame(() => setSmoothScrolling(true));
-    return () => cancelAnimationFrame(frame);
-  }, [initialScrollApplied]);
-
-  useLayoutEffect(() => {
-    const activePage = pages[activePageIndex];
-    if (
-      activePageIndex < 0 ||
-      activeStep === undefined ||
-      activePage === undefined ||
-      page.steps.some((step) => stepHeights[step.step_id] === undefined)
-    ) {
-      return;
-    }
-    const beforeActive = activePage.steps
-      .slice(
-        0,
-        activePage.steps.findIndex(
-          (step) => step.step_id === activeStep.step_id,
-        ),
-      )
+    if (pageIndex < 0) return;
+    const activePage = pages[pageIndex];
+    if (activePage === undefined) return;
+    const activeIndex = activePage.steps.findIndex(
+      (step) => step.step_id === activeStep.step_id,
+    );
+    const before = activePage.steps
+      .slice(0, activeIndex)
       .reduce(
-        (sum, step, index) =>
-          sum +
+        (total, step, index) =>
+          total +
           (index === 0 ? 0 : LONG_TEXT_STEP_GAP) +
-          (stepHeights[step.step_id] ?? 180),
+          (stepHeights[step.step_id] ?? 0),
         0,
       );
-    const stepStartY =
-      70 +
-      (pageOffsets[activePageIndex] ?? 0) +
-      LONG_TEXT_PAGE_PADDING_TOP +
-      beforeActive;
-    const activeHeight = stepHeights[activeStep.step_id] ?? 180;
-    const cursorOffset = renderedUnitBottomOffset(
-      activeStepRef.current,
+    const start = (pageOffsets[pageIndex] ?? 0) + layout.padding_y + before;
+    const measuredCursor = renderedUnitBottomOffset(
+      activeElement,
       renderedVisibleCount,
     );
+    const activeHeight = stepHeights[activeStep.step_id] ?? 0;
     const cursorY =
-      stepStartY +
-      (cursorOffset ??
-        (schedule.length === 0
-          ? activeHeight
-          : activeHeight * (renderedVisibleCount / schedule.length)));
-    const decision = resolveLongTextScroll({
-      initialPositioned: initialScrollPlacedRef.current,
-      initialPlacementInstant: !documentPositionedRef.current,
-      manuallyBrowsing: manuallyBrowsingRef.current,
-      stepStartY,
+      start +
+      (measuredCursor ??
+        activeHeight * (renderedVisibleCount / Math.max(1, schedule.length)));
+    const target = longTextFollowTarget({
       cursorY,
-      currentOffset: scrollOffset,
+      viewportHeight: layout.height,
       maxScroll,
     });
-    if (decision === null) return;
-    if (!initialScrollPlacedRef.current) {
-      initialScrollPlacedRef.current = true;
-      documentPositionedRef.current = true;
-      setSmoothScrolling(!decision.instant);
-      setInitialScrollApplied(true);
+    if (target !== null && !manuallyBrowsingRef.current) {
+      scrollTargetRef.current = target;
+      if (revealImmediately) {
+        scrollOffsetRef.current = target;
+        setScrollOffset(target);
+      }
     }
-    setScrollOffset(decision.offset);
   }, [
-    activePageIndex,
     activeStep,
+    layout.height,
+    layout.padding_y,
+    layoutReady,
     maxScroll,
-    pages,
     pageOffsets,
-    page.steps,
+    pages,
     renderedVisibleCount,
+    revealImmediately,
     schedule.length,
-    scrollOffset,
     stepHeights,
+  ]);
+
+  useEffect(() => {
+    if (!layoutReady || manuallyBrowsingRef.current) return;
+    let frame = 0;
+    let previous = performance.now();
+    const tick = (now: number): void => {
+      const next = clamp(
+        advanceLongTextScroll(
+          scrollOffsetRef.current,
+          scrollTargetRef.current,
+          now - previous,
+          fastForward,
+        ),
+        0,
+        maxScroll,
+      );
+      previous = now;
+      if (Math.abs(next - scrollOffsetRef.current) > 0.01) {
+        scrollOffsetRef.current = next;
+        setScrollOffset(next);
+      }
+      if (Math.abs(scrollTargetRef.current - next) > 0.01) {
+        frame = requestAnimationFrame(tick);
+      }
+    };
+    if (Math.abs(scrollTargetRef.current - scrollOffsetRef.current) > 0.01) {
+      frame = requestAnimationFrame(tick);
+    }
+    return () => cancelAnimationFrame(frame);
+  }, [
+    fastForward,
+    layoutReady,
+    maxScroll,
+    renderedVisibleCount,
+    prompt.prompt_id,
   ]);
 
   const handleWheel = (event: WheelEvent<HTMLElement>): void => {
     if (event.deltaY === 0) return;
     event.preventDefault();
     manuallyBrowsingRef.current = true;
-    setSmoothScrolling(false);
-    setScrollOffset((current) => clamp(current + event.deltaY, 0, maxScroll));
+    const next = clamp(scrollOffsetRef.current + event.deltaY, 0, maxScroll);
+    scrollOffsetRef.current = next;
+    scrollTargetRef.current = next;
+    setScrollOffset(next);
   };
+
+  const handlePointerDown = (event: PointerEvent<HTMLElement>): void => {
+    if (event.button !== 0) return;
+    pointerDragRef.current = {
+      pointerId: event.pointerId,
+      startClientY: event.clientY,
+      startOffset: scrollOffsetRef.current,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLElement>): void => {
+    const drag = pointerDragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    const delta = event.clientY - drag.startClientY;
+    if (!drag.moved && Math.abs(delta) < 5) return;
+    drag.moved = true;
+    manuallyBrowsingRef.current = true;
+    const next = clamp(drag.startOffset - delta, 0, maxScroll);
+    scrollOffsetRef.current = next;
+    scrollTargetRef.current = next;
+    setScrollOffset(next);
+    event.preventDefault();
+  };
+
+  const finishPointerDrag = (event: PointerEvent<HTMLElement>): void => {
+    const drag = pointerDragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    pointerDragRef.current = null;
+    if (drag.moved) suppressAdvanceClickRef.current = true;
+  };
+
+  const style = {
+    "--long-text-x": `${layout.x}px`,
+    "--long-text-y": `${layout.y}px`,
+    "--long-text-width": `${layout.width}px`,
+    "--long-text-height": `${layout.height}px`,
+    "--long-text-padding-x": `${layout.padding_x}px`,
+    "--long-text-padding-y": `${layout.padding_y}px`,
+    "--long-text-page-height": `${layout.page_height}px`,
+    "--long-text-page-gap": `${layout.page_gap}px`,
+    "--long-text-fade": `${Math.min(96, layout.height / 4)}px`,
+    "--long-text-font-size": `${page.font_size}px`,
+    "--long-text-color": page.text_color,
+  } as CSSProperties;
 
   return (
     <section
       aria-label="长文本"
       className="long-text-panel"
+      onClickCapture={(event) => {
+        if (!suppressAdvanceClickRef.current) return;
+        suppressAdvanceClickRef.current = false;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishPointerDrag}
+      onPointerCancel={finishPointerDrag}
       onWheel={handleWheel}
-      style={
-        {
-          "--long-text-font-size": `${page.font_size}px`,
-        } as CSSProperties
-      }
+      style={style}
     >
       <div
         aria-hidden="true"
@@ -480,59 +601,79 @@ export const LongTextPanel = forwardRef<
         ))}
       </div>
       <div
-        className="long-text-paper-stack"
-        style={{
-          transform: `translateY(${-scrollOffset}px)`,
-          transitionDuration: `${
-            smoothScrolling ? (fastForward ? 55 : 360) : 0
-          }ms`,
-        }}
+        className={`long-text-viewport${layoutReady && paperArtworkReady ? " is-ready" : ""}`}
       >
-        {pages.map((paper) => (
-          <article
-            className={`long-text-paper${
-              paperUrl === undefined ? "" : " has-paper-art"
-            }${paperArtworkReady ? "" : " is-waiting-for-paper-art"}`}
-            key={paper.index}
-            style={{
-              height: `${paper.height}px`,
-              ...(typeof paperUrl !== "string"
-                ? {}
-                : { backgroundImage: `url(${JSON.stringify(paperUrl)})` }),
-            }}
+        <div
+          className="long-text-surface-stack"
+          style={{ transform: `translateY(${-scrollOffset}px)` }}
+        >
+          {pages.map((paper, index) => (
+            <article
+              className={`long-text-paper${paperUrl === undefined ? "" : " has-paper-art"}`}
+              key={paper.index}
+              style={{
+                height: `${paper.height}px`,
+                marginBottom:
+                  page.pagination === "continuous" || index === pages.length - 1
+                    ? 0
+                    : `${layout.page_gap}px`,
+                ...(typeof paperUrl === "string"
+                  ? { backgroundImage: `url(${JSON.stringify(paperUrl)})` }
+                  : {}),
+              }}
+            />
+          ))}
+        </div>
+        <div className="long-text-text-clip">
+          <div
+            className="long-text-text-stack"
+            style={{ transform: `translateY(${-scrollOffset}px)` }}
           >
-            <div className="long-text-paper-content">
-              {paper.steps.map((step) => {
-                const current = step.step_id === prompt.step_id;
-                return (
-                  <div
-                    className="long-text-step"
-                    key={step.step_id}
-                    ref={current ? activeStepRef : null}
-                  >
-                    <MarkupText
-                      source={step.text}
-                      visibleCount={
-                        current
-                          ? renderedVisibleCount
-                          : Number.POSITIVE_INFINITY
-                      }
-                      {...(current
-                        ? {
-                            animateMath: true,
-                            instantMathReveal:
-                              instantRevealPromptId === prompt.prompt_id,
-                            onMathMetrics: handleMathMetrics,
-                            unitCps,
-                          }
-                        : {})}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          </article>
-        ))}
+            {pages.map((paper, index) => (
+              <article
+                className="long-text-paper-content"
+                key={paper.index}
+                style={{
+                  height: `${paper.height}px`,
+                  marginBottom:
+                    page.pagination === "continuous" ||
+                    index === pages.length - 1
+                      ? 0
+                      : `${layout.page_gap}px`,
+                }}
+              >
+                {paper.steps.map((step) => {
+                  const current = step.step_id === prompt.step_id;
+                  return (
+                    <div
+                      className="long-text-step"
+                      key={step.step_id}
+                      ref={current ? activeStepRef : null}
+                    >
+                      <MarkupText
+                        animateMath={current}
+                        instantMathReveal={
+                          instantRevealPromptId === prompt.prompt_id
+                        }
+                        revealAnimation={revealAnimation}
+                        source={step.text}
+                        {...(current
+                          ? { onMathMetrics: handleMathMetrics }
+                          : {})}
+                        {...(current ? { unitCps } : {})}
+                        visibleCount={
+                          current
+                            ? renderedVisibleCount
+                            : Number.POSITIVE_INFINITY
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </article>
+            ))}
+          </div>
+        </div>
       </div>
       <span className={`long-text-indicator${complete ? " is-ready" : ""}`}>
         ◆
@@ -540,18 +681,6 @@ export const LongTextPanel = forwardRef<
     </section>
   );
 });
-
-function sameMeasurements(
-  left: Readonly<Record<string, number>>,
-  right: Readonly<Record<string, number>>,
-): boolean {
-  const leftIds = Object.keys(left);
-  const rightIds = Object.keys(right);
-  return (
-    leftIds.length === rightIds.length &&
-    leftIds.every((id) => left[id] === right[id])
-  );
-}
 
 function renderedUnitBottomOffset(
   step: HTMLDivElement | null,
@@ -564,10 +693,6 @@ function renderedUnitBottomOffset(
   const unit = units.item(Math.min(visibleCount, units.length) - 1);
   if (unit === null) return null;
   return unit.getBoundingClientRect().bottom - step.getBoundingClientRect().top;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function isPauseAt(
@@ -587,19 +712,16 @@ function typingCpsAt(
   mathRevealDurations: ReadonlyMap<number, number>,
   fallbackCps: number,
 ): number {
-  let visibleIndex = 0;
+  let index = 0;
   for (const unit of units) {
     if (unit.kind !== "character" && unit.kind !== "math") continue;
-    const revealAt = schedule[visibleIndex] ?? Number.POSITIVE_INFINITY;
+    const revealAt = schedule[index] ?? Number.POSITIVE_INFINITY;
     const duration =
       unit.kind === "math"
-        ? (mathRevealDurations.get(visibleIndex) ??
-          DEFAULT_MATH_REVEAL_DURATION_MS)
+        ? (mathRevealDurations.get(index) ?? DEFAULT_MATH_REVEAL_DURATION_MS)
         : 0;
-    if (elapsedMs <= revealAt + duration) {
-      return unitCps[visibleIndex] ?? fallbackCps;
-    }
-    visibleIndex += 1;
+    if (elapsedMs <= revealAt + duration) return unitCps[index] ?? fallbackCps;
+    index += 1;
   }
   return unitCps[unitCps.length - 1] ?? fallbackCps;
 }

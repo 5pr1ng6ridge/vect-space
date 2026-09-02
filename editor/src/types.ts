@@ -159,6 +159,7 @@ export interface SayNode extends NextNode {
   mode?: "start" | "append";
   page_id?: string | null;
   speed_cps: number | null;
+  reveal_animation?: "line_sweep" | "typewriter" | "drop_fade" | null;
 }
 
 export interface LongTextStep {
@@ -170,10 +171,24 @@ export interface LongTextStep {
 export interface LongTextNode extends NextNode {
   type: "long_text";
   paper?: string | null;
-  pagination?: "auto" | "manual";
+  pagination?: "continuous" | "auto" | "manual";
   font_size?: number;
+  text_color?: string;
+  layout?: LongTextLayout;
   steps: LongTextStep[];
   speed_cps: number | null;
+  reveal_animation?: "line_sweep" | "typewriter" | "drop_fade" | null;
+}
+
+export interface LongTextLayout {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  padding_x: number;
+  padding_y: number;
+  page_height: number;
+  page_gap: number;
 }
 
 export interface ChoiceDefinition {

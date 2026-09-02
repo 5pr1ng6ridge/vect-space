@@ -376,8 +376,11 @@ impl RuntimeEngine {
             paper,
             pagination,
             font_size,
+            text_color,
+            layout,
             steps,
             speed_cps,
+            reveal_animation,
             next,
         } = node
         else {
@@ -396,6 +399,8 @@ impl RuntimeEngine {
                 || page.paper != paper
                 || page.pagination != pagination
                 || page.font_size != font_size
+                || page.text_color != text_color
+                || page.layout != layout
                 || page.active_step_index != step_index
             {
                 return Err(RuntimeError::Content(format!(
@@ -424,6 +429,7 @@ impl RuntimeEngine {
                 PresentationCueKind::LongTextReveal {
                     prompt_id: next_prompt_id,
                     speed_cps,
+                    reveal_animation,
                 },
             )]);
         }
@@ -791,6 +797,7 @@ impl RuntimeEngine {
                     mode,
                     page_id,
                     speed_cps,
+                    reveal_animation,
                     next,
                 } => {
                     let prompt_id = format!("{scene_id}/{node_id}");
@@ -871,6 +878,7 @@ impl RuntimeEngine {
                         PresentationCueKind::DialogueReveal {
                             prompt_id,
                             speed_cps,
+                            reveal_animation,
                         },
                     ));
                     return Ok(cues);
@@ -879,8 +887,11 @@ impl RuntimeEngine {
                     paper,
                     pagination,
                     font_size,
+                    text_color,
+                    layout,
                     steps,
                     speed_cps,
+                    reveal_animation,
                     ..
                 } => {
                     let step = steps.first().ok_or_else(|| {
@@ -897,6 +908,8 @@ impl RuntimeEngine {
                         paper,
                         pagination,
                         font_size,
+                        text_color,
+                        layout,
                         steps: vec![LongTextStepSnapshot {
                             step_id: step.id.clone(),
                             text: text.clone(),
@@ -918,6 +931,7 @@ impl RuntimeEngine {
                         PresentationCueKind::LongTextReveal {
                             prompt_id,
                             speed_cps,
+                            reveal_animation,
                         },
                     ));
                     return Ok(cues);
@@ -2187,6 +2201,7 @@ mod tests {
                 mode: DialogueMode::Start,
                 page_id: None,
                 speed_cps: None,
+                reveal_animation: None,
                 next: "cross_scene_test".to_owned(),
             },
         );
@@ -2528,6 +2543,7 @@ mod tests {
                 mode: DialogueMode::Start,
                 page_id: Some("realization".to_owned()),
                 speed_cps: None,
+                reveal_animation: None,
                 next: "segment_effect".to_owned(),
             },
         );
@@ -2548,6 +2564,7 @@ mod tests {
                 mode: DialogueMode::Append,
                 page_id: Some("realization".to_owned()),
                 speed_cps: Some(20.0),
+                reveal_animation: None,
                 next: "segment_end".to_owned(),
             },
         );
@@ -2656,6 +2673,8 @@ mod tests {
                 paper: None,
                 pagination: crate::model::LongTextPagination::Manual,
                 font_size: 36.0,
+                text_color: crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned(),
+                layout: crate::model::LongTextLayout::default(),
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),
@@ -2669,6 +2688,7 @@ mod tests {
                     },
                 ],
                 speed_cps: Some(24.0),
+                reveal_animation: None,
                 next: "conclusion".to_owned(),
             },
         );
@@ -3027,6 +3047,7 @@ mod tests {
                 mode: DialogueMode::Start,
                 page_id: None,
                 speed_cps: None,
+                reveal_animation: None,
                 next: "conclusion".to_owned(),
             },
         );
@@ -3234,6 +3255,7 @@ mod tests {
             kind: PresentationCueKind::DialogueReveal {
                 prompt_id: "scene/line".to_owned(),
                 speed_cps: Some(30.0),
+                reveal_animation: None,
             },
         };
         let value = serde_json::to_value(cue).unwrap();
@@ -3248,6 +3270,7 @@ mod tests {
             kind: PresentationCueKind::DialogueReveal {
                 prompt_id: "scene/default-speed".to_owned(),
                 speed_cps: None,
+                reveal_animation: None,
             },
         };
         let value = serde_json::to_value(default_speed).unwrap();

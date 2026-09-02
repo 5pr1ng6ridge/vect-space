@@ -214,6 +214,7 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         mode: "start",
         page_id: null,
         speed_cps: null,
+        reveal_animation: null,
         next: fallback,
       };
     case "long_text":
@@ -222,10 +223,22 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         paper: null,
         pagination: "auto",
         font_size: 32,
+        text_color: "#212533",
+        layout: {
+          x: 340,
+          y: 0,
+          width: 1240,
+          height: 1080,
+          padding_x: 118,
+          padding_y: 112,
+          page_height: 1340,
+          page_gap: 92,
+        },
         steps: [
           { id: "step_1", text: "新的长文本内容。", page_break_before: false },
         ],
         speed_cps: null,
+        reveal_animation: null,
         next: fallback,
       };
     case "choice":

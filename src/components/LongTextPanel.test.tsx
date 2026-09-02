@@ -11,7 +11,9 @@ import {
   paginateLongTextSteps,
 } from "./longTextPagination";
 import {
+  advanceLongTextScroll,
   LONG_TEXT_BOTTOM_BROWSING_SPACE,
+  longTextFollowTarget,
   longTextMaxScroll,
   resolveLongTextScroll,
 } from "./longTextScroll";
@@ -31,6 +33,17 @@ describe("LongTextPanel", () => {
           paper: null,
           pagination: "auto",
           font_size: 32,
+          text_color: "#212533",
+          layout: {
+            x: 340,
+            y: 0,
+            width: 1240,
+            height: 1080,
+            padding_x: 118,
+            padding_y: 112,
+            page_height: 1340,
+            page_gap: 92,
+          },
           active_step_index: 1,
           steps: [
             {
@@ -135,7 +148,11 @@ describe("LongTextPanel", () => {
 
     expect(pages).toHaveLength(1);
     expect(pages[0]?.contentHeight).toBe(capacity + 240);
-    expect(pages[0]?.height).toBe(LONG_TEXT_PAGE_HEIGHT + 240);
+    // The new layout has symmetric 112px vertical padding.  An oversized
+    // manual page grows from that stable content box instead of clipping.
+    expect(pages[0]?.height).toBe(
+      LONG_TEXT_PAGE_PADDING_TOP + LONG_TEXT_PAGE_PADDING_TOP + capacity + 240,
+    );
   });
 
   it("leaves browsing space below the final sheet", () => {
@@ -192,5 +209,21 @@ describe("LongTextPanel", () => {
         maxScroll: 1_500,
       }),
     ).toEqual({ offset: 1_140, instant: false });
+  });
+
+  it("keeps the new follower bounded through a stalled frame and resumes from manual positions", () => {
+    expect(
+      longTextFollowTarget({
+        cursorY: 821,
+        viewportHeight: 1_080,
+        maxScroll: 2_000,
+      }),
+    ).toBeCloseTo(151.4);
+    expect(
+      advanceLongTextScroll(320, 1_800, 2_000, false) - 320,
+    ).toBeLessThanOrEqual(120);
+    expect(
+      advanceLongTextScroll(320, 1_800, 2_000, true) - 320,
+    ).toBeLessThanOrEqual(600);
   });
 });

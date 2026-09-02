@@ -379,6 +379,8 @@ pub enum SceneNode {
         page_id: Option<String>,
         #[serde(default)]
         speed_cps: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_animation: Option<TextRevealAnimation>,
         next: String,
     },
     /// A sequence of explanatory text blocks rendered on a vertically flowing
@@ -395,9 +397,18 @@ pub enum SceneNode {
             skip_serializing_if = "is_default_long_text_font_size"
         )]
         font_size: f32,
+        #[serde(
+            default = "default_long_text_color",
+            skip_serializing_if = "is_default_long_text_color"
+        )]
+        text_color: String,
+        #[serde(default, skip_serializing_if = "LongTextLayout::is_default")]
+        layout: LongTextLayout,
         steps: Vec<LongTextStep>,
         #[serde(default)]
         speed_cps: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_animation: Option<TextRevealAnimation>,
         next: String,
     },
     Choice {
@@ -518,9 +529,21 @@ pub enum DialogueMode {
     Append,
 }
 
+/// Player-selectable reveal styles. A story node may optionally override the
+/// current player setting for a specific prompt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TextRevealAnimation {
+    LineSweep,
+    #[default]
+    Typewriter,
+    DropFade,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LongTextPagination {
+    Continuous,
     #[default]
     Auto,
     Manual,
@@ -535,6 +558,15 @@ impl LongTextPagination {
 pub const LONG_TEXT_FONT_SIZE_DEFAULT: f32 = 32.0;
 pub const LONG_TEXT_FONT_SIZE_MIN: f32 = 16.0;
 pub const LONG_TEXT_FONT_SIZE_MAX: f32 = 72.0;
+pub const LONG_TEXT_COLOR_DEFAULT: &str = "#212533";
+pub const LONG_TEXT_LAYOUT_X_DEFAULT: f32 = 340.0;
+pub const LONG_TEXT_LAYOUT_Y_DEFAULT: f32 = 0.0;
+pub const LONG_TEXT_LAYOUT_WIDTH_DEFAULT: f32 = 1240.0;
+pub const LONG_TEXT_LAYOUT_HEIGHT_DEFAULT: f32 = 1080.0;
+pub const LONG_TEXT_LAYOUT_PADDING_X_DEFAULT: f32 = 118.0;
+pub const LONG_TEXT_LAYOUT_PADDING_Y_DEFAULT: f32 = 112.0;
+pub const LONG_TEXT_LAYOUT_PAGE_HEIGHT_DEFAULT: f32 = 1340.0;
+pub const LONG_TEXT_LAYOUT_PAGE_GAP_DEFAULT: f32 = 92.0;
 
 fn default_long_text_font_size() -> f32 {
     LONG_TEXT_FONT_SIZE_DEFAULT
@@ -542,6 +574,81 @@ fn default_long_text_font_size() -> f32 {
 
 fn is_default_long_text_font_size(value: &f32) -> bool {
     *value == LONG_TEXT_FONT_SIZE_DEFAULT
+}
+
+fn default_long_text_color() -> String {
+    LONG_TEXT_COLOR_DEFAULT.to_owned()
+}
+
+fn is_default_long_text_color(value: &str) -> bool {
+    value == LONG_TEXT_COLOR_DEFAULT
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LongTextLayout {
+    #[serde(default = "default_long_text_layout_x")]
+    pub x: f32,
+    #[serde(default = "default_long_text_layout_y")]
+    pub y: f32,
+    #[serde(default = "default_long_text_layout_width")]
+    pub width: f32,
+    #[serde(default = "default_long_text_layout_height")]
+    pub height: f32,
+    #[serde(default = "default_long_text_layout_padding_x")]
+    pub padding_x: f32,
+    #[serde(default = "default_long_text_layout_padding_y")]
+    pub padding_y: f32,
+    #[serde(default = "default_long_text_layout_page_height")]
+    pub page_height: f32,
+    #[serde(default = "default_long_text_layout_page_gap")]
+    pub page_gap: f32,
+}
+
+impl Default for LongTextLayout {
+    fn default() -> Self {
+        Self {
+            x: LONG_TEXT_LAYOUT_X_DEFAULT,
+            y: LONG_TEXT_LAYOUT_Y_DEFAULT,
+            width: LONG_TEXT_LAYOUT_WIDTH_DEFAULT,
+            height: LONG_TEXT_LAYOUT_HEIGHT_DEFAULT,
+            padding_x: LONG_TEXT_LAYOUT_PADDING_X_DEFAULT,
+            padding_y: LONG_TEXT_LAYOUT_PADDING_Y_DEFAULT,
+            page_height: LONG_TEXT_LAYOUT_PAGE_HEIGHT_DEFAULT,
+            page_gap: LONG_TEXT_LAYOUT_PAGE_GAP_DEFAULT,
+        }
+    }
+}
+
+impl LongTextLayout {
+    fn is_default(value: &Self) -> bool {
+        value == &Self::default()
+    }
+}
+
+fn default_long_text_layout_x() -> f32 {
+    LONG_TEXT_LAYOUT_X_DEFAULT
+}
+fn default_long_text_layout_y() -> f32 {
+    LONG_TEXT_LAYOUT_Y_DEFAULT
+}
+fn default_long_text_layout_width() -> f32 {
+    LONG_TEXT_LAYOUT_WIDTH_DEFAULT
+}
+fn default_long_text_layout_height() -> f32 {
+    LONG_TEXT_LAYOUT_HEIGHT_DEFAULT
+}
+fn default_long_text_layout_padding_x() -> f32 {
+    LONG_TEXT_LAYOUT_PADDING_X_DEFAULT
+}
+fn default_long_text_layout_padding_y() -> f32 {
+    LONG_TEXT_LAYOUT_PADDING_Y_DEFAULT
+}
+fn default_long_text_layout_page_height() -> f32 {
+    LONG_TEXT_LAYOUT_PAGE_HEIGHT_DEFAULT
+}
+fn default_long_text_layout_page_gap() -> f32 {
+    LONG_TEXT_LAYOUT_PAGE_GAP_DEFAULT
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -794,6 +901,10 @@ pub struct LongTextPageSnapshot {
     pub pagination: LongTextPagination,
     #[serde(default = "default_long_text_font_size")]
     pub font_size: f32,
+    #[serde(default = "default_long_text_color")]
+    pub text_color: String,
+    #[serde(default)]
+    pub layout: LongTextLayout,
     pub steps: Vec<LongTextStepSnapshot>,
     pub active_step_index: u32,
 }
@@ -1038,11 +1149,15 @@ pub enum PresentationCueKind {
         prompt_id: String,
         /// `None` delegates the base reveal speed to the player's settings.
         speed_cps: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_animation: Option<TextRevealAnimation>,
     },
     LongTextReveal {
         prompt_id: String,
         /// `None` delegates the base reveal speed to the player's settings.
         speed_cps: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_animation: Option<TextRevealAnimation>,
     },
     DialogueUiTransition {
         visible: bool,
@@ -1121,6 +1236,8 @@ pub struct Settings {
     pub video_volume: f32,
     pub text_speed_cps: f32,
     #[serde(default)]
+    pub text_reveal_animation: TextRevealAnimation,
+    #[serde(default)]
     pub skip_mode: SkipMode,
 }
 
@@ -1141,6 +1258,7 @@ impl Default for Settings {
             sfx_volume: 0.8,
             video_volume: 1.0,
             text_speed_cps: 30.0,
+            text_reveal_animation: TextRevealAnimation::Typewriter,
             skip_mode: SkipMode::ReadOnly,
         }
     }

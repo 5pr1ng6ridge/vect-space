@@ -18,7 +18,11 @@ import {
   parseMarkup,
   revealCompletionTime,
 } from "../engine/markup";
-import type { DialoguePageSnapshot, DialoguePrompt } from "../engine/types";
+import type {
+  DialoguePageSnapshot,
+  DialoguePrompt,
+  TextRevealAnimation,
+} from "../engine/types";
 import type { UiMotionHost } from "../engine/uiMotion";
 import { MarkupText } from "./MarkupText";
 
@@ -39,6 +43,7 @@ interface DialogueBoxProps {
   onTypingChange(typing: boolean, cps: number): void;
   onRevealComplete(promptId: string): void;
   revealImmediately: boolean;
+  revealAnimation?: TextRevealAnimation;
   motionHost?: UiMotionHost;
 }
 
@@ -61,6 +66,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       onTypingChange,
       onRevealComplete,
       revealImmediately,
+      revealAnimation = "typewriter",
       motionHost,
     },
     ref,
@@ -313,6 +319,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
             animateMath
             instantMathReveal={instantRevealPromptId === promptId}
             onMathMetrics={handleMathMetrics}
+            revealAnimation={revealAnimation}
             source={currentText}
             unitCps={unitCps}
             visibleCount={renderedVisibleCount}

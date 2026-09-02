@@ -2790,3 +2790,52 @@ body.timeline-resizing {
   padding: 6px 9px;
   font-size: 10px;
 }
+
+.long-text-layout-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.long-text-layout-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(rgb(120 145 183 / 14%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(120 145 183 / 14%) 1px, transparent 1px), #101827;
+  background-size: 10% 10%;
+}
+
+.long-text-layout-rect {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid #8fc6ef;
+  border-radius: 0;
+  background: rgb(77 157 208 / 24%);
+  color: #d7efff;
+  cursor: move;
+  font-size: 10px;
+}
+
+.long-text-layout-rect i {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 9px;
+  height: 9px;
+  border: 1px solid #d7efff;
+  background: #3b82b9;
+  cursor: nwse-resize;
+}
+
+.long-text-layout-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}

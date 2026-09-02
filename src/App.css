@@ -307,12 +307,48 @@ button:disabled {
   display: inline-block;
 }
 
+.markup-reveal-content {
+  display: inline-block;
+}
+
+.markup-line-sweep {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 49%,
+    transparent 51%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 49%,
+    transparent 51%,
+    transparent 100%
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 210% 100%;
+  mask-size: 210% 100%;
+}
+
+.markup-line-sweep.is-visible {
+  animation: text-reveal-left-to-right 180ms linear both;
+  will-change: mask-position, opacity;
+}
+
+.markup-line-sweep:not(.is-visible) .markup-unit {
+  visibility: hidden !important;
+}
+
 .display-math .math-reveal-content {
   display: block;
 }
 
-.math-unit.is-math-revealed:not(.is-math-instant) .math-reveal-content {
-  opacity: 1;
+.markup-unit.is-reveal-line_sweep:not(.is-math-instant) .markup-reveal-content {
   -webkit-mask-image: linear-gradient(
     90deg,
     #000 0%,
@@ -333,9 +369,19 @@ button:disabled {
   mask-repeat: no-repeat;
   -webkit-mask-size: 210% 100%;
   mask-size: 210% 100%;
-  animation: math-reveal-left-to-right var(--math-reveal-duration, 45ms) linear
+  animation: text-reveal-left-to-right var(--math-reveal-duration, 90ms) linear
     both;
   will-change: mask-position, opacity;
+}
+
+.math-unit.is-reveal-typewriter:not(.is-math-instant) .math-reveal-content {
+  animation: text-reveal-formula-fade 180ms ease-out both;
+  will-change: opacity;
+}
+
+.markup-unit.is-reveal-drop_fade:not(.is-math-instant) .markup-reveal-content {
+  animation: text-reveal-drop 160ms cubic-bezier(0.18, 0.72, 0.24, 1) both;
+  will-change: transform, opacity;
 }
 
 .math-unit.is-math-instant .math-reveal-content {
@@ -345,7 +391,7 @@ button:disabled {
   opacity: 1;
 }
 
-@keyframes math-reveal-left-to-right {
+@keyframes text-reveal-left-to-right {
   from {
     -webkit-mask-position: 100% 0;
     mask-position: 100% 0;
@@ -356,6 +402,26 @@ button:disabled {
     -webkit-mask-position: 0 0;
     mask-position: 0 0;
     opacity: 1;
+  }
+}
+
+@keyframes text-reveal-formula-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes text-reveal-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-0.35em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -421,7 +487,6 @@ button:disabled {
   z-index: 15;
   inset: 0;
   overflow: hidden;
-  color: #212533;
   pointer-events: auto;
 }
 
@@ -429,8 +494,8 @@ button:disabled {
   position: absolute;
   top: -100000px;
   left: -100000px;
-  width: 1004px;
-  color: #212533;
+  width: calc(var(--long-text-width) - var(--long-text-padding-x) * 2);
+  color: var(--long-text-color, #212533);
   visibility: hidden;
   pointer-events: none;
   font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
@@ -441,44 +506,74 @@ button:disabled {
   word-break: break-all;
 }
 
-.long-text-paper-stack {
+.long-text-viewport {
+  position: absolute;
+  top: var(--long-text-y);
+  left: var(--long-text-x);
+  width: var(--long-text-width);
+  height: var(--long-text-height);
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 100ms linear;
+}
+
+.long-text-viewport.is-ready {
+  opacity: 1;
+}
+
+.long-text-surface-stack,
+.long-text-text-stack {
   position: absolute;
   top: 0;
   left: 0;
-  width: 1920px;
-  padding-top: 70px;
-  transition-property: transform;
-  transition-timing-function: cubic-bezier(0.2, 0.68, 0.24, 1);
+  width: 100%;
   will-change: transform;
 }
 
 .long-text-paper {
   box-sizing: border-box;
-  width: 1240px;
-  height: 1340px;
-  margin: 0 auto 92px;
-  padding: 112px 118px 128px;
+  width: 100%;
   overflow: hidden;
   background-color: transparent;
-  background-position: center;
-  background-size: 100% 100%;
+  background-position: center top;
+  background-repeat: repeat-y;
+  background-size: 100% var(--long-text-page-height);
   box-shadow: none;
-  font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
-  font-size: var(--long-text-font-size, 32px);
-  line-height: 1.78;
-  letter-spacing: 0.035em;
 }
 
 .long-text-paper.has-paper-art {
   box-shadow: 0 18px 44px rgb(0 0 0 / 36%);
 }
 
-.long-text-paper.is-waiting-for-paper-art {
-  visibility: hidden;
+.long-text-paper-content {
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--long-text-padding-y) var(--long-text-padding-x);
+  color: var(--long-text-color, #212533);
+  font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
+  font-size: var(--long-text-font-size, 32px);
+  line-height: 1.78;
+  letter-spacing: 0.035em;
 }
 
-.long-text-paper-content {
-  min-height: 100%;
+.long-text-text-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--long-text-fade),
+    #000 calc(100% - var(--long-text-fade)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--long-text-fade),
+    #000 calc(100% - var(--long-text-fade)),
+    transparent 100%
+  );
 }
 
 .long-text-step {
@@ -496,8 +591,8 @@ button:disabled {
 .long-text-indicator {
   position: absolute;
   z-index: 1;
-  right: 162px;
-  bottom: 82px;
+  right: calc(1920px - var(--long-text-x) - var(--long-text-width) + 24px);
+  bottom: calc(1080px - var(--long-text-y) - var(--long-text-height) + 24px);
   color: rgb(31 43 66 / 25%);
   font-size: 20px;
   pointer-events: none;
@@ -506,6 +601,29 @@ button:disabled {
 .long-text-indicator.is-ready {
   color: #2e4267;
   animation: indicator 1s ease-in-out infinite;
+}
+
+.text-animation-preview {
+  display: flex;
+  min-height: 44px;
+  margin: -2px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid rgb(118 150 193 / 34%);
+  background: rgb(7 12 22 / 48%);
+  align-items: center;
+  gap: 14px;
+  color: #dfe9fb;
+  font-size: 17px;
+}
+
+.text-animation-preview > span {
+  flex: 1;
+}
+
+.text-animation-preview button {
+  min-width: 76px;
+  padding: 5px 8px;
+  font-size: 12px;
 }
 
 @keyframes indicator {

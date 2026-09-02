@@ -70,8 +70,11 @@ describe("VN markup", () => {
   });
 
   it("gives a long formula enough reveal time without unbounded delays", () => {
-    expect(formulaRevealDurationMs(680, 34, 30)).toBe(1333);
-    expect(formulaRevealDurationMs(680, 34, 5)).toBe(3000);
+    // Formulae are a single reveal unit.  Their visual width contributes at
+    // most twelve equivalent characters, so a wide display formula never
+    // stalls the next prompt for several seconds.
+    expect(formulaRevealDurationMs(680, 34, 30)).toBe(400);
+    expect(formulaRevealDurationMs(680, 34, 5)).toBe(600);
   });
 
   it("tracks speed controls for each visible unit", () => {

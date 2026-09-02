@@ -37,6 +37,7 @@ import type {
   SaveSlotSummary,
   Settings,
   StoryFlowSnapshot,
+  TextRevealAnimation,
 } from "./engine/types";
 import { useViewportMetrics } from "./viewport/viewport";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
@@ -47,6 +48,7 @@ const DEFAULT_SETTINGS: Settings = {
   sfx_volume: 0.8,
   video_volume: 1,
   text_speed_cps: 30,
+  text_reveal_animation: "typewriter",
   skip_mode: "read_only",
 };
 
@@ -377,6 +379,8 @@ export default function App(): ReactElement {
     [textPrompt, update],
   );
   const revealCps = textCueCps ?? settings.text_speed_cps;
+  const revealAnimation =
+    textRevealAnimation(update, textPrompt) ?? settings.text_reveal_animation;
   const runtimeLocked = update?.requires_ack ?? false;
   const activeTimelineCue = update?.cues.find(
     (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
@@ -688,6 +692,7 @@ export default function App(): ReactElement {
                 onRevealComplete={handleRevealComplete}
                 page={renderedDialoguePage}
                 prompt={dialogue}
+                revealAnimation={revealAnimation}
                 ref={dialogueRef}
                 revealImmediately={
                   dialogue === null || textCueCps === undefined
@@ -713,6 +718,7 @@ export default function App(): ReactElement {
                     : (assets[longTextPage.paper] ?? null)
                 }
                 prompt={longText}
+                revealAnimation={revealAnimation}
                 ref={longTextRef}
                 revealImmediately={textCueCps === undefined}
               />
@@ -885,6 +891,7 @@ function SettingsPanel({
   onSave,
   onClose,
 }: SettingsPanelProps): ReactElement {
+  const [animationPreviewRevision, setAnimationPreviewRevision] = useState(0);
   const rows: {
     key:
       | "master_volume"
@@ -935,6 +942,40 @@ function SettingsPanel({
           </label>
         ))}
         <label className="setting-row">
+          <span>文字动画</span>
+          <select
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                text_reveal_animation: event.currentTarget
+                  .value as TextRevealAnimation,
+              })
+            }
+            value={settings.text_reveal_animation}
+          >
+            <option value="line_sweep">逐行横向渐显</option>
+            <option value="typewriter">逐字 / 公式渐显</option>
+            <option value="drop_fade">下落渐显</option>
+          </select>
+          <output />
+        </label>
+        <div className="text-animation-preview" key={animationPreviewRevision}>
+          <MarkupText
+            animateMath
+            revealAnimation={settings.text_reveal_animation}
+            source={"示例：$A \\cong B$"}
+            visibleCount={Number.MAX_SAFE_INTEGER}
+          />
+          <button
+            onClick={() =>
+              setAnimationPreviewRevision((revision) => revision + 1)
+            }
+            type="button"
+          >
+            重播示例
+          </button>
+        </div>
+        <label className="setting-row">
           <span>Ctrl 快进</span>
           <select
             onChange={(event) =>
@@ -975,6 +1016,22 @@ function textRevealSpeed(
   return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
     ? cue.speed_cps
     : undefined;
+}
+
+function textRevealAnimation(
+  update: RuntimeUpdate | null,
+  prompt: DialoguePrompt | LongTextPrompt | null,
+): TextRevealAnimation | null {
+  if (update === null || prompt === null) return null;
+  const cue = update.cues.find(
+    (candidate) =>
+      (candidate.type === "dialogue_reveal" ||
+        candidate.type === "long_text_reveal") &&
+      candidate.prompt_id === prompt.prompt_id,
+  );
+  return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
+    ? (cue.reveal_animation ?? null)
+    : null;
 }
 
 function getInitialAppState(): Promise<InitialAppState> {

@@ -4,6 +4,7 @@ export type CueGate = "none" | "player_advance" | "runtime";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
 export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
 export type SkipMode = "disabled" | "read_only" | "all";
+export type TextRevealAnimation = "line_sweep" | "typewriter" | "drop_fade";
 export type PresentationOutcome = "completed" | "skipped" | "failed";
 
 export interface StoryLocation {
@@ -110,11 +111,24 @@ export interface LongTextStepSnapshot {
   page_break_before: boolean;
 }
 
+export interface LongTextLayout {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  padding_x: number;
+  padding_y: number;
+  page_height: number;
+  page_gap: number;
+}
+
 export interface LongTextPageSnapshot {
   document_id: string;
   paper?: string | null;
-  pagination: "auto" | "manual";
+  pagination: "continuous" | "auto" | "manual";
   font_size: number;
+  text_color: string;
+  layout: LongTextLayout;
   steps: LongTextStepSnapshot[];
   active_step_index: number;
 }
@@ -251,11 +265,13 @@ export type PresentationCue = CueBase &
         type: "dialogue_reveal";
         prompt_id: string;
         speed_cps: number | null;
+        reveal_animation?: TextRevealAnimation | null;
       }
     | {
         type: "long_text_reveal";
         prompt_id: string;
         speed_cps: number | null;
+        reveal_animation?: TextRevealAnimation | null;
       }
     | {
         type: "dialogue_ui_transition";
@@ -363,6 +379,7 @@ export interface Settings {
   sfx_volume: number;
   video_volume: number;
   text_speed_cps: number;
+  text_reveal_animation: TextRevealAnimation;
   skip_mode: SkipMode;
 }
 import type { WireScalarValue } from "../../../shared/generated/WireScalarValue";

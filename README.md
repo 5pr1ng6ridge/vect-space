@@ -149,19 +149,37 @@ Dialogue accepts `$...$`, `$$...$$`, `[pause=500ms]`, speed controls, and the
 `shake`, `wave`, and `glow` text effects. It never accepts HTML. The renderer lays
 out every Chinese character and KaTeX formula first, then reveals units with
 `visibility`; hidden content keeps its geometry and formulas reveal atomically.
+The player can choose `line_sweep`, `typewriter`, or `drop_fade` in Settings;
+individual `say` and `long_text` nodes may use `reveal_animation` to override
+that preference for a single prompt.
 
 `long_text` is the full-screen alternative to `say` for mathematical exposition.
-It displays accumulated `steps` on a vertically flowing paper stack: every click
-reveals and confirms one step, text follows the paper upward when it reaches the
-reading line, and a `page_break_before: true` step begins a new sheet. Each step
-has a stable ID, so saving during a lecture restores the already-written paper
-without replaying typing or scrolling. `paper` is optional and must reference a
-registered GUI asset; without it the built-in neutral paper surface is used.
+It displays accumulated `steps` in a positioned scrolling text block. Every click
+reveals and confirms one step; the reader smoothly follows new writing once it
+reaches the lower reading guard, while wheel or drag browsing pauses follow until
+the next story step. Each step has a stable ID, so saving during a lecture restores
+the already-written paper without replaying typing or scrolling. `paper` is
+optional: omitting it leaves the block transparent for blackboard-style writing.
+`pagination` can be `continuous`, `auto`, or `manual`; automatic mode also accepts
+explicit `page_break_before` markers. `layout` uses 1920×1080 design pixels.
 
 ```yaml
 lecture:
   type: long_text
   paper: gui.lecture_paper # optional
+  pagination: auto
+  font_size: 32
+  text_color: "#212533"
+  layout:
+    x: 340
+    y: 0
+    width: 1240
+    height: 1080
+    padding_x: 118
+    padding_y: 112
+    page_height: 1340
+    page_gap: 92
+  reveal_animation: line_sweep # optional; otherwise player setting
   speed_cps: 28 # optional
   steps:
     - id: definition

@@ -18,6 +18,7 @@ import type {
   ConditionExpression,
   ContentManifest,
   MutationValue,
+  LongTextLayout,
   LongTextStep,
   ScalarValue,
   SceneDefinition,
@@ -28,6 +29,17 @@ import type {
   UiMotionFile,
 } from "../types";
 import { MarkupPreview } from "./MarkupPreview";
+
+const DEFAULT_LONG_TEXT_LAYOUT: LongTextLayout = {
+  x: 340,
+  y: 0,
+  width: 1240,
+  height: 1080,
+  padding_x: 118,
+  padding_y: 112,
+  page_height: 1340,
+  page_gap: 92,
+};
 
 interface NodeInspectorProps {
   scene: SceneDefinition;
@@ -416,6 +428,12 @@ function renderFields(
             onChange={(speed_cps) => update({ ...node, speed_cps })}
             value={node.speed_cps}
           />
+          <RevealAnimationField
+            onChange={(reveal_animation) =>
+              update({ ...node, reveal_animation })
+            }
+            value={node.reveal_animation ?? null}
+          />
           <TargetSelect
             label="下一节点"
             onChange={(next) => update({ ...node, next })}
@@ -441,11 +459,13 @@ function renderFields(
               onChange={(event) =>
                 update({
                   ...node,
-                  pagination: event.currentTarget.value as "auto" | "manual",
+                  pagination: event.currentTarget.value as
+                    "continuous" | "auto" | "manual",
                 })
               }
               value={node.pagination ?? "auto"}
             >
+              <option value="continuous">连续长卷</option>
               <option value="auto">自动分页</option>
               <option value="manual">仅手动分页</option>
             </select>
@@ -456,6 +476,15 @@ function renderFields(
             min={16}
             onChange={(font_size) => update({ ...node, font_size })}
             value={node.font_size ?? 32}
+          />
+          <TextField
+            label="正文颜色"
+            onChange={(text_color) => update({ ...node, text_color })}
+            value={node.text_color ?? "#212533"}
+          />
+          <LongTextLayoutEditor
+            layout={node.layout ?? DEFAULT_LONG_TEXT_LAYOUT}
+            onChange={(layout) => update({ ...node, layout })}
           />
           <p className="field-note">
             每一段在游戏中对应一次推进。自动分页会在空间不足时续页；仅手动分页只响应段落的强制分页标记。
@@ -470,6 +499,12 @@ function renderFields(
             min={0.1}
             onChange={(speed_cps) => update({ ...node, speed_cps })}
             value={node.speed_cps}
+          />
+          <RevealAnimationField
+            onChange={(reveal_animation) =>
+              update({ ...node, reveal_animation })
+            }
+            value={node.reveal_animation ?? null}
           />
           <TargetSelect
             label="下一节点"
@@ -1962,6 +1997,153 @@ function Field({
       {children}
       {hint !== undefined && <small>{hint}</small>}
     </label>
+  );
+}
+
+function RevealAnimationField({
+  onChange,
+  value,
+}: {
+  onChange(value: "line_sweep" | "typewriter" | "drop_fade" | null): void;
+  value: "line_sweep" | "typewriter" | "drop_fade" | null;
+}): ReactElement {
+  return (
+    <Field label="文字动画">
+      <select
+        onChange={(event) =>
+          onChange(
+            event.currentTarget.value === ""
+              ? null
+              : (event.currentTarget.value as
+                  "line_sweep" | "typewriter" | "drop_fade"),
+          )
+        }
+        value={value ?? ""}
+      >
+        <option value="">跟随玩家设置</option>
+        <option value="line_sweep">逐行横向渐显</option>
+        <option value="typewriter">逐字 / 公式渐显</option>
+        <option value="drop_fade">下落渐显</option>
+      </select>
+    </Field>
+  );
+}
+
+function LongTextLayoutEditor({
+  layout,
+  onChange,
+}: {
+  layout: LongTextLayout;
+  onChange(layout: LongTextLayout): void;
+}): ReactElement {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<
+    | {
+        mode: "move" | "resize";
+        x: number;
+        y: number;
+        layout: LongTextLayout;
+      }
+    | undefined
+  >(undefined);
+  const change = (field: keyof LongTextLayout, value: number): void =>
+    onChange({ ...layout, [field]: value });
+  const snapped = (value: number): number => Math.round(value / 10) * 10;
+  const begin = (
+    event: React.PointerEvent<HTMLElement>,
+    mode: "move" | "resize",
+  ): void => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { mode, x: event.clientX, y: event.clientY, layout };
+  };
+  const move = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current;
+    const canvas = canvasRef.current;
+    if (drag === undefined || canvas === null) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = 1920 / rect.width;
+    const scaleY = 1080 / rect.height;
+    const dx = (event.clientX - drag.x) * scaleX;
+    const dy = (event.clientY - drag.y) * scaleY;
+    const snap = event.shiftKey ? (value: number) => value : snapped;
+    if (drag.mode === "move") {
+      onChange({
+        ...drag.layout,
+        x: snap(
+          Math.max(0, Math.min(1920 - drag.layout.width, drag.layout.x + dx)),
+        ),
+        y: snap(
+          Math.max(0, Math.min(1080 - drag.layout.height, drag.layout.y + dy)),
+        ),
+      });
+    } else {
+      onChange({
+        ...drag.layout,
+        width: snap(
+          Math.max(160, Math.min(1920 - drag.layout.x, drag.layout.width + dx)),
+        ),
+        height: snap(
+          Math.max(
+            240,
+            Math.min(1080 - drag.layout.y, drag.layout.height + dy),
+          ),
+        ),
+      });
+    }
+  };
+  return (
+    <div className="long-text-layout-editor">
+      <Field label="文本块位置与范围">
+        <div
+          className="long-text-layout-preview"
+          onPointerMove={move}
+          onPointerUp={() => {
+            dragRef.current = undefined;
+          }}
+          ref={canvasRef}
+        >
+          <button
+            className="long-text-layout-rect"
+            onPointerDown={(event) => begin(event, "move")}
+            style={{
+              left: `${(layout.x / 1920) * 100}%`,
+              top: `${(layout.y / 1080) * 100}%`,
+              width: `${(layout.width / 1920) * 100}%`,
+              height: `${(layout.height / 1080) * 100}%`,
+            }}
+            type="button"
+          >
+            <span>长文本</span>
+            <i onPointerDown={(event) => begin(event, "resize")} />
+          </button>
+        </div>
+      </Field>
+      <div className="long-text-layout-fields">
+        {(
+          [
+            ["x", "X"],
+            ["y", "Y"],
+            ["width", "宽"],
+            ["height", "高"],
+            ["padding_x", "水平边距"],
+            ["padding_y", "垂直边距"],
+            ["page_height", "页高"],
+            ["page_gap", "页间距"],
+          ] as const
+        ).map(([field, label]) => (
+          <NumberField
+            key={field}
+            label={label}
+            min={0}
+            onChange={(value) => change(field, value)}
+            value={layout[field]}
+          />
+        ))}
+      </div>
+      <p className="field-note">
+        拖动或右下角缩放；按住 Shift 可取消 10px 吸附。
+      </p>
+    </div>
   );
 }
 

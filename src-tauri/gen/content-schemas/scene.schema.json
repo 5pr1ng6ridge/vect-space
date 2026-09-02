@@ -305,9 +305,56 @@
         "value"
       ]
     },
+    "LongTextLayout": {
+      "type": "object",
+      "properties": {
+        "height": {
+          "type": "number",
+          "format": "float",
+          "default": 1080.0
+        },
+        "padding_x": {
+          "type": "number",
+          "format": "float",
+          "default": 118.0
+        },
+        "padding_y": {
+          "type": "number",
+          "format": "float",
+          "default": 112.0
+        },
+        "page_gap": {
+          "type": "number",
+          "format": "float",
+          "default": 92.0
+        },
+        "page_height": {
+          "type": "number",
+          "format": "float",
+          "default": 1340.0
+        },
+        "width": {
+          "type": "number",
+          "format": "float",
+          "default": 1240.0
+        },
+        "x": {
+          "type": "number",
+          "format": "float",
+          "default": 340.0
+        },
+        "y": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "LongTextPagination": {
       "type": "string",
       "enum": [
+        "continuous",
         "auto",
         "manual"
       ]
@@ -538,6 +585,16 @@
                 "null"
               ]
             },
+            "reveal_animation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TextRevealAnimation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "speaker": {
               "type": [
                 "string",
@@ -575,6 +632,9 @@
               "type": "number",
               "format": "float"
             },
+            "layout": {
+              "$ref": "#/$defs/LongTextLayout"
+            },
             "next": {
               "type": "string"
             },
@@ -585,6 +645,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "reveal_animation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TextRevealAnimation"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "speed_cps": {
@@ -600,6 +670,9 @@
               "items": {
                 "$ref": "#/$defs/LongTextStep"
               }
+            },
+            "text_color": {
+              "type": "string"
             },
             "type": {
               "type": "string",
@@ -1107,6 +1180,15 @@
         "show",
         "move",
         "hide"
+      ]
+    },
+    "TextRevealAnimation": {
+      "description": "Player-selectable reveal styles. A story node may optionally override the\ncurrent player setting for a specific prompt.",
+      "type": "string",
+      "enum": [
+        "line_sweep",
+        "typewriter",
+        "drop_fade"
       ]
     },
     "TimelineEasing": {

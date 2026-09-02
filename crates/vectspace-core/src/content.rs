@@ -10,11 +10,11 @@ use thiserror::Error;
 
 use crate::model::{
     AssetDefinition, AssetKind, AudioAction, CharacterDefinition, ConditionExpression,
-    ContentManifest, DialogueMode, MutationValue, ResolvedAsset, ScalarValue, SceneDefinition,
-    SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal, TimelineChannels,
-    TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings, UiMotionPreset, ValueOperand,
-    VariableDefinition, VariableOperation, VariableScope, VariableType, LONG_TEXT_FONT_SIZE_MAX,
-    LONG_TEXT_FONT_SIZE_MIN,
+    ContentManifest, DialogueMode, LongTextPagination, MutationValue, ResolvedAsset, ScalarValue,
+    SceneDefinition, SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal,
+    TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings,
+    UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation, VariableScope,
+    VariableType, LONG_TEXT_FONT_SIZE_MAX, LONG_TEXT_FONT_SIZE_MIN,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -719,11 +719,14 @@ fn validate_scenes(
                 }
                 SceneNode::LongText {
                     paper,
-                    pagination: _,
+                    pagination,
                     font_size,
+                    text_color,
+                    layout,
                     steps,
                     speed_cps,
                     next,
+                    ..
                 } => {
                     if let Some(paper) = paper {
                         require_asset(assets, paper, AssetKind::Gui, scene_id, node_id)?;
@@ -744,6 +747,41 @@ fn validate_scenes(
                             "长文本 font_size 必须在 16 到 72 之间",
                         );
                     }
+                    validate_color(text_color).map_err(|message| {
+                        ContentError::Validation(format!(
+                            "{scene_id}/{node_id}: 长文本颜色无效: {message}"
+                        ))
+                    })?;
+                    let values = [
+                        layout.x,
+                        layout.y,
+                        layout.width,
+                        layout.height,
+                        layout.padding_x,
+                        layout.padding_y,
+                        layout.page_height,
+                        layout.page_gap,
+                    ];
+                    if values.iter().any(|value| !value.is_finite())
+                        || layout.x < 0.0
+                        || layout.y < 0.0
+                        || layout.width < 160.0
+                        || layout.height < 240.0
+                        || layout.x + layout.width > 1920.0
+                        || layout.y + layout.height > 1080.0
+                        || layout.padding_x < 0.0
+                        || layout.padding_y < 0.0
+                        || layout.width <= layout.padding_x * 2.0 + 80.0
+                        || layout.height <= layout.padding_y * 2.0 + 80.0
+                        || layout.page_height <= layout.padding_y * 2.0 + 80.0
+                        || layout.page_gap < 0.0
+                    {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            "长文本 layout 非法或超出 1920×1080 画面",
+                        );
+                    }
                     let mut ids = BTreeSet::new();
                     for (index, step) in steps.iter().enumerate() {
                         validate_identifier("long text step id", &step.id)?;
@@ -758,6 +796,13 @@ fn validate_scenes(
                                 scene_id,
                                 node_id,
                                 "长文本第一步骤不能在前方强制分页",
+                            );
+                        }
+                        if *pagination == LongTextPagination::Continuous && step.page_break_before {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                "连续长文本不能使用 page_break_before",
                             );
                         }
                         validate_text_markup(&step.text, variables, scene_id, node_id)?;
@@ -1663,6 +1708,8 @@ mod tests {
                 paper: Some("gui.dialogue_box".to_owned()),
                 pagination: crate::model::LongTextPagination::Auto,
                 font_size: crate::model::LONG_TEXT_FONT_SIZE_DEFAULT,
+                text_color: crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned(),
+                layout: crate::model::LongTextLayout::default(),
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),
@@ -1676,6 +1723,7 @@ mod tests {
                     },
                 ],
                 speed_cps: Some(30.0),
+                reveal_animation: None,
                 next: "introduction".to_owned(),
             },
         );
@@ -1755,6 +1803,7 @@ mod tests {
                 mode: DialogueMode::Start,
                 page_id: None,
                 speed_cps: Some(f32::INFINITY),
+                reveal_animation: None,
                 next: "introduction".to_owned(),
             },
         );
@@ -1770,12 +1819,15 @@ mod tests {
                 paper: None,
                 pagination: crate::model::LongTextPagination::Auto,
                 font_size: 73.0,
+                text_color: crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned(),
+                layout: crate::model::LongTextLayout::default(),
                 steps: vec![crate::model::LongTextStep {
                     id: "step".to_owned(),
                     text: "无效字号".to_owned(),
                     page_break_before: false,
                 }],
                 speed_cps: None,
+                reveal_animation: None,
                 next: "introduction".to_owned(),
             },
         );

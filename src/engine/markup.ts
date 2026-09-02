@@ -254,9 +254,12 @@ export function formulaRevealDurationMs(
     Number.isFinite(fontSizePx) && fontSizePx > 0 ? fontSizePx : 34;
   const safeWidth =
     Number.isFinite(widthPx) && widthPx > 0 ? widthPx : safeFontSize;
-  const equivalentCharacters = Math.max(1, safeWidth / safeFontSize);
-  const duration = (1000 / safeCps) * Math.max(0, equivalentCharacters * 2);
-  return Math.round(Math.min(3000, Math.max(10, duration)));
+  const equivalentCharacters = Math.min(
+    12,
+    Math.max(1, safeWidth / safeFontSize),
+  );
+  const duration = (1_000 / safeCps) * equivalentCharacters;
+  return Math.round(Math.min(600, Math.max(80, duration)));
 }
 
 function validMathRevealDuration(value: number | undefined): number {

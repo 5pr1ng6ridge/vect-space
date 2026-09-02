@@ -66,6 +66,7 @@ const DEFAULT_SETTINGS: Settings = {
   sfx_volume: 1,
   video_volume: 1,
   text_speed_cps: 30,
+  text_reveal_animation: "typewriter",
   skip_mode: "disabled",
 };
 
