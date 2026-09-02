@@ -12,6 +12,7 @@ import {
 } from "./longTextPagination";
 import {
   advanceLongTextScroll,
+  hasReachedLongTextRevealThreshold,
   LONG_TEXT_BOTTOM_BROWSING_SPACE,
   longTextFollowTarget,
   longTextMaxScroll,
@@ -256,5 +257,36 @@ describe("LongTextPanel", () => {
         maxScroll: 2_000,
       }),
     ).toBe(1_104);
+  });
+
+  it("starts revealing halfway through a paragraph scroll in either direction", () => {
+    expect(
+      hasReachedLongTextRevealThreshold({
+        startOffset: 200,
+        targetOffset: 600,
+        currentOffset: 399,
+      }),
+    ).toBe(false);
+    expect(
+      hasReachedLongTextRevealThreshold({
+        startOffset: 200,
+        targetOffset: 600,
+        currentOffset: 400,
+      }),
+    ).toBe(true);
+    expect(
+      hasReachedLongTextRevealThreshold({
+        startOffset: 800,
+        targetOffset: 400,
+        currentOffset: 600,
+      }),
+    ).toBe(true);
+    expect(
+      hasReachedLongTextRevealThreshold({
+        startOffset: 320,
+        targetOffset: 320.2,
+        currentOffset: 320,
+      }),
+    ).toBe(true);
   });
 });

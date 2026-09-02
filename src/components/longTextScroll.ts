@@ -14,6 +14,13 @@ export interface LongTextParagraphTargetInput {
   maxScroll: number;
 }
 
+export interface LongTextRevealThresholdInput {
+  startOffset: number;
+  targetOffset: number;
+  currentOffset: number;
+  fraction?: number;
+}
+
 /**
  * Places a complete paragraph before its reveal begins. Short paragraphs use
  * the smallest movement that fits them between the two reading guards. A
@@ -40,6 +47,20 @@ export function longTextParagraphTarget({
       ? stepStartY - safeTop
       : stepStartY + stepHeight - safeBottom;
   return clamp(desired, 0, maxScroll);
+}
+
+/** Releases paragraph reveal after a stable fraction of its planned scroll. */
+export function hasReachedLongTextRevealThreshold({
+  startOffset,
+  targetOffset,
+  currentOffset,
+  fraction = 0.5,
+}: LongTextRevealThresholdInput): boolean {
+  const distance = Math.abs(targetOffset - startOffset);
+  if (distance <= 0.5) return true;
+  const direction = Math.sign(targetOffset - startOffset);
+  const travelled = (currentOffset - startOffset) * direction;
+  return travelled + 0.5 >= distance * clamp(fraction, 0, 1);
 }
 
 /**

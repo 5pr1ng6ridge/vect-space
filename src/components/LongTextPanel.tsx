@@ -35,6 +35,7 @@ import {
 import {
   advanceLongTextScroll,
   clamp,
+  hasReachedLongTextRevealThreshold,
   longTextMaxScroll,
   longTextParagraphTarget,
 } from "./longTextScroll";
@@ -189,6 +190,7 @@ export const LongTextPanel = forwardRef<
   const measuringRootRef = useRef<HTMLDivElement>(null);
   const stepMeasureRefs = useRef(new Map<string, HTMLDivElement>());
   const scrollOffsetRef = useRef(0);
+  const scrollStartOffsetRef = useRef(0);
   const scrollTargetRef = useRef(0);
   const manuallyBrowsingRef = useRef(false);
   const pointerDragRef = useRef<{
@@ -211,6 +213,7 @@ export const LongTextPanel = forwardRef<
     documentRef.current = page.document_id;
     manuallyBrowsingRef.current = false;
     scrollOffsetRef.current = 0;
+    scrollStartOffsetRef.current = 0;
     scrollTargetRef.current = 0;
     setScrollOffset(0);
     setStepHeights({});
@@ -461,6 +464,7 @@ export const LongTextPanel = forwardRef<
       maxScroll,
     });
     manuallyBrowsingRef.current = false;
+    scrollStartOffsetRef.current = scrollOffsetRef.current;
     scrollTargetRef.current = target;
     if (revealImmediately) {
       scrollOffsetRef.current = target;
@@ -468,7 +472,11 @@ export const LongTextPanel = forwardRef<
     }
     if (
       revealImmediately ||
-      Math.abs(target - scrollOffsetRef.current) <= 0.5
+      hasReachedLongTextRevealThreshold({
+        startOffset: scrollStartOffsetRef.current,
+        targetOffset: target,
+        currentOffset: scrollOffsetRef.current,
+      })
     ) {
       const frame = requestAnimationFrame(() => {
         setScrollPreparedPromptId(prompt.prompt_id);
@@ -509,6 +517,16 @@ export const LongTextPanel = forwardRef<
       if (Math.abs(next - scrollOffsetRef.current) > 0.01) {
         scrollOffsetRef.current = next;
         setScrollOffset(next);
+      }
+      if (
+        scrollPreparedPromptId !== prompt.prompt_id &&
+        hasReachedLongTextRevealThreshold({
+          startOffset: scrollStartOffsetRef.current,
+          targetOffset: scrollTargetRef.current,
+          currentOffset: next,
+        })
+      ) {
+        setScrollPreparedPromptId(prompt.prompt_id);
       }
       if (Math.abs(scrollTargetRef.current - next) > 0.01) {
         frame = requestAnimationFrame(tick);
