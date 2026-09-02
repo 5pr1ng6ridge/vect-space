@@ -1,7 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { parseMarkup, visibleUnits } from "../engine/markup";
 import { MarkupText } from "./MarkupText";
+import { resolveVisualLineGroups } from "./visualLineGroups";
 
 describe("MarkupText math reveal", () => {
   it("keeps the complete KaTeX tree mounted while the formula is hidden", () => {
@@ -38,5 +40,25 @@ describe("MarkupText math reveal", () => {
     expect(html).not.toContain("is-reveal-typewriter");
     expect(html).not.toContain("is-reveal-drop_fade");
     expect(html).not.toContain("is-reveal-line_sweep");
+  });
+
+  it("keeps an inline formula with text that shares its visual baseline", () => {
+    const units = visibleUnits(parseMarkup("示例：$A \\cong B$"));
+    const element = (top: number, height: number): HTMLElement =>
+      ({
+        getBoundingClientRect: () => ({ top, height }) as DOMRect,
+      }) as HTMLElement;
+    const groups = resolveVisualLineGroups(
+      units,
+      new Map([
+        [0, element(100, 34)],
+        [1, element(100, 34)],
+        [2, element(100, 34)],
+        // KaTeX is taller and vertically aligned above nearby characters,
+        // but its center belongs to the same visual row.
+        [3, element(92, 50)],
+      ]),
+    );
+    expect(groups).toEqual([[0, 1, 2, 3]]);
   });
 });

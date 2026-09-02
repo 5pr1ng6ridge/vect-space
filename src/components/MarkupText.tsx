@@ -16,6 +16,7 @@ import {
   type MathUnit,
 } from "../engine/markup";
 import type { TextRevealAnimation } from "../engine/types";
+import { resolveVisualLineGroups } from "./visualLineGroups";
 
 interface MarkupTextProps {
   source: string;
@@ -229,25 +230,6 @@ function MathMarkupUnit({
       />
     </span>
   );
-}
-
-function resolveVisualLineGroups(
-  units: readonly ReturnType<typeof visibleUnits>[number][],
-  elements: ReadonlyMap<number, HTMLElement>,
-): readonly (readonly number[])[] {
-  const groups: number[][] = [];
-  let lastTop: number | null = null;
-  for (let index = 0; index < units.length; index += 1) {
-    const unit = units[index];
-    const element = elements.get(index);
-    if (unit === undefined || element === undefined) return [];
-    const top = Math.round(element.getBoundingClientRect().top * 2) / 2;
-    const startsLine = lastTop === null || Math.abs(top - lastTop) > 1;
-    if (startsLine) groups.push([]);
-    groups[groups.length - 1]?.push(index);
-    lastTop = top;
-  }
-  return groups;
 }
 
 function sameLineGroups(
