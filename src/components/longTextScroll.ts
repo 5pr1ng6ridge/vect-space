@@ -6,6 +6,42 @@ export interface LongTextScrollTargetInput {
   maxScroll: number;
 }
 
+export interface LongTextParagraphTargetInput {
+  stepStartY: number;
+  stepHeight: number;
+  currentOffset: number;
+  viewportHeight: number;
+  maxScroll: number;
+}
+
+/**
+ * Places a complete paragraph before its reveal begins. Short paragraphs use
+ * the smallest movement that fits them between the two reading guards. A
+ * paragraph taller than the safe area is aligned to the upper guard and is
+ * not followed again while it is typing.
+ */
+export function longTextParagraphTarget({
+  stepStartY,
+  stepHeight,
+  currentOffset,
+  viewportHeight,
+  maxScroll,
+}: LongTextParagraphTargetInput): number {
+  const safeTop = Math.min(96, viewportHeight * 0.16);
+  const safeBottom = viewportHeight * 0.76;
+  const visibleTop = stepStartY - currentOffset;
+  const visibleBottom = visibleTop + stepHeight;
+  if (visibleTop >= safeTop && visibleBottom <= safeBottom) {
+    return clamp(currentOffset, 0, maxScroll);
+  }
+  const safeHeight = safeBottom - safeTop;
+  const desired =
+    stepHeight > safeHeight || visibleTop < safeTop
+      ? stepStartY - safeTop
+      : stepStartY + stepHeight - safeBottom;
+  return clamp(desired, 0, maxScroll);
+}
+
 /**
  * The reader only starts following once the active glyph reaches the lower
  * guard. The target stays ahead of it, so a new page never needs a discrete

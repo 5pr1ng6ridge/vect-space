@@ -15,6 +15,7 @@ import {
   LONG_TEXT_BOTTOM_BROWSING_SPACE,
   longTextFollowTarget,
   longTextMaxScroll,
+  longTextParagraphTarget,
   resolveLongTextScroll,
 } from "./longTextScroll";
 
@@ -225,5 +226,35 @@ describe("LongTextPanel", () => {
     expect(
       advanceLongTextScroll(320, 1_800, 2_000, true) - 320,
     ).toBeLessThanOrEqual(600);
+  });
+
+  it("places each paragraph once before reveal and keeps already fitting text still", () => {
+    expect(
+      longTextParagraphTarget({
+        stepStartY: 300,
+        stepHeight: 260,
+        currentOffset: 100,
+        viewportHeight: 1_080,
+        maxScroll: 2_000,
+      }),
+    ).toBe(100);
+    expect(
+      longTextParagraphTarget({
+        stepStartY: 1_200,
+        stepHeight: 240,
+        currentOffset: 300,
+        viewportHeight: 1_080,
+        maxScroll: 2_000,
+      }),
+    ).toBeCloseTo(619.2);
+    expect(
+      longTextParagraphTarget({
+        stepStartY: 1_200,
+        stepHeight: 900,
+        currentOffset: 300,
+        viewportHeight: 1_080,
+        maxScroll: 2_000,
+      }),
+    ).toBe(1_104);
   });
 });

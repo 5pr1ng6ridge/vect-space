@@ -155,9 +155,10 @@ that preference for a single prompt.
 
 `long_text` is the full-screen alternative to `say` for mathematical exposition.
 It displays accumulated `steps` in a positioned scrolling text block. Every click
-reveals and confirms one step; the reader smoothly follows new writing once it
-reaches the lower reading guard, while wheel or drag browsing pauses follow until
-the next story step. Each step has a stable ID, so saving during a lecture restores
+reveals and confirms one step; each new paragraph is measured and smoothly placed
+in the reading area before its text reveal begins. The position then stays stable
+while that paragraph is typing. Wheel or drag browsing is resumed smoothly at the
+next story step. Each step has a stable ID, so saving during a lecture restores
 the already-written paper without replaying typing or scrolling. `paper` is
 optional: omitting it leaves the block transparent for blackboard-style writing.
 `pagination` can be `continuous`, `auto`, or `manual`; automatic mode also accepts
