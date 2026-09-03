@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import {
+  formulaPresentationDurationMs,
   formulaRevealDurationMs,
   parseMarkup,
   visibleUnits,
@@ -177,6 +178,7 @@ export const MarkupText = memo(function MarkupText({
             "--line-sweep-duration": `${lineSweepTiming.durationMs}ms`,
             "--line-sweep-width": `${lineSweepTiming.lineWidthPx}px`,
             "--line-sweep-offset": `${lineSweepTiming.unitOffsetPx}px`,
+            "--line-sweep-play-state": lineSweepPaused ? "paused" : "running",
           }),
     } as CSSProperties;
     const revealClass =
@@ -223,6 +225,7 @@ export const MarkupText = memo(function MarkupText({
         style={style}
       >
         <span className="markup-reveal-content">{unit.value}</span>
+        <wbr />
       </span>
     );
   };
@@ -286,7 +289,10 @@ function MathMarkupUnit({
       }),
     [unit.display, unit.latex],
   );
-  const fallbackRevealDuration = formulaRevealDurationMs(0, 0, cps);
+  const fallbackRevealDuration = formulaPresentationDurationMs(
+    formulaRevealDurationMs(0, 0, cps),
+    unit.display,
+  );
 
   useLayoutEffect(() => {
     if (!animate || !fontReady) return;
@@ -304,7 +310,10 @@ function MathMarkupUnit({
         getComputedStyle(katexElement).fontSize,
       );
       const width = katexElement.offsetWidth;
-      const duration = formulaRevealDurationMs(width, fontSize, cps);
+      const duration = formulaPresentationDurationMs(
+        formulaRevealDurationMs(width, fontSize, cps),
+        unit.display,
+      );
       content.style.setProperty("--math-reveal-duration", `${duration}ms`);
       onMetrics?.(index, width, fontSize);
     };
@@ -313,7 +322,7 @@ function MathMarkupUnit({
     const observer = new ResizeObserver(measure);
     observer.observe(katexElement);
     return () => observer.disconnect();
-  }, [animate, cps, fontReady, html, index, onMetrics]);
+  }, [animate, cps, fontReady, html, index, onMetrics, unit.display]);
 
   return (
     <span

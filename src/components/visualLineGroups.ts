@@ -1,4 +1,8 @@
-import { mathRevealDurationMs, type VisibleUnit } from "../engine/markup";
+import {
+  formulaPresentationDurationMs,
+  mathRevealDurationMs,
+  type VisibleUnit,
+} from "../engine/markup";
 
 export interface LineSweepUnitTiming {
   /** The first unit that starts this visual row. */
@@ -78,7 +82,10 @@ export function buildLineSweepTimings(
     const lastCps = unitCps[lastIndex] ?? 30;
     const lastUnitDuration =
       lastUnit.kind === "math"
-        ? mathRevealDurationMs(mathRevealDurations.get(lastIndex), lastCps)
+        ? formulaPresentationDurationMs(
+            mathRevealDurationMs(mathRevealDurations.get(lastIndex), lastCps),
+            lastUnit.display,
+          )
         : characterRevealDuration(lastCps);
     const lineEndMs = (schedule[lastIndex] ?? lineStartMs) + lastUnitDuration;
     const lineDurationMs = Math.max(

@@ -13,11 +13,13 @@ import {
   buildPauseWindows,
   buildRevealSchedule,
   buildVisibleUnitCps,
+  formulaPresentationDurationMs,
   formulaRevealDurationMs,
   mathRevealDurationMs,
   parseMarkup,
   revealCompletionTime,
   resolveInstantRevealPromptId,
+  type RevealTimingOptions,
 } from "../engine/markup";
 import type {
   DialoguePageSnapshot,
@@ -86,6 +88,10 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       () => buildVisibleUnitCps(units, initialCps, defaultCps),
       [defaultCps, initialCps, units],
     );
+    const timingOptions = useMemo<RevealTimingOptions>(
+      () => ({ waitForInlineMath: revealAnimation !== "drop_fade" }),
+      [revealAnimation],
+    );
     const [mathRevealMetrics, setMathRevealMetrics] = useState<
       ReadonlyMap<number, MathRevealMetric>
     >(() => new Map());
@@ -105,13 +111,25 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     }, [mathRevealMetrics, unitCps]);
     const schedule = useMemo(
       () =>
-        buildRevealSchedule(units, initialCps, defaultCps, mathRevealDurations),
-      [defaultCps, initialCps, mathRevealDurations, units],
+        buildRevealSchedule(
+          units,
+          initialCps,
+          defaultCps,
+          mathRevealDurations,
+          timingOptions,
+        ),
+      [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
     );
     const pauseWindows = useMemo(
       () =>
-        buildPauseWindows(units, initialCps, defaultCps, mathRevealDurations),
-      [defaultCps, initialCps, mathRevealDurations, units],
+        buildPauseWindows(
+          units,
+          initialCps,
+          defaultCps,
+          mathRevealDurations,
+          timingOptions,
+        ),
+      [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
     );
     const revealCompletionMs = useMemo(
       () =>
@@ -121,8 +139,16 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           mathRevealDurations,
           revealAnimation,
           unitCps,
+          timingOptions,
         ),
-      [mathRevealDurations, revealAnimation, schedule, unitCps, units],
+      [
+        mathRevealDurations,
+        revealAnimation,
+        schedule,
+        timingOptions,
+        unitCps,
+        units,
+      ],
     );
     const [visibleCount, setVisibleCount] = useState(0);
     const [revealFinished, setRevealFinished] = useState(
@@ -210,6 +236,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           unitCps,
           mathRevealDurations,
           initialCps,
+          timingOptions,
         );
         setTypingCps((current) => (current === nextCps ? current : nextCps));
         let next = visibleRef.current;
@@ -245,6 +272,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       schedule,
       unitCps,
       units,
+      timingOptions,
     ]);
 
     useImperativeHandle(
@@ -398,6 +426,7 @@ function typingCpsAt(
   unitCps: readonly number[],
   mathRevealDurations: ReadonlyMap<number, number>,
   fallbackCps: number,
+  timingOptions: RevealTimingOptions,
 ): number {
   let visibleIndex = 0;
   for (const unit of units) {
@@ -406,10 +435,14 @@ function typingCpsAt(
     }
     const revealAt = schedule[visibleIndex] ?? Number.POSITIVE_INFINITY;
     const duration =
-      unit.kind === "math"
-        ? mathRevealDurationMs(
-            mathRevealDurations.get(visibleIndex),
-            unitCps[visibleIndex] ?? fallbackCps,
+      unit.kind === "math" &&
+      (unit.display || timingOptions.waitForInlineMath !== false)
+        ? formulaPresentationDurationMs(
+            mathRevealDurationMs(
+              mathRevealDurations.get(visibleIndex),
+              unitCps[visibleIndex] ?? fallbackCps,
+            ),
+            unit.display,
           )
         : 0;
     if (elapsedMs < revealAt + duration) {

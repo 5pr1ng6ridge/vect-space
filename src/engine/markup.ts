@@ -40,6 +40,14 @@ export interface PauseWindow {
   endMs: number;
 }
 
+export interface RevealTimingOptions {
+  /**
+   * Drop-fade lets an inline formula continue animating while the next
+   * character starts on schedule. Display formulae always remain blocking.
+   */
+  waitForInlineMath?: boolean;
+}
+
 const OPEN_FX = /^\[fx=(shake|wave|glow)\]/;
 const PAUSE = /^\[pause=(\d+)ms\]/;
 const SPEED = /^\[speed=(default|\d+(?:\.\d+)?cps)\]/;
@@ -136,6 +144,7 @@ export function buildRevealSchedule(
   initialCps: number,
   defaultCps: number,
   mathRevealDurations: ReadonlyMap<number, number> = new Map(),
+  options: RevealTimingOptions = {},
 ): number[] {
   const schedule: number[] = [];
   let elapsed = 0;
@@ -152,8 +161,9 @@ export function buildRevealSchedule(
     } else if (unit.kind === "character" || unit.kind === "math") {
       elapsed += 1000 / cps;
       schedule.push(elapsed);
-      if (unit.kind === "math") {
-        elapsed += validMathRevealDuration(
+      if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
+        elapsed += formulaRevealDurationForUnit(
+          unit,
           mathRevealDurations.get(visibleIndex),
           cps,
         );
@@ -174,6 +184,7 @@ export function buildPauseWindows(
   initialCps: number,
   defaultCps: number,
   mathRevealDurations: ReadonlyMap<number, number> = new Map(),
+  options: RevealTimingOptions = {},
 ): PauseWindow[] {
   const windows: PauseWindow[] = [];
   let elapsed = 0;
@@ -191,8 +202,9 @@ export function buildPauseWindows(
           : validCps(unit.cps, defaultCps);
     } else if (unit.kind === "character" || unit.kind === "math") {
       elapsed += 1000 / cps;
-      if (unit.kind === "math") {
-        elapsed += validMathRevealDuration(
+      if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
+        elapsed += formulaRevealDurationForUnit(
+          unit,
           mathRevealDurations.get(visibleIndex),
           cps,
         );
@@ -239,32 +251,34 @@ export function revealCompletionTime(
   mathRevealDurations: ReadonlyMap<number, number> = new Map(),
   revealAnimation: TextRevealAnimation = "typewriter",
   unitCps: readonly number[] = [],
+  options: RevealTimingOptions = {},
 ): number {
   const visible = visibleUnits(units);
   const finalAppearance = schedule[schedule.length - 1] ?? 0;
   const finalIndex = visible.length - 1;
   const finalUnit = visible[finalIndex];
   if (finalUnit === undefined) return 0;
+  const finalMathBlocks =
+    finalUnit.kind === "math" && shouldWaitForMath(finalUnit, options);
+  const finalFormulaDuration =
+    finalUnit.kind === "math"
+      ? formulaRevealDurationForUnit(
+          finalUnit,
+          mathRevealDurations.get(finalIndex),
+          unitCps[finalIndex] ?? 30,
+        )
+      : 0;
   const animationDuration =
     revealAnimation === "line_sweep"
-      ? finalUnit.kind === "math"
-        ? validMathRevealDuration(
-            mathRevealDurations.get(finalIndex),
-            unitCps[finalIndex] ?? 30,
-          )
+      ? finalMathBlocks
+        ? finalFormulaDuration
         : characterRevealDuration(unitCps[finalIndex] ?? 30)
       : revealAnimation === "drop_fade"
-        ? finalUnit.kind === "math"
-          ? validMathRevealDuration(
-              mathRevealDurations.get(finalIndex),
-              unitCps[finalIndex] ?? 30,
-            )
+        ? finalMathBlocks
+          ? finalFormulaDuration
           : 160
-        : finalUnit?.kind === "math"
-          ? validMathRevealDuration(
-              mathRevealDurations.get(finalIndex),
-              unitCps[finalIndex] ?? 30,
-            )
+        : finalMathBlocks
+          ? finalFormulaDuration
           : 0;
   return finalAppearance + animationDuration;
 }
@@ -293,11 +307,34 @@ export function formulaRevealDurationMs(
   );
 }
 
+/**
+ * Block formulae have a slightly longer presentation so their larger drop has
+ * time to settle. Keep this as part of the shared timing model: the DOM and
+ * the reveal scheduler must never disagree about the same formula's length.
+ */
+export function formulaPresentationDurationMs(
+  durationMs: number,
+  display: boolean,
+): number {
+  return display ? Math.round(Math.max(120, durationMs * 1.2)) : durationMs;
+}
+
 export function mathRevealDurationMs(
   value: number | undefined,
   cps: number,
 ): number {
   return validMathRevealDuration(value, cps);
+}
+
+export function formulaRevealDurationForUnit(
+  unit: MathUnit,
+  value: number | undefined,
+  cps: number,
+): number {
+  return formulaPresentationDurationMs(
+    validMathRevealDuration(value, cps),
+    unit.display,
+  );
 }
 
 function validMathRevealDuration(
@@ -315,6 +352,13 @@ function validMathRevealDuration(
 
 function characterRevealDuration(cps: number): number {
   return 1_000 / validCps(cps, 30);
+}
+
+function shouldWaitForMath(
+  unit: MathUnit,
+  options: RevealTimingOptions,
+): boolean {
+  return unit.display || options.waitForInlineMath !== false;
 }
 
 export function visibleUnits(units: MarkupUnit[]): VisibleUnit[] {

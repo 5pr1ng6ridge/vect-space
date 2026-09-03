@@ -17,11 +17,13 @@ import {
   buildPauseWindows,
   buildRevealSchedule,
   buildVisibleUnitCps,
+  formulaPresentationDurationMs,
   formulaRevealDurationMs,
   mathRevealDurationMs,
   parseMarkup,
   revealCompletionTime,
   resolveInstantRevealPromptId,
+  type RevealTimingOptions,
 } from "../engine/markup";
 import type {
   LongTextPageSnapshot,
@@ -143,6 +145,10 @@ export const LongTextPanel = forwardRef<
     () => buildVisibleUnitCps(units, initialCps, defaultCps),
     [defaultCps, initialCps, units],
   );
+  const timingOptions = useMemo<RevealTimingOptions>(
+    () => ({ waitForInlineMath: revealAnimation !== "drop_fade" }),
+    [revealAnimation],
+  );
   const [mathRevealMetrics, setMathRevealMetrics] = useState<
     ReadonlyMap<number, MathRevealMetric>
   >(() => new Map());
@@ -162,12 +168,25 @@ export const LongTextPanel = forwardRef<
   }, [mathRevealMetrics, unitCps]);
   const schedule = useMemo(
     () =>
-      buildRevealSchedule(units, initialCps, defaultCps, mathRevealDurations),
-    [defaultCps, initialCps, mathRevealDurations, units],
+      buildRevealSchedule(
+        units,
+        initialCps,
+        defaultCps,
+        mathRevealDurations,
+        timingOptions,
+      ),
+    [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
   );
   const pauseWindows = useMemo(
-    () => buildPauseWindows(units, initialCps, defaultCps, mathRevealDurations),
-    [defaultCps, initialCps, mathRevealDurations, units],
+    () =>
+      buildPauseWindows(
+        units,
+        initialCps,
+        defaultCps,
+        mathRevealDurations,
+        timingOptions,
+      ),
+    [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
   );
   const revealCompletionMs = useMemo(
     () =>
@@ -177,8 +196,16 @@ export const LongTextPanel = forwardRef<
         mathRevealDurations,
         revealAnimation,
         unitCps,
+        timingOptions,
       ),
-    [mathRevealDurations, revealAnimation, schedule, unitCps, units],
+    [
+      mathRevealDurations,
+      revealAnimation,
+      schedule,
+      timingOptions,
+      unitCps,
+      units,
+    ],
   );
   const [visibleCount, setVisibleCount] = useState(0);
   const [revealFinished, setRevealFinished] = useState(
@@ -497,6 +524,7 @@ export const LongTextPanel = forwardRef<
           unitCps,
           mathRevealDurations,
           initialCps,
+          timingOptions,
         );
         return current === next ? current : next;
       });
@@ -533,6 +561,7 @@ export const LongTextPanel = forwardRef<
     unitCps,
     units,
     scrollPreparedPromptId,
+    timingOptions,
   ]);
 
   useImperativeHandle(
@@ -941,16 +970,21 @@ function typingCpsAt(
   unitCps: readonly number[],
   mathRevealDurations: ReadonlyMap<number, number>,
   fallbackCps: number,
+  timingOptions: RevealTimingOptions,
 ): number {
   let index = 0;
   for (const unit of units) {
     if (unit.kind !== "character" && unit.kind !== "math") continue;
     const revealAt = schedule[index] ?? Number.POSITIVE_INFINITY;
     const duration =
-      unit.kind === "math"
-        ? mathRevealDurationMs(
-            mathRevealDurations.get(index),
-            unitCps[index] ?? fallbackCps,
+      unit.kind === "math" &&
+      (unit.display || timingOptions.waitForInlineMath !== false)
+        ? formulaPresentationDurationMs(
+            mathRevealDurationMs(
+              mathRevealDurations.get(index),
+              unitCps[index] ?? fallbackCps,
+            ),
+            unit.display,
           )
         : 0;
     if (elapsedMs <= revealAt + duration) return unitCps[index] ?? fallbackCps;

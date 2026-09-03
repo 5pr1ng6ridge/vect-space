@@ -59,6 +59,11 @@ describe("MarkupText math reveal", () => {
     expect(html).toContain("is-reveal-instant");
   });
 
+  it("puts a legal soft-wrap opportunity after every visible character", () => {
+    const html = renderToStaticMarkup(<MarkupText source="123456" />);
+    expect(html).toContain("<wbr");
+  });
+
   it("keeps an inline formula with text that shares its visual baseline", () => {
     const units = visibleUnits(parseMarkup("示例：$A \\cong B$"));
     const element = (top: number, height: number): HTMLElement =>

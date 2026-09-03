@@ -4,6 +4,7 @@ import {
   buildPauseWindows,
   buildRevealSchedule,
   buildVisibleUnitCps,
+  formulaPresentationDurationMs,
   formulaRevealDurationMs,
   autoReadingDelay,
   hasImmediateAutoAdvance,
@@ -73,6 +74,40 @@ describe("VN markup", () => {
       new Map([[1, 240]]),
     );
     expect(schedule).toEqual([50, 100, 390]);
+  });
+
+  it("lets the next character start while a drop-fade inline formula settles", () => {
+    const units = parseMarkup("甲$x$乙");
+    const options = { waitForInlineMath: false };
+    const schedule = buildRevealSchedule(
+      units,
+      20,
+      20,
+      new Map([[1, 240]]),
+      options,
+    );
+
+    expect(schedule).toEqual([50, 100, 150]);
+    expect(
+      revealCompletionTime(
+        units,
+        schedule,
+        new Map([[1, 240]]),
+        "drop_fade",
+        [20, 20, 20],
+        options,
+      ),
+    ).toBe(310);
+  });
+
+  it("keeps display formulae blocking and gives them the extended presentation", () => {
+    const units = parseMarkup("$$x$$乙");
+    const schedule = buildRevealSchedule(units, 20, 20, new Map([[0, 240]]), {
+      waitForInlineMath: false,
+    });
+
+    expect(formulaPresentationDurationMs(100, true)).toBe(120);
+    expect(schedule).toEqual([50, 388]);
   });
 
   it("waits for a final formula animation before completing the reveal", () => {
