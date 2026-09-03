@@ -247,7 +247,12 @@ export function revealCompletionTime(
     revealAnimation === "line_sweep"
       ? 180
       : revealAnimation === "drop_fade"
-        ? 160
+        ? finalUnit.kind === "math"
+          ? Math.max(
+              160,
+              validMathRevealDuration(mathRevealDurations.get(finalIndex)),
+            )
+          : 160
         : finalUnit?.kind === "math"
           ? Math.max(
               180,

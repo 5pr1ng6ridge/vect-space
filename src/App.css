@@ -308,7 +308,7 @@ button:disabled {
 }
 
 .markup-reveal-content {
-  display: inline-block;
+  display: inline;
 }
 
 .markup-line-sweep {
@@ -347,6 +347,14 @@ button:disabled {
   display: block;
 }
 
+.dialogue-text > span,
+.long-text-step > span {
+  display: inline;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
 .markup-unit.is-reveal-line_sweep:not(.is-math-instant) .markup-reveal-content {
   -webkit-mask-image: linear-gradient(
     90deg,
@@ -381,6 +389,17 @@ button:disabled {
 .markup-unit.is-reveal-drop_fade:not(.is-math-instant) .markup-reveal-content {
   animation: text-reveal-drop 160ms cubic-bezier(0.18, 0.72, 0.24, 1) both;
   will-change: transform, opacity;
+}
+
+.math-unit.is-reveal-drop_fade:not(.is-math-instant) .math-reveal-content {
+  animation-duration: var(--math-reveal-duration, 160ms);
+}
+
+.character-unit.is-reveal-drop_fade:not(.is-math-instant)
+  .markup-reveal-content {
+  position: relative;
+  animation-name: text-reveal-drop-inline;
+  will-change: top, opacity;
 }
 
 .math-unit.is-math-instant .math-reveal-content {
@@ -421,6 +440,17 @@ button:disabled {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes text-reveal-drop-inline {
+  from {
+    opacity: 0;
+    top: -0.35em;
+  }
+  to {
+    opacity: 1;
+    top: 0;
   }
 }
 

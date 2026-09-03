@@ -400,6 +400,12 @@ export default function App(): ReactElement {
     () => textRevealSpeed(update, textPrompt),
     [textPrompt, update],
   );
+  const hasTextRevealCue =
+    update?.cues.some(
+      (cue) =>
+        (cue.type === "dialogue_reveal" || cue.type === "long_text_reveal") &&
+        cue.prompt_id === textPrompt?.prompt_id,
+    ) ?? false;
   const cueRevealAnimation = textRevealAnimation(update, textPrompt);
   const currentTextSettings = useMemo<LockedTextSettings | null>(() => {
     if (textPrompt === null) return null;
@@ -751,7 +757,7 @@ export default function App(): ReactElement {
                 fontReady={fontReady}
                 ref={dialogueRef}
                 revealImmediately={
-                  dialogue === null || textCueCps === undefined
+                  dialogue === null || !hasTextRevealCue
                 }
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
@@ -778,7 +784,7 @@ export default function App(): ReactElement {
                 designScale={viewportMetrics.scale}
                 fontReady={fontReady}
                 ref={longTextRef}
-                revealImmediately={textCueCps === undefined}
+                revealImmediately={!hasTextRevealCue}
               />
             )}
 

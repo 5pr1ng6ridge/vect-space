@@ -99,6 +99,15 @@ describe("VN markup", () => {
     expect(revealCompletionTime(units, schedule, new Map([[0, 80]]))).toBe(230);
   });
 
+  it("keeps drop-fade formula playback tied to the measured formula duration", () => {
+    const units = parseMarkup("$x$");
+    const durations = new Map([[0, 240]]);
+    const schedule = buildRevealSchedule(units, 20, 20, durations);
+    expect(revealCompletionTime(units, schedule, durations, "drop_fade")).toBe(
+      290,
+    );
+  });
+
   it("scales formula reveal duration with rendered width and CPS", () => {
     const normal = formulaRevealDurationMs(340, 34, 40);
     expect(formulaRevealDurationMs(680, 34, 40)).toBeGreaterThan(normal);
