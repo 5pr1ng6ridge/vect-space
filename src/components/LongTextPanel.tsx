@@ -884,9 +884,14 @@ export const LongTextPanel = forwardRef<
                         instantMathReveal={
                           instantRevealPromptId === prompt.prompt_id
                         }
+                        instantReveal={
+                          instantRevealPromptId === prompt.prompt_id
+                        }
+                        lineSweepPaused={effectivePaused}
                         mathRevealDurations={mathRevealDurations}
                         revealAnimation={revealAnimation}
                         revealSchedule={schedule}
+                        pauseWindows={pauseWindows}
                         fontReady={fontReady}
                         source={step.text}
                         {...(current

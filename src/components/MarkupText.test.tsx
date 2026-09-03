@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { parseMarkup, visibleUnits } from "../engine/markup";
 import { MarkupText } from "./MarkupText";
 import {
+  buildLineSweepGeometry,
   buildLineSweepTimings,
   resolveVisualLineGroups,
 } from "./visualLineGroups";
@@ -43,6 +44,19 @@ describe("MarkupText math reveal", () => {
     expect(html).not.toContain("is-reveal-typewriter");
     expect(html).not.toContain("is-reveal-drop_fade");
     expect(html).not.toContain("is-reveal-line_sweep");
+  });
+
+  it("clears every reveal animation when the player completes a prompt", () => {
+    const html = renderToStaticMarkup(
+      <MarkupText
+        animateMath
+        instantReveal
+        revealAnimation="line_sweep"
+        source="甲$x$"
+        visibleCount={2}
+      />,
+    );
+    expect(html).toContain("is-reveal-instant");
   });
 
   it("keeps an inline formula with text that shares its visual baseline", () => {
@@ -95,6 +109,44 @@ describe("MarkupText math reveal", () => {
     expect(timings.get(3)).toMatchObject({
       lineStartIndex: 3,
       durationMs: 40,
+    });
+  });
+
+  it("pauses a line sweep without spending the pause in its mask duration", () => {
+    const units = visibleUnits(parseMarkup("甲乙"));
+    const timings = buildLineSweepTimings(
+      units,
+      [[0, 1]],
+      [50, 600],
+      [20, 20],
+      new Map(),
+      new Map([
+        [0, { lineWidthPx: 64, unitOffsetPx: 0 }],
+        [1, { lineWidthPx: 64, unitOffsetPx: 32 }],
+      ]),
+      [{ startMs: 50, endMs: 550 }],
+    );
+
+    expect(timings.get(0)?.durationMs).toBe(100);
+    expect(timings.get(1)?.durationMs).toBe(100);
+  });
+
+  it("uses the actual KaTeX box for a centered display formula", () => {
+    const katex = {
+      getBoundingClientRect: () => ({ left: 350, width: 100 }) as DOMRect,
+    } as HTMLElement;
+    const displayMath = {
+      classList: { contains: (name: string) => name === "math-unit" },
+      getBoundingClientRect: () => ({ left: 100, width: 600 }) as DOMRect,
+      offsetLeft: 0,
+      offsetWidth: 1_200,
+      querySelector: () => katex,
+    } as unknown as HTMLElement;
+    const geometry = buildLineSweepGeometry([[0]], new Map([[0, displayMath]]));
+
+    expect(geometry.get(0)).toEqual({
+      lineWidthPx: 200,
+      unitOffsetPx: 0,
     });
   });
 });

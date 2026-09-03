@@ -44,6 +44,10 @@ interface MarkupTextProps {
   onLineSweepLayoutChange?(ready: boolean): void;
   revealSchedule?: readonly number[];
   mathRevealDurations?: ReadonlyMap<number, number>;
+  pauseWindows?: readonly { startMs: number; endMs: number }[];
+  lineSweepPaused?: boolean;
+  /** Used for click-to-complete and fast-forward; it clears every reveal mask. */
+  instantReveal?: boolean;
 }
 
 export const MarkupText = memo(function MarkupText({
@@ -59,6 +63,9 @@ export const MarkupText = memo(function MarkupText({
   onLineSweepLayoutChange,
   revealSchedule = [],
   mathRevealDurations = EMPTY_MATH_REVEAL_DURATIONS,
+  pauseWindows = [],
+  lineSweepPaused = false,
+  instantReveal = false,
 }: MarkupTextProps): ReactElement {
   const units = useMemo(() => visibleUnits(parseMarkup(source)), [source]);
   const lineSweepMode =
@@ -137,12 +144,14 @@ export const MarkupText = memo(function MarkupText({
             unitCps,
             mathRevealDurations,
             activeLineGeometry,
+            pauseWindows,
           ),
     [
       activeLineGroups,
       activeLineGeometry,
       lineSweepRequested,
       mathRevealDurations,
+      pauseWindows,
       revealSchedule,
       unitCps,
       units,
@@ -174,6 +183,11 @@ export const MarkupText = memo(function MarkupText({
       visible && visibleCount !== Number.POSITIVE_INFINITY
         ? ` is-reveal-${revealAnimation}`
         : "";
+    const instantClass = instantReveal && visible ? " is-reveal-instant" : "";
+    const linePauseClass =
+      lineSweepTiming !== undefined && lineSweepPaused
+        ? " is-line-sweep-paused"
+        : "";
     const effectClass = unit.effect === null ? "" : ` text-fx-${unit.effect}`;
     const registerElement = (element: HTMLElement | null): void => {
       if (element === null) unitElementsRef.current.delete(index);
@@ -186,8 +200,9 @@ export const MarkupText = memo(function MarkupText({
           cps={unitCps[index] ?? 30}
           effectClass={effectClass}
           index={index}
-          instant={instantMathReveal}
+          instant={instantMathReveal || instantReveal}
           key={`${index}-math-${unit.latex}`}
+          lineSweepPaused={lineSweepTiming !== undefined && lineSweepPaused}
           onMetrics={onMathMetrics}
           registerElement={registerElement}
           revealActive={visible && visibleCount !== Number.POSITIVE_INFINITY}
@@ -202,7 +217,7 @@ export const MarkupText = memo(function MarkupText({
     return (
       <span
         aria-hidden="true"
-        className={`markup-unit character-unit${effectClass}${revealClass}`}
+        className={`markup-unit character-unit${effectClass}${revealClass}${instantClass}${linePauseClass}`}
         key={`${index}-${unit.value}`}
         ref={registerElement}
         style={style}
@@ -232,6 +247,7 @@ function MathMarkupUnit({
   effectClass,
   index,
   instant,
+  lineSweepPaused,
   onMetrics,
   registerElement,
   revealActive,
@@ -246,6 +262,7 @@ function MathMarkupUnit({
   effectClass: string;
   index: number;
   instant: boolean;
+  lineSweepPaused: boolean;
   onMetrics:
     | ((unitIndex: number, widthPx: number, fontSizePx: number) => void)
     | undefined;
@@ -301,7 +318,7 @@ function MathMarkupUnit({
   return (
     <span
       aria-hidden="true"
-      className={`markup-unit math-unit${unit.display ? " display-math" : ""}${effectClass}${animate && visible ? " is-math-revealed" : ""}${revealActive ? ` is-reveal-${revealAnimation}` : ""}${instant ? " is-math-instant" : ""}`}
+      className={`markup-unit math-unit${unit.display ? " display-math" : ""}${effectClass}${animate && visible ? " is-math-revealed" : ""}${revealActive ? ` is-reveal-${revealAnimation}` : ""}${instant ? " is-math-instant is-reveal-instant" : ""}${lineSweepPaused ? " is-line-sweep-paused" : ""}`}
       ref={registerElement}
       style={style}
     >

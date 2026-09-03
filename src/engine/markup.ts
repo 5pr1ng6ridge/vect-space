@@ -44,6 +44,7 @@ const OPEN_FX = /^\[fx=(shake|wave|glow)\]/;
 const PAUSE = /^\[pause=(\d+)ms\]/;
 const SPEED = /^\[speed=(default|\d+(?:\.\d+)?cps)\]/;
 const AUTO_ADVANCE = /^\[auto\]/;
+const MIN_FORMULA_REVEAL_DURATION_MS = 100;
 export function parseMarkup(source: string): MarkupUnit[] {
   const units: MarkupUnit[] = [];
   const effects: TextEffect[] = [];
@@ -284,7 +285,11 @@ export function formulaRevealDurationMs(
   );
   const characterDuration = characterRevealDuration(safeCps);
   return Math.round(
-    Math.max(characterDuration, characterDuration * equivalentCharacters),
+    Math.max(
+      MIN_FORMULA_REVEAL_DURATION_MS,
+      characterDuration,
+      characterDuration * equivalentCharacters,
+    ),
   );
 }
 
@@ -300,6 +305,7 @@ function validMathRevealDuration(
   cps: number,
 ): number {
   return Math.max(
+    MIN_FORMULA_REVEAL_DURATION_MS,
     characterRevealDuration(cps),
     Number.isFinite(value) && (value ?? 0) > 0
       ? (value ?? characterRevealDuration(cps))

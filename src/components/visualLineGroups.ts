@@ -1,4 +1,4 @@
-import type { VisibleUnit } from "../engine/markup";
+import { mathRevealDurationMs, type VisibleUnit } from "../engine/markup";
 
 export interface LineSweepUnitTiming {
   /** The first unit that starts this visual row. */
@@ -64,6 +64,7 @@ export function buildLineSweepTimings(
   unitCps: readonly number[],
   mathRevealDurations: ReadonlyMap<number, number>,
   geometry: ReadonlyMap<number, LineSweepUnitGeometry>,
+  pauseWindows: readonly { startMs: number; endMs: number }[] = [],
 ): ReadonlyMap<number, LineSweepUnitTiming> {
   const result = new Map<number, LineSweepUnitTiming>();
   for (const group of groups) {
@@ -77,11 +78,14 @@ export function buildLineSweepTimings(
     const lastCps = unitCps[lastIndex] ?? 30;
     const lastUnitDuration =
       lastUnit.kind === "math"
-        ? resolveMathDuration(mathRevealDurations.get(lastIndex), lastCps)
+        ? mathRevealDurationMs(mathRevealDurations.get(lastIndex), lastCps)
         : characterRevealDuration(lastCps);
+    const lineEndMs = (schedule[lastIndex] ?? lineStartMs) + lastUnitDuration;
     const lineDurationMs = Math.max(
       characterRevealDuration(unitCps[lineStartIndex] ?? 30),
-      (schedule[lastIndex] ?? lineStartMs) - lineStartMs + lastUnitDuration,
+      lineEndMs -
+        lineStartMs -
+        pauseDurationWithin(pauseWindows, lineStartMs, lineEndMs),
     );
     for (const index of group) {
       const unit = units[index];
@@ -109,13 +113,8 @@ export function buildLineSweepGeometry(
     const laidOutUnits = group.flatMap((index) => {
       const element = elements.get(index);
       if (element === undefined) return [];
-      return [
-        {
-          index,
-          leftPx: element.offsetLeft,
-          rightPx: element.offsetLeft + element.offsetWidth,
-        },
-      ];
+      const box = visibleElementBox(element);
+      return [{ index, leftPx: box.leftPx, rightPx: box.rightPx }];
     });
     if (laidOutUnits.length !== group.length) continue;
     const lineLeftPx = Math.min(...laidOutUnits.map((unit) => unit.leftPx));
@@ -135,11 +134,43 @@ function characterRevealDuration(cps: number): number {
   return 1_000 / Math.max(1, cps);
 }
 
-function resolveMathDuration(value: number | undefined, cps: number): number {
-  return Math.max(
-    characterRevealDuration(cps),
-    Number.isFinite(value) && (value ?? 0) > 0
-      ? (value ?? characterRevealDuration(cps))
-      : characterRevealDuration(cps),
-  );
+function pauseDurationWithin(
+  windows: readonly { startMs: number; endMs: number }[],
+  startMs: number,
+  endMs: number,
+): number {
+  return windows.reduce((total, window) => {
+    const overlapStart = Math.max(startMs, window.startMs);
+    const overlapEnd = Math.min(endMs, window.endMs);
+    return total + Math.max(0, overlapEnd - overlapStart);
+  }, 0);
+}
+
+function visibleElementBox(element: HTMLElement): {
+  leftPx: number;
+  rightPx: number;
+} {
+  const fallback = {
+    leftPx: element.offsetLeft,
+    rightPx: element.offsetLeft + element.offsetWidth,
+  };
+  if (!element.classList.contains("math-unit")) return fallback;
+  const katex = element.querySelector<HTMLElement>(".katex");
+  if (katex === null || element.offsetWidth <= 0) return fallback;
+
+  // A display formula's .math-unit is a full-width block.  Its actual KaTeX
+  // content is normally centered within that block, so using the outer box
+  // makes a row mask sweep across empty space and hides the real animation.
+  const outerRect = element.getBoundingClientRect();
+  const katexRect = katex.getBoundingClientRect();
+  const scale = outerRect.width / element.offsetWidth;
+  if (!Number.isFinite(scale) || scale <= 0 || katexRect.width <= 0) {
+    return fallback;
+  }
+  const leftPx = element.offsetLeft + (katexRect.left - outerRect.left) / scale;
+  const widthPx = katexRect.width / scale;
+  return {
+    leftPx,
+    rightPx: leftPx + widthPx,
+  };
 }

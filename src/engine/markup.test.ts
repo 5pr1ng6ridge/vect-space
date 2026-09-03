@@ -62,7 +62,7 @@ describe("VN markup", () => {
 
   it("leaves a short visual reveal window after formulas", () => {
     const schedule = buildRevealSchedule(parseMarkup("甲$x$乙"), 20, 20);
-    expect(schedule).toEqual([50, 100, 200]);
+    expect(schedule).toEqual([50, 100, 250]);
   });
 
   it("uses measured formula duration in the following text timeline", () => {
@@ -104,7 +104,7 @@ describe("VN markup", () => {
         "typewriter",
         [20],
       ),
-    ).toBe(130);
+    ).toBe(150);
   });
 
   it("keeps drop-fade formula playback tied to the measured formula duration", () => {
@@ -126,10 +126,10 @@ describe("VN markup", () => {
   it("scales formula animation from one character to its rendered width", () => {
     // A formula is one visual unit, but its time tracks its width rather than
     // using a fixed fade.  It can never finish before one typed character.
-    expect(formulaRevealDurationMs(1, 34, 20)).toBe(50);
+    expect(formulaRevealDurationMs(1, 34, 20)).toBe(100);
     expect(formulaRevealDurationMs(680, 34, 30)).toBe(667);
     expect(formulaRevealDurationMs(680, 34, 5)).toBe(4_000);
-    expect(mathRevealDurationMs(20, 20)).toBe(50);
+    expect(mathRevealDurationMs(20, 20)).toBe(100);
   });
 
   it("tracks speed controls for each visible unit", () => {

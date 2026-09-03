@@ -360,6 +360,10 @@ button:disabled {
   will-change: mask-position;
 }
 
+.markup-unit.is-line-sweep-paused .markup-reveal-content {
+  animation-play-state: paused;
+}
+
 .math-unit.is-reveal-typewriter:not(.is-math-instant) .math-reveal-content {
   animation: text-reveal-formula-fade var(--math-reveal-duration, 34ms) ease-out
     both;
@@ -387,6 +391,15 @@ button:disabled {
   mask: none;
   animation: none;
   opacity: 1;
+}
+
+.markup-unit.is-reveal-instant .markup-reveal-content {
+  -webkit-mask: none !important;
+  mask: none !important;
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none;
+  top: 0;
 }
 
 @keyframes text-reveal-line-sweep {

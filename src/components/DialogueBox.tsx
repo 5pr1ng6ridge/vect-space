@@ -353,10 +353,13 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           <MarkupText
             animateMath
             instantMathReveal={instantRevealPromptId === promptId}
+            instantReveal={instantRevealPromptId === promptId}
+            lineSweepPaused={effectivePaused}
             mathRevealDurations={mathRevealDurations}
             onMathMetrics={handleMathMetrics}
             revealAnimation={revealAnimation}
             revealSchedule={schedule}
+            pauseWindows={pauseWindows}
             fontReady={fontReady}
             source={currentText}
             unitCps={unitCps}
