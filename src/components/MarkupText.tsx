@@ -16,7 +16,13 @@ import {
   type MathUnit,
 } from "../engine/markup";
 import type { TextRevealAnimation } from "../engine/types";
-import { resolveVisualLineGroups } from "./visualLineGroups";
+import {
+  buildLineSweepTimings,
+  resolveVisualLineGroups,
+  type LineSweepUnitTiming,
+} from "./visualLineGroups";
+
+const EMPTY_MATH_REVEAL_DURATIONS: ReadonlyMap<number, number> = new Map();
 
 interface MarkupTextProps {
   source: string;
@@ -28,6 +34,14 @@ interface MarkupTextProps {
   onMathMetrics?(unitIndex: number, widthPx: number, fontSizePx: number): void;
   revealAnimation?: TextRevealAnimation;
   fontReady?: boolean;
+  /**
+   * The prompt controller waits for a real visual-line measurement before it
+   * starts a line sweep.  It prevents a slow font load from accumulating text
+   * and then replaying every already-revealed row at once.
+   */
+  onLineSweepLayoutChange?(ready: boolean): void;
+  revealSchedule?: readonly number[];
+  mathRevealDurations?: ReadonlyMap<number, number>;
 }
 
 export const MarkupText = memo(function MarkupText({
@@ -40,13 +54,17 @@ export const MarkupText = memo(function MarkupText({
   onMathMetrics,
   revealAnimation = "typewriter",
   fontReady = true,
+  onLineSweepLayoutChange,
+  revealSchedule = [],
+  mathRevealDurations = EMPTY_MATH_REVEAL_DURATIONS,
 }: MarkupTextProps): ReactElement {
   const units = useMemo(() => visibleUnits(parseMarkup(source)), [source]);
-  const lineSweep =
+  const lineSweepMode =
     revealAnimation === "line_sweep" &&
-    visibleCount !== Number.POSITIVE_INFINITY &&
-    fontReady;
+    visibleCount !== Number.POSITIVE_INFINITY;
+  const lineSweepRequested = lineSweepMode && fontReady;
   const unitElementsRef = useRef(new Map<number, HTMLElement>());
+  const rootRef = useRef<HTMLSpanElement>(null);
   const [lineGroups, setLineGroups] = useState<{
     source: string;
     groups: readonly (readonly number[])[];
@@ -54,38 +72,89 @@ export const MarkupText = memo(function MarkupText({
 
   useLayoutEffect(() => {
     let frame = 0;
-    if (!lineSweep) {
+    if (!lineSweepRequested) {
       frame = requestAnimationFrame(() => setLineGroups(null));
       return () => cancelAnimationFrame(frame);
     }
-    frame = requestAnimationFrame(() => {
+    const measure = (): void => {
       const groups = resolveVisualLineGroups(units, unitElementsRef.current);
       const measuredUnitCount = groups.reduce(
         (total, group) => total + group.length,
         0,
       );
-      if (groups.length === 0 || measuredUnitCount !== units.length) return;
+      if (measuredUnitCount !== units.length) return;
       setLineGroups((current) =>
         current?.source === source && sameLineGroups(current.groups, groups)
           ? current
           : { source, groups },
       );
+    };
+    frame = requestAnimationFrame(measure);
+    const root = rootRef.current;
+    if (root === null || typeof ResizeObserver === "undefined") {
+      return () => cancelAnimationFrame(frame);
+    }
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
     });
-    return () => cancelAnimationFrame(frame);
-  }, [fontReady, lineSweep, source, units]);
+    observer.observe(root);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [lineSweepRequested, source, units]);
+
+  const activeLineGroups =
+    lineGroups?.source === source ? lineGroups.groups : null;
+  const groupedUnitCount =
+    activeLineGroups?.reduce((total, group) => total + group.length, 0) ?? 0;
+  const lineSweepReady =
+    !lineSweepMode ||
+    (activeLineGroups !== null && groupedUnitCount === units.length);
+  const lineSweepTimings = useMemo(
+    () =>
+      !lineSweepRequested || activeLineGroups === null
+        ? new Map<number, LineSweepUnitTiming>()
+        : buildLineSweepTimings(
+            units,
+            activeLineGroups,
+            revealSchedule,
+            unitCps,
+            mathRevealDurations,
+          ),
+    [
+      activeLineGroups,
+      lineSweepRequested,
+      mathRevealDurations,
+      revealSchedule,
+      unitCps,
+      units,
+    ],
+  );
+
+  useLayoutEffect(() => {
+    onLineSweepLayoutChange?.(lineSweepReady);
+  }, [lineSweepReady, onLineSweepLayoutChange]);
 
   const renderUnit = (
     unit: (typeof units)[number],
     index: number,
     visible: boolean,
-    suppressReveal: boolean,
+    lineSweepTiming: LineSweepUnitTiming | undefined,
   ): ReactElement => {
     const style = {
       visibility: visible ? "visible" : "hidden",
       "--unit-index": index,
+      ...(lineSweepTiming === undefined
+        ? {}
+        : {
+            "--line-sweep-delay": `${lineSweepTiming.delayMs}ms`,
+            "--line-sweep-duration": `${lineSweepTiming.durationMs}ms`,
+          }),
     } as CSSProperties;
     const revealClass =
-      !suppressReveal && visible && visibleCount !== Number.POSITIVE_INFINITY
+      visible && visibleCount !== Number.POSITIVE_INFINITY
         ? ` is-reveal-${revealAnimation}`
         : "";
     const effectClass = unit.effect === null ? "" : ` text-fx-${unit.effect}`;
@@ -104,11 +173,7 @@ export const MarkupText = memo(function MarkupText({
           key={`${index}-math-${unit.latex}`}
           onMetrics={onMathMetrics}
           registerElement={registerElement}
-          revealActive={
-            !suppressReveal &&
-            visible &&
-            visibleCount !== Number.POSITIVE_INFINITY
-          }
+          revealActive={visible && visibleCount !== Number.POSITIVE_INFINITY}
           style={style}
           unit={unit}
           visible={visible}
@@ -130,36 +195,16 @@ export const MarkupText = memo(function MarkupText({
     );
   };
 
-  const activeLineGroups =
-    lineGroups?.source === source ? lineGroups.groups : null;
-  const groupedUnitCount =
-    activeLineGroups?.reduce((total, group) => total + group.length, 0) ?? 0;
-  const groupedLineSweep =
-    lineSweep && activeLineGroups !== null && groupedUnitCount === units.length;
   return (
-    <span className={className} aria-label={source}>
-      {groupedLineSweep
-        ? activeLineGroups.map((indices, lineIndex) => {
-            const finalUnit = indices[indices.length - 1] ?? -1;
-            const visible = finalUnit < visibleCount;
-            return (
-              <span
-                className={`markup-line-sweep${visible ? " is-visible" : ""}`}
-                key={`line-${lineIndex}-${indices[0] ?? 0}`}
-                style={{ visibility: visible ? "visible" : "hidden" }}
-              >
-                {indices.map((index) => {
-                  const unit = units[index];
-                  return unit === undefined
-                    ? null
-                    : renderUnit(unit, index, visible, true);
-                })}
-              </span>
-            );
-          })
-        : units.map((unit, index) =>
-            renderUnit(unit, index, index < visibleCount, false),
-          )}
+    <span className={className} aria-label={source} ref={rootRef}>
+      {units.map((unit, index) => {
+        const timing = lineSweepTimings.get(index);
+        const visible =
+          timing === undefined
+            ? index < visibleCount
+            : timing.lineStartIndex < visibleCount;
+        return renderUnit(unit, index, visible, timing);
+      })}
     </span>
   );
 });

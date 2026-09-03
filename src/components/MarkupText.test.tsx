@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import { parseMarkup, visibleUnits } from "../engine/markup";
 import { MarkupText } from "./MarkupText";
-import { resolveVisualLineGroups } from "./visualLineGroups";
+import {
+  buildLineSweepTimings,
+  resolveVisualLineGroups,
+} from "./visualLineGroups";
 
 describe("MarkupText math reveal", () => {
   it("keeps the complete KaTeX tree mounted while the formula is hidden", () => {
@@ -60,5 +63,30 @@ describe("MarkupText math reveal", () => {
       ]),
     );
     expect(groups).toEqual([[0, 1, 2, 3]]);
+  });
+
+  it("keeps line-sweep timing on the original inline units", () => {
+    const units = visibleUnits(parseMarkup("甲乙$x$丙"));
+    const timings = buildLineSweepTimings(
+      units,
+      [[0, 1, 2], [3]],
+      [40, 80, 120, 280],
+      [25, 25, 25, 25],
+      new Map([[2, 240]]),
+    );
+
+    expect(timings.get(0)).toMatchObject({
+      lineStartIndex: 0,
+      delayMs: 0,
+    });
+    expect(timings.get(2)).toMatchObject({
+      lineStartIndex: 0,
+      delayMs: 80,
+      durationMs: 240,
+    });
+    expect(timings.get(3)).toMatchObject({
+      lineStartIndex: 3,
+      delayMs: 0,
+    });
   });
 });

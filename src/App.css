@@ -308,39 +308,9 @@ button:disabled {
 }
 
 .markup-reveal-content {
-  display: inline;
-}
-
-.markup-line-sweep {
-  display: block;
-  width: 100%;
-  -webkit-mask-image: linear-gradient(
-    90deg,
-    #000 0%,
-    #000 49%,
-    transparent 51%,
-    transparent 100%
-  );
-  mask-image: linear-gradient(
-    90deg,
-    #000 0%,
-    #000 49%,
-    transparent 51%,
-    transparent 100%
-  );
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  -webkit-mask-size: 210% 100%;
-  mask-size: 210% 100%;
-}
-
-.markup-line-sweep.is-visible {
-  animation: text-reveal-left-to-right 180ms linear both;
-  will-change: mask-position, opacity;
-}
-
-.markup-line-sweep:not(.is-visible) .markup-unit {
-  visibility: hidden !important;
+  /* Atomic inline boxes can wrap between characters, while still allowing
+     masks and transforms to animate reliably in WebView2. */
+  display: inline-block;
 }
 
 .display-math .math-reveal-content {
@@ -351,7 +321,7 @@ button:disabled {
 .long-text-step > span {
   display: inline;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  word-break: break-all;
   white-space: pre-wrap;
 }
 
@@ -376,8 +346,9 @@ button:disabled {
   mask-repeat: no-repeat;
   -webkit-mask-size: 210% 100%;
   mask-size: 210% 100%;
-  animation: text-reveal-left-to-right var(--math-reveal-duration, 90ms) linear
-    both;
+  animation: text-reveal-left-to-right
+    var(--line-sweep-duration, var(--math-reveal-duration, 90ms)) linear
+    var(--line-sweep-delay, 0ms) both;
   will-change: mask-position, opacity;
 }
 

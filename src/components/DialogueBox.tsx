@@ -133,6 +133,9 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     >(null);
     const [paused, setPaused] = useState(() => isPauseAt(0, pauseWindows));
     const [typingCps, setTypingCps] = useState(() => unitCps[0] ?? initialCps);
+    const [lineSweepReadyPromptId, setLineSweepReadyPromptId] = useState<
+      string | null
+    >(null);
     const promptIdRef = useRef(promptId);
     const visibleRef = useRef(0);
     const promptIsActive = activePromptId === promptId;
@@ -140,6 +143,17 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     const complete = promptIsActive && revealFinished;
     const completeRef = useRef(complete);
     const reportedPromptRef = useRef<string | null>(null);
+    const handleLineSweepLayoutChange = useCallback(
+      (ready: boolean): void => {
+        setLineSweepReadyPromptId(ready ? promptId : null);
+      },
+      [promptId],
+    );
+    const revealReady =
+      revealImmediately ||
+      (fontReady &&
+        (revealAnimation !== "line_sweep" ||
+          lineSweepReadyPromptId === promptId));
     const handleMathMetrics = useCallback(
       (unitIndex: number, widthPx: number, fontSizePx: number): void => {
         if (visibleRef.current > 0) return;
@@ -160,6 +174,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     );
 
     useEffect(() => {
+      if (!revealReady) return;
       if (promptIdRef.current === promptId && completeRef.current) return;
       const previousPromptId = promptIdRef.current;
       const initialVisibleCount = revealImmediately ? schedule.length : 0;
@@ -225,6 +240,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       promptId,
       revealCompletionMs,
       revealImmediately,
+      revealReady,
       schedule,
       unitCps,
       units,
@@ -336,12 +352,17 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           <MarkupText
             animateMath
             instantMathReveal={instantRevealPromptId === promptId}
+            mathRevealDurations={mathRevealDurations}
             onMathMetrics={handleMathMetrics}
             revealAnimation={revealAnimation}
+            revealSchedule={schedule}
             fontReady={fontReady}
             source={currentText}
             unitCps={unitCps}
             visibleCount={renderedVisibleCount}
+            {...(revealAnimation === "line_sweep"
+              ? { onLineSweepLayoutChange: handleLineSweepLayoutChange }
+              : {})}
           />
         </span>
         {prompt !== null && (

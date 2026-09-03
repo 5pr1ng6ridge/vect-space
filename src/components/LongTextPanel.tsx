@@ -189,6 +189,9 @@ export const LongTextPanel = forwardRef<
   >(revealImmediately ? prompt.prompt_id : null);
   const [paused, setPaused] = useState(() => isPauseAt(0, pauseWindows));
   const [typingCps, setTypingCps] = useState(() => unitCps[0] ?? initialCps);
+  const [lineSweepReadyPromptId, setLineSweepReadyPromptId] = useState<
+    string | null
+  >(null);
   const [stepHeights, setStepHeights] = useState<
     Readonly<Record<string, number>>
   >({});
@@ -223,6 +226,17 @@ export const LongTextPanel = forwardRef<
   const promptIsActive = activePromptId === prompt.prompt_id;
   const renderedVisibleCount = promptIsActive ? visibleCount : 0;
   const complete = promptIsActive && revealFinished;
+  const handleLineSweepLayoutChange = useCallback(
+    (ready: boolean): void => {
+      setLineSweepReadyPromptId(ready ? prompt.prompt_id : null);
+    },
+    [prompt.prompt_id],
+  );
+  const revealReady =
+    revealImmediately ||
+    (fontReady &&
+      (revealAnimation !== "line_sweep" ||
+        lineSweepReadyPromptId === prompt.prompt_id));
   const activeStep = page.steps[page.active_step_index];
   const activeStepRef = useRef<HTMLDivElement>(null);
   const paperArtworkReady = usePaperArtworkReady(paperUrl);
@@ -441,6 +455,7 @@ export const LongTextPanel = forwardRef<
 
   useEffect(() => {
     if (scrollPreparedPromptId !== prompt.prompt_id) return;
+    if (!revealReady) return;
     if (revealPromptRef.current === prompt.prompt_id && completeRef.current) {
       return;
     }
@@ -512,6 +527,7 @@ export const LongTextPanel = forwardRef<
     prompt.prompt_id,
     revealCompletionMs,
     revealImmediately,
+    revealReady,
     schedule,
     unitCps,
     units,
@@ -867,13 +883,21 @@ export const LongTextPanel = forwardRef<
                         instantMathReveal={
                           instantRevealPromptId === prompt.prompt_id
                         }
+                        mathRevealDurations={mathRevealDurations}
                         revealAnimation={revealAnimation}
+                        revealSchedule={schedule}
                         fontReady={fontReady}
                         source={step.text}
                         {...(current
                           ? { onMathMetrics: handleMathMetrics }
                           : {})}
                         {...(current ? { unitCps } : {})}
+                        {...(current && revealAnimation === "line_sweep"
+                          ? {
+                              onLineSweepLayoutChange:
+                                handleLineSweepLayoutChange,
+                            }
+                          : {})}
                         visibleCount={
                           current
                             ? renderedVisibleCount
