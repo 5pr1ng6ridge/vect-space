@@ -3,10 +3,17 @@ import type { VisibleUnit } from "../engine/markup";
 export interface LineSweepUnitTiming {
   /** The first unit that starts this visual row. */
   readonly lineStartIndex: number;
-  /** Milliseconds after that first unit before this unit begins its fade. */
-  readonly delayMs: number;
-  /** The duration of this unit's soft horizontal reveal. */
+  /** The duration of this row's continuous left-to-right reveal. */
   readonly durationMs: number;
+  /** Width of the full visual row in unscaled CSS layout pixels. */
+  readonly lineWidthPx: number;
+  /** This unit's left edge within the visual row. */
+  readonly unitOffsetPx: number;
+}
+
+export interface LineSweepUnitGeometry {
+  readonly lineWidthPx: number;
+  readonly unitOffsetPx: number;
 }
 
 /**
@@ -56,28 +63,83 @@ export function buildLineSweepTimings(
   schedule: readonly number[],
   unitCps: readonly number[],
   mathRevealDurations: ReadonlyMap<number, number>,
+  geometry: ReadonlyMap<number, LineSweepUnitGeometry>,
 ): ReadonlyMap<number, LineSweepUnitTiming> {
   const result = new Map<number, LineSweepUnitTiming>();
   for (const group of groups) {
     const lineStartIndex = group[0];
     if (lineStartIndex === undefined) continue;
     const lineStartMs = schedule[lineStartIndex] ?? 0;
+    const lastIndex = group[group.length - 1];
+    if (lastIndex === undefined) continue;
+    const lastUnit = units[lastIndex];
+    if (lastUnit === undefined) continue;
+    const lastCps = unitCps[lastIndex] ?? 30;
+    const lastUnitDuration =
+      lastUnit.kind === "math"
+        ? resolveMathDuration(mathRevealDurations.get(lastIndex), lastCps)
+        : characterRevealDuration(lastCps);
+    const lineDurationMs = Math.max(
+      characterRevealDuration(unitCps[lineStartIndex] ?? 30),
+      (schedule[lastIndex] ?? lineStartMs) - lineStartMs + lastUnitDuration,
+    );
     for (const index of group) {
       const unit = units[index];
       if (unit === undefined) continue;
-      const cps = unitCps[index] ?? 30;
-      const characterDuration = Math.round(
-        Math.min(220, Math.max(80, 2_500 / Math.max(1, cps))),
-      );
+      const unitGeometry = geometry.get(index);
+      if (unitGeometry === undefined) continue;
       result.set(index, {
         lineStartIndex,
-        delayMs: Math.max(0, (schedule[index] ?? lineStartMs) - lineStartMs),
-        durationMs:
-          unit.kind === "math"
-            ? Math.max(80, mathRevealDurations.get(index) ?? 120)
-            : characterDuration,
+        durationMs: Math.round(lineDurationMs),
+        lineWidthPx: unitGeometry.lineWidthPx,
+        unitOffsetPx: unitGeometry.unitOffsetPx,
       });
     }
   }
   return result;
+}
+
+/** Captures geometry outside React render, in the unscaled CSS layout space. */
+export function buildLineSweepGeometry(
+  groups: readonly (readonly number[])[],
+  elements: ReadonlyMap<number, HTMLElement>,
+): ReadonlyMap<number, LineSweepUnitGeometry> {
+  const result = new Map<number, LineSweepUnitGeometry>();
+  for (const group of groups) {
+    const laidOutUnits = group.flatMap((index) => {
+      const element = elements.get(index);
+      if (element === undefined) return [];
+      return [
+        {
+          index,
+          leftPx: element.offsetLeft,
+          rightPx: element.offsetLeft + element.offsetWidth,
+        },
+      ];
+    });
+    if (laidOutUnits.length !== group.length) continue;
+    const lineLeftPx = Math.min(...laidOutUnits.map((unit) => unit.leftPx));
+    const lineRightPx = Math.max(...laidOutUnits.map((unit) => unit.rightPx));
+    const lineWidthPx = Math.max(1, lineRightPx - lineLeftPx);
+    for (const unit of laidOutUnits) {
+      result.set(unit.index, {
+        lineWidthPx,
+        unitOffsetPx: unit.leftPx - lineLeftPx,
+      });
+    }
+  }
+  return result;
+}
+
+function characterRevealDuration(cps: number): number {
+  return 1_000 / Math.max(1, cps);
+}
+
+function resolveMathDuration(value: number | undefined, cps: number): number {
+  return Math.max(
+    characterRevealDuration(cps),
+    Number.isFinite(value) && (value ?? 0) > 0
+      ? (value ?? characterRevealDuration(cps))
+      : characterRevealDuration(cps),
+  );
 }

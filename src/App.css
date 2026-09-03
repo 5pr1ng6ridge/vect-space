@@ -329,31 +329,40 @@ button:disabled {
   -webkit-mask-image: linear-gradient(
     90deg,
     #000 0%,
-    #000 49%,
-    transparent 51%,
+    #000 calc(100% - var(--line-sweep-feather, 1.5em)),
     transparent 100%
   );
   mask-image: linear-gradient(
     90deg,
     #000 0%,
-    #000 49%,
-    transparent 51%,
+    #000 calc(100% - var(--line-sweep-feather, 1.5em)),
     transparent 100%
   );
-  -webkit-mask-position: 0 0;
-  mask-position: 0 0;
+  -webkit-mask-position: calc(
+      0px - var(--line-sweep-offset) - var(--line-sweep-width) -
+        var(--line-sweep-feather, 1.5em)
+    )
+    0;
+  mask-position: calc(
+      0px - var(--line-sweep-offset) - var(--line-sweep-width) -
+        var(--line-sweep-feather, 1.5em)
+    )
+    0;
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
-  -webkit-mask-size: 210% 100%;
-  mask-size: 210% 100%;
-  animation: text-reveal-left-to-right
-    var(--line-sweep-duration, var(--math-reveal-duration, 90ms)) linear
-    var(--line-sweep-delay, 0ms) both;
-  will-change: mask-position, opacity;
+  -webkit-mask-size: calc(
+      var(--line-sweep-width) + var(--line-sweep-feather, 1.5em)
+    )
+    100%;
+  mask-size: calc(var(--line-sweep-width) + var(--line-sweep-feather, 1.5em))
+    100%;
+  animation: text-reveal-line-sweep var(--line-sweep-duration, 90ms) linear both;
+  will-change: mask-position;
 }
 
 .math-unit.is-reveal-typewriter:not(.is-math-instant) .math-reveal-content {
-  animation: text-reveal-formula-fade 180ms ease-out both;
+  animation: text-reveal-formula-fade var(--math-reveal-duration, 34ms) ease-out
+    both;
   will-change: opacity;
 }
 
@@ -380,17 +389,23 @@ button:disabled {
   opacity: 1;
 }
 
-@keyframes text-reveal-left-to-right {
+@keyframes text-reveal-line-sweep {
   from {
-    -webkit-mask-position: 100% 0;
-    mask-position: 100% 0;
-    opacity: 0.72;
+    -webkit-mask-position: calc(
+        0px - var(--line-sweep-offset) - var(--line-sweep-width) -
+          var(--line-sweep-feather, 1.5em)
+      )
+      0;
+    mask-position: calc(
+        0px - var(--line-sweep-offset) - var(--line-sweep-width) -
+          var(--line-sweep-feather, 1.5em)
+      )
+      0;
   }
 
   to {
-    -webkit-mask-position: 0 0;
-    mask-position: 0 0;
-    opacity: 1;
+    -webkit-mask-position: calc(0px - var(--line-sweep-offset)) 0;
+    mask-position: calc(0px - var(--line-sweep-offset)) 0;
   }
 }
 

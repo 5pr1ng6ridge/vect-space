@@ -44,8 +44,6 @@ const OPEN_FX = /^\[fx=(shake|wave|glow)\]/;
 const PAUSE = /^\[pause=(\d+)ms\]/;
 const SPEED = /^\[speed=(default|\d+(?:\.\d+)?cps)\]/;
 const AUTO_ADVANCE = /^\[auto\]/;
-export const DEFAULT_MATH_REVEAL_DURATION_MS = 120;
-
 export function parseMarkup(source: string): MarkupUnit[] {
   const units: MarkupUnit[] = [];
   const effects: TextEffect[] = [];
@@ -156,6 +154,7 @@ export function buildRevealSchedule(
       if (unit.kind === "math") {
         elapsed += validMathRevealDuration(
           mathRevealDurations.get(visibleIndex),
+          cps,
         );
       }
       visibleIndex += 1;
@@ -194,6 +193,7 @@ export function buildPauseWindows(
       if (unit.kind === "math") {
         elapsed += validMathRevealDuration(
           mathRevealDurations.get(visibleIndex),
+          cps,
         );
       }
       visibleIndex += 1;
@@ -237,6 +237,7 @@ export function revealCompletionTime(
   schedule: readonly number[],
   mathRevealDurations: ReadonlyMap<number, number> = new Map(),
   revealAnimation: TextRevealAnimation = "typewriter",
+  unitCps: readonly number[] = [],
 ): number {
   const visible = visibleUnits(units);
   const finalAppearance = schedule[schedule.length - 1] ?? 0;
@@ -245,18 +246,23 @@ export function revealCompletionTime(
   if (finalUnit === undefined) return 0;
   const animationDuration =
     revealAnimation === "line_sweep"
-      ? 180
+      ? finalUnit.kind === "math"
+        ? validMathRevealDuration(
+            mathRevealDurations.get(finalIndex),
+            unitCps[finalIndex] ?? 30,
+          )
+        : characterRevealDuration(unitCps[finalIndex] ?? 30)
       : revealAnimation === "drop_fade"
         ? finalUnit.kind === "math"
-          ? Math.max(
-              160,
-              validMathRevealDuration(mathRevealDurations.get(finalIndex)),
+          ? validMathRevealDuration(
+              mathRevealDurations.get(finalIndex),
+              unitCps[finalIndex] ?? 30,
             )
           : 160
         : finalUnit?.kind === "math"
-          ? Math.max(
-              180,
-              validMathRevealDuration(mathRevealDurations.get(finalIndex)),
+          ? validMathRevealDuration(
+              mathRevealDurations.get(finalIndex),
+              unitCps[finalIndex] ?? 30,
             )
           : 0;
   return finalAppearance + animationDuration;
@@ -273,17 +279,36 @@ export function formulaRevealDurationMs(
   const safeWidth =
     Number.isFinite(widthPx) && widthPx > 0 ? widthPx : safeFontSize;
   const equivalentCharacters = Math.min(
-    12,
+    48,
     Math.max(1, safeWidth / safeFontSize),
   );
-  const duration = (1_000 / safeCps) * equivalentCharacters;
-  return Math.round(Math.min(600, Math.max(80, duration)));
+  const characterDuration = characterRevealDuration(safeCps);
+  return Math.round(
+    Math.max(characterDuration, characterDuration * equivalentCharacters),
+  );
 }
 
-function validMathRevealDuration(value: number | undefined): number {
-  return Number.isFinite(value) && (value ?? 0) > 0
-    ? (value ?? DEFAULT_MATH_REVEAL_DURATION_MS)
-    : DEFAULT_MATH_REVEAL_DURATION_MS;
+export function mathRevealDurationMs(
+  value: number | undefined,
+  cps: number,
+): number {
+  return validMathRevealDuration(value, cps);
+}
+
+function validMathRevealDuration(
+  value: number | undefined,
+  cps: number,
+): number {
+  return Math.max(
+    characterRevealDuration(cps),
+    Number.isFinite(value) && (value ?? 0) > 0
+      ? (value ?? characterRevealDuration(cps))
+      : characterRevealDuration(cps),
+  );
+}
+
+function characterRevealDuration(cps: number): number {
+  return 1_000 / validCps(cps, 30);
 }
 
 export function visibleUnits(units: MarkupUnit[]): VisibleUnit[] {

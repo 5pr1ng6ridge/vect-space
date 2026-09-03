@@ -4,10 +4,10 @@ import {
   buildPauseWindows,
   buildRevealSchedule,
   buildVisibleUnitCps,
-  DEFAULT_MATH_REVEAL_DURATION_MS,
   formulaRevealDurationMs,
   autoReadingDelay,
   hasImmediateAutoAdvance,
+  mathRevealDurationMs,
   parseMarkup,
   revealCompletionTime,
   resolveInstantRevealPromptId,
@@ -62,7 +62,7 @@ describe("VN markup", () => {
 
   it("leaves a short visual reveal window after formulas", () => {
     const schedule = buildRevealSchedule(parseMarkup("甲$x$乙"), 20, 20);
-    expect(schedule).toEqual([50, 100, 150 + DEFAULT_MATH_REVEAL_DURATION_MS]);
+    expect(schedule).toEqual([50, 100, 200]);
   });
 
   it("uses measured formula duration in the following text timeline", () => {
@@ -85,27 +85,35 @@ describe("VN markup", () => {
   it("waits for the selected text animation to finish", () => {
     const units = parseMarkup("甲乙");
     const schedule = buildRevealSchedule(units, 20, 20);
-    expect(revealCompletionTime(units, schedule, new Map(), "line_sweep")).toBe(
-      280,
-    );
-    expect(revealCompletionTime(units, schedule, new Map(), "drop_fade")).toBe(
-      260,
-    );
+    expect(
+      revealCompletionTime(units, schedule, new Map(), "line_sweep", [20, 20]),
+    ).toBe(150);
+    expect(
+      revealCompletionTime(units, schedule, new Map(), "drop_fade", [20, 20]),
+    ).toBe(260);
   });
 
   it("never completes a typewriter formula before its CSS fade", () => {
     const units = parseMarkup("$x$");
     const schedule = buildRevealSchedule(units, 20, 20, new Map([[0, 80]]));
-    expect(revealCompletionTime(units, schedule, new Map([[0, 80]]))).toBe(230);
+    expect(
+      revealCompletionTime(
+        units,
+        schedule,
+        new Map([[0, 80]]),
+        "typewriter",
+        [20],
+      ),
+    ).toBe(130);
   });
 
   it("keeps drop-fade formula playback tied to the measured formula duration", () => {
     const units = parseMarkup("$x$");
     const durations = new Map([[0, 240]]);
     const schedule = buildRevealSchedule(units, 20, 20, durations);
-    expect(revealCompletionTime(units, schedule, durations, "drop_fade")).toBe(
-      290,
-    );
+    expect(
+      revealCompletionTime(units, schedule, durations, "drop_fade", [20]),
+    ).toBe(290);
   });
 
   it("scales formula reveal duration with rendered width and CPS", () => {
@@ -115,12 +123,13 @@ describe("VN markup", () => {
     expect(formulaRevealDurationMs(0, 0, Number.NaN)).toBeGreaterThan(0);
   });
 
-  it("gives a long formula enough reveal time without unbounded delays", () => {
-    // Formulae are a single reveal unit.  Their visual width contributes at
-    // most twelve equivalent characters, so a wide display formula never
-    // stalls the next prompt for several seconds.
-    expect(formulaRevealDurationMs(680, 34, 30)).toBe(400);
-    expect(formulaRevealDurationMs(680, 34, 5)).toBe(600);
+  it("scales formula animation from one character to its rendered width", () => {
+    // A formula is one visual unit, but its time tracks its width rather than
+    // using a fixed fade.  It can never finish before one typed character.
+    expect(formulaRevealDurationMs(1, 34, 20)).toBe(50);
+    expect(formulaRevealDurationMs(680, 34, 30)).toBe(667);
+    expect(formulaRevealDurationMs(680, 34, 5)).toBe(4_000);
+    expect(mathRevealDurationMs(20, 20)).toBe(50);
   });
 
   it("tracks speed controls for each visible unit", () => {

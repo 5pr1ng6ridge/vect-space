@@ -13,8 +13,8 @@ import {
   buildPauseWindows,
   buildRevealSchedule,
   buildVisibleUnitCps,
-  DEFAULT_MATH_REVEAL_DURATION_MS,
   formulaRevealDurationMs,
+  mathRevealDurationMs,
   parseMarkup,
   revealCompletionTime,
   resolveInstantRevealPromptId,
@@ -120,8 +120,9 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           schedule,
           mathRevealDurations,
           revealAnimation,
+          unitCps,
         ),
-      [mathRevealDurations, revealAnimation, schedule, units],
+      [mathRevealDurations, revealAnimation, schedule, unitCps, units],
     );
     const [visibleCount, setVisibleCount] = useState(0);
     const [revealFinished, setRevealFinished] = useState(
@@ -403,8 +404,10 @@ function typingCpsAt(
     const revealAt = schedule[visibleIndex] ?? Number.POSITIVE_INFINITY;
     const duration =
       unit.kind === "math"
-        ? (mathRevealDurations.get(visibleIndex) ??
-          DEFAULT_MATH_REVEAL_DURATION_MS)
+        ? mathRevealDurationMs(
+            mathRevealDurations.get(visibleIndex),
+            unitCps[visibleIndex] ?? fallbackCps,
+          )
         : 0;
     if (elapsedMs < revealAt + duration) {
       return unitCps[visibleIndex] ?? fallbackCps;

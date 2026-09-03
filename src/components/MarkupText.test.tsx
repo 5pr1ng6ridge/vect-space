@@ -73,20 +73,28 @@ describe("MarkupText math reveal", () => {
       [40, 80, 120, 280],
       [25, 25, 25, 25],
       new Map([[2, 240]]),
+      new Map([
+        [0, { lineWidthPx: 96, unitOffsetPx: 0 }],
+        [1, { lineWidthPx: 96, unitOffsetPx: 32 }],
+        [2, { lineWidthPx: 96, unitOffsetPx: 64 }],
+        [3, { lineWidthPx: 32, unitOffsetPx: 0 }],
+      ]),
     );
 
     expect(timings.get(0)).toMatchObject({
       lineStartIndex: 0,
-      delayMs: 0,
+      durationMs: 320,
+      lineWidthPx: 96,
+      unitOffsetPx: 0,
     });
     expect(timings.get(2)).toMatchObject({
       lineStartIndex: 0,
-      delayMs: 80,
-      durationMs: 240,
+      durationMs: 320,
+      unitOffsetPx: 64,
     });
     expect(timings.get(3)).toMatchObject({
       lineStartIndex: 3,
-      delayMs: 0,
+      durationMs: 40,
     });
   });
 });

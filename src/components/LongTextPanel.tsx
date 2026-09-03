@@ -17,8 +17,8 @@ import {
   buildPauseWindows,
   buildRevealSchedule,
   buildVisibleUnitCps,
-  DEFAULT_MATH_REVEAL_DURATION_MS,
   formulaRevealDurationMs,
+  mathRevealDurationMs,
   parseMarkup,
   revealCompletionTime,
   resolveInstantRevealPromptId,
@@ -176,8 +176,9 @@ export const LongTextPanel = forwardRef<
         schedule,
         mathRevealDurations,
         revealAnimation,
+        unitCps,
       ),
-    [mathRevealDurations, revealAnimation, schedule, units],
+    [mathRevealDurations, revealAnimation, schedule, unitCps, units],
   );
   const [visibleCount, setVisibleCount] = useState(0);
   const [revealFinished, setRevealFinished] = useState(
@@ -942,7 +943,10 @@ function typingCpsAt(
     const revealAt = schedule[index] ?? Number.POSITIVE_INFINITY;
     const duration =
       unit.kind === "math"
-        ? (mathRevealDurations.get(index) ?? DEFAULT_MATH_REVEAL_DURATION_MS)
+        ? mathRevealDurationMs(
+            mathRevealDurations.get(index),
+            unitCps[index] ?? fallbackCps,
+          )
         : 0;
     if (elapsedMs <= revealAt + duration) return unitCps[index] ?? fallbackCps;
     index += 1;

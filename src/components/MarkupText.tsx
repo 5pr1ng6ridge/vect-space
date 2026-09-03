@@ -17,8 +17,10 @@ import {
 } from "../engine/markup";
 import type { TextRevealAnimation } from "../engine/types";
 import {
+  buildLineSweepGeometry,
   buildLineSweepTimings,
   resolveVisualLineGroups,
+  type LineSweepUnitGeometry,
   type LineSweepUnitTiming,
 } from "./visualLineGroups";
 
@@ -68,6 +70,7 @@ export const MarkupText = memo(function MarkupText({
   const [lineGroups, setLineGroups] = useState<{
     source: string;
     groups: readonly (readonly number[])[];
+    geometry: ReadonlyMap<number, LineSweepUnitGeometry>;
   } | null>(null);
 
   useLayoutEffect(() => {
@@ -83,10 +86,14 @@ export const MarkupText = memo(function MarkupText({
         0,
       );
       if (measuredUnitCount !== units.length) return;
+      const geometry = buildLineSweepGeometry(groups, unitElementsRef.current);
+      if (geometry.size !== units.length) return;
       setLineGroups((current) =>
-        current?.source === source && sameLineGroups(current.groups, groups)
+        current?.source === source &&
+        sameLineGroups(current.groups, groups) &&
+        sameLineSweepGeometry(current.geometry, geometry)
           ? current
-          : { source, groups },
+          : { source, groups, geometry },
       );
     };
     frame = requestAnimationFrame(measure);
@@ -107,14 +114,21 @@ export const MarkupText = memo(function MarkupText({
 
   const activeLineGroups =
     lineGroups?.source === source ? lineGroups.groups : null;
+  const activeLineGeometry =
+    lineGroups?.source === source ? lineGroups.geometry : null;
   const groupedUnitCount =
     activeLineGroups?.reduce((total, group) => total + group.length, 0) ?? 0;
   const lineSweepReady =
     !lineSweepMode ||
-    (activeLineGroups !== null && groupedUnitCount === units.length);
+    (activeLineGroups !== null &&
+      activeLineGeometry !== null &&
+      groupedUnitCount === units.length &&
+      activeLineGeometry.size === units.length);
   const lineSweepTimings = useMemo(
     () =>
-      !lineSweepRequested || activeLineGroups === null
+      !lineSweepRequested ||
+      activeLineGroups === null ||
+      activeLineGeometry === null
         ? new Map<number, LineSweepUnitTiming>()
         : buildLineSweepTimings(
             units,
@@ -122,9 +136,11 @@ export const MarkupText = memo(function MarkupText({
             revealSchedule,
             unitCps,
             mathRevealDurations,
+            activeLineGeometry,
           ),
     [
       activeLineGroups,
+      activeLineGeometry,
       lineSweepRequested,
       mathRevealDurations,
       revealSchedule,
@@ -149,8 +165,9 @@ export const MarkupText = memo(function MarkupText({
       ...(lineSweepTiming === undefined
         ? {}
         : {
-            "--line-sweep-delay": `${lineSweepTiming.delayMs}ms`,
             "--line-sweep-duration": `${lineSweepTiming.durationMs}ms`,
+            "--line-sweep-width": `${lineSweepTiming.lineWidthPx}px`,
+            "--line-sweep-offset": `${lineSweepTiming.unitOffsetPx}px`,
           }),
     } as CSSProperties;
     const revealClass =
@@ -252,6 +269,7 @@ function MathMarkupUnit({
       }),
     [unit.display, unit.latex],
   );
+  const fallbackRevealDuration = formulaRevealDurationMs(0, 0, cps);
 
   useLayoutEffect(() => {
     if (!animate || !fontReady) return;
@@ -291,6 +309,11 @@ function MathMarkupUnit({
         className="math-reveal-content markup-reveal-content"
         dangerouslySetInnerHTML={{ __html: html }}
         ref={contentRef}
+        style={
+          {
+            "--math-reveal-duration": `${fallbackRevealDuration}ms`,
+          } as CSSProperties
+        }
       />
     </span>
   );
@@ -306,4 +329,22 @@ function sameLineGroups(
       line.length === right[index]?.length &&
       line.every((unit, unitIndex) => unit === right[index]?.[unitIndex]),
   );
+}
+
+function sameLineSweepGeometry(
+  left: ReadonlyMap<number, LineSweepUnitGeometry> | undefined,
+  right: ReadonlyMap<number, LineSweepUnitGeometry>,
+): boolean {
+  if (left === undefined || left.size !== right.size) return false;
+  for (const [index, value] of left) {
+    const candidate = right.get(index);
+    if (
+      candidate === undefined ||
+      candidate.lineWidthPx !== value.lineWidthPx ||
+      candidate.unitOffsetPx !== value.unitOffsetPx
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
