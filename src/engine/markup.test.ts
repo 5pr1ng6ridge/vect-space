@@ -50,6 +50,14 @@ describe("VN markup", () => {
     ).toBe("$ [ \\");
   });
 
+  it("normalizes every source line ending to one hard-break character", () => {
+    expect(
+      visibleUnits(parseMarkup("甲\r\n乙\r丙\n丁")).map((unit) =>
+        unit.kind === "character" ? unit.value : "",
+      ),
+    ).toEqual(["甲", "\n", "乙", "\n", "丙", "\n", "丁"]);
+  });
+
   it("accounts for pause and speed controls", () => {
     const units = parseMarkup("A[pause=500ms][speed=10cps]B");
     const schedule = buildRevealSchedule(units, 20, 30);

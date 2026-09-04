@@ -6,6 +6,7 @@ import { MarkupText } from "./MarkupText";
 import {
   buildLineSweepGeometry,
   buildLineSweepTimings,
+  lineSweepMaskPositionPx,
   resolveVisualLineGroups,
 } from "./visualLineGroups";
 
@@ -64,6 +65,11 @@ describe("MarkupText math reveal", () => {
     expect(html).toContain("<wbr");
   });
 
+  it("renders an explicit hard line break instead of relying on whitespace inheritance", () => {
+    const html = renderToStaticMarkup(<MarkupText source={"甲\r\n乙"} />);
+    expect(html).toContain("<br");
+  });
+
   it("keeps an inline formula with text that shares its visual baseline", () => {
     const units = visibleUnits(parseMarkup("示例：$A \\cong B$"));
     const element = (top: number, height: number): HTMLElement =>
@@ -82,6 +88,22 @@ describe("MarkupText math reveal", () => {
       ]),
     );
     expect(groups).toEqual([[0, 1, 2, 3]]);
+  });
+
+  it("keeps explicit source line breaks in separate visual rows", () => {
+    const units = visibleUnits(parseMarkup("甲\n乙"));
+    const element = (top: number): HTMLElement =>
+      ({
+        getBoundingClientRect: () => ({ top, height: 34 }) as DOMRect,
+      }) as HTMLElement;
+    const groups = resolveVisualLineGroups(
+      units,
+      new Map([
+        [0, element(100)],
+        [2, element(100)],
+      ]),
+    );
+    expect(groups).toEqual([[0], [2]]);
   });
 
   it("keeps line-sweep timing on the original inline units", () => {
@@ -134,6 +156,17 @@ describe("MarkupText math reveal", () => {
 
     expect(timings.get(0)?.durationMs).toBe(100);
     expect(timings.get(1)?.durationMs).toBe(100);
+    const timing = timings.get(0);
+    expect(timing).toBeDefined();
+    if (timing === undefined) return;
+    expect(
+      lineSweepMaskPositionPx(timing, 50, [{ startMs: 50, endMs: 550 }]),
+    ).toBe(lineSweepMaskPositionPx(timing, 420, [{ startMs: 50, endMs: 550 }]));
+    expect(
+      lineSweepMaskPositionPx(timing, 600, [{ startMs: 50, endMs: 550 }]),
+    ).toBeGreaterThan(
+      lineSweepMaskPositionPx(timing, 50, [{ startMs: 50, endMs: 550 }]),
+    );
   });
 
   it("uses the actual KaTeX box for a centered display formula", () => {

@@ -13,11 +13,18 @@ export interface LineSweepUnitTiming {
   readonly lineWidthPx: number;
   /** This unit's left edge within the visual row. */
   readonly unitOffsetPx: number;
+  /** Absolute reveal-clock bounds for this row, including explicit pauses. */
+  readonly startMs: number;
+  readonly endMs: number;
 }
 
 export interface LineSweepUnitGeometry {
   readonly lineWidthPx: number;
   readonly unitOffsetPx: number;
+}
+
+export function isHardLineBreak(unit: VisibleUnit): boolean {
+  return unit.kind === "character" && unit.value === "\n";
 }
 
 /**
@@ -33,16 +40,24 @@ export function resolveVisualLineGroups(
   let lastCenter: number | null = null;
   let lastHeight = 0;
   let previousWasDisplayMath = false;
+  let forceNextLine = false;
   for (let index = 0; index < units.length; index += 1) {
     const unit = units[index];
+    if (unit === undefined) return [];
+    if (isHardLineBreak(unit)) {
+      forceNextLine = true;
+      previousWasDisplayMath = false;
+      continue;
+    }
     const element = elements.get(index);
-    if (unit === undefined || element === undefined) return [];
+    if (element === undefined) return [];
     const rect = element.getBoundingClientRect();
     const center = rect.top + rect.height / 2;
     const tolerance = Math.max(4, Math.max(lastHeight, rect.height) * 0.45);
     const isDisplayMath = unit.kind === "math" && unit.display;
     const startsLine =
       lastCenter === null ||
+      forceNextLine ||
       previousWasDisplayMath ||
       isDisplayMath ||
       Math.abs(center - lastCenter) > tolerance;
@@ -51,6 +66,7 @@ export function resolveVisualLineGroups(
     lastCenter = center;
     lastHeight = rect.height;
     previousWasDisplayMath = isDisplayMath;
+    forceNextLine = false;
   }
   return groups;
 }
@@ -104,10 +120,38 @@ export function buildLineSweepTimings(
         durationMs: Math.round(lineDurationMs),
         lineWidthPx: unitGeometry.lineWidthPx,
         unitOffsetPx: unitGeometry.unitOffsetPx,
+        startMs: lineStartMs,
+        endMs: lineEndMs,
       });
     }
   }
   return result;
+}
+
+/**
+ * Resolves the mask entirely from the story clock.  Unlike pausing a CSS
+ * animation, this never leaves its antialiased feather part-way over a later
+ * glyph while a `[pause]` is active.
+ */
+export function lineSweepMaskPositionPx(
+  timing: LineSweepUnitTiming,
+  elapsedMs: number,
+  pauseWindows: readonly { startMs: number; endMs: number }[],
+  featherPx = 51,
+): number {
+  const boundedElapsed = Math.min(
+    timing.endMs,
+    Math.max(timing.startMs, elapsedMs),
+  );
+  const spentMs = Math.max(
+    0,
+    boundedElapsed -
+      timing.startMs -
+      pauseDurationWithin(pauseWindows, timing.startMs, boundedElapsed),
+  );
+  const progress = clamp(spentMs / Math.max(1, timing.durationMs), 0, 1);
+  const sweepWidth = timing.lineWidthPx + featherPx;
+  return -timing.unitOffsetPx - sweepWidth + sweepWidth * progress;
 }
 
 /** Captures geometry outside React render, in the unscaled CSS layout space. */
@@ -151,6 +195,10 @@ function pauseDurationWithin(
     const overlapEnd = Math.min(endMs, window.endMs);
     return total + Math.max(0, overlapEnd - overlapStart);
   }, 0);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function visibleElementBox(element: HTMLElement): {

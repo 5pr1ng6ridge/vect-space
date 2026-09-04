@@ -163,6 +163,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     const [lineSweepReadyPromptId, setLineSweepReadyPromptId] = useState<
       string | null
     >(null);
+    const [lineSweepElapsedMs, setLineSweepElapsedMs] = useState(0);
     const promptIdRef = useRef(promptId);
     const visibleRef = useRef(0);
     const promptIsActive = activePromptId === promptId;
@@ -222,11 +223,15 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       promptIdRef.current = promptId;
       setPaused(isPauseAt(0, pauseWindows));
       setTypingCps(unitCps[0] ?? initialCps);
+      setLineSweepElapsedMs(revealImmediately ? revealCompletionMs : 0);
       if (initiallyFinished) return;
       const startedAt = performance.now();
       let frame = 0;
       const tick = (now: number): void => {
         const elapsed = now - startedAt;
+        if (revealAnimation === "line_sweep") {
+          setLineSweepElapsedMs(elapsed);
+        }
         const nextPaused = isPauseAt(elapsed, pauseWindows);
         setPaused((current) => (current === nextPaused ? current : nextPaused));
         const nextCps = typingCpsAt(
@@ -267,6 +272,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       mathRevealDurations,
       promptId,
       revealCompletionMs,
+      revealAnimation,
       revealImmediately,
       revealReady,
       schedule,
@@ -382,7 +388,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
             animateMath
             instantMathReveal={instantRevealPromptId === promptId}
             instantReveal={instantRevealPromptId === promptId}
-            lineSweepPaused={effectivePaused}
+            lineSweepElapsedMs={lineSweepElapsedMs}
             mathRevealDurations={mathRevealDurations}
             onMathMetrics={handleMathMetrics}
             revealAnimation={revealAnimation}

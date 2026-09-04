@@ -220,6 +220,7 @@ export const LongTextPanel = forwardRef<
   const [lineSweepReadyPromptId, setLineSweepReadyPromptId] = useState<
     string | null
   >(null);
+  const [lineSweepElapsedMs, setLineSweepElapsedMs] = useState(0);
   const [stepHeights, setStepHeights] = useState<
     Readonly<Record<string, number>>
   >({});
@@ -508,12 +509,16 @@ export const LongTextPanel = forwardRef<
       revealPromptRef.current = prompt.prompt_id;
       setPaused(isPauseAt(0, pauseWindows));
       setTypingCps(unitCps[0] ?? initialCps);
+      setLineSweepElapsedMs(revealImmediately ? revealCompletionMs : 0);
       manuallyBrowsingRef.current = false;
       if (!initiallyFinished) frame = requestAnimationFrame(tick);
     };
     const startedAt = performance.now();
     const tick = (now: number): void => {
       const elapsed = now - startedAt;
+      if (revealAnimation === "line_sweep") {
+        setLineSweepElapsedMs(elapsed);
+      }
       const nextPaused = isPauseAt(elapsed, pauseWindows);
       setPaused((current) => (current === nextPaused ? current : nextPaused));
       setTypingCps((current) => {
@@ -555,6 +560,7 @@ export const LongTextPanel = forwardRef<
     pauseWindows,
     prompt.prompt_id,
     revealCompletionMs,
+    revealAnimation,
     revealImmediately,
     revealReady,
     schedule,
@@ -704,52 +710,52 @@ export const LongTextPanel = forwardRef<
   ]);
 
   useEffect(() => {
-    if (!layoutReady || manuallyBrowsingRef.current) return;
+    if (!layoutReady || complete) return;
     let frame = 0;
     let previous = performance.now();
     const tick = (now: number): void => {
-      const next = clamp(
-        advanceLongTextScroll(
-          scrollOffsetRef.current,
-          scrollTargetRef.current,
-          now - previous,
-          fastForward,
-        ),
-        0,
-        maxScroll,
-      );
+      const elapsedMs = now - previous;
       previous = now;
-      if (Math.abs(next - scrollOffsetRef.current) > 0.01) {
-        applyScrollOffset(next);
-        updatePageWindow(next);
+      if (!manuallyBrowsingRef.current) {
+        const next = clamp(
+          advanceLongTextScroll(
+            scrollOffsetRef.current,
+            scrollTargetRef.current,
+            elapsedMs,
+            fastForward,
+          ),
+          0,
+          maxScroll,
+        );
+        if (Math.abs(next - scrollOffsetRef.current) > 0.01) {
+          applyScrollOffset(next);
+          updatePageWindow(next);
+        }
+        if (
+          scrollPreparedPromptId !== prompt.prompt_id &&
+          hasReachedLongTextRevealThreshold({
+            startOffset: scrollStartOffsetRef.current,
+            targetOffset: scrollTargetRef.current,
+            currentOffset: next,
+          })
+        ) {
+          setScrollPreparedPromptId(prompt.prompt_id);
+        }
       }
-      if (
-        scrollPreparedPromptId !== prompt.prompt_id &&
-        hasReachedLongTextRevealThreshold({
-          startOffset: scrollStartOffsetRef.current,
-          targetOffset: scrollTargetRef.current,
-          currentOffset: next,
-        })
-      ) {
-        setScrollPreparedPromptId(prompt.prompt_id);
-      }
-      if (Math.abs(scrollTargetRef.current - next) > 0.01) {
-        frame = requestAnimationFrame(tick);
-      } else if (scrollPreparedPromptId !== prompt.prompt_id) {
-        setScrollPreparedPromptId(prompt.prompt_id);
-      }
-    };
-    if (Math.abs(scrollTargetRef.current - scrollOffsetRef.current) > 0.01) {
+      // Keep one controller alive for the whole prompt.  Restarting this
+      // effect on every newly visible unit introduced a small hitch exactly
+      // when a paragraph continued or a new paper entered the viewport.
       frame = requestAnimationFrame(tick);
-    }
+    };
+    frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
   }, [
+    complete,
     fastForward,
     applyScrollOffset,
     layoutReady,
     maxScroll,
     prompt.prompt_id,
-    renderedVisibleCount,
     scrollPreparedPromptId,
     updatePageWindow,
   ]);
@@ -916,7 +922,7 @@ export const LongTextPanel = forwardRef<
                         instantReveal={
                           instantRevealPromptId === prompt.prompt_id
                         }
-                        lineSweepPaused={effectivePaused}
+                        lineSweepElapsedMs={lineSweepElapsedMs}
                         mathRevealDurations={mathRevealDurations}
                         revealAnimation={revealAnimation}
                         revealSchedule={schedule}

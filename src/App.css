@@ -343,11 +343,13 @@ button:disabled {
         var(--line-sweep-feather, 1.5em)
     )
     0;
+  -webkit-mask-position: var(--line-sweep-mask-position) 0;
   mask-position: calc(
       0px - var(--line-sweep-offset) - var(--line-sweep-width) -
         var(--line-sweep-feather, 1.5em)
     )
     0;
+  mask-position: var(--line-sweep-mask-position) 0;
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
   -webkit-mask-size: calc(
@@ -356,11 +358,8 @@ button:disabled {
     100%;
   mask-size: calc(var(--line-sweep-width) + var(--line-sweep-feather, 1.5em))
     100%;
-  animation: text-reveal-line-sweep var(--line-sweep-duration, 90ms) linear both;
-  /* Set on the unit as an inherited custom property.  This cannot lose a
-     specificity contest with the animation shorthand above, so [pause]
-     freezes an active sweep in every WebView2 build. */
-  animation-play-state: var(--line-sweep-play-state, running);
+  /* The reveal clock supplies this position directly. `[pause]` therefore
+     holds an exact boundary instead of freezing an antialiased CSS frame. */
   will-change: mask-position;
 }
 
@@ -404,26 +403,6 @@ button:disabled {
   opacity: 1 !important;
   transform: none;
   top: 0;
-}
-
-@keyframes text-reveal-line-sweep {
-  from {
-    -webkit-mask-position: calc(
-        0px - var(--line-sweep-offset) - var(--line-sweep-width) -
-          var(--line-sweep-feather, 1.5em)
-      )
-      0;
-    mask-position: calc(
-        0px - var(--line-sweep-offset) - var(--line-sweep-width) -
-          var(--line-sweep-feather, 1.5em)
-      )
-      0;
-  }
-
-  to {
-    -webkit-mask-position: calc(0px - var(--line-sweep-offset)) 0;
-    mask-position: calc(0px - var(--line-sweep-offset)) 0;
-  }
 }
 
 @keyframes text-reveal-formula-fade {

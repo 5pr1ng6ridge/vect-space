@@ -100,6 +100,16 @@ export function parseMarkup(source: string): MarkupUnit[] {
         continue;
       }
     }
+    if (remaining.startsWith("\r\n")) {
+      units.push(character("\n", effects));
+      index += 2;
+      continue;
+    }
+    if (remaining.startsWith("\r")) {
+      units.push(character("\n", effects));
+      index += 1;
+      continue;
+    }
     if (remaining.startsWith("$$")) {
       const end = findUnescaped(source, "$$", index + 2);
       if (end >= 0) {
