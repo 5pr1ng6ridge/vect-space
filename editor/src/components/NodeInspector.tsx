@@ -52,6 +52,7 @@ interface NodeInspectorProps {
   onConvertToTimeline(nodeId: string): void;
   onSplitDialogue(nodeId: string, offset: number): void;
   onSetEntry(nodeId: string): void;
+  onOpenLongTextWorkspace(nodeId: string): void;
   uiMotions: UiMotionFile[];
 }
 
@@ -66,6 +67,7 @@ export function NodeInspector({
   onConvertToTimeline,
   onSplitDialogue,
   onSetEntry,
+  onOpenLongTextWorkspace,
   uiMotions,
 }: NodeInspectorProps): ReactElement {
   const node = nodeId === null ? undefined : scene.nodes[nodeId];
@@ -140,8 +142,14 @@ export function NodeInspector({
       </section>
 
       <section className="inspector-section node-fields">
-        {renderFields(node, update, scene, manifest, uiMotions, (offset) =>
-          onSplitDialogue(nodeId, offset),
+        {renderFields(
+          node,
+          update,
+          scene,
+          manifest,
+          uiMotions,
+          (offset) => onSplitDialogue(nodeId, offset),
+          () => onOpenLongTextWorkspace(nodeId),
         )}
       </section>
 
@@ -190,6 +198,7 @@ function renderFields(
   manifest: ContentManifest,
   uiMotions: UiMotionFile[],
   splitDialogue: (offset: number) => void,
+  openLongTextWorkspace: () => void,
 ): ReactNode {
   const targets = Object.keys(scene.nodes);
   switch (node.type) {
@@ -492,6 +501,13 @@ function renderFields(
             onChange={(text_color) => update({ ...node, text_color })}
             value={node.text_color ?? "#212533"}
           />
+          <button
+            className="primary-button long-text-open-workspace"
+            onClick={openLongTextWorkspace}
+            type="button"
+          >
+            全屏背景预览编辑
+          </button>
           <LongTextLayoutEditor
             layout={node.layout ?? DEFAULT_LONG_TEXT_LAYOUT}
             onChange={(layout) => update({ ...node, layout })}

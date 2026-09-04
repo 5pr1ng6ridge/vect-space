@@ -756,9 +756,7 @@ export default function App(): ReactElement {
                 revealAnimation={revealAnimation}
                 fontReady={fontReady}
                 ref={dialogueRef}
-                revealImmediately={
-                  dialogue === null || !hasTextRevealCue
-                }
+                revealImmediately={dialogue === null || !hasTextRevealCue}
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
             )}

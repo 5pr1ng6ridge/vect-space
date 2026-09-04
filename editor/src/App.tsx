@@ -73,6 +73,11 @@ const TimelineWorkspace = lazy(() =>
     default: module.TimelineWorkspace,
   })),
 );
+const LongTextWorkspace = lazy(() =>
+  import("./components/LongTextWorkspace").then((module) => ({
+    default: module.LongTextWorkspace,
+  })),
+);
 const UiMotionWorkspace = lazy(() =>
   import("./components/UiMotionWorkspace").then((module) => ({
     default: module.UiMotionWorkspace,
@@ -167,6 +172,10 @@ export function App(): ReactElement {
   const [addType, setAddType] = useState<NodeType>("say");
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("scenes");
   const [timelineTarget, setTimelineTarget] = useState<{
+    sceneId: string;
+    nodeId: string;
+  } | null>(null);
+  const [longTextTarget, setLongTextTarget] = useState<{
     sceneId: string;
     nodeId: string;
   } | null>(null);
@@ -307,6 +316,7 @@ export function App(): ReactElement {
       setActiveSceneId(initialScene);
       setSelectedNodeId(null);
       setTimelineTarget(null);
+      setLongTextTarget(null);
       setUiMotionTarget(null);
       setFlowWorkspace(false);
       setFlowSelectionId(null);
@@ -611,6 +621,12 @@ export function App(): ReactElement {
       }
     });
     setSelectedNodeId(null);
+    if (
+      longTextTarget?.sceneId === activeSceneId &&
+      longTextTarget.nodeId === nodeId
+    ) {
+      setLongTextTarget(null);
+    }
   };
 
   const duplicateNode = (nodeId: string): void => {
@@ -732,6 +748,7 @@ export function App(): ReactElement {
     const next =
       project.scenes.find((file) => file.definition.id !== sceneId)?.definition
         .id ?? "";
+    if (longTextTarget?.sceneId === sceneId) setLongTextTarget(null);
     setActiveSceneId(next);
     setSelectedNodeId(null);
   };
@@ -858,6 +875,47 @@ export function App(): ReactElement {
   const uiMotionFile = project.ui_motions.find(
     (file) => file.definition.id === uiMotionTarget,
   );
+  const longTextScene = findScene(project, longTextTarget?.sceneId ?? "");
+  const longTextNode =
+    longTextTarget === null
+      ? undefined
+      : longTextScene?.definition.nodes[longTextTarget.nodeId];
+  if (
+    longTextTarget !== null &&
+    longTextScene !== undefined &&
+    longTextNode?.type === "long_text"
+  ) {
+    return (
+      <>
+        <Suspense fallback={<WorkspaceFallback />}>
+          <LongTextWorkspace
+            assets={project.assets}
+            dirty={dirty}
+            node={longTextNode}
+            nodeId={longTextTarget.nodeId}
+            onBack={() => setLongTextTarget(null)}
+            onChange={(next) => changeNode(longTextTarget.nodeId, next)}
+            onRedo={redo}
+            onSave={() => void saveProject()}
+            onUndo={undo}
+            project={project}
+            redoAvailable={future.length > 0}
+            sceneId={longTextTarget.sceneId}
+            undoAvailable={past.length > 0}
+          />
+        </Suspense>
+        {error !== null && (
+          <div className="error-toast" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              关闭
+            </button>
+          </div>
+        )}
+        {notice !== null && <div className="notice-toast">{notice}</div>}
+      </>
+    );
+  }
   if (flowWorkspace && project.story_flow !== null) {
     return (
       <Suspense fallback={<WorkspaceFallback />}>
@@ -1221,8 +1279,14 @@ export function App(): ReactElement {
             onPaste={pasteNode}
             onQuickInsert={quickInsertNode}
             onOpen={(nodeId) => {
-              if (activeScene.nodes[nodeId]?.type === "timeline") {
+              const node = activeScene.nodes[nodeId];
+              if (node?.type === "timeline") {
+                setLongTextTarget(null);
                 setTimelineTarget({ sceneId: activeSceneId, nodeId });
+              } else if (node?.type === "long_text") {
+                setTimelineTarget(null);
+                setUiMotionTarget(null);
+                setLongTextTarget({ sceneId: activeSceneId, nodeId });
               }
             }}
             onSelect={setSelectedNodeId}
@@ -1250,6 +1314,11 @@ export function App(): ReactElement {
           onDuplicate={duplicateNode}
           onConvertToTimeline={convertNodeToTimeline}
           onSplitDialogue={splitDialogue}
+          onOpenLongTextWorkspace={(nodeId) => {
+            setTimelineTarget(null);
+            setUiMotionTarget(null);
+            setLongTextTarget({ sceneId: activeSceneId, nodeId });
+          }}
           uiMotions={project.ui_motions}
           onRename={(previousId, nextId) => {
             if (

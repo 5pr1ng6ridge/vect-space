@@ -62,7 +62,8 @@ export const StoryNodeCard = memo(function StoryNodeCard({
       data-allow-context-menu="true"
       onClick={() => data.onSelect(data.nodeId)}
       onDoubleClick={() => {
-        if (data.node.type === "timeline") data.onOpen(data.nodeId);
+        if (data.node.type === "timeline" || data.node.type === "long_text")
+          data.onOpen(data.nodeId);
       }}
       onContextMenu={(event) => {
         event.preventDefault();
