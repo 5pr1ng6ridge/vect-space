@@ -227,9 +227,6 @@ export const LongTextPanel = forwardRef<
   const [scrollPreparedPromptId, setScrollPreparedPromptId] = useState<
     string | null
   >(null);
-  const [scrollSettledPromptId, setScrollSettledPromptId] = useState<
-    string | null
-  >(revealImmediately ? prompt.prompt_id : null);
   const [pageWindow, setPageWindow] = useState({ start: 0, end: 0 });
   const [presentedDocumentId, setPresentedDocumentId] = useState<string | null>(
     null,
@@ -501,7 +498,6 @@ export const LongTextPanel = forwardRef<
       completeRef.current = initiallyFinished;
       setVisibleCount(initialVisibleCount);
       setRevealFinished(initiallyFinished);
-      setScrollSettledPromptId(revealImmediately ? prompt.prompt_id : null);
       setInstantRevealPromptId((current) =>
         resolveInstantRevealPromptId(
           current,
@@ -586,28 +582,17 @@ export const LongTextPanel = forwardRef<
         setVisibleCount(schedule.length);
       },
       isComplete: () =>
-        scrollPreparedPromptId === prompt.prompt_id &&
-        completeRef.current &&
-        (revealImmediately || scrollSettledPromptId === prompt.prompt_id),
+        scrollPreparedPromptId === prompt.prompt_id && completeRef.current,
     }),
-    [
-      prompt.prompt_id,
-      revealImmediately,
-      schedule.length,
-      scrollPreparedPromptId,
-      scrollSettledPromptId,
-    ],
+    [prompt.prompt_id, schedule.length, scrollPreparedPromptId],
   );
 
-  const readyToAdvance =
-    complete &&
-    (revealImmediately || scrollSettledPromptId === prompt.prompt_id);
   useEffect(() => {
-    if (readyToAdvance && reportedPromptRef.current !== prompt.prompt_id) {
+    if (complete && reportedPromptRef.current !== prompt.prompt_id) {
       reportedPromptRef.current = prompt.prompt_id;
       onRevealComplete(prompt.prompt_id);
     }
-  }, [onRevealComplete, prompt.prompt_id, readyToAdvance]);
+  }, [complete, onRevealComplete, prompt.prompt_id]);
 
   const effectivePaused = promptIsActive ? paused : isPauseAt(0, pauseWindows);
   const typing = promptIsActive && !disabled && !complete && !effectivePaused;
@@ -760,9 +745,6 @@ export const LongTextPanel = forwardRef<
       const settled =
         Math.abs(scrollTargetRef.current - scrollOffsetRef.current) <= 0.01;
       if (complete && (manuallyBrowsingRef.current || settled)) {
-        setScrollSettledPromptId((current) =>
-          current === prompt.prompt_id ? current : prompt.prompt_id,
-        );
         return;
       }
       // Keep one controller alive for the whole prompt.  Restarting this
@@ -976,9 +958,7 @@ export const LongTextPanel = forwardRef<
           </div>
         </div>
       </div>
-      <span
-        className={`long-text-indicator${readyToAdvance ? " is-ready" : ""}`}
-      >
+      <span className={`long-text-indicator${complete ? " is-ready" : ""}`}>
         ◆
       </span>
     </section>
