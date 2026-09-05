@@ -17,6 +17,7 @@
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.2",
     "@vectspace/presentation-core": "0.1.0",
+    "@vectspace/text": "0.1.0",
     "@xyflow/react": "12.11.3",
     "elkjs": "0.12.0",
     "immer": "10.1.3",

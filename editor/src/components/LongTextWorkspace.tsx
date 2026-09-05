@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -84,10 +85,14 @@ export function LongTextWorkspace({
   const [draft, setDraft] = useState(node);
   const draftRef = useRef(node);
   const [previewScale, setPreviewScale] = useState(0.5);
+  const [measuredSurfaceHeight, setMeasuredSurfaceHeight] = useState<
+    number | null
+  >(null);
   const [gestureActive, setGestureActive] = useState(false);
   const [backgroundChoice, setBackgroundChoice] = useState("__current__");
   const stageWrapRef = useRef<HTMLDivElement>(null);
   const designRef = useRef<HTMLDivElement>(null);
+  const paperRef = useRef<HTMLDivElement>(null);
   const gestureRef = useRef<LayoutGesture | null>(null);
 
   const assetsById = useMemo(
@@ -122,11 +127,14 @@ export function LongTextWorkspace({
     `Long Text ${previewFont?.id ?? "default"}`,
   );
   const layout = draft.layout ?? DEFAULT_LAYOUT;
-  const previewSteps =
-    draft.steps.length > 0
-      ? draft.steps
-      : [{ id: "preview", text: "长文本预览", page_break_before: false }];
-  const previewSurfaceHeight = useMemo(() => {
+  const previewSteps = useMemo(
+    () =>
+      draft.steps.length > 0
+        ? draft.steps
+        : [{ id: "preview", text: "长文本预览", page_break_before: false }],
+    [draft.steps],
+  );
+  const estimatedSurfaceHeight = useMemo(() => {
     const estimatedStepHeight = Math.max(88, (draft.font_size ?? 32) * 2.2);
     const contentHeight =
       layout.padding_y * 2 + previewSteps.length * estimatedStepHeight;
@@ -137,6 +145,66 @@ export function LongTextWorkspace({
     layout.padding_y,
     previewSteps.length,
   ]);
+  const previewSurfaceHeight = Math.max(
+    estimatedSurfaceHeight,
+    measuredSurfaceHeight ?? 0,
+  );
+
+  // Use the actual KaTeX/font layout as the editor's height source. The
+  // estimate above only prevents the first paint from collapsing; after the
+  // browser has laid out every unit, the measured scroll height becomes the
+  // stable surface size used by both the paper and text layers.
+  useLayoutEffect(() => {
+    const paper = paperRef.current;
+    if (paper === null) return;
+    const measure = (): void => {
+      const next = Math.max(layout.page_height, paper.scrollHeight);
+      setMeasuredSurfaceHeight((previous) =>
+        previous === next ? previous : next,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(paper);
+    return () => observer.disconnect();
+  }, [
+    draft.font_size,
+    layout.page_height,
+    layout.padding_x,
+    layout.padding_y,
+    layout.page_gap,
+    previewSteps,
+  ]);
+
+  useEffect(() => {
+    setMeasuredSurfaceHeight(null);
+  }, [
+    draft.font_size,
+    layout.page_height,
+    layout.padding_x,
+    layout.padding_y,
+    layout.page_gap,
+    previewSteps,
+  ]);
+
+  const interpolationWarnings = useMemo(
+    () =>
+      previewSteps.flatMap((step) => {
+        try {
+          interpolateTemplate(step.text, (id) => {
+            const definition = project.manifest.variables[id];
+            if (definition === undefined) throw new Error(`未知变量：${id}`);
+            return definition.default;
+          });
+          return [];
+        } catch (error) {
+          return [
+            `${step.id}：${error instanceof Error ? error.message : "变量插值失败"}`,
+          ];
+        }
+      }),
+    [previewSteps, project.manifest.variables],
+  );
 
   const replaceDraft = useCallback((next: LongTextNode): void => {
     draftRef.current = next;
@@ -400,6 +468,7 @@ export function LongTextWorkspace({
                   <div className="long-text-workspace-text-clip">
                     <div
                       className="long-text-workspace-paper"
+                      ref={paperRef}
                       style={textStyle}
                     >
                       {previewSteps.map((step, index) => (
@@ -464,6 +533,18 @@ export function LongTextWorkspace({
           <p className="long-text-workspace-note">
             背景选择不会写入 YAML；它只用于确认文本块在真实场景中的可读性。
           </p>
+          <p className="long-text-workspace-note">
+            预览使用共享文本解析器；pause、speed 和 auto
+            只控制播放，不占据正文排版空间。
+          </p>
+          {interpolationWarnings.length > 0 && (
+            <div className="long-text-workspace-warning">
+              <strong>预览插值诊断</strong>
+              {interpolationWarnings.map((warning) => (
+                <div key={warning}>{warning}</div>
+              ))}
+            </div>
+          )}
           <label>
             纸张素材
             <select
