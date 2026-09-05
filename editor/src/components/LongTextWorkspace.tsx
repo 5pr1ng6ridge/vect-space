@@ -12,6 +12,7 @@ import {
 import { assetUrl } from "../api";
 import { interpolateTemplate } from "../textTemplate";
 import { useAssetFont } from "../useAssetFont";
+import type { TextLayoutSnapshot } from "@vectspace/text";
 import type {
   ContentManifest,
   EditorAsset,
@@ -88,6 +89,9 @@ export function LongTextWorkspace({
   const [measuredSurfaceHeight, setMeasuredSurfaceHeight] = useState<
     number | null
   >(null);
+  const [stepLayouts, setStepLayouts] = useState<
+    Readonly<Record<string, TextLayoutSnapshot>>
+  >({});
   const [gestureActive, setGestureActive] = useState(false);
   const [backgroundChoice, setBackgroundChoice] = useState("__current__");
   const stageWrapRef = useRef<HTMLDivElement>(null);
@@ -134,6 +138,56 @@ export function LongTextWorkspace({
         : [{ id: "preview", text: "长文本预览", page_break_before: false }],
     [draft.steps],
   );
+  const reportStepLayout = useCallback(
+    (stepId: string, nextLayout: TextLayoutSnapshot): void => {
+      setStepLayouts((previous) => {
+        const current = previous[stepId];
+        if (current !== undefined && sameLayoutSnapshot(current, nextLayout)) {
+          return previous;
+        }
+        return { ...previous, [stepId]: nextLayout };
+      });
+    },
+    [],
+  );
+  const measuredPagination = useMemo(() => {
+    const capacity = Math.max(1, layout.page_height - layout.padding_y * 2);
+    const breakBefore = new Set<number>();
+    let used = 0;
+    let surfaceHeight = layout.padding_y * 2;
+    previewSteps.forEach((step, index) => {
+      const measuredHeight = stepLayouts[step.id]?.contentHeight;
+      const height = Math.max(
+        1,
+        measuredHeight ?? Math.max(88, (draft.font_size ?? 32) * 2.2),
+      );
+      const gap = used === 0 ? 0 : 28;
+      const explicitBreak =
+        index > 0 &&
+        draft.pagination !== "continuous" &&
+        step.page_break_before;
+      const automaticBreak =
+        index > 0 &&
+        draft.pagination === "auto" &&
+        used > 0 &&
+        used + gap + height > capacity;
+      if (explicitBreak || automaticBreak) {
+        breakBefore.add(index);
+        used = 0;
+      }
+      const nextGap = used === 0 ? 0 : 28;
+      used += nextGap + height;
+      surfaceHeight = Math.max(surfaceHeight, layout.padding_y * 2 + used);
+    });
+    return { breakBefore, surfaceHeight };
+  }, [
+    draft.font_size,
+    draft.pagination,
+    layout.page_height,
+    layout.padding_y,
+    previewSteps,
+    stepLayouts,
+  ]);
   const estimatedSurfaceHeight = useMemo(() => {
     const estimatedStepHeight = Math.max(88, (draft.font_size ?? 32) * 2.2);
     const contentHeight =
@@ -147,6 +201,7 @@ export function LongTextWorkspace({
   ]);
   const previewSurfaceHeight = Math.max(
     estimatedSurfaceHeight,
+    measuredPagination.surfaceHeight,
     measuredSurfaceHeight ?? 0,
   );
 
@@ -167,17 +222,6 @@ export function LongTextWorkspace({
     const observer = new ResizeObserver(measure);
     observer.observe(paper);
     return () => observer.disconnect();
-  }, [
-    draft.font_size,
-    layout.page_height,
-    layout.padding_x,
-    layout.padding_y,
-    layout.page_gap,
-    previewSteps,
-  ]);
-
-  useEffect(() => {
-    setMeasuredSurfaceHeight(null);
   }, [
     draft.font_size,
     layout.page_height,
@@ -473,10 +517,13 @@ export function LongTextWorkspace({
                     >
                       {previewSteps.map((step, index) => (
                         <div
-                          className={`long-text-workspace-step${step.page_break_before && index > 0 ? " page-break" : ""}`}
+                          className={`long-text-workspace-step${measuredPagination.breakBefore.has(index) ? " page-break" : ""}`}
                           key={step.id}
                         >
                           <MarkupPreview
+                            onLayout={(nextLayout) =>
+                              reportStepLayout(step.id, nextLayout)
+                            }
                             source={previewText(step.text, project.manifest)}
                           />
                         </div>
@@ -785,4 +832,34 @@ function previewSuccessors(
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function sameLayoutSnapshot(
+  left: TextLayoutSnapshot,
+  right: TextLayoutSnapshot,
+): boolean {
+  if (
+    Math.abs(left.contentHeight - right.contentHeight) > 0.1 ||
+    left.lines.length !== right.lines.length
+  ) {
+    return false;
+  }
+  return left.lines.every((line, index) => {
+    const other = right.lines[index];
+    if (
+      other === undefined ||
+      line.unitIndices.length !== other.unitIndices.length
+    ) {
+      return false;
+    }
+    return (
+      line.unitIndices.every(
+        (unit, unitIndex) => unit === other.unitIndices[unitIndex],
+      ) &&
+      Math.abs(line.top - other.top) <= 0.1 &&
+      Math.abs(line.bottom - other.bottom) <= 0.1 &&
+      Math.abs(line.left - other.left) <= 0.1 &&
+      Math.abs(line.right - other.right) <= 0.1
+    );
+  });
 }
