@@ -1,0 +1,11 @@
+{
+  "name": "@vectspace/text",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./markup": "./src/markup.ts",
+    "./reveal": "./src/reveal.ts"
+  }
+}
