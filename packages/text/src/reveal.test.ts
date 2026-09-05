@@ -7,7 +7,10 @@ import {
 } from "./reveal";
 import { parseMarkup } from "./markup";
 
-function stateAt(session: TextRevealSession, deltaMs: number): RevealSessionState {
+function stateAt(
+  session: TextRevealSession,
+  deltaMs: number,
+): RevealSessionState {
   return session.advance(deltaMs).state;
 }
 
@@ -23,7 +26,9 @@ describe("TextRevealSession", () => {
     expect(paused.state.status).toBe("waiting");
     expect(paused.state.revealedCount).toBe(1);
     expect(paused.advance(499).state.revealedCount).toBe(1);
-    expect(paused.advance(550).state.revealedCount).toBe(2);
+    const pauseBoundary = paused.advance(550);
+    expect(pauseBoundary.state.revealedCount).toBe(1);
+    expect(pauseBoundary.advance(50).state.revealedCount).toBe(2);
   });
 
   it("allows inline math to animate concurrently but waits for display math", () => {
