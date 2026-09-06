@@ -149,6 +149,11 @@ Dialogue accepts `$...$`, `$$...$$`, `[pause=500ms]`, speed controls, and the
 `shake`, `wave`, and `glow` text effects. It never accepts HTML. The renderer lays
 out every Chinese character and KaTeX formula first, then reveals units with
 `visibility`; hidden content keeps its geometry and formulas reveal atomically.
+The game, editor, and Settings sample share the `@vectspace/text` parser, visual
+line layout, and reveal clock. A pause is a hard reveal boundary: later content
+does not begin until all animations before that marker and the pause itself have
+completed. This also makes click-to-complete, auto playback, and Ctrl fast
+forward use the same timing rules.
 The player can choose `line_sweep`, `typewriter`, or `drop_fade` in Settings;
 individual `say` and `long_text` nodes may use `reveal_animation` to override
 that preference for a single prompt.
@@ -164,7 +169,10 @@ ID, so saving during a lecture restores the already-written paper without replay
 typing or scrolling. `paper` is
 optional: omitting it leaves the block transparent for blackboard-style writing.
 `pagination` can be `continuous`, `auto`, or `manual`; automatic mode also accepts
-explicit `page_break_before` markers. `layout` uses 1920×1080 design pixels.
+explicit `page_break_before` markers. In automatic mode pagination happens at
+measured visual-line boundaries rather than at paragraph boundaries, so a single
+long step can safely cross a page while formulas remain atomic. `layout` uses
+1920×1080 design pixels.
 
 ```yaml
 lecture:

@@ -2785,6 +2785,25 @@ body.timeline-resizing {
   white-space: nowrap;
 }
 
+.long-text-workspace-preview-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.long-text-workspace-preview-controls button {
+  white-space: nowrap;
+}
+
+.long-text-workspace-preview-controls span {
+  color: #8d9bb2;
+  font:
+    10px ui-monospace,
+    monospace;
+  white-space: nowrap;
+}
+
 .long-text-workspace-status {
   margin-left: auto;
   color: #92a1b7;
@@ -2885,6 +2904,27 @@ body.timeline-resizing {
   pointer-events: none;
 }
 
+.long-text-workspace-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  transition: transform 160ms cubic-bezier(0.18, 0.72, 0.24, 1);
+  will-change: transform;
+}
+
+.long-text-workspace-measure-root {
+  position: absolute;
+  top: -100000px;
+  left: -100000px;
+  visibility: hidden;
+  pointer-events: none;
+  line-height: 1.78;
+  letter-spacing: 0.035em;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
 .long-text-workspace-text-clip {
   position: absolute;
   inset: 0;
@@ -2920,9 +2960,11 @@ body.timeline-resizing {
 }
 
 .long-text-workspace-paper {
+  position: absolute;
+  top: 0;
+  left: 0;
   box-sizing: border-box;
   width: 100%;
-  min-height: 100%;
   padding: var(--long-text-padding-y, 112px) var(--long-text-padding-x, 118px);
   overflow: hidden;
   background-color: transparent;
@@ -2941,6 +2983,18 @@ body.timeline-resizing {
   min-height: 0;
   margin: 0;
   white-space: pre-wrap;
+}
+
+.long-text-workspace-step-fragment {
+  position: absolute;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+}
+
+.long-text-workspace-step-fragment-content {
+  width: 100%;
+  will-change: transform;
 }
 
 .long-text-workspace-step + .long-text-workspace-step {
@@ -2962,6 +3016,77 @@ body.timeline-resizing {
   color: inherit;
   font: inherit;
   line-height: inherit;
+}
+
+.long-text-workspace .markup-preview-character {
+  white-space: pre-wrap;
+}
+
+.long-text-workspace .markup-preview-content {
+  display: inline-block;
+}
+
+.long-text-workspace .markup-preview-math {
+  display: inline-block;
+  margin: 0 0.12em;
+  vertical-align: -0.08em;
+}
+
+.long-text-workspace .markup-preview-math.markup-display-math {
+  display: block;
+  margin: 0.5em auto;
+  text-align: center;
+}
+
+.long-text-workspace
+  .markup-preview-character.is-preview-reveal-typewriter
+  .markup-preview-content,
+.long-text-workspace .markup-preview-math.is-preview-reveal-typewriter {
+  animation: editor-text-reveal-fade 120ms ease-out both;
+}
+
+.long-text-workspace
+  .markup-preview-character.is-preview-reveal-drop_fade
+  .markup-preview-content,
+.long-text-workspace .markup-preview-math.is-preview-reveal-drop_fade {
+  animation: editor-text-reveal-drop 160ms cubic-bezier(0.18, 0.72, 0.24, 1)
+    both;
+}
+
+.long-text-workspace
+  .markup-preview-character.is-preview-reveal-line_sweep
+  .markup-preview-content,
+.long-text-workspace .markup-preview-math.is-preview-reveal-line_sweep {
+  animation: editor-text-reveal-line-sweep 160ms linear both;
+}
+
+@keyframes editor-text-reveal-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes editor-text-reveal-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-0.35em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes editor-text-reveal-line-sweep {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0);
+  }
 }
 
 .long-text-workspace .markup-control {

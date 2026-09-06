@@ -84,7 +84,7 @@ const CLOSE_FX = /^\[\/fx\]/;
 const PAUSE = /^\[pause=(\d+)ms\]/;
 const SPEED = /^\[speed=(default|\d+(?:\.\d+)?cps)\]/;
 const AUTO_ADVANCE = /^\[auto\]/;
-const MIN_FORMULA_REVEAL_DURATION_MS = 100;
+const MAX_FORMULA_EQUIVALENT_CHARACTERS = 12;
 
 /**
  * Parses the supported text markup without ever treating input as HTML.
@@ -227,7 +227,10 @@ export function buildVisibleUnitCps(
   let cps = validCps(initialCps, defaultCps);
   for (const unit of units) {
     if (unit.kind === "speed") {
-      cps = unit.cps === null ? validCps(defaultCps, 30) : validCps(unit.cps, defaultCps);
+      cps =
+        unit.cps === null
+          ? validCps(defaultCps, 30)
+          : validCps(unit.cps, defaultCps);
     } else if (unit.kind === "character" || unit.kind === "math") {
       result.push(cps);
     }
@@ -253,12 +256,19 @@ export function buildRevealSchedule(
   for (const unit of units) {
     if (unit.kind === "pause") elapsed += unit.durationMs;
     else if (unit.kind === "speed") {
-      cps = unit.cps === null ? validCps(defaultCps, 30) : validCps(unit.cps, defaultCps);
+      cps =
+        unit.cps === null
+          ? validCps(defaultCps, 30)
+          : validCps(unit.cps, defaultCps);
     } else if (unit.kind === "character" || unit.kind === "math") {
       elapsed += 1_000 / cps;
       schedule.push(elapsed);
       if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
-        elapsed += formulaRevealDurationForUnit(unit, mathRevealDurations.get(revealIndex), cps);
+        elapsed += formulaRevealDurationForUnit(
+          unit,
+          mathRevealDurations.get(revealIndex),
+          cps,
+        );
       }
       revealIndex += 1;
     }
@@ -286,11 +296,18 @@ export function buildPauseWindows(
       });
       elapsed += unit.durationMs;
     } else if (unit.kind === "speed") {
-      cps = unit.cps === null ? validCps(defaultCps, 30) : validCps(unit.cps, defaultCps);
+      cps =
+        unit.cps === null
+          ? validCps(defaultCps, 30)
+          : validCps(unit.cps, defaultCps);
     } else if (unit.kind === "character" || unit.kind === "math") {
       elapsed += 1_000 / cps;
       if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
-        elapsed += formulaRevealDurationForUnit(unit, mathRevealDurations.get(revealIndex), cps);
+        elapsed += formulaRevealDurationForUnit(
+          unit,
+          mathRevealDurations.get(revealIndex),
+          cps,
+        );
       }
       revealIndex += 1;
     }
@@ -311,42 +328,82 @@ export function revealCompletionTime(
   const finalIndex = visible.length - 1;
   const finalUnit = visible[finalIndex];
   const finalAt = schedule[finalIndex] ?? 0;
-  const formulaBlocks = finalUnit?.kind === "math" && shouldWaitForMath(finalUnit, options);
+  const formulaBlocks =
+    finalUnit?.kind === "math" && shouldWaitForMath(finalUnit, options);
   const animationMs =
     finalUnit?.kind === "math" && formulaBlocks
-      ? formulaRevealDurationForUnit(finalUnit, mathRevealDurations.get(finalIndex), unitCps[finalIndex] ?? 30)
+      ? formulaRevealDurationForUnit(
+          finalUnit,
+          mathRevealDurations.get(finalIndex),
+          unitCps[finalIndex] ?? 30,
+        )
       : animation === "drop_fade"
         ? 160
         : animation === "line_sweep"
           ? characterRevealDuration(unitCps[finalIndex] ?? 30)
           : 0;
   const lastBlockingMathEnd = visible.reduce((latest, unit, index) => {
-    if (unit.kind !== "math" || !shouldWaitForMath(unit, options)) return latest;
+    if (unit.kind !== "math" || !shouldWaitForMath(unit, options))
+      return latest;
     const at = schedule[index] ?? 0;
-    return Math.max(latest, at + formulaRevealDurationForUnit(unit, mathRevealDurations.get(index), unitCps[index] ?? 30));
+    return Math.max(
+      latest,
+      at +
+        formulaRevealDurationForUnit(
+          unit,
+          mathRevealDurations.get(index),
+          unitCps[index] ?? 30,
+        ),
+    );
   }, 0);
-  return Math.max(finalAt + animationMs, lastBlockingMathEnd, totalTimelineMs(units, schedule, mathRevealDurations, options, unitCps));
+  return Math.max(
+    finalAt + animationMs,
+    lastBlockingMathEnd,
+    totalTimelineMs(units, schedule, mathRevealDurations, options, unitCps),
+  );
 }
 
-export function formulaRevealDurationMs(widthPx: number, fontSizePx: number, cps: number): number {
+export function formulaRevealDurationMs(
+  widthPx: number,
+  fontSizePx: number,
+  cps: number,
+): number {
   const safeCps = validCps(cps, 30);
-  const safeFontSize = Number.isFinite(fontSizePx) && fontSizePx > 0 ? fontSizePx : 34;
-  const safeWidth = Number.isFinite(widthPx) && widthPx > 0 ? widthPx : safeFontSize;
-  const equivalentCharacters = Math.min(48, Math.max(1, safeWidth / safeFontSize));
+  const safeFontSize =
+    Number.isFinite(fontSizePx) && fontSizePx > 0 ? fontSizePx : 34;
+  const safeWidth =
+    Number.isFinite(widthPx) && widthPx > 0 ? widthPx : safeFontSize;
+  const equivalentCharacters = Math.min(
+    MAX_FORMULA_EQUIVALENT_CHARACTERS,
+    Math.max(1, safeWidth / safeFontSize),
+  );
   const characterDuration = characterRevealDuration(safeCps);
-  return Math.round(Math.max(MIN_FORMULA_REVEAL_DURATION_MS, characterDuration, characterDuration * equivalentCharacters));
+  return Math.round(characterDuration * equivalentCharacters);
 }
 
-export function formulaPresentationDurationMs(durationMs: number, display: boolean): number {
+export function formulaPresentationDurationMs(
+  durationMs: number,
+  display: boolean,
+): number {
   return display ? Math.round(Math.max(120, durationMs * 1.2)) : durationMs;
 }
 
-export function mathRevealDurationMs(value: number | undefined, cps: number): number {
+export function mathRevealDurationMs(
+  value: number | undefined,
+  cps: number,
+): number {
   return validMathRevealDuration(value, cps);
 }
 
-export function formulaRevealDurationForUnit(unit: MathUnit, value: number | undefined, cps: number): number {
-  return formulaPresentationDurationMs(validMathRevealDuration(value, cps), unit.display);
+export function formulaRevealDurationForUnit(
+  unit: MathUnit,
+  value: number | undefined,
+  cps: number,
+): number {
+  return formulaPresentationDurationMs(
+    validMathRevealDuration(value, cps),
+    unit.display,
+  );
 }
 
 export function hasImmediateAutoAdvance(source: string): boolean {
@@ -360,9 +417,13 @@ export function autoReadingDelay(source: string): number {
   let blockMath = 0;
   for (const unit of parseMarkup(source)) {
     if (unit.kind === "character") characters += 1;
-    else if (unit.kind === "math") unit.display ? (blockMath += 1) : (inlineMath += 1);
+    else if (unit.kind === "math")
+      unit.display ? (blockMath += 1) : (inlineMath += 1);
   }
-  return Math.min(5_000, Math.max(800, 600 + characters * 35 + inlineMath * 350 + blockMath * 700));
+  return Math.min(
+    5_000,
+    Math.max(800, 600 + characters * 35 + inlineMath * 350 + blockMath * 700),
+  );
 }
 
 function totalTimelineMs(
@@ -394,24 +455,60 @@ function totalTimelineMs(
   return Math.max(elapsed, schedule[schedule.length - 1] ?? 0);
 }
 
-function validMathRevealDuration(value: number | undefined, cps: number): number {
-  return Math.max(MIN_FORMULA_REVEAL_DURATION_MS, characterRevealDuration(cps), Number.isFinite(value) && (value ?? 0) > 0 ? (value as number) : characterRevealDuration(cps));
+function validMathRevealDuration(
+  value: number | undefined,
+  cps: number,
+): number {
+  const characterDuration = characterRevealDuration(cps);
+  const measured =
+    Number.isFinite(value) && (value ?? 0) > 0
+      ? (value as number)
+      : characterDuration;
+  // Cache values originate from measured rendered width.  Keep the IPC/UI
+  // boundary defensive nevertheless: a stale or malformed value cannot make
+  // a formula shorter than one character or longer than twelve of them.
+  return Math.min(
+    characterDuration * MAX_FORMULA_EQUIVALENT_CHARACTERS,
+    Math.max(characterDuration, measured),
+  );
 }
 
 function characterRevealDuration(cps: number): number {
   return 1_000 / validCps(cps, 30);
 }
 
-function shouldWaitForMath(unit: MathUnit, options: RevealTimingOptions): boolean {
+function shouldWaitForMath(
+  unit: MathUnit,
+  options: RevealTimingOptions,
+): boolean {
   return unit.display || options.waitForInlineMath !== false;
 }
 
-function character(value: string, effects: TextEffect[], start: number, end: number): CharacterUnit {
-  return { kind: "character", value, effect: currentEffect(effects), span: span(start, end) };
+function character(
+  value: string,
+  effects: TextEffect[],
+  start: number,
+  end: number,
+): CharacterUnit {
+  return {
+    kind: "character",
+    value,
+    effect: currentEffect(effects),
+    span: span(start, end),
+  };
 }
 
-function hardBreak(effects: TextEffect[], start: number, end: number): HardBreakUnit {
-  return { kind: "hard_break", value: "\n", effect: currentEffect(effects), span: span(start, end) };
+function hardBreak(
+  effects: TextEffect[],
+  start: number,
+  end: number,
+): HardBreakUnit {
+  return {
+    kind: "hard_break",
+    value: "\n",
+    effect: currentEffect(effects),
+    span: span(start, end),
+  };
 }
 
 function currentEffect(effects: TextEffect[]): TextEffect | null {
@@ -432,7 +529,12 @@ function findUnescaped(source: string, marker: string, from: number): number {
     const found = source.indexOf(marker, index);
     if (found < 0) return -1;
     let slashCount = 0;
-    for (let cursor = found - 1; cursor >= 0 && source[cursor] === "\\"; cursor -= 1) slashCount += 1;
+    for (
+      let cursor = found - 1;
+      cursor >= 0 && source[cursor] === "\\";
+      cursor -= 1
+    )
+      slashCount += 1;
     if (slashCount % 2 === 0) return found;
     index = found + marker.length;
   }
@@ -442,7 +544,10 @@ function findUnescaped(source: string, marker: string, from: number): number {
 function nextGrapheme(source: string, start: number): string {
   const segmenter = getSegmenter();
   if (segmenter !== null) {
-    const first = segmenter.segment(source.slice(start))[Symbol.iterator]().next().value as { segment?: string } | undefined;
+    const first = segmenter
+      .segment(source.slice(start))
+      [Symbol.iterator]()
+      .next().value as { segment?: string } | undefined;
     if (first?.segment !== undefined) return first.segment;
   }
   return fallbackGrapheme(source, start);
@@ -456,8 +561,16 @@ let cachedSegmenter: SegmenterLike | null | undefined;
 
 function getSegmenter(): SegmenterLike | null {
   if (cachedSegmenter !== undefined) return cachedSegmenter;
-  const intl = Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: string }) => SegmenterLike };
-  cachedSegmenter = intl.Segmenter === undefined ? null : new intl.Segmenter(undefined, { granularity: "grapheme" });
+  const intl = Intl as unknown as {
+    Segmenter?: new (
+      locale?: string,
+      options?: { granularity: string },
+    ) => SegmenterLike;
+  };
+  cachedSegmenter =
+    intl.Segmenter === undefined
+      ? null
+      : new intl.Segmenter(undefined, { granularity: "grapheme" });
   return cachedSegmenter;
 }
 
@@ -471,7 +584,11 @@ function fallbackGrapheme(source: string, start: number): string {
     codePoint = source.codePointAt(end);
     if (codePoint === undefined) break;
     const length = codePoint > 0xffff ? 2 : 1;
-    if (isCombining(codePoint) || isVariationSelector(codePoint) || isEmojiModifier(codePoint)) {
+    if (
+      isCombining(codePoint) ||
+      isVariationSelector(codePoint) ||
+      isEmojiModifier(codePoint)
+    ) {
       end += length;
       continue;
     }
@@ -496,7 +613,10 @@ function isCombining(codePoint: number): boolean {
 }
 
 function isVariationSelector(codePoint: number): boolean {
-  return (codePoint >= 0xfe00 && codePoint <= 0xfe0f) || (codePoint >= 0xe0100 && codePoint <= 0xe01ef);
+  return (
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+  );
 }
 
 function isEmojiModifier(codePoint: number): boolean {

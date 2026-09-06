@@ -1,446 +1,56 @@
-import type { TextRevealAnimation } from "./types";
+/**
+ * Compatibility boundary for game code.
+ *
+ * Text syntax, grapheme parsing and reveal timing live in `@vectspace/text`.
+ * Keeping this tiny module lets older game imports migrate gradually without
+ * allowing a second parser or scheduler to grow here again.
+ */
+export {
+  autoReadingDelay,
+  buildPauseWindows,
+  buildRevealSchedule,
+  buildVisibleUnitCps,
+  formulaPresentationDurationMs,
+  formulaRevealDurationForUnit,
+  formulaRevealDurationMs,
+  hasImmediateAutoAdvance,
+  mathRevealDurationMs,
+  parseMarkup,
+  revealCompletionTime,
+  revealUnits,
+  visibleUnits,
+} from "@vectspace/text";
 
-export type TextEffect = "shake" | "wave" | "glow";
+export type {
+  AutoAdvanceUnit,
+  CharacterUnit,
+  HardBreakUnit,
+  LayoutUnit,
+  MarkupUnit,
+  MathUnit,
+  PauseUnit,
+  PauseWindow,
+  RevealTimingOptions,
+  RevealUnit,
+  SourceSpan,
+  SpeedUnit,
+  TextEffect,
+} from "@vectspace/text";
 
-interface VisibleUnitBase {
-  effect: TextEffect | null;
-}
-
-export interface CharacterUnit extends VisibleUnitBase {
-  kind: "character";
-  value: string;
-}
-
-export interface MathUnit extends VisibleUnitBase {
-  kind: "math";
-  latex: string;
-  display: boolean;
-}
-
-export interface PauseUnit {
-  kind: "pause";
-  durationMs: number;
-}
-
-export interface SpeedUnit {
-  kind: "speed";
-  cps: number | null;
-}
-
-export interface AutoAdvanceUnit {
-  kind: "auto_advance";
-}
-
-export type MarkupUnit =
-  CharacterUnit | MathUnit | PauseUnit | SpeedUnit | AutoAdvanceUnit;
-export type VisibleUnit = CharacterUnit | MathUnit;
-
-export interface PauseWindow {
-  startMs: number;
-  endMs: number;
-}
-
-export interface RevealTimingOptions {
-  /**
-   * Drop-fade lets an inline formula continue animating while the next
-   * character starts on schedule. Display formulae always remain blocking.
-   */
-  waitForInlineMath?: boolean;
-}
-
-const OPEN_FX = /^\[fx=(shake|wave|glow)\]/;
-const PAUSE = /^\[pause=(\d+)ms\]/;
-const SPEED = /^\[speed=(default|\d+(?:\.\d+)?cps)\]/;
-const AUTO_ADVANCE = /^\[auto\]/;
-const MIN_FORMULA_REVEAL_DURATION_MS = 100;
-export function parseMarkup(source: string): MarkupUnit[] {
-  const units: MarkupUnit[] = [];
-  const effects: TextEffect[] = [];
-  let index = 0;
-
-  while (index < source.length) {
-    const remaining = source.slice(index);
-    const pause = PAUSE.exec(remaining);
-    if (pause?.[1] !== undefined) {
-      units.push({ kind: "pause", durationMs: Number(pause[1]) });
-      index += pause[0].length;
-      continue;
-    }
-    const speed = SPEED.exec(remaining);
-    if (speed?.[1] !== undefined) {
-      units.push({
-        kind: "speed",
-        cps: speed[1] === "default" ? null : Number(speed[1].slice(0, -3)),
-      });
-      index += speed[0].length;
-      continue;
-    }
-    const autoAdvance = AUTO_ADVANCE.exec(remaining);
-    if (autoAdvance !== null) {
-      units.push({ kind: "auto_advance" });
-      index += autoAdvance[0].length;
-      continue;
-    }
-    const openFx = OPEN_FX.exec(remaining);
-    if (openFx?.[1] !== undefined) {
-      effects.push(openFx[1] as TextEffect);
-      index += openFx[0].length;
-      continue;
-    }
-    if (remaining.startsWith("[/fx]") && effects.length > 0) {
-      effects.pop();
-      index += 5;
-      continue;
-    }
-    if (remaining.startsWith("\\") && remaining.length >= 2) {
-      const escaped = remaining[1];
-      if (escaped === "$" || escaped === "[" || escaped === "\\") {
-        units.push(character(escaped, effects));
-        index += 2;
-        continue;
-      }
-    }
-    if (remaining.startsWith("\r\n")) {
-      units.push(character("\n", effects));
-      index += 2;
-      continue;
-    }
-    if (remaining.startsWith("\r")) {
-      units.push(character("\n", effects));
-      index += 1;
-      continue;
-    }
-    if (remaining.startsWith("$$")) {
-      const end = findUnescaped(source, "$$", index + 2);
-      if (end >= 0) {
-        units.push({
-          kind: "math",
-          latex: source.slice(index + 2, end),
-          display: true,
-          effect: currentEffect(effects),
-        });
-        index = end + 2;
-        continue;
-      }
-    }
-    if (remaining.startsWith("$")) {
-      const end = findUnescaped(source, "$", index + 1);
-      if (end >= 0) {
-        units.push({
-          kind: "math",
-          latex: source.slice(index + 1, end),
-          display: false,
-          effect: currentEffect(effects),
-        });
-        index = end + 1;
-        continue;
-      }
-    }
-
-    const codePoint = source.codePointAt(index);
-    if (codePoint === undefined) {
-      break;
-    }
-    const value = String.fromCodePoint(codePoint);
-    units.push(character(value, effects));
-    index += value.length;
-  }
-
-  return units;
-}
-
-export function buildRevealSchedule(
-  units: MarkupUnit[],
-  initialCps: number,
-  defaultCps: number,
-  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
-  options: RevealTimingOptions = {},
-): number[] {
-  const schedule: number[] = [];
-  let elapsed = 0;
-  let cps = validCps(initialCps, defaultCps);
-  let visibleIndex = 0;
-  for (const unit of units) {
-    if (unit.kind === "pause") {
-      elapsed += unit.durationMs;
-    } else if (unit.kind === "speed") {
-      cps =
-        unit.cps === null
-          ? validCps(defaultCps, 30)
-          : validCps(unit.cps, defaultCps);
-    } else if (unit.kind === "character" || unit.kind === "math") {
-      elapsed += 1000 / cps;
-      schedule.push(elapsed);
-      if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
-        elapsed += formulaRevealDurationForUnit(
-          unit,
-          mathRevealDurations.get(visibleIndex),
-          cps,
-        );
-      }
-      visibleIndex += 1;
-    }
-  }
-  return schedule;
-}
+/** A layout unit may be a grapheme, a TeX atom, or an explicit hard break. */
+export type { LayoutUnit as VisibleUnit } from "@vectspace/text";
 
 /**
- * Returns the explicit pauses in the same absolute timeline as the reveal
- * schedule. Character-to-character gaps are intentionally not included: the
- * typing loop should continue playing during normal reveal pacing.
+ * Retained only for callers that have not yet switched to TextRevealSession.
+ * `completeReveal()` and `restorePresentation()` are deliberately separate
+ * in the shared session; this helper never represents either operation.
  */
-export function buildPauseWindows(
-  units: MarkupUnit[],
-  initialCps: number,
-  defaultCps: number,
-  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
-  options: RevealTimingOptions = {},
-): PauseWindow[] {
-  const windows: PauseWindow[] = [];
-  let elapsed = 0;
-  let cps = validCps(initialCps, defaultCps);
-  let visibleIndex = 0;
-  for (const unit of units) {
-    if (unit.kind === "pause") {
-      const startMs = elapsed;
-      elapsed += unit.durationMs;
-      windows.push({ startMs, endMs: elapsed });
-    } else if (unit.kind === "speed") {
-      cps =
-        unit.cps === null
-          ? validCps(defaultCps, 30)
-          : validCps(unit.cps, defaultCps);
-    } else if (unit.kind === "character" || unit.kind === "math") {
-      elapsed += 1000 / cps;
-      if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
-        elapsed += formulaRevealDurationForUnit(
-          unit,
-          mathRevealDurations.get(visibleIndex),
-          cps,
-        );
-      }
-      visibleIndex += 1;
-    }
-  }
-  return windows;
-}
-
-/**
- * `[auto]` is an author-controlled boundary marker. It takes effect only when
- * it is the last non-whitespace markup unit, so an accidental mid-sentence
- * marker cannot make the player miss text.
- */
-export function hasImmediateAutoAdvance(source: string): boolean {
-  const units = parseMarkup(source.trimEnd());
-  return units[units.length - 1]?.kind === "auto_advance";
-}
-
-export function buildVisibleUnitCps(
-  units: MarkupUnit[],
-  initialCps: number,
-  defaultCps: number,
-): number[] {
-  const result: number[] = [];
-  let cps = validCps(initialCps, defaultCps);
-  for (const unit of units) {
-    if (unit.kind === "speed") {
-      cps =
-        unit.cps === null
-          ? validCps(defaultCps, 30)
-          : validCps(unit.cps, defaultCps);
-    } else if (unit.kind === "character" || unit.kind === "math") {
-      result.push(cps);
-    }
-  }
-  return result;
-}
-
-export function revealCompletionTime(
-  units: MarkupUnit[],
-  schedule: readonly number[],
-  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
-  revealAnimation: TextRevealAnimation = "typewriter",
-  unitCps: readonly number[] = [],
-  options: RevealTimingOptions = {},
-): number {
-  const visible = visibleUnits(units);
-  const finalAppearance = schedule[schedule.length - 1] ?? 0;
-  const finalIndex = visible.length - 1;
-  const finalUnit = visible[finalIndex];
-  if (finalUnit === undefined) return 0;
-  const finalMathBlocks =
-    finalUnit.kind === "math" && shouldWaitForMath(finalUnit, options);
-  const finalFormulaDuration =
-    finalUnit.kind === "math"
-      ? formulaRevealDurationForUnit(
-          finalUnit,
-          mathRevealDurations.get(finalIndex),
-          unitCps[finalIndex] ?? 30,
-        )
-      : 0;
-  const animationDuration =
-    revealAnimation === "line_sweep"
-      ? finalMathBlocks
-        ? finalFormulaDuration
-        : characterRevealDuration(unitCps[finalIndex] ?? 30)
-      : revealAnimation === "drop_fade"
-        ? finalMathBlocks
-          ? finalFormulaDuration
-          : 160
-        : finalMathBlocks
-          ? finalFormulaDuration
-          : 0;
-  return finalAppearance + animationDuration;
-}
-
-export function formulaRevealDurationMs(
-  widthPx: number,
-  fontSizePx: number,
-  cps: number,
-): number {
-  const safeCps = validCps(cps, 30);
-  const safeFontSize =
-    Number.isFinite(fontSizePx) && fontSizePx > 0 ? fontSizePx : 34;
-  const safeWidth =
-    Number.isFinite(widthPx) && widthPx > 0 ? widthPx : safeFontSize;
-  const equivalentCharacters = Math.min(
-    48,
-    Math.max(1, safeWidth / safeFontSize),
-  );
-  const characterDuration = characterRevealDuration(safeCps);
-  return Math.round(
-    Math.max(
-      MIN_FORMULA_REVEAL_DURATION_MS,
-      characterDuration,
-      characterDuration * equivalentCharacters,
-    ),
-  );
-}
-
-/**
- * Block formulae have a slightly longer presentation so their larger drop has
- * time to settle. Keep this as part of the shared timing model: the DOM and
- * the reveal scheduler must never disagree about the same formula's length.
- */
-export function formulaPresentationDurationMs(
-  durationMs: number,
-  display: boolean,
-): number {
-  return display ? Math.round(Math.max(120, durationMs * 1.2)) : durationMs;
-}
-
-export function mathRevealDurationMs(
-  value: number | undefined,
-  cps: number,
-): number {
-  return validMathRevealDuration(value, cps);
-}
-
-export function formulaRevealDurationForUnit(
-  unit: MathUnit,
-  value: number | undefined,
-  cps: number,
-): number {
-  return formulaPresentationDurationMs(
-    validMathRevealDuration(value, cps),
-    unit.display,
-  );
-}
-
-function validMathRevealDuration(
-  value: number | undefined,
-  cps: number,
-): number {
-  return Math.max(
-    MIN_FORMULA_REVEAL_DURATION_MS,
-    characterRevealDuration(cps),
-    Number.isFinite(value) && (value ?? 0) > 0
-      ? (value ?? characterRevealDuration(cps))
-      : characterRevealDuration(cps),
-  );
-}
-
-function characterRevealDuration(cps: number): number {
-  return 1_000 / validCps(cps, 30);
-}
-
-function shouldWaitForMath(
-  unit: MathUnit,
-  options: RevealTimingOptions,
-): boolean {
-  return unit.display || options.waitForInlineMath !== false;
-}
-
-export function visibleUnits(units: MarkupUnit[]): VisibleUnit[] {
-  return units.filter(
-    (unit): unit is VisibleUnit =>
-      unit.kind === "character" || unit.kind === "math",
-  );
-}
-
-export function autoReadingDelay(source: string): number {
-  let characters = 0;
-  let inlineMath = 0;
-  let blockMath = 0;
-  for (const unit of parseMarkup(source)) {
-    if (unit.kind === "character") {
-      characters += 1;
-    } else if (unit.kind === "math") {
-      if (unit.display) {
-        blockMath += 1;
-      } else {
-        inlineMath += 1;
-      }
-    }
-  }
-  return Math.min(
-    5_000,
-    Math.max(800, 600 + characters * 35 + inlineMath * 350 + blockMath * 700),
-  );
-}
-
-/** Keeps an explicit skip stable when formula measurement refreshes a prompt. */
 export function resolveInstantRevealPromptId(
   current: string | null,
   promptId: string,
   previousPromptId: string,
-  revealImmediately: boolean,
+  restorePresentation: boolean,
 ): string | null {
-  if (revealImmediately) return promptId;
+  if (restorePresentation) return promptId;
   return previousPromptId === promptId ? current : null;
-}
-
-function character(value: string, effects: TextEffect[]): CharacterUnit {
-  return { kind: "character", value, effect: currentEffect(effects) };
-}
-
-function currentEffect(effects: TextEffect[]): TextEffect | null {
-  return effects[effects.length - 1] ?? null;
-}
-
-function validCps(value: number, fallback: number): number {
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function findUnescaped(source: string, marker: string, from: number): number {
-  let index = from;
-  while (index < source.length) {
-    const found = source.indexOf(marker, index);
-    if (found < 0) {
-      return -1;
-    }
-    let slashCount = 0;
-    for (
-      let cursor = found - 1;
-      cursor >= 0 && source[cursor] === "\\";
-      cursor -= 1
-    ) {
-      slashCount += 1;
-    }
-    if (slashCount % 2 === 0) {
-      return found;
-    }
-    index = found + marker.length;
-  }
-  return -1;
 }

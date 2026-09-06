@@ -1,4 +1,5 @@
 import { createRef } from "react";
+import { act, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -14,6 +15,61 @@ const page = {
 };
 
 describe("DialogueBox continued pages", () => {
+  it("skips a pause and continues across prompts while immediate reveal is held", () => {
+    vi.useFakeTimers();
+    const handle = createRef<DialogueBoxHandle>();
+    const onComplete = vi.fn();
+    const props = {
+      defaultCps: 30,
+      initialCps: 30,
+      dialogueBoxUrl: "dialogue.png",
+      nameBoxUrl: "name.png",
+      disabled: false,
+      visible: true,
+      onRevealComplete: onComplete,
+      onTypingChange: vi.fn(),
+      page,
+    };
+    const prompt = {
+      kind: "dialogue" as const,
+      prompt_id: "first",
+      speaker: null,
+      speaker_id: null,
+      name_color: null,
+      text_color: null,
+      text: "A[pause=10000ms]B",
+      is_read: true,
+    };
+    const view = render(
+      <DialogueBox
+        {...props}
+        prompt={prompt}
+        ref={handle}
+        revealImmediately={false}
+      />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    expect(handle.current?.isComplete()).toBe(false);
+    view.rerender(
+      <DialogueBox {...props} prompt={prompt} ref={handle} revealImmediately />,
+    );
+    expect(handle.current?.isComplete()).toBe(true);
+    expect(onComplete).toHaveBeenCalledWith("first");
+    view.rerender(
+      <DialogueBox
+        {...props}
+        prompt={{ ...prompt, prompt_id: "second" }}
+        ref={handle}
+        revealImmediately
+      />,
+    );
+    expect(handle.current?.isComplete()).toBe(true);
+    expect(onComplete).toHaveBeenCalledWith("second");
+    view.unmount();
+    vi.useRealTimers();
+  });
   it("renders completed segments before the currently revealing segment", () => {
     const html = renderToStaticMarkup(
       <DialogueBox

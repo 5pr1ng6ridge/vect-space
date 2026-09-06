@@ -1,5 +1,9 @@
 import katex from "katex";
 import {
+  createTextLayoutSnapshot,
+  type TextLayoutSnapshot,
+} from "@vectspace/text";
+import {
   memo,
   useLayoutEffect,
   useMemo,
@@ -17,12 +21,14 @@ import {
   type MathUnit,
 } from "../engine/markup";
 import type { TextRevealAnimation } from "../engine/types";
+import type { TextRevealClock } from "./useTextRevealSession";
 import {
   buildLineSweepGeometry,
   buildLineSweepTimings,
   isHardLineBreak,
   lineSweepMaskPositionPx,
   resolveVisualLineGroups,
+  splitLinesAtPauses,
   type LineSweepUnitGeometry,
   type LineSweepUnitTiming,
 } from "./visualLineGroups";
@@ -45,12 +51,16 @@ interface MarkupTextProps {
    * and then replaying every already-revealed row at once.
    */
   onLineSweepLayoutChange?(ready: boolean): void;
+  /** Actual browser rows, shared with long-text pagination and editor tools. */
+  onTextLayout?(layout: TextLayoutSnapshot): void;
   revealSchedule?: readonly number[];
   mathRevealDurations?: ReadonlyMap<number, number>;
   pauseWindows?: readonly { startMs: number; endMs: number }[];
   lineSweepElapsedMs?: number;
   /** Used for click-to-complete and fast-forward; it clears every reveal mask. */
   instantReveal?: boolean;
+  /** Optional frame clock used to update line masks without React renders. */
+  revealClock?: TextRevealClock;
 }
 
 export const MarkupText = memo(function MarkupText({
@@ -64,17 +74,63 @@ export const MarkupText = memo(function MarkupText({
   revealAnimation = "typewriter",
   fontReady = true,
   onLineSweepLayoutChange,
+  onTextLayout,
   revealSchedule = [],
   mathRevealDurations = EMPTY_MATH_REVEAL_DURATIONS,
   pauseWindows = [],
   lineSweepElapsedMs = 0,
   instantReveal = false,
+  revealClock,
 }: MarkupTextProps): ReactElement {
   const units = useMemo(() => visibleUnits(parseMarkup(source)), [source]);
+  // Reveal plans deliberately omit hard breaks: they take no time, but remain
+  // mounted so that hidden text still reserves its final wrapping geometry.
+  const revealIndexByLayoutIndex = useMemo(() => {
+    const result = new Map<number, number>();
+    let revealIndex = 0;
+    units.forEach((unit, layoutIndex) => {
+      if (isHardLineBreak(unit)) return;
+      result.set(layoutIndex, revealIndex);
+      revealIndex += 1;
+    });
+    return result;
+  }, [units]);
+  const layoutSchedule = useMemo(
+    () =>
+      units.map((unit, layoutIndex) => {
+        const revealIndex = revealIndexByLayoutIndex.get(layoutIndex);
+        return isHardLineBreak(unit) || revealIndex === undefined
+          ? 0
+          : (revealSchedule[revealIndex] ?? Number.POSITIVE_INFINITY);
+      }),
+    [revealIndexByLayoutIndex, revealSchedule, units],
+  );
+  const layoutUnitCps = useMemo(
+    () =>
+      units.map((unit, layoutIndex) => {
+        const revealIndex = revealIndexByLayoutIndex.get(layoutIndex);
+        return isHardLineBreak(unit) || revealIndex === undefined
+          ? 30
+          : (unitCps[revealIndex] ?? 30);
+      }),
+    [revealIndexByLayoutIndex, unitCps, units],
+  );
+  const layoutMathRevealDurations = useMemo(() => {
+    const result = new Map<number, number>();
+    units.forEach((unit, layoutIndex) => {
+      const revealIndex = revealIndexByLayoutIndex.get(layoutIndex);
+      if (unit.kind !== "math" || revealIndex === undefined) return;
+      const duration = mathRevealDurations.get(revealIndex);
+      if (duration !== undefined) result.set(layoutIndex, duration);
+    });
+    return result;
+  }, [mathRevealDurations, revealIndexByLayoutIndex, units]);
   const lineSweepMode =
     revealAnimation === "line_sweep" &&
     visibleCount !== Number.POSITIVE_INFINITY;
   const lineSweepRequested = lineSweepMode && fontReady;
+  const measurementRequested =
+    fontReady && (lineSweepRequested || onTextLayout !== undefined);
   const unitElementsRef = useRef(new Map<number, HTMLElement>());
   const rootRef = useRef<HTMLSpanElement>(null);
   const [lineGroups, setLineGroups] = useState<{
@@ -82,18 +138,24 @@ export const MarkupText = memo(function MarkupText({
     groups: readonly (readonly number[])[];
     geometry: ReadonlyMap<number, LineSweepUnitGeometry>;
     featherPx: number;
+    layout: TextLayoutSnapshot;
   } | null>(null);
 
   useLayoutEffect(() => {
     let frame = 0;
-    if (!lineSweepRequested) {
+    if (!measurementRequested) {
       frame = requestAnimationFrame(() => setLineGroups(null));
       return () => cancelAnimationFrame(frame);
     }
     const root = rootRef.current;
     const measure = (): void => {
-      const groups = resolveVisualLineGroups(units, unitElementsRef.current);
-      const measuredUnitCount = groups.reduce(
+      const rawGroups = resolveVisualLineGroups(units, unitElementsRef.current);
+      const groups = splitLinesAtPauses(
+        rawGroups,
+        layoutSchedule,
+        pauseWindows,
+      );
+      const measuredUnitCount = rawGroups.reduce(
         (total, group) => total + group.length,
         0,
       );
@@ -101,8 +163,40 @@ export const MarkupText = memo(function MarkupText({
         (unit) => !isHardLineBreak(unit),
       ).length;
       if (measuredUnitCount !== paintableUnitCount) return;
-      const geometry = buildLineSweepGeometry(groups, unitElementsRef.current);
-      if (geometry.size !== paintableUnitCount) return;
+      const geometry = lineSweepRequested
+        ? buildLineSweepGeometry(groups, unitElementsRef.current)
+        : new Map<number, LineSweepUnitGeometry>();
+      if (lineSweepRequested && geometry.size !== paintableUnitCount) return;
+      const rootRect = root?.getBoundingClientRect();
+      const boxes = new Map<
+        number,
+        {
+          index: number;
+          top: number;
+          bottom: number;
+          left: number;
+          right: number;
+        }
+      >();
+      for (const group of rawGroups) {
+        for (const index of group) {
+          const element = unitElementsRef.current.get(index);
+          if (element === undefined || rootRect === undefined) continue;
+          const rect = element.getBoundingClientRect();
+          boxes.set(index, {
+            index,
+            top: rect.top - rootRect.top,
+            bottom: rect.bottom - rootRect.top,
+            left: rect.left - rootRect.left,
+            right: rect.right - rootRect.left,
+          });
+        }
+      }
+      const layout = createTextLayoutSnapshot(
+        rawGroups,
+        boxes,
+        Math.max(root?.scrollHeight ?? 0, rootRect?.height ?? 0),
+      );
       const fontSizePx =
         root === null
           ? Number.NaN
@@ -113,9 +207,10 @@ export const MarkupText = memo(function MarkupText({
         current?.source === source &&
         sameLineGroups(current.groups, groups) &&
         sameLineSweepGeometry(current.geometry, geometry) &&
-        Math.abs(current.featherPx - featherPx) <= 0.1
+        Math.abs(current.featherPx - featherPx) <= 0.1 &&
+        sameTextLayout(current.layout, layout)
           ? current
-          : { source, groups, geometry, featherPx },
+          : { source, groups, geometry, featherPx, layout },
       );
     };
     frame = requestAnimationFrame(measure);
@@ -131,7 +226,14 @@ export const MarkupText = memo(function MarkupText({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [lineSweepRequested, source, units]);
+  }, [
+    layoutSchedule,
+    lineSweepRequested,
+    measurementRequested,
+    pauseWindows,
+    source,
+    units,
+  ]);
 
   const activeLineGroups =
     lineGroups?.source === source ? lineGroups.groups : null;
@@ -159,9 +261,9 @@ export const MarkupText = memo(function MarkupText({
         : buildLineSweepTimings(
             units,
             activeLineGroups,
-            revealSchedule,
-            unitCps,
-            mathRevealDurations,
+            layoutSchedule,
+            layoutUnitCps,
+            layoutMathRevealDurations,
             activeLineGeometry,
             pauseWindows,
           ),
@@ -169,21 +271,54 @@ export const MarkupText = memo(function MarkupText({
       activeLineGroups,
       activeLineGeometry,
       lineSweepRequested,
-      mathRevealDurations,
+      layoutMathRevealDurations,
+      layoutSchedule,
+      layoutUnitCps,
       pauseWindows,
-      revealSchedule,
-      unitCps,
       units,
     ],
   );
 
   useLayoutEffect(() => {
+    if (!lineSweepMode || revealClock === undefined) return;
+    const updateMaskPositions = (elapsedMs: number): void => {
+      for (const [index, timing] of lineSweepTimings) {
+        const element = unitElementsRef.current.get(index);
+        if (element === undefined) continue;
+        element.style.setProperty(
+          "--line-sweep-mask-position",
+          `${lineSweepMaskPositionPx(
+            timing,
+            elapsedMs,
+            pauseWindows,
+            lineSweepFeatherPx,
+          )}px`,
+        );
+      }
+    };
+    updateMaskPositions(revealClock.getElapsedMs());
+    return revealClock.subscribe(updateMaskPositions);
+  }, [
+    lineSweepFeatherPx,
+    lineSweepMode,
+    lineSweepTimings,
+    pauseWindows,
+    revealClock,
+  ]);
+
+  useLayoutEffect(() => {
     onLineSweepLayoutChange?.(lineSweepReady);
   }, [lineSweepReady, onLineSweepLayoutChange]);
+
+  useLayoutEffect(() => {
+    if (lineGroups?.source !== source) return;
+    onTextLayout?.(lineGroups.layout);
+  }, [lineGroups, onTextLayout, source]);
 
   const renderUnit = (
     unit: (typeof units)[number],
     index: number,
+    revealIndex: number | undefined,
     visible: boolean,
     lineSweepTiming: LineSweepUnitTiming | undefined,
   ): ReactElement => {
@@ -219,12 +354,17 @@ export const MarkupText = memo(function MarkupText({
       return (
         <MathMarkupUnit
           animate={animateMath}
-          cps={unitCps[index] ?? 30}
+          cps={unitCps[revealIndex ?? 0] ?? 30}
           effectClass={effectClass}
           index={index}
           instant={instantMathReveal || instantReveal}
           key={`${index}-math-${unit.latex}`}
-          onMetrics={onMathMetrics}
+          onMetrics={
+            revealIndex === undefined || onMathMetrics === undefined
+              ? undefined
+              : (_unitIndex, widthPx, fontSizePx) =>
+                  onMathMetrics(revealIndex, widthPx, fontSizePx)
+          }
           registerElement={registerElement}
           revealActive={visible && visibleCount !== Number.POSITIVE_INFINITY}
           style={style}
@@ -265,11 +405,18 @@ export const MarkupText = memo(function MarkupText({
     <span className={className} aria-label={source} ref={rootRef}>
       {units.map((unit, index) => {
         const timing = lineSweepTimings.get(index);
-        const visible =
+        const revealIndex = revealIndexByLayoutIndex.get(index);
+        const lineStartRevealIndex =
           timing === undefined
-            ? index < visibleCount
-            : timing.lineStartIndex < visibleCount;
-        return renderUnit(unit, index, visible, timing);
+            ? undefined
+            : revealIndexByLayoutIndex.get(timing.lineStartIndex);
+        const visible =
+          isHardLineBreak(unit) ||
+          (timing === undefined
+            ? (revealIndex ?? Number.POSITIVE_INFINITY) < visibleCount
+            : (lineStartRevealIndex ?? Number.POSITIVE_INFINITY) <
+              visibleCount);
+        return renderUnit(unit, index, revealIndex, visible, timing);
       })}
     </span>
   );
@@ -402,4 +549,31 @@ function sameLineSweepGeometry(
     }
   }
   return true;
+}
+
+function sameTextLayout(
+  left: TextLayoutSnapshot,
+  right: TextLayoutSnapshot,
+): boolean {
+  if (
+    Math.abs(left.contentHeight - right.contentHeight) > 0.25 ||
+    left.lines.length !== right.lines.length
+  ) {
+    return false;
+  }
+  return left.lines.every((line, index) => {
+    const candidate = right.lines[index];
+    return (
+      candidate !== undefined &&
+      line.unitIndices.length === candidate.unitIndices.length &&
+      line.unitIndices.every(
+        (unitIndex, unitOffset) =>
+          unitIndex === candidate.unitIndices[unitOffset],
+      ) &&
+      Math.abs(line.top - candidate.top) <= 0.25 &&
+      Math.abs(line.bottom - candidate.bottom) <= 0.25 &&
+      Math.abs(line.left - candidate.left) <= 0.25 &&
+      Math.abs(line.right - candidate.right) <= 0.25
+    );
+  });
 }

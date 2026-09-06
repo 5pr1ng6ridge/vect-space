@@ -4,19 +4,23 @@ import {
   visibleUnits,
   type MarkupUnit,
   type TextEffect,
+  type TextRevealAnimation,
   type TextLayoutSnapshot,
 } from "@vectspace/text";
 import katex from "katex";
 import {
   useCallback,
   useLayoutEffect,
+  useMemo,
   useRef,
   type CSSProperties,
   type ReactElement,
 } from "react";
 
 /**
- * Static editor rendering for authored text.
+ * Editor rendering for authored text. It is static by default and can also
+ * receive the shared reveal session's current visible-unit count for the
+ * long-text workspace playback controls.
  *
  * Markup controls are deliberately not represented by DOM nodes. They are
  * timing metadata and must not affect line wrapping or long-text pagination.
@@ -29,6 +33,10 @@ export interface MarkupPreviewProps {
   onLayout?(layout: TextLayoutSnapshot): void;
   className?: string;
   style?: CSSProperties;
+  /** The shared reveal session's visible-unit count; omitted means static. */
+  visibleCount?: number;
+  /** Lightweight editing playback treatment; static layout remains unchanged. */
+  revealAnimation?: TextRevealAnimation;
 }
 
 export function MarkupPreview({
@@ -36,9 +44,25 @@ export function MarkupPreview({
   onLayout,
   className,
   style,
+  visibleCount = Number.POSITIVE_INFINITY,
+  revealAnimation = "typewriter",
 }: MarkupPreviewProps): ReactElement {
-  const units = parseMarkup(source);
-  const layoutUnits = visibleUnits(units);
+  const { units, layoutUnits, revealIndexByLayoutIndex } = useMemo(() => {
+    const parsed = parseMarkup(source);
+    const layout = visibleUnits(parsed);
+    const revealIndices = new Map<number, number>();
+    let revealIndex = 0;
+    layout.forEach((unit, layoutIndex) => {
+      if (unit.kind === "hard_break") return;
+      revealIndices.set(layoutIndex, revealIndex);
+      revealIndex += 1;
+    });
+    return {
+      units: parsed,
+      layoutUnits: layout,
+      revealIndexByLayoutIndex: revealIndices,
+    };
+  }, [source]);
   const rootRef = useRef<HTMLDivElement>(null);
   const onLayoutRef = useRef(onLayout);
 
@@ -129,7 +153,18 @@ export function MarkupPreview({
     <div className={rootClassName} ref={rootRef} style={style}>
       {units.map((unit, index) => {
         const layoutIndex = layoutIndexFor(units, index);
-        return renderUnit(unit, index, layoutIndex);
+        const revealIndex =
+          layoutIndex === null
+            ? undefined
+            : revealIndexByLayoutIndex.get(layoutIndex);
+        return renderUnit(
+          unit,
+          index,
+          layoutIndex,
+          revealIndex === undefined || revealIndex < visibleCount,
+          revealAnimation,
+          visibleCount !== Number.POSITIVE_INFINITY,
+        );
       })}
     </div>
   );
@@ -139,6 +174,9 @@ function renderUnit(
   unit: MarkupUnit,
   index: number,
   layoutIndex: number | null,
+  visible: boolean,
+  revealAnimation: TextRevealAnimation,
+  isRevealing: boolean,
 ): ReactElement | string | null {
   if (
     unit.kind === "pause" ||
@@ -154,31 +192,43 @@ function renderUnit(
   }
 
   const className = effectClass(unit.effect);
+  const revealClass =
+    visible && isRevealing ? ` is-preview-reveal-${revealAnimation}` : "";
+  const style: CSSProperties = {
+    visibility: visible ? "visible" : "hidden",
+  };
   if (unit.kind === "character") {
     return (
       <span
-        className={className}
+        className={`markup-preview-character${className === undefined ? "" : ` ${className}`}${revealClass}`}
         data-layout-index={layoutIndex ?? undefined}
         key={`text-${unit.span.start}`}
+        style={style}
       >
-        {unit.value}
+        <span className="markup-preview-content">{unit.value}</span>
+        <wbr />
       </span>
     );
   }
 
   return (
     <span
-      className={`${className ?? ""} ${unit.display ? "markup-display-math" : ""}`.trim()}
+      className={`markup-preview-math${unit.display ? " markup-display-math" : ""}${className === undefined ? "" : ` ${className}`}${revealClass}`}
       data-layout-index={layoutIndex ?? undefined}
       dangerouslySetInnerHTML={{
         __html: katex.renderToString(unit.latex, {
           displayMode: unit.display,
           throwOnError: false,
-          strict: "warn",
+          // Match the game renderer exactly: a preview measurement must not
+          // acquire the MathML companion tree (or stricter warnings) that
+          // would make its geometry differ from the in-game text block.
+          strict: "ignore",
           trust: false,
+          output: "html",
         }),
       }}
       key={`math-${unit.span.start}`}
+      style={style}
     />
   );
 }

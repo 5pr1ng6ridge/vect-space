@@ -606,6 +606,18 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.long-text-step-fragment {
+  position: absolute;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+}
+
+.long-text-step-fragment-content {
+  width: 100%;
+  will-change: transform;
+}
+
 .long-text-step + .long-text-step {
   margin-top: 28px;
 }

@@ -23,10 +23,11 @@ import { StoryFlowPage } from "./components/StoryFlowPage";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
 import {
   autoReadingDelay,
-  buildRevealSchedule,
+  buildVisibleUnitCps,
   hasImmediateAutoAdvance,
   parseMarkup,
 } from "./engine/markup";
+import { useTextRevealSession } from "./components/useTextRevealSession";
 import { canFastForwardPrompt } from "./engine/playback";
 import { UiMotionHost } from "./engine/uiMotion";
 import type {
@@ -68,7 +69,7 @@ interface InitialAppState {
 }
 
 interface LockedTextSettings {
-  promptId: string;
+  instanceKey: string;
   defaultCps: number;
   initialCps: number;
   animation: TextRevealAnimation;
@@ -108,7 +109,9 @@ export default function App(): ReactElement {
   const [normalAuto, setNormalAuto] = useState(false);
   const [ctrlHeld, setCtrlHeld] = useState(false);
   const [pageHidden, setPageHidden] = useState(document.hidden);
-  const [completedPromptId, setCompletedPromptId] = useState<string | null>(
+  // A stable prompt_id may legitimately be revisited.  Completion belongs to
+  // the RuntimeUpdate/presentation instance, never to the story node alone.
+  const [completedPromptKey, setCompletedPromptKey] = useState<string | null>(
     null,
   );
   const [history, setHistory] = useState<DialogueHistoryEntry[]>([]);
@@ -407,15 +410,19 @@ export default function App(): ReactElement {
         cue.prompt_id === textPrompt?.prompt_id,
     ) ?? false;
   const cueRevealAnimation = textRevealAnimation(update, textPrompt);
+  const textInstanceKey =
+    textPrompt === null
+      ? null
+      : `${update?.update_id ?? "none"}:${textPrompt.prompt_id}`;
   const currentTextSettings = useMemo<LockedTextSettings | null>(() => {
     if (textPrompt === null) return null;
     return {
-      promptId: textPrompt.prompt_id,
+      instanceKey: textInstanceKey ?? "none",
       defaultCps: settings.text_speed_cps,
       initialCps: textCueCps ?? settings.text_speed_cps,
       animation: cueRevealAnimation ?? settings.text_reveal_animation,
     };
-  }, [cueRevealAnimation, settings, textCueCps, textPrompt]);
+  }, [cueRevealAnimation, settings, textCueCps, textInstanceKey, textPrompt]);
   const [lockedTextSettings, setLockedTextSettings] =
     useState<LockedTextSettings | null>(null);
   useEffect(() => {
@@ -425,7 +432,7 @@ export default function App(): ReactElement {
     }
     const frame = requestAnimationFrame(() => {
       setLockedTextSettings((previous) =>
-        previous?.promptId === currentTextSettings.promptId
+        previous?.instanceKey === currentTextSettings.instanceKey
           ? previous
           : currentTextSettings,
       );
@@ -433,7 +440,7 @@ export default function App(): ReactElement {
     return () => cancelAnimationFrame(frame);
   }, [currentTextSettings]);
   const effectiveTextSettings =
-    lockedTextSettings?.promptId === currentTextSettings?.promptId
+    lockedTextSettings?.instanceKey === currentTextSettings?.instanceKey
       ? lockedTextSettings
       : currentTextSettings;
   const revealCps =
@@ -513,9 +520,40 @@ export default function App(): ReactElement {
     advance("manual");
   }, [advance, forcedAuto, longText, panel, runtimeLocked, textPrompt, update]);
 
-  const handleRevealComplete = useCallback((promptId: string): void => {
-    setCompletedPromptId(promptId);
+  const handleRevealComplete = useCallback((instanceKey: string): void => {
+    setCompletedPromptKey(instanceKey);
   }, []);
+
+  useEffect(() => {
+    if (
+      phase !== "playing" ||
+      panel !== "none" ||
+      busy ||
+      runtimeLocked ||
+      textPrompt === null ||
+      !fastForwardRequested ||
+      !fastForwardDialogueAllowed
+    ) {
+      return;
+    }
+
+    // Ctrl is a request to finish the current reveal, including an explicit
+    // pause. It must happen before the completion gate below; otherwise a
+    // held Ctrl key can never leave a prompt that is still typing or paused.
+    // The component reports completion asynchronously, so the normal
+    // revision-safe advance effect remains the only place that advances.
+    if (longText === null) dialogueRef.current?.complete();
+    else longTextRef.current?.complete();
+  }, [
+    busy,
+    fastForwardDialogueAllowed,
+    fastForwardRequested,
+    longText,
+    panel,
+    phase,
+    runtimeLocked,
+    textPrompt,
+  ]);
 
   useEffect(() => {
     if (
@@ -529,7 +567,7 @@ export default function App(): ReactElement {
     }
 
     let timer = 0;
-    if (completedPromptId !== textPrompt.prompt_id) return;
+    if (completedPromptKey !== textInstanceKey) return;
     if (immediateAutoAdvance) {
       timer = window.setTimeout(
         () => advance(forcedAuto ? "forced_auto" : "auto"),
@@ -542,10 +580,8 @@ export default function App(): ReactElement {
       );
     } else if (fastForwardRequested) {
       if (!fastForwardDialogueAllowed) return;
-      if (longText === null) dialogueRef.current?.complete();
-      else longTextRef.current?.complete();
       timer = window.setTimeout(() => advance("fast_forward"), 50);
-    } else if (normalAuto && completedPromptId === textPrompt.prompt_id) {
+    } else if (normalAuto && completedPromptKey === textInstanceKey) {
       timer = window.setTimeout(
         () => advance("auto"),
         autoReadingDelay(textPrompt.text),
@@ -555,8 +591,9 @@ export default function App(): ReactElement {
   }, [
     advance,
     busy,
-    completedPromptId,
+    completedPromptKey,
     textPrompt,
+    textInstanceKey,
     fastForwardDialogueAllowed,
     fastForwardRequested,
     forcedAuto,
@@ -746,7 +783,7 @@ export default function App(): ReactElement {
                 dialogueBoxUrl={assets["gui.dialogue_box"] ?? ""}
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
-                key={`${renderedDialoguePage.page_id}:${dialogue?.prompt_id ?? `retained:${update.snapshot.revision}`}`}
+                key={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${update.snapshot.revision}`}`}
                 motionHost={uiMotionHost}
                 nameBoxUrl={assets["gui.name_box"] ?? ""}
                 onTypingChange={handleTypingChange}
@@ -757,6 +794,8 @@ export default function App(): ReactElement {
                 fontReady={fontReady}
                 ref={dialogueRef}
                 revealImmediately={dialogue === null || !hasTextRevealCue}
+                sessionKey={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${renderedDialoguePage.page_id}`}`}
+                suspended={panel !== "none" || pageHidden}
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
             )}
@@ -783,6 +822,8 @@ export default function App(): ReactElement {
                 fontReady={fontReady}
                 ref={longTextRef}
                 revealImmediately={!hasTextRevealCue}
+                sessionKey={`${update.update_id}:${longText.prompt_id}`}
+                suspended={panel !== "none" || pageHidden}
               />
             )}
 
@@ -954,40 +995,36 @@ function SettingsPanel({
   onClose,
 }: SettingsPanelProps): ReactElement {
   const [animationPreviewRevision, setAnimationPreviewRevision] = useState(0);
-  const [animationPreviewVisibleCount, setAnimationPreviewVisibleCount] =
-    useState(0);
   const animationPreviewSource = "示例：$A \\cong B$，文字";
-  useEffect(() => {
-    const units = parseMarkup(animationPreviewSource);
-    const schedule = buildRevealSchedule(
-      units,
-      settings.text_speed_cps,
-      settings.text_speed_cps,
-    );
-    let frame = 0;
-    const startedAt = performance.now();
-    const tick = (now: number): void => {
-      const elapsed = now - startedAt;
-      let next = 0;
-      while (
-        next < schedule.length &&
-        (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
-      ) {
-        next += 1;
-      }
-      setAnimationPreviewVisibleCount(next);
-      if (next < schedule.length) frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(() => {
-      setAnimationPreviewVisibleCount(0);
-      frame = requestAnimationFrame(tick);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [
-    animationPreviewRevision,
-    settings.text_reveal_animation,
-    settings.text_speed_cps,
-  ]);
+  const animationPreviewUnits = useMemo(
+    () => parseMarkup(animationPreviewSource),
+    [animationPreviewSource],
+  );
+  const animationPreviewCps = useMemo(
+    () =>
+      buildVisibleUnitCps(
+        animationPreviewUnits,
+        settings.text_speed_cps,
+        settings.text_speed_cps,
+      ),
+    [animationPreviewUnits, settings.text_speed_cps],
+  );
+  const previewKey = `${animationPreviewRevision}:${settings.text_reveal_animation}:${settings.text_speed_cps}`;
+  const [previewLineLayoutKey, setPreviewLineLayoutKey] = useState<
+    string | null
+  >(null);
+  const preview = useTextRevealSession({
+    animation: settings.text_reveal_animation,
+    defaultCps: settings.text_speed_cps,
+    initialCps: settings.text_speed_cps,
+    instanceKey: previewKey,
+    ready:
+      settings.text_reveal_animation !== "line_sweep" ||
+      previewLineLayoutKey === previewKey,
+    restorePresentation: false,
+    units: animationPreviewUnits,
+    waitForInlineMath: settings.text_reveal_animation !== "drop_fade",
+  });
   const rows: {
     key:
       | "master_volume"
@@ -1055,15 +1092,22 @@ function SettingsPanel({
           </select>
           <output />
         </label>
-        <div
-          className="text-animation-preview"
-          key={`${animationPreviewRevision}:${settings.text_reveal_animation}`}
-        >
+        <div className="text-animation-preview" key={previewKey}>
           <MarkupText
             animateMath
+            instantMathReveal={preview.isComplete()}
+            instantReveal={preview.isComplete()}
+            lineSweepElapsedMs={preview.state.elapsedMs}
+            onLineSweepLayoutChange={(ready) =>
+              setPreviewLineLayoutKey(ready ? previewKey : null)
+            }
+            pauseWindows={preview.plan.pauses}
             revealAnimation={settings.text_reveal_animation}
+            revealClock={preview.clock}
+            revealSchedule={preview.plan.events.map((event) => event.atMs)}
             source={animationPreviewSource}
-            visibleCount={animationPreviewVisibleCount}
+            unitCps={animationPreviewCps}
+            visibleCount={preview.state.revealedCount}
           />
           <button
             onClick={() =>

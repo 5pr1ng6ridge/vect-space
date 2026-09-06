@@ -53,7 +53,9 @@ describe("VN markup", () => {
   it("normalizes every source line ending to one hard-break character", () => {
     expect(
       visibleUnits(parseMarkup("甲\r\n乙\r丙\n丁")).map((unit) =>
-        unit.kind === "character" ? unit.value : "",
+        unit.kind === "character" || unit.kind === "hard_break"
+          ? unit.value
+          : "",
       ),
     ).toEqual(["甲", "\n", "乙", "\n", "丙", "\n", "丁"]);
   });
@@ -64,14 +66,14 @@ describe("VN markup", () => {
     expect(schedule[0]).toBe(50);
     expect(schedule[1]).toBe(650);
 
-    expect(buildPauseWindows(units, 20, 30)).toEqual([
+    expect(buildPauseWindows(units, 20, 30)).toMatchObject([
       { startMs: 50, endMs: 550 },
     ]);
   });
 
   it("leaves a short visual reveal window after formulas", () => {
     const schedule = buildRevealSchedule(parseMarkup("甲$x$乙"), 20, 20);
-    expect(schedule).toEqual([50, 100, 250]);
+    expect(schedule).toEqual([50, 100, 200]);
   });
 
   it("uses measured formula duration in the following text timeline", () => {
@@ -147,7 +149,7 @@ describe("VN markup", () => {
         "typewriter",
         [20],
       ),
-    ).toBe(150);
+    ).toBe(130);
   });
 
   it("keeps drop-fade formula playback tied to the measured formula duration", () => {
@@ -169,10 +171,10 @@ describe("VN markup", () => {
   it("scales formula animation from one character to its rendered width", () => {
     // A formula is one visual unit, but its time tracks its width rather than
     // using a fixed fade.  It can never finish before one typed character.
-    expect(formulaRevealDurationMs(1, 34, 20)).toBe(100);
-    expect(formulaRevealDurationMs(680, 34, 30)).toBe(667);
-    expect(formulaRevealDurationMs(680, 34, 5)).toBe(4_000);
-    expect(mathRevealDurationMs(20, 20)).toBe(100);
+    expect(formulaRevealDurationMs(1, 34, 20)).toBe(50);
+    expect(formulaRevealDurationMs(680, 34, 30)).toBe(400);
+    expect(formulaRevealDurationMs(680, 34, 5)).toBe(2_400);
+    expect(mathRevealDurationMs(20, 20)).toBe(50);
   });
 
   it("tracks speed controls for each visible unit", () => {

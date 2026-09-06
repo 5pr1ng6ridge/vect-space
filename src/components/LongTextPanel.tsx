@@ -14,16 +14,10 @@ import {
 } from "react";
 
 import {
-  buildPauseWindows,
-  buildRevealSchedule,
   buildVisibleUnitCps,
-  formulaPresentationDurationMs,
   formulaRevealDurationMs,
-  mathRevealDurationMs,
   parseMarkup,
-  revealCompletionTime,
-  resolveInstantRevealPromptId,
-  type RevealTimingOptions,
+  visibleUnits,
 } from "../engine/markup";
 import type {
   LongTextPageSnapshot,
@@ -32,10 +26,10 @@ import type {
 } from "../engine/types";
 import { MarkupText } from "./MarkupText";
 import {
-  LONG_TEXT_STEP_GAP,
-  paginateLongTextSteps,
+  paginateLongTextVisualSteps,
   resolveLongTextPageWindow,
 } from "./longTextPagination";
+import type { TextLayoutSnapshot } from "@vectspace/text";
 import {
   advanceLongTextScroll,
   clamp,
@@ -44,6 +38,7 @@ import {
   longTextParagraphTarget,
   longTextFollowTarget,
 } from "./longTextScroll";
+import { useTextRevealSession } from "./useTextRevealSession";
 
 export interface LongTextPanelHandle {
   complete(): void;
@@ -59,20 +54,31 @@ interface LongTextPanelProps {
   /** null means a configured asset is still resolving; undefined is transparent. */
   paperUrl: string | null | undefined;
   revealImmediately: boolean;
+  /** Per RuntimeUpdate/prompt identity; stable prompt IDs are revisitable. */
+  sessionKey?: string;
   revealAnimation?: TextRevealAnimation;
   /** The game viewport scale, used to translate pointer deltas to design pixels. */
   designScale?: number;
   /** Rendering is held until the runtime font has finished loading. */
   fontReady?: boolean;
   fastForward: boolean;
+  /** Menu/page-hidden suspension freezes both reveal and scroll clocks. */
+  suspended?: boolean;
   onTypingChange(typing: boolean, cps: number): void;
-  onRevealComplete(promptId: string): void;
+  onRevealComplete(instanceKey: string): void;
 }
 
 interface MathRevealMetric {
   widthPx: number;
   fontSizePx: number;
 }
+
+interface MetricsForInstance {
+  key: string;
+  values: ReadonlyMap<number, MathRevealMetric>;
+}
+
+const EMPTY_MATH_METRICS: ReadonlyMap<number, MathRevealMetric> = new Map();
 
 const readyPaperArtworkUrls = new Set<string>();
 const paperArtworkLoads = new Map<string, Promise<void>>();
@@ -131,27 +137,33 @@ export const LongTextPanel = forwardRef<
     disabled,
     paperUrl,
     revealImmediately,
+    sessionKey,
     revealAnimation = "typewriter",
     designScale = 1,
     fontReady = true,
     fastForward,
+    suspended = false,
     onTypingChange,
     onRevealComplete,
   },
   ref,
 ): ReactElement {
+  const instanceKey = sessionKey ?? prompt.prompt_id;
   const units = useMemo(() => parseMarkup(prompt.text), [prompt.text]);
   const unitCps = useMemo(
     () => buildVisibleUnitCps(units, initialCps, defaultCps),
     [defaultCps, initialCps, units],
   );
-  const timingOptions = useMemo<RevealTimingOptions>(
-    () => ({ waitForInlineMath: revealAnimation !== "drop_fade" }),
-    [revealAnimation],
+  const mathUnitCount = useMemo(
+    () => units.filter((unit) => unit.kind === "math").length,
+    [units],
   );
-  const [mathRevealMetrics, setMathRevealMetrics] = useState<
-    ReadonlyMap<number, MathRevealMetric>
-  >(() => new Map());
+  const [metrics, setMetrics] = useState<MetricsForInstance>(() => ({
+    key: instanceKey,
+    values: new Map(),
+  }));
+  const mathRevealMetrics =
+    metrics.key === instanceKey ? metrics.values : EMPTY_MATH_METRICS;
   const mathRevealDurations = useMemo(() => {
     const result = new Map<number, number>();
     for (const [index, metric] of mathRevealMetrics) {
@@ -166,78 +178,22 @@ export const LongTextPanel = forwardRef<
     }
     return result;
   }, [mathRevealMetrics, unitCps]);
-  const schedule = useMemo(
-    () =>
-      buildRevealSchedule(
-        units,
-        initialCps,
-        defaultCps,
-        mathRevealDurations,
-        timingOptions,
-      ),
-    [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
+  const [lineSweepReadyKey, setLineSweepReadyKey] = useState<string | null>(
+    null,
   );
-  const pauseWindows = useMemo(
-    () =>
-      buildPauseWindows(
-        units,
-        initialCps,
-        defaultCps,
-        mathRevealDurations,
-        timingOptions,
-      ),
-    [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
-  );
-  const revealCompletionMs = useMemo(
-    () =>
-      revealCompletionTime(
-        units,
-        schedule,
-        mathRevealDurations,
-        revealAnimation,
-        unitCps,
-        timingOptions,
-      ),
-    [
-      mathRevealDurations,
-      revealAnimation,
-      schedule,
-      timingOptions,
-      unitCps,
-      units,
-    ],
-  );
-  const [visibleCount, setVisibleCount] = useState(0);
-  const [revealFinished, setRevealFinished] = useState(
-    () => revealImmediately || schedule.length === 0,
-  );
-  const [activePromptId, setActivePromptId] = useState(prompt.prompt_id);
-  const [instantRevealPromptId, setInstantRevealPromptId] = useState<
-    string | null
-  >(revealImmediately ? prompt.prompt_id : null);
-  const [paused, setPaused] = useState(() => isPauseAt(0, pauseWindows));
-  const [typingCps, setTypingCps] = useState(() => unitCps[0] ?? initialCps);
-  const [lineSweepReadyPromptId, setLineSweepReadyPromptId] = useState<
-    string | null
-  >(null);
-  const [lineSweepElapsedMs, setLineSweepElapsedMs] = useState(0);
-  const [stepHeights, setStepHeights] = useState<
-    Readonly<Record<string, number>>
+  const [stepLayouts, setStepLayouts] = useState<
+    Readonly<Record<string, TextLayoutSnapshot>>
   >({});
-  const [scrollPreparedPromptId, setScrollPreparedPromptId] = useState<
-    string | null
-  >(null);
+  const [scrollPreparedKey, setScrollPreparedKey] = useState<string | null>(
+    null,
+  );
   const [pageWindow, setPageWindow] = useState({ start: 0, end: 0 });
   const [presentedDocumentId, setPresentedDocumentId] = useState<string | null>(
     null,
   );
-  const visibleRef = useRef(0);
-  const completeRef = useRef(revealImmediately || schedule.length === 0);
   const pageWindowRef = useRef(pageWindow);
-  const revealPromptRef = useRef(prompt.prompt_id);
-  const reportedPromptRef = useRef<string | null>(null);
+  const pendingCompleteRef = useRef(false);
   const measuringRootRef = useRef<HTMLDivElement>(null);
-  const stepMeasureRefs = useRef(new Map<string, HTMLDivElement>());
   const surfaceStackRef = useRef<HTMLDivElement>(null);
   const textStackRef = useRef<HTMLDivElement>(null);
   const scrollOffsetRef = useRef(0);
@@ -252,22 +208,30 @@ export const LongTextPanel = forwardRef<
   } | null>(null);
   const suppressAdvanceClickRef = useRef(false);
   const documentRef = useRef(page.document_id);
-  const promptIsActive = activePromptId === prompt.prompt_id;
-  const renderedVisibleCount = promptIsActive ? visibleCount : 0;
-  const complete = promptIsActive && revealFinished;
   const handleLineSweepLayoutChange = useCallback(
     (ready: boolean): void => {
-      setLineSweepReadyPromptId(ready ? prompt.prompt_id : null);
+      setLineSweepReadyKey(ready ? instanceKey : null);
     },
-    [prompt.prompt_id],
+    [instanceKey],
   );
-  const revealReady =
-    revealImmediately ||
-    (fontReady &&
-      (revealAnimation !== "line_sweep" ||
-        lineSweepReadyPromptId === prompt.prompt_id));
   const activeStep = page.steps[page.active_step_index];
-  const activeStepRef = useRef<HTMLDivElement>(null);
+  const activeLayoutUnits = useMemo(
+    () =>
+      activeStep === undefined
+        ? []
+        : visibleUnits(parseMarkup(activeStep.text)),
+    [activeStep],
+  );
+  const activeRevealIndexByLayoutIndex = useMemo(() => {
+    const result = new Map<number, number>();
+    let revealIndex = 0;
+    activeLayoutUnits.forEach((unit, layoutIndex) => {
+      if (unit.kind === "hard_break") return;
+      result.set(layoutIndex, revealIndex);
+      revealIndex += 1;
+    });
+    return result;
+  }, [activeLayoutUnits]);
   const paperArtworkReady = usePaperArtworkReady(paperUrl);
   const layout = page.layout;
   const applyScrollOffset = useCallback((offset: number): void => {
@@ -288,69 +252,43 @@ export const LongTextPanel = forwardRef<
     applyScrollOffset(0);
     scrollStartOffsetRef.current = 0;
     scrollTargetRef.current = 0;
-    setStepHeights({});
-    setMathRevealMetrics(new Map());
-    setScrollPreparedPromptId(null);
+    setStepLayouts({});
+    setMetrics({ key: instanceKey, values: new Map() });
+    setScrollPreparedKey(null);
+    pendingCompleteRef.current = false;
     const emptyWindow = { start: 0, end: 0 };
     pageWindowRef.current = emptyWindow;
     setPageWindow(emptyWindow);
-  }, [applyScrollOffset, page.document_id]);
+  }, [applyScrollOffset, instanceKey, page.document_id]);
 
   const unmeasuredSteps = useMemo(
-    () => page.steps.filter((step) => stepHeights[step.step_id] === undefined),
-    [page.steps, stepHeights],
+    () => page.steps.filter((step) => stepLayouts[step.step_id] === undefined),
+    [page.steps, stepLayouts],
   );
   const measurementBatch = useMemo(
     () => unmeasuredSteps.slice(0, 16),
     [unmeasuredSteps],
   );
 
-  const measureSteps = useCallback(() => {
-    const measured: Record<string, number> = {};
-    for (const [id, element] of stepMeasureRefs.current) {
-      measured[id] = Math.ceil(
-        Math.max(element.getBoundingClientRect().height, element.scrollHeight),
-      );
-    }
-    setStepHeights((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const [id, height] of Object.entries(measured)) {
-        // A committed step never changes height later: this is the layout
-        // boundary that prevents image/font settling from moving old pages.
-        if (next[id] === undefined) {
-          next[id] = height;
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, []);
-
-  useLayoutEffect(() => {
-    const root = measuringRootRef.current;
-    if (root === null) return;
-    let active = true;
-    const measureWhenFontsReady = (): void => {
-      if (active) measureSteps();
-    };
-    if (!fontReady) return;
-    if ("fonts" in document) {
-      void document.fonts.ready.then(measureWhenFontsReady);
-    } else {
-      measureWhenFontsReady();
-    }
-    return () => {
-      active = false;
-    };
-  }, [fontReady, measureSteps, measurementBatch]);
+  const handleStepLayout = useCallback(
+    (stepId: string, layoutSnapshot: TextLayoutSnapshot): void => {
+      setStepLayouts((current) => {
+        // A committed step never changes later. This is the stable-layout
+        // boundary: a subsequent font/ResizeObserver callback cannot move a
+        // prior page while later steps are appended.
+        if (current[stepId] !== undefined) return current;
+        return { ...current, [stepId]: layoutSnapshot };
+      });
+    },
+    [],
+  );
 
   const layoutReady = fontReady && unmeasuredSteps.length === 0;
   const pages = useMemo(
     () =>
-      paginateLongTextSteps(
+      paginateLongTextVisualSteps(
         page.steps,
-        stepHeights,
+        stepLayouts,
         page.pagination,
         layout.page_height,
         layout.padding_y,
@@ -360,7 +298,7 @@ export const LongTextPanel = forwardRef<
       layout.padding_y,
       page.pagination,
       page.steps,
-      stepHeights,
+      stepLayouts,
     ],
   );
   const pageOffsets = useMemo(() => {
@@ -389,37 +327,28 @@ export const LongTextPanel = forwardRef<
   const maxScroll = longTextMaxScroll(surfaceHeight, layout.height);
   const activeStepGeometry = useMemo(() => {
     if (!layoutReady || activeStep === undefined) return null;
-    const pageIndex = pages.findIndex((candidate) =>
-      candidate.steps.some((step) => step.step_id === activeStep.step_id),
+    const fragments = pages.flatMap((candidate, pageIndex) =>
+      candidate.fragments
+        .filter((fragment) => fragment.step.step_id === activeStep.step_id)
+        .map((fragment) => ({ fragment, pageIndex })),
     );
-    if (pageIndex < 0) return null;
-    const activePage = pages[pageIndex];
-    if (activePage === undefined) return null;
-    const activeIndex = activePage.steps.findIndex(
-      (step) => step.step_id === activeStep.step_id,
-    );
-    if (activeIndex < 0) return null;
-    const before = activePage.steps
-      .slice(0, activeIndex)
-      .reduce(
-        (total, step, index) =>
-          total +
-          (index === 0 ? 0 : LONG_TEXT_STEP_GAP) +
-          (stepHeights[step.step_id] ?? 0),
-        0,
-      );
+    const first = fragments[0];
+    const last = fragments[fragments.length - 1];
+    if (first === undefined || last === undefined) return null;
+    const start =
+      (pageOffsets[first.pageIndex] ?? 0) +
+      layout.padding_y +
+      first.fragment.top;
+    const end =
+      (pageOffsets[last.pageIndex] ?? 0) +
+      layout.padding_y +
+      last.fragment.top +
+      last.fragment.height;
     return {
-      start: (pageOffsets[pageIndex] ?? 0) + layout.padding_y + before,
-      height: stepHeights[activeStep.step_id] ?? 0,
+      start,
+      height: Math.max(1, end - start),
     };
-  }, [
-    activeStep,
-    layout.padding_y,
-    layoutReady,
-    pageOffsets,
-    pages,
-    stepHeights,
-  ]);
+  }, [activeStep, layout.padding_y, layoutReady, pageOffsets, pages]);
   const updatePageWindow = useCallback(
     (offset: number): void => {
       const next = resolveLongTextPageWindow(
@@ -465,145 +394,101 @@ export const LongTextPanel = forwardRef<
 
   const handleMathMetrics = useCallback(
     (index: number, widthPx: number, fontSizePx: number): void => {
-      if (visibleRef.current > 0) return;
-      setMathRevealMetrics((current) => {
-        const previous = current.get(index);
+      setMetrics((current) => {
+        const values: ReadonlyMap<number, MathRevealMetric> =
+          current.key === instanceKey ? current.values : EMPTY_MATH_METRICS;
+        const previous = values.get(index);
         if (
           previous?.widthPx === widthPx &&
-          previous.fontSizePx === fontSizePx
+          previous.fontSizePx === fontSizePx &&
+          current.key === instanceKey
         ) {
           return current;
         }
-        const next = new Map(current);
+        const next = new Map<number, MathRevealMetric>(values);
         next.set(index, { widthPx, fontSizePx });
-        return next;
+        return { key: instanceKey, values: next };
       });
     },
-    [],
+    [instanceKey],
   );
-
-  useEffect(() => {
-    if (scrollPreparedPromptId !== prompt.prompt_id) return;
-    if (!revealReady) return;
-    if (revealPromptRef.current === prompt.prompt_id && completeRef.current) {
-      return;
-    }
-    const previousPromptId = revealPromptRef.current;
-    const initialVisibleCount = revealImmediately ? schedule.length : 0;
-    const initiallyFinished = revealImmediately || schedule.length === 0;
-    let frame = 0;
-    const start = (): void => {
-      setActivePromptId(prompt.prompt_id);
-      visibleRef.current = initialVisibleCount;
-      completeRef.current = initiallyFinished;
-      setVisibleCount(initialVisibleCount);
-      setRevealFinished(initiallyFinished);
-      setInstantRevealPromptId((current) =>
-        resolveInstantRevealPromptId(
-          current,
-          prompt.prompt_id,
-          previousPromptId,
-          revealImmediately,
-        ),
-      );
-      revealPromptRef.current = prompt.prompt_id;
-      setPaused(isPauseAt(0, pauseWindows));
-      setTypingCps(unitCps[0] ?? initialCps);
-      setLineSweepElapsedMs(revealImmediately ? revealCompletionMs : 0);
-      manuallyBrowsingRef.current = false;
-      if (!initiallyFinished) frame = requestAnimationFrame(tick);
-    };
-    const startedAt = performance.now();
-    const tick = (now: number): void => {
-      const elapsed = now - startedAt;
-      if (revealAnimation === "line_sweep") {
-        setLineSweepElapsedMs(elapsed);
-      }
-      const nextPaused = isPauseAt(elapsed, pauseWindows);
-      setPaused((current) => (current === nextPaused ? current : nextPaused));
-      setTypingCps((current) => {
-        const next = typingCpsAt(
-          elapsed,
-          units,
-          schedule,
-          unitCps,
-          mathRevealDurations,
-          initialCps,
-          timingOptions,
-        );
-        return current === next ? current : next;
-      });
-      let next = visibleRef.current;
-      while (
-        next < schedule.length &&
-        (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
-      ) {
-        next += 1;
-      }
-      if (next !== visibleRef.current) {
-        visibleRef.current = next;
-        setVisibleCount(next);
-      }
-      if (next >= schedule.length && elapsed >= revealCompletionMs) {
-        completeRef.current = true;
-        setRevealFinished(true);
-      } else {
-        frame = requestAnimationFrame(tick);
-      }
-    };
-    frame = requestAnimationFrame(start);
-    return () => cancelAnimationFrame(frame);
-  }, [
+  const metricsReady = mathRevealMetrics.size >= mathUnitCount;
+  const revealReady =
+    scrollPreparedKey === instanceKey &&
+    fontReady &&
+    metricsReady &&
+    (revealAnimation !== "line_sweep" || lineSweepReadyKey === instanceKey);
+  const handleSessionComplete = useCallback(
+    (): void => onRevealComplete(instanceKey),
+    [instanceKey, onRevealComplete],
+  );
+  const session = useTextRevealSession({
+    animation: revealAnimation,
     defaultCps,
     initialCps,
+    instanceKey,
     mathRevealDurations,
-    pauseWindows,
-    prompt.prompt_id,
-    revealCompletionMs,
-    revealAnimation,
-    revealImmediately,
-    revealReady,
-    schedule,
-    unitCps,
+    onComplete: handleSessionComplete,
+    ready: revealReady,
+    restorePresentation: revealImmediately,
+    suspended: suspended || disabled,
     units,
-    scrollPreparedPromptId,
-    timingOptions,
-  ]);
+    waitForInlineMath: revealAnimation !== "drop_fade",
+  });
+  const completeReveal = session.completeReveal;
+  const isSessionComplete = session.isComplete;
+  const complete = session.isComplete();
+  const renderedVisibleCount = session.state.revealedCount;
+  const typingCps =
+    unitCps[Math.min(renderedVisibleCount, Math.max(0, unitCps.length - 1))] ??
+    initialCps;
+
+  useEffect(() => {
+    pendingCompleteRef.current = false;
+  }, [instanceKey]);
+
+  useEffect(() => {
+    if (pendingCompleteRef.current && scrollPreparedKey === instanceKey) {
+      pendingCompleteRef.current = false;
+      completeReveal();
+    }
+  }, [completeReveal, instanceKey, scrollPreparedKey]);
 
   useImperativeHandle(
     ref,
     () => ({
       complete: () => {
-        if (scrollPreparedPromptId !== prompt.prompt_id) return;
-        visibleRef.current = schedule.length;
-        completeRef.current = true;
-        setRevealFinished(true);
-        setInstantRevealPromptId(prompt.prompt_id);
-        setVisibleCount(schedule.length);
+        if (scrollPreparedKey !== instanceKey) {
+          pendingCompleteRef.current = true;
+          return;
+        }
+        completeReveal();
       },
-      isComplete: () =>
-        scrollPreparedPromptId === prompt.prompt_id && completeRef.current,
+      isComplete: isSessionComplete,
     }),
-    [prompt.prompt_id, schedule.length, scrollPreparedPromptId],
+    [completeReveal, instanceKey, isSessionComplete, scrollPreparedKey],
   );
 
   useEffect(() => {
-    if (complete && reportedPromptRef.current !== prompt.prompt_id) {
-      reportedPromptRef.current = prompt.prompt_id;
-      onRevealComplete(prompt.prompt_id);
-    }
-  }, [complete, onRevealComplete, prompt.prompt_id]);
-
-  const effectivePaused = promptIsActive ? paused : isPauseAt(0, pauseWindows);
-  const typing = promptIsActive && !disabled && !complete && !effectivePaused;
-  useEffect(() => {
+    const typing =
+      !disabled &&
+      !suspended &&
+      !complete &&
+      session.state.activePause === null;
     onTypingChange(typing, typingCps);
     return () => onTypingChange(false, typingCps);
-  }, [onTypingChange, typing, typingCps]);
+  }, [
+    complete,
+    disabled,
+    onTypingChange,
+    session.state.activePause,
+    suspended,
+    typingCps,
+  ]);
 
   useLayoutEffect(() => {
     if (!layoutReady || activeStep === undefined) return;
-    if (scrollPreparedPromptId === prompt.prompt_id) return;
+    if (scrollPreparedKey === instanceKey) return;
     if (activeStepGeometry === null) return;
     const { start, height: activeHeight } = activeStepGeometry;
     const target = longTextParagraphTarget({
@@ -629,7 +514,7 @@ export const LongTextPanel = forwardRef<
       })
     ) {
       const frame = requestAnimationFrame(() => {
-        setScrollPreparedPromptId(prompt.prompt_id);
+        setScrollPreparedKey(instanceKey);
       });
       return () => cancelAnimationFrame(frame);
     }
@@ -642,48 +527,61 @@ export const LongTextPanel = forwardRef<
     layoutReady,
     maxScroll,
     pageOffsets,
-    prompt.prompt_id,
+    instanceKey,
     revealImmediately,
-    scrollPreparedPromptId,
+    scrollPreparedKey,
     activeStepGeometry,
     updatePageWindow,
   ]);
 
   // Once a paragraph has started revealing, follow its actual rendered cursor
-  // instead of aligning the whole paragraph again. This is what keeps a very
-  // tall paragraph readable without a second teleport at the page boundary.
+  // from the immutable visual-line layout instead of querying transformed DOM
+  // boxes. This keeps a tall step smooth when it crosses a paper boundary.
   useLayoutEffect(() => {
     if (
       !layoutReady ||
       revealImmediately ||
       activeStepGeometry === null ||
-      scrollPreparedPromptId !== prompt.prompt_id ||
+      scrollPreparedKey !== instanceKey ||
       manuallyBrowsingRef.current ||
       renderedVisibleCount <= 0
     ) {
       return;
     }
-    const stepElement = activeStepRef.current;
-    if (stepElement === null) return;
-    const visibleElements =
-      stepElement.querySelectorAll<HTMLElement>(".markup-unit");
-    const visibleIndex = Math.min(renderedVisibleCount, visibleElements.length);
-    if (visibleIndex <= 0) return;
-    const cursorElement = visibleElements.item(visibleIndex - 1);
-    const scale =
-      Number.isFinite(designScale) && designScale > 0 ? designScale : 1;
-    const stepRect = stepElement.getBoundingClientRect();
-    const cursorRect = cursorElement?.getBoundingClientRect();
-    const measuredOffset =
-      cursorRect === undefined
-        ? Number.NaN
-        : (cursorRect.bottom - stepRect.top) / scale;
+    const activeLayout =
+      activeStep === undefined ? undefined : stepLayouts[activeStep.step_id];
+    const revealIndex = renderedVisibleCount - 1;
+    const lineIndex =
+      activeLayout?.lines.findIndex((line) =>
+        line.unitIndices.some(
+          (layoutIndex) =>
+            (activeRevealIndexByLayoutIndex.get(layoutIndex) ?? -1) >=
+            revealIndex,
+        ),
+      ) ?? -1;
+    const line = lineIndex >= 0 ? activeLayout?.lines[lineIndex] : undefined;
+    const location =
+      line === undefined || activeStep === undefined
+        ? undefined
+        : pages.flatMap((paper, pageIndex) =>
+            paper.fragments
+              .filter(
+                (fragment) =>
+                  fragment.step.step_id === activeStep.step_id &&
+                  lineIndex >= fragment.firstLine &&
+                  lineIndex <= fragment.lastLine,
+              )
+              .map((fragment) => ({ fragment, pageIndex })),
+          )[0];
     const cursorY =
-      activeStepGeometry.start +
-      (Number.isFinite(measuredOffset)
-        ? measuredOffset
-        : activeStepGeometry.height *
-          (visibleIndex / Math.max(1, schedule.length)));
+      line === undefined || location === undefined
+        ? activeStepGeometry.start +
+          activeStepGeometry.height *
+            (renderedVisibleCount / Math.max(1, session.plan.events.length))
+        : (pageOffsets[location.pageIndex] ?? 0) +
+          layout.padding_y +
+          location.fragment.top +
+          (line.bottom - location.fragment.sourceTop);
     const currentOffset = scrollOffsetRef.current;
     const followDelta = longTextFollowTarget({
       cursorY: cursorY - currentOffset,
@@ -696,16 +594,22 @@ export const LongTextPanel = forwardRef<
     scrollTargetRef.current = target;
     updatePageWindow(currentOffset);
   }, [
+    activeLayoutUnits,
+    activeRevealIndexByLayoutIndex,
+    activeStep,
     activeStepGeometry,
-    designScale,
     layout.height,
+    layout.padding_y,
     layoutReady,
     maxScroll,
-    prompt.prompt_id,
+    instanceKey,
+    pageOffsets,
+    pages,
     renderedVisibleCount,
     revealImmediately,
-    scrollPreparedPromptId,
-    schedule.length,
+    scrollPreparedKey,
+    session.plan.events.length,
+    stepLayouts,
     updatePageWindow,
   ]);
 
@@ -714,6 +618,7 @@ export const LongTextPanel = forwardRef<
     let frame = 0;
     let previous = performance.now();
     const tick = (now: number): void => {
+      if (suspended) return;
       const elapsedMs = now - previous;
       previous = now;
       if (!manuallyBrowsingRef.current) {
@@ -732,14 +637,14 @@ export const LongTextPanel = forwardRef<
           updatePageWindow(next);
         }
         if (
-          scrollPreparedPromptId !== prompt.prompt_id &&
+          scrollPreparedKey !== instanceKey &&
           hasReachedLongTextRevealThreshold({
             startOffset: scrollStartOffsetRef.current,
             targetOffset: scrollTargetRef.current,
             currentOffset: next,
           })
         ) {
-          setScrollPreparedPromptId(prompt.prompt_id);
+          setScrollPreparedKey(instanceKey);
         }
       }
       const settled =
@@ -760,8 +665,9 @@ export const LongTextPanel = forwardRef<
     applyScrollOffset,
     layoutReady,
     maxScroll,
-    prompt.prompt_id,
-    scrollPreparedPromptId,
+    instanceKey,
+    scrollPreparedKey,
+    suspended,
     updatePageWindow,
   ]);
 
@@ -855,16 +761,13 @@ export const LongTextPanel = forwardRef<
         ref={measuringRootRef}
       >
         {measurementBatch.map((step) => (
-          <div
-            className="long-text-step"
-            key={step.step_id}
-            ref={(element) => {
-              if (element === null)
-                stepMeasureRefs.current.delete(step.step_id);
-              else stepMeasureRefs.current.set(step.step_id, element);
-            }}
-          >
-            <MarkupText source={step.text} />
+          <div className="long-text-step" key={step.step_id}>
+            <MarkupText
+              onTextLayout={(layoutSnapshot) =>
+                handleStepLayout(step.step_id, layoutSnapshot)
+              }
+              source={step.text}
+            />
           </div>
         ))}
       </div>
@@ -911,45 +814,58 @@ export const LongTextPanel = forwardRef<
                   top: `${top}px`,
                 }}
               >
-                {paper.steps.map((step) => {
-                  const current = step.step_id === prompt.step_id;
+                {paper.fragments.map((fragment) => {
+                  const current = fragment.step.step_id === prompt.step_id;
                   return (
                     <div
-                      className="long-text-step"
-                      key={step.step_id}
-                      ref={current ? activeStepRef : undefined}
+                      className="long-text-step-fragment"
+                      key={`${fragment.step.step_id}:${fragment.sourceTop}`}
+                      style={{
+                        height: `${fragment.height}px`,
+                        top: `${fragment.top}px`,
+                      }}
                     >
-                      <MarkupText
-                        animateMath={current}
-                        instantMathReveal={
-                          instantRevealPromptId === prompt.prompt_id
-                        }
-                        instantReveal={
-                          instantRevealPromptId === prompt.prompt_id
-                        }
-                        lineSweepElapsedMs={lineSweepElapsedMs}
-                        mathRevealDurations={mathRevealDurations}
-                        revealAnimation={revealAnimation}
-                        revealSchedule={schedule}
-                        pauseWindows={pauseWindows}
-                        fontReady={fontReady}
-                        source={step.text}
-                        {...(current
-                          ? { onMathMetrics: handleMathMetrics }
-                          : {})}
-                        {...(current ? { unitCps } : {})}
-                        {...(current && revealAnimation === "line_sweep"
-                          ? {
-                              onLineSweepLayoutChange:
-                                handleLineSweepLayoutChange,
+                      <div
+                        className="long-text-step-fragment-content"
+                        style={{
+                          transform: `translate3d(0, -${fragment.sourceTop}px, 0)`,
+                        }}
+                      >
+                        <div className="long-text-step">
+                          <MarkupText
+                            animateMath={current}
+                            instantMathReveal={complete}
+                            instantReveal={complete}
+                            lineSweepElapsedMs={session.state.elapsedMs}
+                            mathRevealDurations={mathRevealDurations}
+                            revealAnimation={revealAnimation}
+                            revealSchedule={session.plan.events.map(
+                              (event) => event.atMs,
+                            )}
+                            pauseWindows={session.plan.pauses}
+                            fontReady={fontReady}
+                            source={fragment.step.text}
+                            {...(current
+                              ? { onMathMetrics: handleMathMetrics }
+                              : {})}
+                            {...(current ? { unitCps } : {})}
+                            {...(current ? { revealClock: session.clock } : {})}
+                            {...(current &&
+                            fragment.sourceTop === 0 &&
+                            revealAnimation === "line_sweep"
+                              ? {
+                                  onLineSweepLayoutChange:
+                                    handleLineSweepLayoutChange,
+                                }
+                              : {})}
+                            visibleCount={
+                              current
+                                ? renderedVisibleCount
+                                : Number.POSITIVE_INFINITY
                             }
-                          : {})}
-                        visibleCount={
-                          current
-                            ? renderedVisibleCount
-                            : Number.POSITIVE_INFINITY
-                        }
-                      />
+                          />
+                        </div>
+                      </div>
                     </div>
                   );
                 })}
@@ -964,42 +880,3 @@ export const LongTextPanel = forwardRef<
     </section>
   );
 });
-
-function isPauseAt(
-  elapsedMs: number,
-  windows: { startMs: number; endMs: number }[],
-): boolean {
-  return windows.some(
-    ({ startMs, endMs }) => elapsedMs >= startMs && elapsedMs < endMs,
-  );
-}
-
-function typingCpsAt(
-  elapsedMs: number,
-  units: ReturnType<typeof parseMarkup>,
-  schedule: readonly number[],
-  unitCps: readonly number[],
-  mathRevealDurations: ReadonlyMap<number, number>,
-  fallbackCps: number,
-  timingOptions: RevealTimingOptions,
-): number {
-  let index = 0;
-  for (const unit of units) {
-    if (unit.kind !== "character" && unit.kind !== "math") continue;
-    const revealAt = schedule[index] ?? Number.POSITIVE_INFINITY;
-    const duration =
-      unit.kind === "math" &&
-      (unit.display || timingOptions.waitForInlineMath !== false)
-        ? formulaPresentationDurationMs(
-            mathRevealDurationMs(
-              mathRevealDurations.get(index),
-              unitCps[index] ?? fallbackCps,
-            ),
-            unit.display,
-          )
-        : 0;
-    if (elapsedMs <= revealAt + duration) return unitCps[index] ?? fallbackCps;
-    index += 1;
-  }
-  return unitCps[unitCps.length - 1] ?? fallbackCps;
-}

@@ -11,12 +11,7 @@ import {
 export type TextRevealAnimation = "line_sweep" | "typewriter" | "drop_fade";
 
 export type RevealSessionStatus =
-  | "preparing"
-  | "revealing"
-  | "waiting"
-  | "paused"
-  | "completed"
-  | "cancelled";
+  "preparing" | "revealing" | "waiting" | "paused" | "completed" | "cancelled";
 
 export interface RevealEvent {
   revealIndex: number;
@@ -53,7 +48,9 @@ export interface RevealSessionState {
 }
 
 /** Builds a deterministic plan. It performs no DOM work or scheduling. */
-export function createRevealPlan(options: TextRevealSessionOptions): RevealPlan {
+export function createRevealPlan(
+  options: TextRevealSessionOptions,
+): RevealPlan {
   const reveal = revealUnits(options.units);
   const events: RevealEvent[] = [];
   const pauses: PauseWindow[] = [];
@@ -66,16 +63,24 @@ export function createRevealPlan(options: TextRevealSessionOptions): RevealPlan 
 
   for (const unit of options.units) {
     if (unit.kind === "pause") {
+      // A pause is a hard reveal boundary, not just an annotation on the
+      // timeline.  In drop-fade mode an inline formula (and the preceding
+      // characters) may still be animating concurrently, so the explicit
+      // wait starts only after every already-started animation has settled.
+      const startMs = Math.max(elapsed, latestAnimationEnd);
       pauses.push({
-        startMs: elapsed,
-        endMs: elapsed + unit.durationMs,
+        startMs,
+        endMs: startMs + unit.durationMs,
         span: unit.span,
       });
-      elapsed += unit.durationMs;
+      elapsed = startMs + unit.durationMs;
       continue;
     }
     if (unit.kind === "speed") {
-      cps = unit.cps === null ? validCps(options.defaultCps, 30) : validCps(unit.cps, options.defaultCps);
+      cps =
+        unit.cps === null
+          ? validCps(options.defaultCps, 30)
+          : validCps(unit.cps, options.defaultCps);
       continue;
     }
     if (unit.kind !== "character" && unit.kind !== "math") continue;
@@ -85,9 +90,14 @@ export function createRevealPlan(options: TextRevealSessionOptions): RevealPlan 
       unit.kind === "math"
         ? formulaRevealDurationForUnit(unit, durations.get(revealIndex), cps)
         : 0;
-    const waitsForFormula = unit.kind === "math" && shouldWaitForMath(unit, options);
+    const waitsForFormula =
+      unit.kind === "math" && shouldWaitForMath(unit, options);
+    // A drop-fade formula keeps a width-derived animation duration even when
+    // inline TeX is non-blocking. The next character may start one CPS tick
+    // later, but the formula continues falling/fading concurrently instead of
+    // collapsing into a one-frame animation.
     const visualDuration =
-      unit.kind === "math" && waitsForFormula
+      unit.kind === "math" && (waitsForFormula || animation === "drop_fade")
         ? formulaDuration
         : animation === "drop_fade"
           ? 160
@@ -115,7 +125,9 @@ export function createRevealPlan(options: TextRevealSessionOptions): RevealPlan 
   };
 }
 
-export function initialRevealSessionState(plan: RevealPlan): RevealSessionState {
+export function initialRevealSessionState(
+  plan: RevealPlan,
+): RevealSessionState {
   return makeState(plan, 0, false, false);
 }
 
@@ -125,16 +137,46 @@ export function advanceRevealSession(
   state: RevealSessionState,
   deltaMs: number,
 ): RevealSessionState {
-  if (state.status === "completed" || state.status === "cancelled" || state.status === "paused") return state;
+  if (
+    state.status === "completed" ||
+    state.status === "cancelled" ||
+    state.status === "paused"
+  )
+    return state;
   const delta = Number.isFinite(deltaMs) ? Math.max(0, deltaMs) : 0;
-  return makeState(plan, Math.min(plan.completionMs, state.elapsedMs + delta), false, state.restored);
+  const target = Math.min(plan.completionMs, state.elapsedMs + delta);
+  const activePause = plan.pauses.find(
+    (pause) =>
+      state.elapsedMs >= pause.startMs && state.elapsedMs < pause.endMs,
+  );
+  // Never let one RAF tick jump from before a pause to after it.  When a
+  // pause is active, consume at most its own remaining duration; a separate
+  // tick is required before the following segment may start.  This also
+  // handles adjacent pauses without exposing even a frame of later text.
+  const nextPause = plan.pauses.find(
+    (pause) => pause.startMs >= state.elapsedMs && pause.startMs <= target,
+  );
+  const bounded =
+    activePause === undefined
+      ? nextPause === undefined
+        ? target
+        : nextPause.startMs === state.elapsedMs
+          ? Math.min(target, nextPause.endMs)
+          : nextPause.startMs
+      : Math.min(target, activePause.endMs);
+  return makeState(plan, bounded, false, state.restored);
 }
 
 export function pauseRevealSession(
   _plan: RevealPlan,
   state: RevealSessionState,
 ): RevealSessionState {
-  if (state.status === "completed" || state.status === "cancelled" || state.status === "paused") return state;
+  if (
+    state.status === "completed" ||
+    state.status === "cancelled" ||
+    state.status === "paused"
+  )
+    return state;
   return { ...state, status: "paused" };
 }
 
@@ -147,11 +189,16 @@ export function resumeRevealSession(
 }
 
 /** Immediately reveals every unit and clears every pending pause. */
-export function completeRevealSession(plan: RevealPlan, restored = false): RevealSessionState {
+export function completeRevealSession(
+  plan: RevealPlan,
+  restored = false,
+): RevealSessionState {
   return makeState(plan, plan.completionMs, true, restored);
 }
 
-export function cancelRevealSession(state: RevealSessionState): RevealSessionState {
+export function cancelRevealSession(
+  state: RevealSessionState,
+): RevealSessionState {
   if (state.status === "cancelled") return state;
   return { ...state, status: "cancelled", activePause: null };
 }
@@ -169,8 +216,13 @@ export class TextRevealSession {
     this.state = state ?? initialRevealSessionState(this.plan);
   }
 
-  private static fromPlan(plan: RevealPlan, state: RevealSessionState): TextRevealSession {
-    const session = Object.create(TextRevealSession.prototype) as TextRevealSession;
+  private static fromPlan(
+    plan: RevealPlan,
+    state: RevealSessionState,
+  ): TextRevealSession {
+    const session = Object.create(
+      TextRevealSession.prototype,
+    ) as TextRevealSession;
     Object.defineProperties(session, {
       plan: { value: plan, enumerable: true },
       state: { value: state, enumerable: true },
@@ -179,29 +231,47 @@ export class TextRevealSession {
   }
 
   advance(deltaMs: number): TextRevealSession {
-    return TextRevealSession.fromPlan(this.plan, advanceRevealSession(this.plan, this.state, deltaMs));
+    return TextRevealSession.fromPlan(
+      this.plan,
+      advanceRevealSession(this.plan, this.state, deltaMs),
+    );
   }
 
   pause(): TextRevealSession {
-    return TextRevealSession.fromPlan(this.plan, pauseRevealSession(this.plan, this.state));
+    return TextRevealSession.fromPlan(
+      this.plan,
+      pauseRevealSession(this.plan, this.state),
+    );
   }
 
   resume(): TextRevealSession {
-    return TextRevealSession.fromPlan(this.plan, resumeRevealSession(this.plan, this.state));
+    return TextRevealSession.fromPlan(
+      this.plan,
+      resumeRevealSession(this.plan, this.state),
+    );
   }
 
   /** Completes the active reveal while preserving the current presentation. */
   completeReveal(): TextRevealSession {
-    return TextRevealSession.fromPlan(this.plan, completeRevealSession(this.plan));
+    return TextRevealSession.fromPlan(
+      this.plan,
+      completeRevealSession(this.plan),
+    );
   }
 
   /** Restores a saved presentation directly at its final state. */
   restorePresentation(): TextRevealSession {
-    return TextRevealSession.fromPlan(this.plan, completeRevealSession(this.plan, true));
+    return TextRevealSession.fromPlan(
+      this.plan,
+      completeRevealSession(this.plan, true),
+    );
   }
 
   cancel(): TextRevealSession {
-    return TextRevealSession.fromPlan(this.plan, cancelRevealSession(this.state));
+    return TextRevealSession.fromPlan(
+      this.plan,
+      cancelRevealSession(this.state),
+    );
   }
 }
 
@@ -214,13 +284,20 @@ function makeState(
   const elapsed = Math.max(0, Math.min(plan.completionMs, elapsedMs));
   const revealedUnitIndices: number[] = [];
   for (const event of plan.events) {
-    if (forceComplete || event.atMs <= elapsed) revealedUnitIndices.push(event.revealIndex);
+    if (forceComplete || event.atMs <= elapsed)
+      revealedUnitIndices.push(event.revealIndex);
     else break;
   }
   const activePause = forceComplete ? null : pauseAt(plan.pauses, elapsed);
   const completed = forceComplete || elapsed >= plan.completionMs;
   return {
-    status: completed ? "completed" : activePause !== null ? "waiting" : elapsed === 0 ? "preparing" : "revealing",
+    status: completed
+      ? "completed"
+      : activePause !== null
+        ? "waiting"
+        : elapsed === 0
+          ? "preparing"
+          : "revealing",
     elapsedMs: elapsed,
     revealedCount: revealedUnitIndices.length,
     revealedUnitIndices,
@@ -230,12 +307,19 @@ function makeState(
   };
 }
 
-function pauseAt(pauses: readonly PauseWindow[], elapsed: number): PauseWindow | null {
-  for (const pause of pauses) if (elapsed >= pause.startMs && elapsed < pause.endMs) return pause;
+function pauseAt(
+  pauses: readonly PauseWindow[],
+  elapsed: number,
+): PauseWindow | null {
+  for (const pause of pauses)
+    if (elapsed >= pause.startMs && elapsed < pause.endMs) return pause;
   return null;
 }
 
-function shouldWaitForMath(unit: MathUnit, options: RevealTimingOptions): boolean {
+function shouldWaitForMath(
+  unit: MathUnit,
+  options: RevealTimingOptions,
+): boolean {
   return unit.display || options.waitForInlineMath !== false;
 }
 

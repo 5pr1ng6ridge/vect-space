@@ -4,22 +4,14 @@ import {
   useEffect,
   useImperativeHandle,
   useMemo,
-  useRef,
   useState,
   type ReactElement,
 } from "react";
 
 import {
-  buildPauseWindows,
-  buildRevealSchedule,
   buildVisibleUnitCps,
-  formulaPresentationDurationMs,
   formulaRevealDurationMs,
-  mathRevealDurationMs,
   parseMarkup,
-  revealCompletionTime,
-  resolveInstantRevealPromptId,
-  type RevealTimingOptions,
 } from "../engine/markup";
 import type {
   DialoguePageSnapshot,
@@ -28,8 +20,10 @@ import type {
 } from "../engine/types";
 import type { UiMotionHost } from "../engine/uiMotion";
 import { MarkupText } from "./MarkupText";
+import { useTextRevealSession } from "./useTextRevealSession";
 
 export interface DialogueBoxHandle {
+  /** Completes reveal only; it never performs a load-style visual restore. */
   complete(): void;
   isComplete(): boolean;
 }
@@ -44,10 +38,15 @@ interface DialogueBoxProps {
   dialogueBoxUrl: string;
   nameBoxUrl: string;
   onTypingChange(typing: boolean, cps: number): void;
-  onRevealComplete(promptId: string): void;
-  revealImmediately: boolean;
+  onRevealComplete(instanceKey: string): void;
+  /** Per RuntimeUpdate/prompt identity. Revisited prompt ids need a new key. */
+  sessionKey?: string;
+  /** Saved/no-cue state only; Ctrl uses the imperative complete() method. */
+  revealImmediately?: boolean;
   revealAnimation?: TextRevealAnimation;
   fontReady?: boolean;
+  /** Menus and visibility changes freeze the virtual reveal clock. */
+  suspended?: boolean;
   motionHost?: UiMotionHost;
 }
 
@@ -55,6 +54,13 @@ interface MathRevealMetric {
   widthPx: number;
   fontSizePx: number;
 }
+
+interface MetricsForInstance {
+  key: string;
+  values: ReadonlyMap<number, MathRevealMetric>;
+}
+
+const EMPTY_MATH_METRICS: ReadonlyMap<number, MathRevealMetric> = new Map();
 
 export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
   function DialogueBox(
@@ -69,14 +75,17 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       nameBoxUrl,
       onTypingChange,
       onRevealComplete,
-      revealImmediately,
+      sessionKey,
+      revealImmediately = false,
       revealAnimation = "typewriter",
       fontReady = true,
+      suspended = false,
       motionHost,
     },
     ref,
   ): ReactElement {
     const promptId = prompt?.prompt_id ?? `${page.page_id}:retained`;
+    const instanceKey = sessionKey ?? promptId;
     const currentText = prompt?.text ?? "";
     const completedText = useMemo(
       () =>
@@ -88,236 +97,116 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       () => buildVisibleUnitCps(units, initialCps, defaultCps),
       [defaultCps, initialCps, units],
     );
-    const timingOptions = useMemo<RevealTimingOptions>(
-      () => ({ waitForInlineMath: revealAnimation !== "drop_fade" }),
-      [revealAnimation],
+    const mathUnitCount = useMemo(
+      () => units.filter((unit) => unit.kind === "math").length,
+      [units],
     );
-    const [mathRevealMetrics, setMathRevealMetrics] = useState<
-      ReadonlyMap<number, MathRevealMetric>
-    >(() => new Map());
+    const [metrics, setMetrics] = useState<MetricsForInstance>(() => ({
+      key: instanceKey,
+      values: new Map(),
+    }));
+    const mathRevealMetrics =
+      metrics.key === instanceKey ? metrics.values : EMPTY_MATH_METRICS;
     const mathRevealDurations = useMemo(() => {
       const result = new Map<number, number>();
-      for (const [unitIndex, metric] of mathRevealMetrics) {
+      for (const [index, metric] of mathRevealMetrics) {
         result.set(
-          unitIndex,
+          index,
           formulaRevealDurationMs(
             metric.widthPx,
             metric.fontSizePx,
-            unitCps[unitIndex] ?? 30,
+            unitCps[index] ?? 30,
           ),
         );
       }
       return result;
     }, [mathRevealMetrics, unitCps]);
-    const schedule = useMemo(
-      () =>
-        buildRevealSchedule(
-          units,
-          initialCps,
-          defaultCps,
-          mathRevealDurations,
-          timingOptions,
-        ),
-      [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
+    const [lineSweepReadyKey, setLineSweepReadyKey] = useState<string | null>(
+      null,
     );
-    const pauseWindows = useMemo(
-      () =>
-        buildPauseWindows(
-          units,
-          initialCps,
-          defaultCps,
-          mathRevealDurations,
-          timingOptions,
-        ),
-      [defaultCps, initialCps, mathRevealDurations, timingOptions, units],
-    );
-    const revealCompletionMs = useMemo(
-      () =>
-        revealCompletionTime(
-          units,
-          schedule,
-          mathRevealDurations,
-          revealAnimation,
-          unitCps,
-          timingOptions,
-        ),
-      [
-        mathRevealDurations,
-        revealAnimation,
-        schedule,
-        timingOptions,
-        unitCps,
-        units,
-      ],
-    );
-    const [visibleCount, setVisibleCount] = useState(0);
-    const [revealFinished, setRevealFinished] = useState(
-      () => revealImmediately || schedule.length === 0,
-    );
-    const [activePromptId, setActivePromptId] = useState(promptId);
-    const [instantRevealPromptId, setInstantRevealPromptId] = useState<
-      string | null
-    >(null);
-    const [paused, setPaused] = useState(() => isPauseAt(0, pauseWindows));
-    const [typingCps, setTypingCps] = useState(() => unitCps[0] ?? initialCps);
-    const [lineSweepReadyPromptId, setLineSweepReadyPromptId] = useState<
-      string | null
-    >(null);
-    const [lineSweepElapsedMs, setLineSweepElapsedMs] = useState(0);
-    const promptIdRef = useRef(promptId);
-    const visibleRef = useRef(0);
-    const promptIsActive = activePromptId === promptId;
-    const renderedVisibleCount = promptIsActive ? visibleCount : 0;
-    const complete = promptIsActive && revealFinished;
-    const completeRef = useRef(complete);
-    const reportedPromptRef = useRef<string | null>(null);
     const handleLineSweepLayoutChange = useCallback(
       (ready: boolean): void => {
-        setLineSweepReadyPromptId(ready ? promptId : null);
+        setLineSweepReadyKey(ready ? instanceKey : null);
       },
-      [promptId],
+      [instanceKey],
     );
-    const revealReady =
-      revealImmediately ||
-      (fontReady &&
-        (revealAnimation !== "line_sweep" ||
-          lineSweepReadyPromptId === promptId));
     const handleMathMetrics = useCallback(
-      (unitIndex: number, widthPx: number, fontSizePx: number): void => {
-        if (visibleRef.current > 0) return;
-        setMathRevealMetrics((current) => {
-          const previous = current.get(unitIndex);
+      (index: number, widthPx: number, fontSizePx: number): void => {
+        setMetrics((current) => {
+          const values: ReadonlyMap<number, MathRevealMetric> =
+            current.key === instanceKey ? current.values : EMPTY_MATH_METRICS;
+          const previous = values.get(index);
           if (
             previous?.widthPx === widthPx &&
-            previous.fontSizePx === fontSizePx
+            previous.fontSizePx === fontSizePx &&
+            current.key === instanceKey
           ) {
             return current;
           }
-          const next = new Map(current);
-          next.set(unitIndex, { widthPx, fontSizePx });
-          return next;
+          const next = new Map<number, MathRevealMetric>(values);
+          next.set(index, { widthPx, fontSizePx });
+          return { key: instanceKey, values: next };
         });
       },
-      [],
+      [instanceKey],
     );
-
-    useEffect(() => {
-      if (!revealReady) return;
-      if (promptIdRef.current === promptId && completeRef.current) return;
-      const previousPromptId = promptIdRef.current;
-      const initialVisibleCount = revealImmediately ? schedule.length : 0;
-      const initiallyFinished = revealImmediately || schedule.length === 0;
-      setActivePromptId(promptId);
-      visibleRef.current = initialVisibleCount;
-      completeRef.current = initiallyFinished;
-      setVisibleCount(initialVisibleCount);
-      setRevealFinished(initiallyFinished);
-      setInstantRevealPromptId((current) =>
-        resolveInstantRevealPromptId(
-          current,
-          promptId,
-          previousPromptId,
-          revealImmediately,
-        ),
-      );
-      promptIdRef.current = promptId;
-      setPaused(isPauseAt(0, pauseWindows));
-      setTypingCps(unitCps[0] ?? initialCps);
-      setLineSweepElapsedMs(revealImmediately ? revealCompletionMs : 0);
-      if (initiallyFinished) return;
-      const startedAt = performance.now();
-      let frame = 0;
-      const tick = (now: number): void => {
-        const elapsed = now - startedAt;
-        if (revealAnimation === "line_sweep") {
-          setLineSweepElapsedMs(elapsed);
-        }
-        const nextPaused = isPauseAt(elapsed, pauseWindows);
-        setPaused((current) => (current === nextPaused ? current : nextPaused));
-        const nextCps = typingCpsAt(
-          elapsed,
-          units,
-          schedule,
-          unitCps,
-          mathRevealDurations,
-          initialCps,
-          timingOptions,
-        );
-        setTypingCps((current) => (current === nextCps ? current : nextCps));
-        let next = visibleRef.current;
-        while (
-          next < schedule.length &&
-          (schedule[next] ?? Number.POSITIVE_INFINITY) <= elapsed
-        ) {
-          next += 1;
-        }
-        if (next !== visibleRef.current) {
-          visibleRef.current = next;
-          setVisibleCount(next);
-        }
-        const timelineFinished =
-          next >= schedule.length && elapsed >= revealCompletionMs;
-        if (timelineFinished) {
-          completeRef.current = true;
-          setRevealFinished(true);
-        } else {
-          frame = requestAnimationFrame(tick);
-        }
-      };
-      frame = requestAnimationFrame(tick);
-      return () => cancelAnimationFrame(frame);
-    }, [
-      pauseWindows,
+    const metricsReady = mathRevealMetrics.size >= mathUnitCount;
+    const revealReady =
+      fontReady &&
+      metricsReady &&
+      (revealAnimation !== "line_sweep" || lineSweepReadyKey === instanceKey);
+    const handleSessionComplete = useCallback((): void => {
+      if (prompt !== null) onRevealComplete(instanceKey);
+    }, [instanceKey, onRevealComplete, prompt]);
+    const session = useTextRevealSession({
+      animation: revealAnimation,
+      defaultCps,
       initialCps,
+      instanceKey,
       mathRevealDurations,
-      promptId,
-      revealCompletionMs,
-      revealAnimation,
-      revealImmediately,
-      revealReady,
-      schedule,
-      unitCps,
+      onComplete: handleSessionComplete,
+      ready: revealReady,
+      restorePresentation: revealImmediately,
+      suspended: suspended || disabled || !visible,
       units,
-      timingOptions,
-    ]);
+      waitForInlineMath: revealAnimation !== "drop_fade",
+    });
+    const complete = session.isComplete();
+    const visibleCount = session.state.revealedCount;
+    const typingCps =
+      unitCps[Math.min(visibleCount, Math.max(0, unitCps.length - 1))] ??
+      initialCps;
 
     useImperativeHandle(
       ref,
       () => ({
-        complete: () => {
-          visibleRef.current = schedule.length;
-          completeRef.current = true;
-          setRevealFinished(true);
-          setInstantRevealPromptId(promptId);
-          setVisibleCount(schedule.length);
-        },
-        isComplete: () => completeRef.current,
+        complete: session.completeReveal,
+        isComplete: session.isComplete,
       }),
-      [promptId, schedule.length],
+      [session.completeReveal, session.isComplete],
     );
 
     useEffect(() => {
-      if (
+      const typing =
         prompt !== null &&
-        complete &&
-        reportedPromptRef.current !== promptId
-      ) {
-        reportedPromptRef.current = promptId;
-        onRevealComplete(promptId);
-      }
-    }, [complete, onRevealComplete, prompt, promptId]);
-
-    const effectivePaused =
-      promptIdRef.current === promptId ? paused : isPauseAt(0, pauseWindows);
-    const typing =
-      promptIsActive && visible && !disabled && !complete && !effectivePaused;
-    useEffect(() => {
+        visible &&
+        !disabled &&
+        !suspended &&
+        !complete &&
+        session.state.activePause === null;
       onTypingChange(typing, typingCps);
       return () => onTypingChange(false, typingCps);
-    }, [onTypingChange, typing, typingCps]);
+    }, [
+      complete,
+      disabled,
+      onTypingChange,
+      prompt,
+      session.state.activePause,
+      suspended,
+      typingCps,
+      visible,
+    ]);
 
-    // Keep callback refs stable while the typewriter causes frequent React
-    // renders. Re-registering an element would reset an in-flight UI motion.
     const dialogueRootRef = useCallback(
       (element: HTMLElement | null) =>
         motionHost?.register("dialogue_root", element),
@@ -386,21 +275,20 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           <MarkupText source={completedText} />
           <MarkupText
             animateMath
-            instantMathReveal={instantRevealPromptId === promptId}
-            instantReveal={instantRevealPromptId === promptId}
-            lineSweepElapsedMs={lineSweepElapsedMs}
+            fontReady={fontReady}
+            instantMathReveal={complete}
+            instantReveal={complete}
+            lineSweepElapsedMs={session.state.elapsedMs}
             mathRevealDurations={mathRevealDurations}
             onMathMetrics={handleMathMetrics}
+            onLineSweepLayoutChange={handleLineSweepLayoutChange}
+            pauseWindows={session.plan.pauses}
             revealAnimation={revealAnimation}
-            revealSchedule={schedule}
-            pauseWindows={pauseWindows}
-            fontReady={fontReady}
+            revealClock={session.clock}
+            revealSchedule={session.plan.events.map((event) => event.atMs)}
             source={currentText}
             unitCps={unitCps}
-            visibleCount={renderedVisibleCount}
-            {...(revealAnimation === "line_sweep"
-              ? { onLineSweepLayoutChange: handleLineSweepLayoutChange }
-              : {})}
+            visibleCount={visibleCount}
           />
         </span>
         {prompt !== null && (
@@ -415,46 +303,3 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
     );
   },
 );
-
-function isPauseAt(
-  elapsedMs: number,
-  windows: { startMs: number; endMs: number }[],
-): boolean {
-  return windows.some(
-    ({ startMs, endMs }) => elapsedMs >= startMs && elapsedMs < endMs,
-  );
-}
-
-function typingCpsAt(
-  elapsedMs: number,
-  units: ReturnType<typeof parseMarkup>,
-  schedule: readonly number[],
-  unitCps: readonly number[],
-  mathRevealDurations: ReadonlyMap<number, number>,
-  fallbackCps: number,
-  timingOptions: RevealTimingOptions,
-): number {
-  let visibleIndex = 0;
-  for (const unit of units) {
-    if (unit.kind !== "character" && unit.kind !== "math") {
-      continue;
-    }
-    const revealAt = schedule[visibleIndex] ?? Number.POSITIVE_INFINITY;
-    const duration =
-      unit.kind === "math" &&
-      (unit.display || timingOptions.waitForInlineMath !== false)
-        ? formulaPresentationDurationMs(
-            mathRevealDurationMs(
-              mathRevealDurations.get(visibleIndex),
-              unitCps[visibleIndex] ?? fallbackCps,
-            ),
-            unit.display,
-          )
-        : 0;
-    if (elapsedMs < revealAt + duration) {
-      return unitCps[visibleIndex] ?? fallbackCps;
-    }
-    visibleIndex += 1;
-  }
-  return unitCps[unitCps.length - 1] ?? fallbackCps;
-}

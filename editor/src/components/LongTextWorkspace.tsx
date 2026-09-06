@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,7 +11,13 @@ import {
 import { assetUrl } from "../api";
 import { interpolateTemplate } from "../textTemplate";
 import { useAssetFont } from "../useAssetFont";
-import type { TextLayoutSnapshot } from "@vectspace/text";
+import {
+  paginateTextLayouts,
+  parseMarkup,
+  TextRevealSession,
+  type TextLayoutSnapshot,
+  type TextRevealAnimation,
+} from "@vectspace/text";
 import type {
   ContentManifest,
   EditorAsset,
@@ -45,6 +50,11 @@ interface LayoutGesture {
   startY: number;
   initial: LongTextLayout;
   moved: boolean;
+}
+
+interface EditorPreviewRun {
+  key: string;
+  session: TextRevealSession;
 }
 
 export interface LongTextWorkspaceProps {
@@ -86,18 +96,18 @@ export function LongTextWorkspace({
   const [draft, setDraft] = useState(node);
   const draftRef = useRef(node);
   const [previewScale, setPreviewScale] = useState(0.5);
-  const [measuredSurfaceHeight, setMeasuredSurfaceHeight] = useState<
-    number | null
-  >(null);
   const [stepLayouts, setStepLayouts] = useState<
     Readonly<Record<string, TextLayoutSnapshot>>
   >({});
   const [gestureActive, setGestureActive] = useState(false);
   const [backgroundChoice, setBackgroundChoice] = useState("__current__");
+  const [previewStepIndex, setPreviewStepIndex] = useState(0);
+  const [previewRun, setPreviewRun] = useState<EditorPreviewRun | null>(null);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
   const stageWrapRef = useRef<HTMLDivElement>(null);
   const designRef = useRef<HTMLDivElement>(null);
-  const paperRef = useRef<HTMLDivElement>(null);
   const gestureRef = useRef<LayoutGesture | null>(null);
+  const previewSessionRef = useRef<EditorPreviewRun | null>(null);
 
   const assetsById = useMemo(
     () => new Map(assets.map((asset) => [asset.id, asset] as const)),
@@ -150,85 +160,234 @@ export function LongTextWorkspace({
     },
     [],
   );
-  const measuredPagination = useMemo(() => {
-    const capacity = Math.max(1, layout.page_height - layout.padding_y * 2);
-    const breakBefore = new Set<number>();
-    let used = 0;
-    let surfaceHeight = layout.padding_y * 2;
-    previewSteps.forEach((step, index) => {
-      const measuredHeight = stepLayouts[step.id]?.contentHeight;
-      const height = Math.max(
-        1,
-        measuredHeight ?? Math.max(88, (draft.font_size ?? 32) * 2.2),
-      );
-      const gap = used === 0 ? 0 : 28;
-      const explicitBreak =
-        index > 0 &&
-        draft.pagination !== "continuous" &&
-        step.page_break_before;
-      const automaticBreak =
-        index > 0 &&
-        draft.pagination === "auto" &&
-        used > 0 &&
-        used + gap + height > capacity;
-      if (explicitBreak || automaticBreak) {
-        breakBefore.add(index);
-        used = 0;
-      }
-      const nextGap = used === 0 ? 0 : 28;
-      used += nextGap + height;
-      surfaceHeight = Math.max(surfaceHeight, layout.padding_y * 2 + used);
-    });
-    return { breakBefore, surfaceHeight };
-  }, [
-    draft.font_size,
-    draft.pagination,
-    layout.page_height,
-    layout.padding_y,
-    previewSteps,
-    stepLayouts,
+  // This is the identical row-based paginator used by the game.  Before an
+  // asynchronous font/KaTeX measurement arrives it uses only a provisional
+  // height; it never falls back to the former editor-only line estimate.
+  const previewPages = useMemo(
+    () =>
+      paginateTextLayouts(
+        previewSteps.map((step) => ({
+          id: step.id,
+          pageBreakBefore: step.page_break_before,
+          layout: stepLayouts[step.id],
+          fallbackHeight: Math.max(88, (draft.font_size ?? 32) * 2.2),
+        })),
+        draft.pagination ?? "auto",
+        layout.page_height,
+        layout.padding_y,
+      ),
+    [
+      draft.font_size,
+      draft.pagination,
+      layout.page_height,
+      layout.padding_y,
+      previewSteps,
+      stepLayouts,
+    ],
+  );
+  const previewPageOffsets = useMemo(() => {
+    const offsets: number[] = [];
+    let next = 0;
+    for (const page of previewPages) {
+      offsets.push(next);
+      next +=
+        page.height + (draft.pagination === "continuous" ? 0 : layout.page_gap);
+    }
+    return offsets;
+  }, [draft.pagination, layout.page_gap, previewPages]);
+  const previewSurfaceHeight = useMemo(
+    () =>
+      previewPages.reduce(
+        (total, page, index) =>
+          total +
+          page.height +
+          (draft.pagination !== "continuous" && index < previewPages.length - 1
+            ? layout.page_gap
+            : 0),
+        0,
+      ),
+    [draft.pagination, layout.page_gap, previewPages],
+  );
+  const previewStepIndexById = useMemo(
+    () => new Map(previewSteps.map((step, index) => [step.id, index] as const)),
+    [previewSteps],
+  );
+  const previewMaxScroll = Math.max(
+    0,
+    previewSurfaceHeight - layout.height + 240,
+  );
+  const previewSourceById = useMemo(
+    () =>
+      new Map(
+        previewSteps.map((step) => [
+          step.id,
+          previewText(step.text, project.manifest),
+        ]),
+      ),
+    [previewSteps, project.manifest],
+  );
+  const safePreviewStepIndex = clamp(
+    previewStepIndex,
+    0,
+    Math.max(0, previewSteps.length - 1),
+  );
+  const previewAnimation: TextRevealAnimation =
+    draft.reveal_animation ?? "typewriter";
+  const previewCps = draft.speed_cps ?? 30;
+  const createPreviewSession = useCallback(
+    (stepIndex: number): TextRevealSession => {
+      const step =
+        previewSteps[clamp(stepIndex, 0, Math.max(0, previewSteps.length - 1))];
+      return new TextRevealSession({
+        units: parseMarkup(
+          step === undefined ? "" : (previewSourceById.get(step.id) ?? ""),
+        ),
+        initialCps: previewCps,
+        defaultCps: previewCps,
+        animation: previewAnimation,
+        waitForInlineMath: previewAnimation !== "drop_fade",
+      });
+    },
+    [previewAnimation, previewCps, previewSourceById, previewSteps],
+  );
+  const previewStep = previewSteps[safePreviewStepIndex];
+  const previewSessionKey = JSON.stringify([
+    previewStep?.id ?? "",
+    previewSourceById.get(previewStep?.id ?? "") ?? "",
+    previewCps,
+    previewAnimation,
   ]);
-  const estimatedSurfaceHeight = useMemo(() => {
-    const estimatedStepHeight = Math.max(88, (draft.font_size ?? 32) * 2.2);
-    const contentHeight =
-      layout.padding_y * 2 + previewSteps.length * estimatedStepHeight;
-    return Math.max(layout.page_height, contentHeight);
-  }, [
-    draft.font_size,
-    layout.page_height,
-    layout.padding_y,
-    previewSteps.length,
-  ]);
-  const previewSurfaceHeight = Math.max(
-    estimatedSurfaceHeight,
-    measuredPagination.surfaceHeight,
-    measuredSurfaceHeight ?? 0,
+  const initialPreviewSession = useMemo(
+    () => createPreviewSession(safePreviewStepIndex),
+    [createPreviewSession, safePreviewStepIndex],
+  );
+  const previewSession =
+    previewRun?.key === previewSessionKey
+      ? previewRun.session
+      : initialPreviewSession;
+  const replacePreviewSession = useCallback(
+    (next: TextRevealSession): void => {
+      const run = { key: previewSessionKey, session: next };
+      previewSessionRef.current = run;
+      setPreviewRun(run);
+    },
+    [previewSessionKey],
   );
 
-  // Use the actual KaTeX/font layout as the editor's height source. The
-  // estimate above only prevents the first paint from collapsing; after the
-  // browser has laid out every unit, the measured scroll height becomes the
-  // stable surface size used by both the paper and text layers.
-  useLayoutEffect(() => {
-    const paper = paperRef.current;
-    if (paper === null) return;
-    const measure = (): void => {
-      const next = Math.max(layout.page_height, paper.scrollHeight);
-      setMeasuredSurfaceHeight((previous) =>
-        previous === next ? previous : next,
-      );
+  // Keep the animation callback in sync with derived content without using
+  // an effect to reset React state. A changed text/layout key simply presents
+  // a new pure session until the user presses a playback control.
+  useEffect(() => {
+    previewSessionRef.current = {
+      key: previewSessionKey,
+      session: previewSession,
     };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(paper);
-    return () => observer.disconnect();
+  }, [previewSession, previewSessionKey]);
+
+  useEffect(() => {
+    if (!previewPlaying) return;
+    let frame = 0;
+    let previous = performance.now();
+    const tick = (now: number): void => {
+      const current = previewSessionRef.current;
+      if (
+        current === null ||
+        current.key !== previewSessionKey ||
+        current.session.state.status === "completed"
+      ) {
+        setPreviewPlaying(false);
+        return;
+      }
+      const next = current.session.advance(
+        Math.min(50, Math.max(0, now - previous)),
+      );
+      previous = now;
+      replacePreviewSession(next);
+      if (next.state.status === "completed") {
+        setPreviewPlaying(false);
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [previewPlaying, previewSessionKey, replacePreviewSession]);
+
+  const previewScrollOffset = useMemo(() => {
+    if (previewStep === undefined) return 0;
+    let start: number | undefined;
+    for (const [pageIndex, page] of previewPages.entries()) {
+      const fragment = page.fragments.find(
+        (candidate) => candidate.itemId === previewStep.id,
+      );
+      if (fragment === undefined) continue;
+      start =
+        (previewPageOffsets[pageIndex] ?? 0) + layout.padding_y + fragment.top;
+      break;
+    }
+    return start === undefined
+      ? 0
+      : clamp(start - layout.height * 0.38, 0, previewMaxScroll);
   }, [
-    draft.font_size,
-    layout.page_height,
-    layout.padding_x,
+    layout.height,
     layout.padding_y,
-    layout.page_gap,
-    previewSteps,
+    previewMaxScroll,
+    previewPageOffsets,
+    previewPages,
+    previewStep,
+  ]);
+
+  const previewComplete = previewSession.state.status === "completed";
+  const resetPreview = useCallback(
+    (stepIndex: number, playing = false): void => {
+      const normalized = clamp(
+        stepIndex,
+        0,
+        Math.max(0, previewSteps.length - 1),
+      );
+      setPreviewStepIndex(normalized);
+      if (normalized === safePreviewStepIndex) {
+        replacePreviewSession(createPreviewSession(normalized));
+      } else {
+        previewSessionRef.current = null;
+        setPreviewRun(null);
+      }
+      setPreviewPlaying(playing);
+    },
+    [
+      createPreviewSession,
+      previewSteps.length,
+      replacePreviewSession,
+      safePreviewStepIndex,
+    ],
+  );
+  const togglePreviewPlayback = useCallback((): void => {
+    if (previewComplete) {
+      resetPreview(safePreviewStepIndex, true);
+      return;
+    }
+    setPreviewPlaying((current) => !current);
+  }, [previewComplete, resetPreview, safePreviewStepIndex]);
+  const completePreviewStep = useCallback((): void => {
+    const current = previewSessionRef.current;
+    const session =
+      current?.key === previewSessionKey ? current.session : previewSession;
+    replacePreviewSession(session.completeReveal());
+    setPreviewPlaying(false);
+  }, [previewSession, previewSessionKey, replacePreviewSession]);
+  const advancePreviewStep = useCallback((): void => {
+    if (!previewComplete) {
+      completePreviewStep();
+      return;
+    }
+    if (safePreviewStepIndex >= previewSteps.length - 1) return;
+    resetPreview(safePreviewStepIndex + 1);
+  }, [
+    completePreviewStep,
+    previewComplete,
+    previewSteps.length,
+    resetPreview,
+    safePreviewStepIndex,
   ]);
 
   const interpolationWarnings = useMemo(
@@ -420,8 +579,7 @@ export function LongTextWorkspace({
     transform: `translate(-50%, -50%) scale(${previewScale})`,
     fontFamily: font.fontFamily,
   } as CSSProperties;
-  const paperStyle = {
-    height: `${previewSurfaceHeight}px`,
+  const paperArtworkStyle = {
     ...(paperUrl === undefined
       ? {}
       : {
@@ -429,12 +587,16 @@ export function LongTextWorkspace({
           backgroundSize: `100% ${layout.page_height}px`,
         }),
   } as CSSProperties;
-  const textStyle = {
+  const textSurfaceStyle = {
     height: `${previewSurfaceHeight}px`,
-    "--long-text-page-gap": `${layout.page_gap}px`,
     "--long-text-padding-x": `${layout.padding_x}px`,
     "--long-text-padding-y": `${layout.padding_y}px`,
     fontSize: `${draft.font_size ?? 32}px`,
+  } as CSSProperties;
+  const measureStyle = {
+    color: draft.text_color ?? "#212533",
+    fontSize: `${draft.font_size ?? 32}px`,
+    width: `${Math.max(1, layout.width - layout.padding_x * 2)}px`,
   } as CSSProperties;
 
   return (
@@ -447,6 +609,33 @@ export function LongTextWorkspace({
         <code>
           {sceneId}/{nodeId}
         </code>
+        <div className="long-text-workspace-preview-controls">
+          <button onClick={togglePreviewPlayback} type="button">
+            {previewPlaying ? "暂停预览" : "播放预览"}
+          </button>
+          <button
+            disabled={previewComplete}
+            onClick={completePreviewStep}
+            type="button"
+          >
+            补全
+          </button>
+          <button
+            disabled={
+              previewComplete && safePreviewStepIndex >= previewSteps.length - 1
+            }
+            onClick={advancePreviewStep}
+            type="button"
+          >
+            下一分段
+          </button>
+          <button onClick={() => resetPreview(0)} type="button">
+            从头重播
+          </button>
+          <span>
+            {safePreviewStepIndex + 1} / {previewSteps.length}
+          </span>
+        </div>
         <span className="long-text-workspace-status">
           {dirty ? "有未保存修改" : "已保存"}
         </span>
@@ -504,29 +693,99 @@ export function LongTextWorkspace({
                   width: `${layout.width}px`,
                 }}
               >
+                <div
+                  aria-hidden="true"
+                  className="long-text-workspace-measure-root"
+                  style={measureStyle}
+                >
+                  {previewSteps.map((step) => (
+                    <MarkupPreview
+                      key={step.id}
+                      onLayout={(nextLayout) =>
+                        reportStepLayout(step.id, nextLayout)
+                      }
+                      source={previewSourceById.get(step.id) ?? ""}
+                    />
+                  ))}
+                </div>
                 <div className="long-text-workspace-window">
                   <div
-                    className="long-text-workspace-paper-background"
-                    style={paperStyle}
-                  />
+                    className="long-text-workspace-surface"
+                    style={{
+                      height: `${previewSurfaceHeight}px`,
+                      transform: `translate3d(0, -${previewScrollOffset}px, 0)`,
+                    }}
+                  >
+                    {previewPages.map((page, index) => (
+                      <div
+                        className="long-text-workspace-paper-background"
+                        key={page.index}
+                        style={{
+                          ...paperArtworkStyle,
+                          height: `${page.height}px`,
+                          top: `${previewPageOffsets[index] ?? 0}px`,
+                        }}
+                      />
+                    ))}
+                  </div>
                   <div className="long-text-workspace-text-clip">
                     <div
-                      className="long-text-workspace-paper"
-                      ref={paperRef}
-                      style={textStyle}
+                      className="long-text-workspace-surface"
+                      style={{
+                        ...textSurfaceStyle,
+                        transform: `translate3d(0, -${previewScrollOffset}px, 0)`,
+                      }}
                     >
-                      {previewSteps.map((step, index) => (
-                        <div
-                          className={`long-text-workspace-step${measuredPagination.breakBefore.has(index) ? " page-break" : ""}`}
-                          key={step.id}
+                      {previewPages.map((page, index) => (
+                        <article
+                          className="long-text-workspace-paper"
+                          key={page.index}
+                          style={{
+                            height: `${page.height}px`,
+                            top: `${previewPageOffsets[index] ?? 0}px`,
+                          }}
                         >
-                          <MarkupPreview
-                            onLayout={(nextLayout) =>
-                              reportStepLayout(step.id, nextLayout)
+                          {page.fragments.map((fragment) => {
+                            const fragmentStepIndex =
+                              previewStepIndexById.get(fragment.itemId) ?? -1;
+                            if (fragmentStepIndex > safePreviewStepIndex) {
+                              return null;
                             }
-                            source={previewText(step.text, project.manifest)}
-                          />
-                        </div>
+                            const active =
+                              fragmentStepIndex === safePreviewStepIndex;
+                            return (
+                              <div
+                                className="long-text-workspace-step-fragment"
+                                key={`${fragment.itemId}:${fragment.sourceTop}`}
+                                style={{
+                                  height: `${fragment.height}px`,
+                                  top: `${fragment.top}px`,
+                                }}
+                              >
+                                <div
+                                  className="long-text-workspace-step-fragment-content"
+                                  style={{
+                                    transform: `translate3d(0, -${fragment.sourceTop}px, 0)`,
+                                  }}
+                                >
+                                  <MarkupPreview
+                                    revealAnimation={previewAnimation}
+                                    source={
+                                      previewSourceById.get(fragment.itemId) ??
+                                      ""
+                                    }
+                                    visibleCount={
+                                      active
+                                        ? (previewSession?.state
+                                            .revealedCount ?? 0)
+                                        : Number.POSITIVE_INFINITY
+                                    }
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </article>
                       ))}
                     </div>
                   </div>

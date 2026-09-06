@@ -24,7 +24,36 @@ export interface LineSweepUnitGeometry {
 }
 
 export function isHardLineBreak(unit: VisibleUnit): boolean {
-  return unit.kind === "character" && unit.value === "\n";
+  return (
+    unit.kind === "hard_break" ||
+    (unit.kind === "character" && unit.value === "\n")
+  );
+}
+
+/** Pauses split a visual row into independently revealed segments. */
+export function splitLinesAtPauses(
+  groups: readonly (readonly number[])[],
+  schedule: readonly number[],
+  pauses: readonly { startMs: number; endMs: number }[],
+): readonly (readonly number[])[] {
+  return groups.flatMap((group) => {
+    const segments: number[][] = [];
+    for (const index of group) {
+      const lastSegment = segments[segments.length - 1];
+      const previous = lastSegment?.[lastSegment.length - 1];
+      if (
+        previous === undefined ||
+        pauses.some(
+          (pause) =>
+            pause.startMs >= (schedule[previous] ?? 0) &&
+            pause.endMs < (schedule[index] ?? 0),
+        )
+      )
+        segments.push([]);
+      segments[segments.length - 1]?.push(index);
+    }
+    return segments;
+  });
 }
 
 /**
@@ -151,7 +180,13 @@ export function lineSweepMaskPositionPx(
   );
   const progress = clamp(spentMs / Math.max(1, timing.durationMs), 0, 1);
   const sweepWidth = timing.lineWidthPx + featherPx;
-  return -timing.unitOffsetPx - sweepWidth + sweepWidth * progress;
+  // Move one feather-width beyond the nominal row end.  The gradient's tail
+  // is transparent, so stopping at `-unitOffset` leaves the final glyphs
+  // partially masked.  That was especially visible as tiny gaps between
+  // adjacent Chinese characters after a completed sweep.
+  return (
+    -timing.unitOffsetPx - sweepWidth + (sweepWidth + featherPx) * progress
+  );
 }
 
 /** Captures geometry outside React render, in the unscaled CSS layout space. */

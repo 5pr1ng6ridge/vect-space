@@ -8,9 +8,37 @@ import {
   buildLineSweepTimings,
   lineSweepMaskPositionPx,
   resolveVisualLineGroups,
+  splitLinesAtPauses,
 } from "./visualLineGroups";
 
 describe("MarkupText math reveal", () => {
+  it("does not start the post-pause segment when the visual row starts", () => {
+    const segments = splitLinesAtPauses(
+      [[0, 1, 2, 3]],
+      [50, 100, 650, 700],
+      [{ startMs: 100, endMs: 600 }],
+    );
+    expect(segments).toEqual([
+      [0, 1],
+      [2, 3],
+    ]);
+    const timings = buildLineSweepTimings(
+      visibleUnits(parseMarkup("abcd")),
+      segments,
+      [50, 100, 650, 700],
+      [20, 20, 20, 20],
+      new Map(),
+      new Map([
+        [0, { lineWidthPx: 64, unitOffsetPx: 0 }],
+        [1, { lineWidthPx: 64, unitOffsetPx: 32 }],
+        [2, { lineWidthPx: 64, unitOffsetPx: 0 }],
+        [3, { lineWidthPx: 64, unitOffsetPx: 32 }],
+      ]),
+      [{ startMs: 100, endMs: 600 }],
+    );
+    expect(timings.get(2)?.lineStartIndex).toBe(2);
+    expect(timings.get(3)?.startMs).toBe(650);
+  });
   it("keeps the complete KaTeX tree mounted while the formula is hidden", () => {
     const html = renderToStaticMarkup(
       <MarkupText animateMath source="甲$x+y$" visibleCount={1} />,
@@ -166,6 +194,11 @@ describe("MarkupText math reveal", () => {
       lineSweepMaskPositionPx(timing, 600, [{ startMs: 50, endMs: 550 }]),
     ).toBeGreaterThan(
       lineSweepMaskPositionPx(timing, 50, [{ startMs: 50, endMs: 550 }]),
+    );
+    // The finished mask moves past the gradient feather, leaving the final
+    // character fully opaque rather than permanently fading its right edge.
+    expect(lineSweepMaskPositionPx(timing, timing.endMs, [], 16)).toBe(
+      -timing.unitOffsetPx + 16,
     );
   });
 

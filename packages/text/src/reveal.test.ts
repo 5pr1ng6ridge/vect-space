@@ -54,6 +54,29 @@ describe("TextRevealSession", () => {
     expect(block.advance(150).state.revealedCount).toBe(2);
   });
 
+  it("does not leak a post-pause character while a drop-fade formula settles", () => {
+    const session = new TextRevealSession({
+      units: parseMarkup("A$x$[pause=100ms]B"),
+      initialCps: 20,
+      defaultCps: 20,
+      mathRevealDurations: new Map([[1, 240]]),
+      animation: "drop_fade",
+      waitForInlineMath: false,
+    });
+
+    // The pause begins only after the inline formula's concurrent animation.
+    // A large frame is still bounded at the pause start/end, so B cannot be
+    // exposed in the same frame as the pause completion.
+    const waiting = session.advance(340);
+    expect(waiting.state).toMatchObject({
+      status: "waiting",
+      revealedCount: 2,
+    });
+    const pauseEnd = waiting.advance(1_000);
+    expect(pauseEnd.state.revealedCount).toBe(2);
+    expect(pauseEnd.advance(50).state.revealedCount).toBe(3);
+  });
+
   it("separates completion from restoring a saved presentation", () => {
     const session = new TextRevealSession({
       units: parseMarkup("完整"),
