@@ -12,10 +12,8 @@ import type {
   PresentationOutcome,
   StoryFlowSnapshot,
 } from "./types";
-
-function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+import type { WireU64 } from "../../shared/generated/WireU64";
+import { toCommandError } from "../../shared/commandError";
 
 async function command<T>(
   name: string,
@@ -24,18 +22,18 @@ async function command<T>(
   try {
     return await invoke<T>(name, args);
   } catch (error) {
-    throw new Error(messageFrom(error));
+    throw toCommandError(error);
   }
 }
 
 export const engineApi = {
   bootstrap: () => command<BootstrapPayload>("bootstrap"),
   startNewGame: () => command<RuntimeUpdate>("start_new_game"),
-  advance: (expectedRevision: number, source: AdvanceSource) =>
+  advance: (expectedRevision: WireU64, source: AdvanceSource) =>
     command<RuntimeUpdate>("advance", { expectedRevision, source }),
-  choose: (choiceId: string, expectedRevision: number) =>
+  choose: (choiceId: string, expectedRevision: WireU64) =>
     command<RuntimeUpdate>("choose", { choiceId, expectedRevision }),
-  presentationComplete: (updateId: number, outcome: PresentationOutcome) =>
+  presentationComplete: (updateId: WireU64, outcome: PresentationOutcome) =>
     command<RuntimeUpdate>("presentation_complete", { updateId, outcome }),
   getSnapshot: () => command<RuntimeSnapshot>("get_snapshot"),
   getDialogueHistory: () =>

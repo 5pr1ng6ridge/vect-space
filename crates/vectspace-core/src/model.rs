@@ -166,6 +166,9 @@ pub struct ContentManifest {
     pub entry_scene: String,
     #[serde(default = "default_locale")]
     pub default_locale: String,
+    /// Optional shared font asset used by game and editor previews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_font: Option<String>,
     #[serde(default)]
     pub variables: BTreeMap<String, VariableDefinition>,
     #[serde(default)]
@@ -1206,6 +1209,8 @@ pub struct BootstrapPayload {
     pub asset_ids: Vec<String>,
     pub content_version: String,
     pub story_flow_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_font: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

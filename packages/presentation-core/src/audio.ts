@@ -33,6 +33,14 @@ interface PlayingTypingSfx {
   sources: Set<ActiveSfx>;
 }
 
+export interface AudioManagerOptions {
+  /**
+   * Keep a silent preview from creating an AudioContext or downloading BGM
+   * until the user explicitly enables sound.
+   */
+  deferUntilUnmuted?: boolean;
+}
+
 const MAX_SFX_CACHE_BYTES = 64 * 1024 * 1024;
 const MAX_SFX_VOICES = 32;
 const MAX_SFX_VOICES_PER_ASSET = 4;
@@ -56,9 +64,15 @@ export class AudioManager {
   #playbackRate = 1;
   #paused = false;
   #settings: Settings;
+  readonly #deferUntilUnmuted: boolean;
+  #deferredBgm: {
+    target: LoopingAudioSnapshot | null;
+    assets: AssetUrlMap;
+  } | null = null;
 
-  constructor(settings: Settings) {
+  constructor(settings: Settings, options: AudioManagerOptions = {}) {
     this.#settings = settings;
+    this.#deferUntilUnmuted = options.deferUntilUnmuted === true;
   }
 
   async unlock(): Promise<void> {
@@ -129,10 +143,16 @@ export class AudioManager {
     asset: string,
     volume: number,
     assets: AssetUrlMap,
+    signal?: AbortSignal,
   ): Promise<void> {
     const url = requireAssetUrl(assets, asset);
     const context = this.#ensureContext();
     const buffer = await this.#load(url);
+    // Loading an SFX is asynchronous.  A presentation can be interrupted
+    // while the buffer is decoding (for example by loading a save or
+    // switching the editor preview target); never start a stale voice after
+    // that boundary.
+    if (signal?.aborted) return;
     this.#enforcePolyphony(url);
     const source = context.createBufferSource();
     const gain = context.createGain();
@@ -141,9 +161,24 @@ export class AudioManager {
     gain.gain.value = volume;
     source.connect(gain).connect(this.#sfxBus as GainNode);
     this.#activeSfx.push(voice);
-    source.addEventListener("ended", () => this.#removeVoice(voice), {
-      once: true,
-    });
+    const abort = (): void => {
+      signal?.removeEventListener("abort", abort);
+      this.#stopVoice(voice);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    source.addEventListener(
+      "ended",
+      () => {
+        signal?.removeEventListener("abort", abort);
+        this.#removeVoice(voice);
+      },
+      { once: true },
+    );
+    if (signal?.aborted) {
+      signal.removeEventListener("abort", abort);
+      this.#stopVoice(voice);
+      return;
+    }
     source.start();
   }
 
@@ -184,11 +219,10 @@ export class AudioManager {
     assets: AssetUrlMap,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted) return;
     if (target === null && this.#currentBgm === null) return;
     const previous = this.#currentBgm;
     if (target !== null && previous?.state.asset === target.asset) {
-      previous.state = { ...target };
-      previous.element.loop = target.loop_end_ms == null;
       const from = previous.gain.gain.value;
       await dynamicFade(
         durationMs,
@@ -197,6 +231,9 @@ export class AudioManager {
           setGain(previous.gain, from + (target.volume - from) * progress),
         signal,
       );
+      if (signal?.aborted) return;
+      previous.state = { ...target };
+      previous.element.loop = target.loop_end_ms == null;
       return;
     }
     let next: PlayingBgm | null = null;
@@ -204,6 +241,10 @@ export class AudioManager {
       next = this.#createBgm(target, requireAssetUrl(assets, target.asset));
       setGain(next.gain, durationMs > 0 ? 0 : target.volume);
       await next.element.play().catch(() => undefined);
+      if (signal?.aborted) {
+        this.#destroyBgm(next);
+        return;
+      }
     }
     this.#currentBgm = next;
     const previousVolume = previous?.gain.gain.value ?? 0;
@@ -218,11 +259,38 @@ export class AudioManager {
       },
       signal,
     );
-    if (previous !== null) this.#destroyBgm(previous);
+    if (!signal?.aborted && previous !== null) this.#destroyBgm(previous);
   }
 
-  async reconcile(snapshot: AudioSnapshot, assets: AssetUrlMap): Promise<void> {
-    await this.transitionBgm(snapshot.bgm, 0, assets);
+  async reconcile(
+    snapshot: AudioSnapshot,
+    assets: AssetUrlMap,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    // A timeline preview starts muted. Remember only the latest desired BGM
+    // while no graph exists; do not create Web Audio or fetch an audio file
+    // merely to keep a silent canvas in sync.
+    if (
+      this.#deferUntilUnmuted &&
+      this.#context === null &&
+      this.#settings.master_volume <= 0
+    ) {
+      this.#deferredBgm = {
+        target: snapshot.bgm === null ? null : { ...snapshot.bgm },
+        assets: { ...assets },
+      };
+      return;
+    }
+    this.#deferredBgm = null;
+    await this.transitionBgm(snapshot.bgm, 0, assets, signal);
+  }
+
+  /** Start the latest deferred preview audio after an explicit user gesture. */
+  async activateDeferred(signal?: AbortSignal): Promise<void> {
+    const deferred = this.#deferredBgm;
+    this.#deferredBgm = null;
+    if (deferred === null || signal?.aborted) return;
+    await this.transitionBgm(deferred.target, 0, deferred.assets, signal);
   }
 
   destroy(): void {
@@ -234,6 +302,7 @@ export class AudioManager {
     if (this.#context !== null) void this.#context.close();
     this.#context = null;
     this.#buffers.clear();
+    this.#deferredBgm = null;
   }
 
   #ensureContext(): AudioContext {
@@ -447,13 +516,17 @@ function dynamicFade(
     let previous = performance.now();
     let elapsed = 0;
     let frame = 0;
+    let settled = false;
     const abort = (): void => {
+      if (settled) return;
+      settled = true;
       cancelAnimationFrame(frame);
+      signal?.removeEventListener("abort", abort);
       resolve();
     };
     signal?.addEventListener("abort", abort, { once: true });
     const tick = (now: number): void => {
-      if (signal?.aborted) return;
+      if (settled || signal?.aborted) return;
       const rate = getRate();
       if (rate > 0) {
         elapsed = advanceVirtualElapsed(
@@ -467,6 +540,7 @@ function dynamicFade(
       const progress = Math.min(1, elapsed / durationMs);
       apply(progress);
       if (progress >= 1) {
+        settled = true;
         signal?.removeEventListener("abort", abort);
         resolve();
       } else frame = requestAnimationFrame(tick);

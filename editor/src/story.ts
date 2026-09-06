@@ -13,6 +13,7 @@ import type {
   TimelineNode,
   TimelinePreviewSettings,
 } from "./types";
+import { scalarText } from "./scalars";
 import {
   countTemplateVariable,
   removeUnknownTemplateVariables,
@@ -882,9 +883,9 @@ export function summarizeCondition(condition: ConditionExpression): string {
 function summarizeOperand(
   operand: { variable: string } | { value: ScalarValue },
 ): string {
-  return "variable" in operand
-    ? operand.variable
-    : JSON.stringify(operand.value);
+  if ("variable" in operand) return operand.variable;
+  if (typeof operand.value === "string") return JSON.stringify(operand.value);
+  return scalarText(operand.value);
 }
 
 export function renameVariable(

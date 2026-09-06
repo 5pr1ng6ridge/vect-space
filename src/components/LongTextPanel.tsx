@@ -814,61 +814,67 @@ export const LongTextPanel = forwardRef<
                   top: `${top}px`,
                 }}
               >
-                {paper.fragments.map((fragment) => {
-                  const current = fragment.step.step_id === prompt.step_id;
-                  return (
-                    <div
-                      className="long-text-step-fragment"
-                      key={`${fragment.step.step_id}:${fragment.sourceTop}`}
-                      style={{
-                        height: `${fragment.height}px`,
-                        top: `${fragment.top}px`,
-                      }}
-                    >
-                      <div
-                        className="long-text-step-fragment-content"
-                        style={{
-                          transform: `translate3d(0, -${fragment.sourceTop}px, 0)`,
-                        }}
-                      >
-                        <div className="long-text-step">
-                          <MarkupText
-                            animateMath={current}
-                            instantMathReveal={complete}
-                            instantReveal={complete}
-                            lineSweepElapsedMs={session.state.elapsedMs}
-                            mathRevealDurations={mathRevealDurations}
-                            revealAnimation={revealAnimation}
-                            revealSchedule={session.plan.events.map(
-                              (event) => event.atMs,
-                            )}
-                            pauseWindows={session.plan.pauses}
-                            fontReady={fontReady}
-                            source={fragment.step.text}
-                            {...(current
-                              ? { onMathMetrics: handleMathMetrics }
-                              : {})}
-                            {...(current ? { unitCps } : {})}
-                            {...(current ? { revealClock: session.clock } : {})}
-                            {...(current &&
-                            fragment.sourceTop === 0 &&
-                            revealAnimation === "line_sweep"
-                              ? {
-                                  onLineSweepLayoutChange:
-                                    handleLineSweepLayoutChange,
+                <div className="long-text-paper-content-inner">
+                  <div className="long-text-paper-content-stage">
+                    {paper.fragments.map((fragment) => {
+                      const current = fragment.step.step_id === prompt.step_id;
+                      return (
+                        <div
+                          className="long-text-step-fragment"
+                          key={`${fragment.step.step_id}:${fragment.sourceTop}`}
+                          style={{
+                            height: `${fragment.height}px`,
+                            top: `${fragment.top}px`,
+                          }}
+                        >
+                          <div
+                            className="long-text-step-fragment-content"
+                            style={{
+                              transform: `translate3d(0, -${fragment.sourceTop}px, 0)`,
+                            }}
+                          >
+                            <div className="long-text-step">
+                              <MarkupText
+                                animateMath={current}
+                                instantMathReveal={complete}
+                                instantReveal={complete}
+                                lineSweepElapsedMs={session.state.elapsedMs}
+                                mathRevealDurations={mathRevealDurations}
+                                revealAnimation={revealAnimation}
+                                revealSchedule={session.plan.events.map(
+                                  (event) => event.atMs,
+                                )}
+                                pauseWindows={session.plan.pauses}
+                                fontReady={fontReady}
+                                source={fragment.step.text}
+                                {...(current
+                                  ? { onMathMetrics: handleMathMetrics }
+                                  : {})}
+                                {...(current ? { unitCps } : {})}
+                                {...(current
+                                  ? { revealClock: session.clock }
+                                  : {})}
+                                {...(current &&
+                                fragment.sourceTop === 0 &&
+                                revealAnimation === "line_sweep"
+                                  ? {
+                                      onLineSweepLayoutChange:
+                                        handleLineSweepLayoutChange,
+                                    }
+                                  : {})}
+                                visibleCount={
+                                  current
+                                    ? renderedVisibleCount
+                                    : Number.POSITIVE_INFINITY
                                 }
-                              : {})}
-                            visibleCount={
-                              current
-                                ? renderedVisibleCount
-                                : Number.POSITIVE_INFINITY
-                            }
-                          />
+                              />
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                      );
+                    })}
+                  </div>
+                </div>
               </article>
             ))}
           </div>

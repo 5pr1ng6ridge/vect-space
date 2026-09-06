@@ -23,6 +23,11 @@ export class BoundedLedger<Key> {
     return this.#values.has(key);
   }
 
+  /** Remove one consumed entry when a playhead is rewound past it. */
+  delete(key: Key): void {
+    this.#values.delete(key);
+  }
+
   clear(): void {
     this.#values.clear();
   }

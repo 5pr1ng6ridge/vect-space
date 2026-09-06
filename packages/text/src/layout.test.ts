@@ -26,11 +26,54 @@ describe("paginateTextLayouts", () => {
 
     expect(pages).toHaveLength(2);
     expect(pages[0]?.fragments).toMatchObject([
-      { itemId: "proof", firstLine: 0, lastLine: 1, top: 0 },
+      {
+        itemId: "proof",
+        firstLine: 0,
+        lastLine: 1,
+        top: 0,
+        // The slice continues to the next visual row's top instead of the
+        // last glyph's bottom, so the preceding row cannot be cropped.
+        height: 84,
+      },
     ]);
     expect(pages[1]?.fragments).toMatchObject([
       { itemId: "proof", firstLine: 2, lastLine: 2, top: 0 },
     ]);
+  });
+
+  it("keeps a row's lower glyph bounds when rows overlap", () => {
+    const pages = paginateTextLayouts(
+      [
+        {
+          id: "overlap",
+          pageBreakBefore: false,
+          layout: {
+            contentHeight: 100,
+            lines: [
+              { unitIndices: [0], top: 0, bottom: 60, left: 0, right: 20 },
+              { unitIndices: [1], top: 55, bottom: 100, left: 0, right: 20 },
+            ],
+          },
+        },
+      ],
+      "auto",
+      100,
+      10,
+    );
+
+    expect(pages).toHaveLength(2);
+    expect(pages[0]?.fragments[0]).toMatchObject({
+      sourceTop: 0,
+      height: 60,
+      firstLine: 0,
+      lastLine: 0,
+    });
+    expect(pages[1]?.fragments[0]).toMatchObject({
+      sourceTop: 55,
+      height: 45,
+      firstLine: 1,
+      lastLine: 1,
+    });
   });
 
   it("keeps manual overflow on one paper and honors explicit breaks", () => {

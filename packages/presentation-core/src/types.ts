@@ -164,7 +164,7 @@ export type PromptSnapshot =
   EmptyPrompt | DialoguePrompt | LongTextPrompt | ChoicePrompt | EndPrompt;
 
 export interface RuntimeSnapshot {
-  revision: number;
+  revision: WireU64;
   location: StoryLocation;
   variables: Record<string, WireScalarValue>;
   world: WorldSnapshot;
@@ -176,7 +176,7 @@ export interface RuntimeSnapshot {
 }
 
 interface CueBase {
-  cue_id: number;
+  cue_id: WireU64;
   gate: CueGate;
 }
 
@@ -280,7 +280,7 @@ export type PresentationCue = CueBase &
         motion: UiMotionPreset | null;
       }
     | {
-        cue_id: number;
+        cue_id: WireU64;
         gate: CueGate;
         type: "ui_motion";
         duration_ms: number;
@@ -313,7 +313,7 @@ export type PresentationCue = CueBase &
   );
 
 export interface RuntimeUpdate {
-  update_id: number;
+  update_id: WireU64;
   snapshot: RuntimeSnapshot;
   cues: PresentationCue[];
   requires_ack: boolean;
@@ -324,10 +324,11 @@ export interface BootstrapPayload {
   asset_ids: string[];
   content_version: string;
   story_flow_available: boolean;
+  default_font?: string | null;
 }
 
 export interface DialogueHistoryEntry {
-  entry_id: number;
+  entry_id: WireU64;
   prompt_id: string;
   speaker_id?: string | null;
   speaker: string | null;
@@ -383,3 +384,4 @@ export interface Settings {
   skip_mode: SkipMode;
 }
 import type { WireScalarValue } from "../../../shared/generated/WireScalarValue";
+import type { WireU64 } from "../../../shared/generated/WireU64";

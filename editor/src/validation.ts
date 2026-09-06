@@ -1,5 +1,6 @@
 import { outputPorts } from "./story";
 import { validateTemplate } from "./textTemplate";
+import { isIntegerScalar, scalarType } from "./scalars";
 import type {
   AssetKind,
   ConditionExpression,
@@ -216,6 +217,17 @@ function validateStoryFlow(
     );
   const edges = new Set<string>();
   const ids = new Set<string>();
+  const profileProject: EditorProject = {
+    ...project,
+    manifest: {
+      ...project.manifest,
+      variables: Object.fromEntries(
+        Object.entries(project.manifest.variables).filter(
+          ([, definition]) => definition.scope === "profile",
+        ),
+      ),
+    },
+  };
   for (const [id, node] of Object.entries(file.definition.nodes)) {
     if (!scenes.has(id))
       output.push(
@@ -240,6 +252,16 @@ function validateStoryFlow(
           id,
         ),
       );
+    if (node.reveal?.mode === "condition") {
+      validateCondition(
+        profileProject,
+        node.reveal.condition,
+        (code, message) =>
+          output.push(
+            flowError(`flow_${code}`, `流程节点 ${id}：${message}`, id),
+          ),
+      );
+    }
   }
   for (const edge of file.definition.edges) {
     if (!ID_PATTERN.test(edge.id) || !ids.add(edge.id))
@@ -988,21 +1010,21 @@ function valueMatchesType(value: ScalarValue, type: VariableType): boolean {
     case "boolean":
       return typeof value === "boolean";
     case "integer":
-      return typeof value === "number" && Number.isSafeInteger(value);
+      return (
+        isIntegerScalar(value) &&
+        (typeof value === "bigint" || Number.isSafeInteger(value))
+      );
     case "number":
-      return typeof value === "number" && Number.isFinite(value);
+      return (
+        typeof value === "bigint" ||
+        (typeof value === "number" && Number.isFinite(value))
+      );
     case "string":
       return (
         typeof value === "string" &&
         new TextEncoder().encode(value).length <= 16 * 1024
       );
   }
-}
-
-function scalarType(value: ScalarValue): VariableType {
-  if (typeof value === "boolean") return "boolean";
-  if (typeof value === "string") return "string";
-  return Number.isInteger(value) ? "integer" : "number";
 }
 
 function isNumericType(type: VariableType): boolean {
@@ -1087,6 +1109,8 @@ function deduplicate(diagnostics: EditorDiagnostic[]): EditorDiagnostic[] {
       diagnostic.code,
       diagnostic.scene_id,
       diagnostic.node_id,
+      diagnostic.workspace,
+      diagnostic.flow_element_id,
       diagnostic.message,
     ].join("|");
     if (seen.has(key)) return false;

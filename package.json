@@ -10,11 +10,11 @@
   "scripts": {
     "assets:check": "node scripts/check-lfs-assets.mjs game/assets",
     "predev": "npm run assets:check",
-    "dev": "vite",
+    "dev": "vite --configLoader runner",
     "prebuild": "npm run assets:check",
     "build": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && vite build",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --configLoader runner",
+    "test:watch": "vitest --configLoader runner",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "preview": "vite preview",
@@ -23,7 +23,7 @@
     "editor:build": "npm --prefix editor run tauri build",
     "editor:check": "npm --prefix editor run build",
     "codegen": "cargo run -p vectspace-core --bin export_schemas && cargo test -p vectspace-protocol export_bindings",
-    "codegen:check": "npm run codegen && git diff --exit-code -- src-tauri/gen/content-schemas shared/generated",
+    "codegen:check": "node scripts/check-codegen.mjs",
     "check:all": "npm test && npm run build && npm --prefix editor test && npm --prefix editor run build && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings"
   },
   "dependencies": {

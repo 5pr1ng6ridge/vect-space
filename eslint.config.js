@@ -8,6 +8,8 @@ export default tseslint.config(
     ignores: [
       "**/dist/**",
       "**/node_modules/**",
+      "**/.vite-cache/**",
+      "**/.vite-editor-cache/**",
       "**/target/**",
       "**/src-tauri/gen/**",
       "**/src-tauri/target/**",

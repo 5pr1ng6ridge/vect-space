@@ -19,6 +19,13 @@
     "content_version": {
       "type": "string"
     },
+    "default_font": {
+      "description": "Optional shared font asset used by game and editor previews.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "default_locale": {
       "type": "string",
       "default": "zh-CN"

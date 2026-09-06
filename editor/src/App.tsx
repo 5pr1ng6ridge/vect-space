@@ -2,6 +2,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   applyPatches,
   enablePatches,
+  original,
   produceWithPatches,
   type Patch,
 } from "immer";
@@ -11,6 +12,7 @@ import {
   lazy,
   useMemo,
   useRef,
+  useReducer,
   useState,
   Suspense,
   type CSSProperties,
@@ -18,6 +20,7 @@ import {
   type ReactElement,
 } from "react";
 import { editorApi } from "./api";
+import { CommandError } from "../../shared/commandError";
 import { NodeInspector } from "./components/NodeInspector";
 import { ProjectSidebar, type SidebarTab } from "./components/ProjectSidebar";
 import { StoryGraph } from "./components/StoryGraph";
@@ -57,10 +60,153 @@ type ResizeAxis = "left" | "right";
 
 enablePatches();
 
+function currentPlainProject(draft: EditorProject): EditorProject {
+  // Rename helpers intentionally return a complete project.  When they are
+  // used from an Immer recipe, unwrap the proxy first so their defensive
+  // structuredClone remains safe and, importantly, sees queued edits.
+  return original(draft) ?? draft;
+}
+
 interface HistoryEntry {
-  at: number;
+  label: string;
   redo: Patch[];
   undo: Patch[];
+  beforeRevision: number;
+  afterRevision: number;
+}
+
+interface EditorState {
+  project: EditorProject | null;
+  past: HistoryEntry[];
+  future: HistoryEntry[];
+  dirty: boolean;
+  // Layout/preview preferences intentionally stay out of the content undo
+  // stack, but they still make the project dirty until the next save.
+  ephemeralDirty: boolean;
+  currentRevision: number;
+  savedRevision: number;
+  nextRevision: number;
+}
+
+/**
+ * Mutations are kept in the reducer action instead of being evaluated in the
+ * component.  React may batch several pointer/text events before rendering;
+ * evaluating against the component's captured project in that situation
+ * would make the later event overwrite the earlier one.  Running the recipe
+ * in the reducer guarantees that every queued action sees the latest project.
+ */
+type EditorMutation = (draft: EditorProject) => unknown;
+
+type EditorAction =
+  | { type: "load"; project: EditorProject }
+  | { type: "reset_history" }
+  | {
+      type: "edit";
+      mutation: EditorMutation;
+      history: boolean;
+      label: string;
+    }
+  | { type: "undo" }
+  | { type: "redo" };
+
+const INITIAL_EDITOR_STATE: EditorState = {
+  project: null,
+  past: [],
+  future: [],
+  dirty: false,
+  ephemeralDirty: false,
+  currentRevision: 0,
+  savedRevision: 0,
+  nextRevision: 0,
+};
+
+function editorReducer(state: EditorState, action: EditorAction): EditorState {
+  switch (action.type) {
+    case "load":
+      return {
+        project: action.project,
+        past: [],
+        future: [],
+        dirty: false,
+        ephemeralDirty: false,
+        currentRevision: 0,
+        savedRevision: 0,
+        nextRevision: 0,
+      };
+    case "reset_history":
+      return {
+        ...state,
+        past: [],
+        future: [],
+        dirty: false,
+        ephemeralDirty: false,
+        currentRevision: 0,
+        savedRevision: 0,
+        nextRevision: 0,
+      };
+    case "edit":
+      if (state.project === null) return state;
+      {
+        const [project, redo, undo] = produceWithPatches(
+          state.project,
+          (draft) => {
+            const result = action.mutation(draft);
+            if (result === undefined) return undefined;
+            return result as EditorProject;
+          },
+        );
+        if (redo.length === 0) return state;
+        if (!action.history) {
+          // Ephemeral layout changes (viewport and preview preferences) still
+          // need to be persisted, but do not pollute the content undo stack.
+          return { ...state, project, dirty: true, ephemeralDirty: true };
+        }
+        const afterRevision = state.nextRevision + 1;
+        const entry: HistoryEntry = {
+          label: action.label,
+          redo,
+          undo,
+          beforeRevision: state.currentRevision,
+          afterRevision,
+        };
+        return {
+          ...state,
+          project,
+          past: [...state.past.slice(-99), entry],
+          future: [],
+          currentRevision: afterRevision,
+          nextRevision: afterRevision,
+          dirty: afterRevision !== state.savedRevision || state.ephemeralDirty,
+        };
+      }
+    case "undo": {
+      const previous = state.past[state.past.length - 1];
+      if (state.project === null || previous === undefined) return state;
+      return {
+        ...state,
+        project: applyPatches(state.project, previous.undo),
+        past: state.past.slice(0, -1),
+        future: [previous, ...state.future].slice(0, 100),
+        currentRevision: previous.beforeRevision,
+        dirty:
+          previous.beforeRevision !== state.savedRevision ||
+          state.ephemeralDirty,
+      };
+    }
+    case "redo": {
+      const next = state.future[0];
+      if (state.project === null || next === undefined) return state;
+      return {
+        ...state,
+        project: applyPatches(state.project, next.redo),
+        past: [...state.past.slice(-99), next],
+        future: state.future.slice(1),
+        currentRevision: next.afterRevision,
+        dirty:
+          next.afterRevision !== state.savedRevision || state.ephemeralDirty,
+      };
+    }
+  }
 }
 
 const StoryFlowWorkspace = lazy(() =>
@@ -163,10 +309,11 @@ function ResizeHandle({
 }
 
 export function App(): ReactElement {
-  const [project, setProject] = useState<EditorProject | null>(null);
-  const [past, setPast] = useState<HistoryEntry[]>([]);
-  const [future, setFuture] = useState<HistoryEntry[]>([]);
-  const [dirty, setDirty] = useState(false);
+  const [editorState, dispatchEditor] = useReducer(
+    editorReducer,
+    INITIAL_EDITOR_STATE,
+  );
+  const { project, past, future, dirty } = editorState;
   const [activeSceneId, setActiveSceneId] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [addType, setAddType] = useState<NodeType>("say");
@@ -246,43 +393,39 @@ export function App(): ReactElement {
   const activeScene = activeSceneFile?.definition;
 
   const resetHistory = (): void => {
-    setPast([]);
-    setFuture([]);
-    setDirty(false);
+    dispatchEditor({ type: "reset_history" });
   };
 
+  const reportCommandError = useCallback((reason: unknown): void => {
+    if (reason instanceof CommandError) {
+      if (reason.code === "validation") setSidebarTab("problems");
+      if (reason.location !== undefined) {
+        setActiveSceneId(reason.location.scene_id);
+        setSelectedNodeId(reason.location.node_id);
+      }
+      if (reason.code === "stale_project") {
+        setError(
+          "项目文件已被外部修改，请重新打开后再保存。\n" + reason.message,
+        );
+      } else {
+        setError(reason.message);
+      }
+      return;
+    }
+    setError(reason instanceof Error ? reason.message : String(reason));
+  }, []);
+
   const commit = useCallback(
-    (mutator: (draft: EditorProject) => unknown, history = true): void => {
-      setProject((current) => {
-        if (current === null) return current;
-        const [next, redo, undo] = produceWithPatches(current, (draft) => {
-          const result = mutator(draft);
-          return result === undefined ? undefined : (result as EditorProject);
-        });
-        if (history && redo.length > 0) {
-          const entry = { at: performance.now(), redo, undo };
-          setPast((items) => {
-            const previous = items[items.length - 1];
-            if (
-              previous !== undefined &&
-              entry.at - previous.at < 1_000 &&
-              samePatchTargets(previous.redo, redo)
-            ) {
-              return [
-                ...items.slice(0, -1),
-                {
-                  at: entry.at,
-                  redo: [...previous.redo, ...redo],
-                  undo: [...undo, ...previous.undo],
-                },
-              ];
-            }
-            return [...items.slice(-99), entry];
-          });
-          setFuture([]);
-        }
-        if (redo.length > 0) setDirty(true);
-        return next;
+    (
+      mutator: (draft: EditorProject) => unknown,
+      history = true,
+      label = "编辑项目",
+    ): void => {
+      dispatchEditor({
+        type: "edit",
+        mutation: mutator,
+        history,
+        label,
       });
     },
     [],
@@ -308,7 +451,7 @@ export function App(): ReactElement {
     setError(null);
     try {
       const loaded = await editorApi.openProject(root);
-      setProject(loaded);
+      dispatchEditor({ type: "load", project: loaded });
       savedContentRef.current = contentDocumentFingerprint(loaded);
       savedContentVersionRef.current = loaded.manifest.content_version;
       const initialScene =
@@ -324,7 +467,7 @@ export function App(): ReactElement {
       localStorage.setItem("vectspace-editor:last-project", loaded.root);
       setNotice(`已打开 ${loaded.root}`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      reportCommandError(reason);
     } finally {
       setBusy(false);
     }
@@ -354,42 +497,32 @@ export function App(): ReactElement {
     setError(null);
     try {
       await editorApi.validateProject(projectRequest(project));
-      const saved = await editorApi.saveProject(projectRequest(project));
-      setProject(saved);
+      const result = await editorApi.saveProject(projectRequest(project));
+      const saved = result.project;
+      dispatchEditor({ type: "load", project: saved });
       savedContentRef.current = contentDocumentFingerprint(saved);
       savedContentVersionRef.current = saved.manifest.content_version;
       resetHistory();
-      setNotice("项目已安全保存；备份文件保留在原文件旁。 ");
+      const changed = result.changed_paths.length;
+      setNotice(
+        changed === 0
+          ? "项目没有需要写入的文件。"
+          : `项目已安全保存（${changed} 个文件）。备份位于 .vectspace/backups。`,
+      );
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      reportCommandError(reason);
     } finally {
       setBusy(false);
     }
-  }, [project]);
+  }, [project, reportCommandError]);
 
   const undo = useCallback((): void => {
-    if (project === null || past.length === 0) return;
-    const previous = past[past.length - 1];
-    if (previous === undefined) return;
-    setPast((items) => items.slice(0, -1));
-    setFuture((items) => [previous, ...items].slice(0, 100));
-    setProject((current) =>
-      current === null ? current : applyPatches(current, previous.undo),
-    );
-    setDirty(true);
-  }, [past, project]);
+    dispatchEditor({ type: "undo" });
+  }, []);
 
   const redo = useCallback((): void => {
-    if (project === null || future.length === 0) return;
-    const next = future[0];
-    if (next === undefined) return;
-    setFuture((items) => items.slice(1));
-    setPast((items) => [...items.slice(-99), next]);
-    setProject((current) =>
-      current === null ? current : applyPatches(current, next.redo),
-    );
-    setDirty(true);
-  }, [future, project]);
+    dispatchEditor({ type: "redo" });
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -490,18 +623,35 @@ export function App(): ReactElement {
       );
       setTimelineTarget({ sceneId, nodeId });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      reportCommandError(reason);
     }
   };
 
-  const splitDialogue = (nodeId: string, offset: number): void => {
+  const splitDialogue = (
+    nodeId: string,
+    offset: number,
+    textOverride?: string,
+  ): void => {
     const scene = activeScene;
     if (scene === undefined) return;
+    const sourceScene =
+      textOverride === undefined
+        ? scene
+        : {
+            ...scene,
+            nodes: {
+              ...scene.nodes,
+              [nodeId]:
+                scene.nodes[nodeId]?.type === "say"
+                  ? { ...scene.nodes[nodeId], text: textOverride }
+                  : scene.nodes[nodeId],
+            },
+          };
     let result: ReturnType<typeof splitDialogueAt>;
     try {
-      result = splitDialogueAt(scene, nodeId, offset);
+      result = splitDialogueAt(sourceScene, nodeId, offset);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      reportCommandError(reason);
       return;
     }
     commit((draft) => {
@@ -766,7 +916,7 @@ export function App(): ReactElement {
       });
       setNotice(`已导入素材 ${id}；保存项目后写入 manifest。`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      reportCommandError(reason);
     }
   };
 
@@ -937,11 +1087,7 @@ export function App(): ReactElement {
             void editorApi
               .validateProject(projectRequest(project))
               .then(() => setNotice("总流程已通过 Rust 权威校验。"))
-              .catch((reason: unknown) =>
-                setError(
-                  reason instanceof Error ? reason.message : String(reason),
-                ),
-              );
+              .catch((reason: unknown) => reportCommandError(reason));
           }}
           onUndo={undo}
           onRedo={redo}
@@ -1166,7 +1312,9 @@ export function App(): ReactElement {
             !window.confirm("重命名场景会更改文件路径并影响既有存档。继续吗？")
           )
             return;
-          commit(() => renameScene(project, previousId, nextId));
+          commit((draft) =>
+            renameScene(currentPlainProject(draft), previousId, nextId),
+          );
           setActiveSceneId(nextId);
         }}
         onRenameVariable={(previousId, nextId) => {
@@ -1177,7 +1325,9 @@ export function App(): ReactElement {
             setError("新变量 ID 非法或已经存在。");
             return;
           }
-          commit(() => renameVariable(project, previousId, nextId));
+          commit((draft) =>
+            renameVariable(currentPlainProject(draft), previousId, nextId),
+          );
         }}
         onAddCharacter={(id, definition) =>
           commit((draft) => {
@@ -1207,7 +1357,9 @@ export function App(): ReactElement {
             setError("新角色 ID 非法或已经存在。");
             return;
           }
-          commit(() => renameCharacter(project, previousId, nextId));
+          commit((draft) =>
+            renameCharacter(currentPlainProject(draft), previousId, nextId),
+          );
         }}
         onCreateUiMotion={createUiMotion}
         onEditUiMotion={setUiMotionTarget}
@@ -1358,17 +1510,20 @@ export function App(): ReactElement {
 }
 
 function contentDocumentFingerprint(project: EditorProject): string {
-  return JSON.stringify({
-    manifest: project.manifest,
-    scenes: project.scenes,
-    ui_motions: project.ui_motions,
-    story_flow: project.story_flow,
-  });
-}
-
-function samePatchTargets(left: Patch[], right: Patch[]): boolean {
-  if (left.length === 0 || right.length === 0) return false;
-  const targets = (patches: Patch[]): string[] =>
-    patches.map((patch) => JSON.stringify(patch.path)).sort();
-  return JSON.stringify(targets(left)) === JSON.stringify(targets(right));
+  // Editor scalar integers are bigint so that i64 values never pass through
+  // a lossy JavaScript number.  Fingerprints are only used for change
+  // detection, but must still be deterministic and must not throw when a
+  // project contains a bigint default/value.
+  return JSON.stringify(
+    {
+      manifest: project.manifest,
+      scenes: project.scenes,
+      ui_motions: project.ui_motions,
+      story_flow: project.story_flow,
+    },
+    (_key, value: unknown) =>
+      typeof value === "bigint"
+        ? { __vectspace_integer__: value.toString() }
+        : value,
+  );
 }

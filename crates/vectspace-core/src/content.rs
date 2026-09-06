@@ -68,6 +68,7 @@ impl ContentCatalog {
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
+        validate_default_font(&manifest)?;
 
         let ui_motions = load_ui_motions(&root, &manifest.ui_motions)?;
         validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
@@ -146,6 +147,7 @@ impl ContentCatalog {
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets)?;
+        validate_default_font(&manifest)?;
         let ui_motions = validate_ui_motion_files(&manifest.ui_motions, &ui_motion_files)?;
         validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
 
@@ -558,6 +560,23 @@ fn validate_assets(
                 "视频素材 {id} 必须使用 .mp4（H.264/AAC）"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_default_font(manifest: &ContentManifest) -> Result<(), ContentError> {
+    let Some(id) = manifest.default_font.as_deref() else {
+        return Ok(());
+    };
+    let Some(asset) = manifest.assets.get(id) else {
+        return Err(ContentError::Validation(format!(
+            "default_font 引用了未知素材: {id}"
+        )));
+    };
+    if asset.kind != AssetKind::Font {
+        return Err(ContentError::Validation(format!(
+            "default_font 必须引用 kind: font 素材: {id}"
+        )));
     }
     Ok(())
 }

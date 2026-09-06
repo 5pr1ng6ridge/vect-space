@@ -175,13 +175,39 @@ impl RuntimeEngine {
         target: &StoryLocation,
         decisions: &[PreviewChoiceDecision],
     ) -> Result<PreviewRunResult, RuntimeError> {
+        self.preview_to_with_origin(content, target, decisions, None)
+    }
+
+    /// Variant of [`preview_to`] that starts at a scene entry rather than the
+    /// manifest entry.  It is intentionally explicit so the editor never
+    /// silently changes preview context after an unreachable path.
+    pub fn preview_to_from_scene_entry(
+        &mut self,
+        content: &ContentCatalog,
+        scene_id: &str,
+        target: &StoryLocation,
+        decisions: &[PreviewChoiceDecision],
+    ) -> Result<PreviewRunResult, RuntimeError> {
+        self.preview_to_with_origin(content, target, decisions, Some(scene_id))
+    }
+
+    fn preview_to_with_origin(
+        &mut self,
+        content: &ContentCatalog,
+        target: &StoryLocation,
+        decisions: &[PreviewChoiceDecision],
+        origin_scene: Option<&str>,
+    ) -> Result<PreviewRunResult, RuntimeError> {
         self.preview_target = Some(target.clone());
         self.preview_skip_target_once = false;
         let mut last_trace = Vec::new();
         let result = (|| {
             let mut visits = std::collections::BTreeMap::<StoryLocation, usize>::new();
             let mut trace = Vec::new();
-            let mut update = self.start_new_game(content)?;
+            let mut update = match origin_scene {
+                Some(scene_id) => self.start_scene_preview(content, scene_id)?,
+                None => self.start_new_game(content)?,
+            };
             for _ in 0..MAX_IMMEDIATE_NODES {
                 if trace.last() != Some(&self.snapshot.location) {
                     trace.push(self.snapshot.location.clone());
@@ -285,21 +311,35 @@ impl RuntimeEngine {
         let scene = content
             .scene(&scene_id)
             .map_err(|error| RuntimeError::Content(error.to_string()))?;
-        let SceneNode::Timeline { next, .. } = scene
-            .nodes
-            .get(&node_id)
-            .ok_or_else(|| RuntimeError::Content(format!("节点不存在: {scene_id}/{node_id}")))?
-        else {
+        if !matches!(scene.nodes.get(&node_id), Some(SceneNode::Timeline { .. })) {
             return Err(RuntimeError::Content(format!(
                 "目标节点不是 timeline：{scene_id}/{node_id}"
             )));
-        };
-        self.preview_target = Some(StoryLocation {
-            scene_id,
-            node_id: next.clone(),
-        });
+        }
+        self.preview_execute_current_node(content)
+    }
+
+    /// Execute any node currently selected by an editor preview.  The
+    /// successor is used as a temporary breakpoint, so the returned update is
+    /// exactly the update the game would emit for that node and no later
+    /// immediate nodes are folded into the result.  Choice and End nodes have
+    /// no successor and naturally return their prompt boundary.
+    pub fn preview_execute_current_node(
+        &mut self,
+        content: &ContentCatalog,
+    ) -> Result<RuntimeUpdate, RuntimeError> {
+        let scene_id = self.snapshot.location.scene_id.clone();
+        let node_id = self.snapshot.location.node_id.clone();
+        let scene = content
+            .scene(&scene_id)
+            .map_err(|error| RuntimeError::Content(error.to_string()))?;
+        let node = scene
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| RuntimeError::Content(format!("节点不存在: {scene_id}/{node_id}")))?;
+        self.preview_target = preview_successor(&scene_id, node);
         // The successor can legally loop back to this same node. Skip the
-        // breakpoint once so the target timeline itself is always executed.
+        // breakpoint once so the selected node itself is always executed.
         self.preview_skip_target_once = true;
         let result = self
             .run_until_boundary(content)
@@ -316,6 +356,17 @@ impl RuntimeEngine {
             asset_ids: content.asset_ids(),
             content_version: content.manifest.content_version.clone(),
             story_flow_available: content.story_flow.is_some(),
+            default_font: content.manifest.default_font.clone().or_else(|| {
+                content
+                    .manifest
+                    .assets
+                    .iter()
+                    .find(|(id, definition)| {
+                        id.as_str() == "font.fusion_pixel"
+                            && definition.kind == crate::model::AssetKind::Font
+                    })
+                    .map(|(id, _)| id.clone())
+            }),
         }
     }
 
@@ -330,6 +381,44 @@ impl RuntimeEngine {
         self.pending_runtime_update = None;
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
+    }
+
+    /// Start an isolated preview at a scene's declared entry.  This is used
+    /// only by editor tooling; it keeps the same profile/variable clone as a
+    /// story-entry preview and never touches the player's persisted state.
+    pub fn start_scene_preview(
+        &mut self,
+        content: &ContentCatalog,
+        scene_id: &str,
+    ) -> Result<RuntimeUpdate, RuntimeError> {
+        let entry = content
+            .scene(scene_id)
+            .map_err(|error| RuntimeError::Content(error.to_string()))?
+            .entry
+            .clone();
+        let previous_revision = self.snapshot.revision;
+        self.snapshot = initial_snapshot(content)?;
+        self.snapshot.revision = previous_revision;
+        self.snapshot.location = StoryLocation {
+            scene_id: scene_id.to_owned(),
+            node_id: entry,
+        };
+        self.started = true;
+        self.pending_runtime_update = None;
+        let cues = self.run_until_boundary(content)?;
+        Ok(self.finish_update(cues, true))
+    }
+
+    /// Resolve editor preview text using the exact variable/profile clone
+    /// used by the runtime.  The host uses this for non-active long-text
+    /// steps so their measurement never falls back to a second interpolation
+    /// implementation in JavaScript.
+    pub fn resolve_preview_text(
+        &self,
+        content: &ContentCatalog,
+        source: &str,
+    ) -> Result<String, RuntimeError> {
+        self.interpolate_text(content, source)
     }
 
     pub fn advance(
@@ -1569,6 +1658,36 @@ fn gate(await_completion: bool) -> CueGate {
     }
 }
 
+fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> {
+    let local = |next: &str| StoryLocation {
+        scene_id: scene_id.to_owned(),
+        node_id: next.to_owned(),
+    };
+    match node {
+        SceneNode::Background { next, .. }
+        | SceneNode::Sprite { next, .. }
+        | SceneNode::Clear { next, .. }
+        | SceneNode::Say { next, .. }
+        | SceneNode::LongText { next, .. }
+        | SceneNode::Set { next, .. }
+        | SceneNode::Playback { next, .. }
+        | SceneNode::Wait { next, .. }
+        | SceneNode::Bgm { next, .. }
+        | SceneNode::Sfx { next, .. }
+        | SceneNode::Camera { next, .. }
+        | SceneNode::ScreenEffect { next, .. }
+        | SceneNode::DialogueUi { next, .. }
+        | SceneNode::UiMotionSet { next, .. }
+        | SceneNode::UiMotionPlay { next, .. }
+        | SceneNode::Timeline { next, .. } => Some(local(next)),
+        SceneNode::Jump { scene, target } => Some(StoryLocation {
+            scene_id: scene.clone().unwrap_or_else(|| scene_id.to_owned()),
+            node_id: target.clone(),
+        }),
+        SceneNode::Choice { .. } | SceneNode::Condition { .. } | SceneNode::End => None,
+    }
+}
+
 fn final_channel(channels: &TimelineChannels, id: &str) -> Option<f32> {
     channels
         .get(id)
@@ -1809,12 +1928,12 @@ fn compare_numeric(
 ) -> Result<std::cmp::Ordering, RuntimeError> {
     match (left, right) {
         (ScalarValue::Integer(left), ScalarValue::Integer(right)) => Ok(left.cmp(right)),
-        (ScalarValue::Integer(left), ScalarValue::Number(right)) => (*left as f64)
-            .partial_cmp(right)
-            .ok_or_else(|| RuntimeError::Content("无法比较非有限数值".to_owned())),
-        (ScalarValue::Number(left), ScalarValue::Integer(right)) => left
-            .partial_cmp(&(*right as f64))
-            .ok_or_else(|| RuntimeError::Content("无法比较非有限数值".to_owned())),
+        (ScalarValue::Integer(left), ScalarValue::Number(right)) => {
+            compare_integer_number(*left, *right)
+        }
+        (ScalarValue::Number(left), ScalarValue::Integer(right)) => {
+            compare_integer_number(*right, *left).map(std::cmp::Ordering::reverse)
+        }
         (ScalarValue::Number(left), ScalarValue::Number(right)) => left
             .partial_cmp(right)
             .ok_or_else(|| RuntimeError::Content("无法比较非有限数值".to_owned())),
@@ -1822,6 +1941,42 @@ fn compare_numeric(
             "Lt/Le/Gt/Ge 只允许比较数值".to_owned(),
         )),
     }
+}
+
+/// Compare an exact i64 with an f64 without first rounding the integer to a
+/// floating-point value.  A direct `i64 as f64` cast collapses neighbouring
+/// values above 2^53 and can make an equality condition unexpectedly true.
+fn compare_integer_number(integer: i64, number: f64) -> Result<std::cmp::Ordering, RuntimeError> {
+    if !number.is_finite() {
+        return Err(RuntimeError::Content("无法比较非有限数值".to_owned()));
+    }
+    // 2^63 is the first value outside the signed i64 range.  Keep the
+    // constants explicit so the boundary remains exact in f64.
+    const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0;
+    const I64_MAX_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0;
+    if number < I64_MIN_F64 {
+        return Ok(std::cmp::Ordering::Greater);
+    }
+    if number >= I64_MAX_EXCLUSIVE_F64 {
+        return Ok(std::cmp::Ordering::Less);
+    }
+
+    // Within the range above, the truncated f64 value is safe to convert to
+    // i128.  Compare integer parts exactly, then account for a fractional
+    // remainder when the integer parts match.
+    let truncated = number.trunc() as i128;
+    let ordering = i128::from(integer).cmp(&truncated);
+    if ordering != std::cmp::Ordering::Equal {
+        return Ok(ordering);
+    }
+    let fraction = number.fract();
+    Ok(if fraction > 0.0 {
+        std::cmp::Ordering::Less
+    } else if fraction < 0.0 {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    })
 }
 
 fn resolve_dialogue_motion(
@@ -3437,6 +3592,34 @@ mod tests {
             ],
         };
         assert!(runtime.evaluate_condition(&content, &nested).unwrap());
+    }
+
+    #[test]
+    fn mixed_integer_number_comparison_preserves_i64_precision() {
+        use std::cmp::Ordering;
+
+        // Both values round to the same f64. Comparing through `as f64`
+        // would incorrectly report equality for the exact integer pair.
+        assert_eq!(
+            compare_numeric(
+                &ScalarValue::Integer(9_007_199_254_740_993),
+                &ScalarValue::Number(9_007_199_254_740_992.0),
+            )
+            .unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_numeric(
+                &ScalarValue::Integer(i64::MAX),
+                &ScalarValue::Number(9_223_372_036_854_775_808.0),
+            )
+            .unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_numeric(&ScalarValue::Integer(0), &ScalarValue::Number(-0.0)).unwrap(),
+            Ordering::Equal
+        );
     }
 
     #[test]

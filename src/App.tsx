@@ -86,8 +86,8 @@ export default function App(): ReactElement {
   const uiMotionHost = useMemo(() => new UiMotionHost(), []);
   const phaseRef = useRef<Phase>("booting");
   const busyRef = useRef(false);
-  const acknowledgedUpdates = useRef(new BoundedLedger<number>(256));
-  const autosavedRevisions = useRef(new BoundedLedger<number>(256));
+  const acknowledgedUpdates = useRef(new BoundedLedger<string>(256));
+  const autosavedRevisions = useRef(new BoundedLedger<string>(256));
   const heldControlKeys = useRef(new Set<string>());
 
   const [phase, setPhase] = useState<Phase>("booting");
@@ -95,6 +95,7 @@ export default function App(): ReactElement {
   const [update, setUpdate] = useState<RuntimeUpdate | null>(null);
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
+  const [fontLoadErrorUrl, setFontLoadErrorUrl] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [draftSettings, setDraftSettings] =
     useState<Settings>(DEFAULT_SETTINGS);
@@ -102,6 +103,7 @@ export default function App(): ReactElement {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contentVersion, setContentVersion] = useState("");
+  const [defaultFontId, setDefaultFontId] = useState<string | null>(null);
   const [typingSfxActive, setTypingSfxActive] = useState(false);
   const [typingSfxCps, setTypingSfxCps] = useState(
     DEFAULT_SETTINGS.text_speed_cps,
@@ -135,6 +137,7 @@ export default function App(): ReactElement {
         setSaveSlots(slots);
         setUpdate(bootstrap.update);
         setContentVersion(bootstrap.content_version);
+        setDefaultFontId(bootstrap.default_font ?? null);
         setStoryFlowAvailable(bootstrap.story_flow_available);
         setPhase("title");
       })
@@ -150,7 +153,7 @@ export default function App(): ReactElement {
   }, []);
 
   useEffect(() => {
-    const fontUrl = assets["font.fusion_pixel"];
+    const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
     if (fontUrl === undefined) {
       return;
     }
@@ -161,22 +164,35 @@ export default function App(): ReactElement {
     document.fonts.add(face);
     void face
       .load()
+      .then(async () => {
+        // FontFace.load() resolves when this face is usable, while the
+        // document-wide promise also accounts for any companion faces that
+        // KaTeX/layout may have queued.  Do not mark the URL ready on a
+        // rejected load: doing so would freeze a fallback-font layout as if it
+        // were authoritative.
+        await document.fonts.ready;
+        if (active) setLoadedFontUrl(fontUrl);
+      })
       .catch((reason: unknown) => {
         if (active) {
-          setError(`中文字体加载失败：${errorMessage(reason)}`);
+          // A font is an enhancement, not a reason to deadlock the story. The
+          // text components keep their system fallback geometry when loading
+          // fails; remember the failed URL so the readiness gate can release.
+          setFontLoadErrorUrl(fontUrl);
+          setError(`中文字体加载失败，已使用系统字体：${errorMessage(reason)}`);
         }
-      })
-      .finally(() => {
-        if (active) setLoadedFontUrl(fontUrl);
       });
     return () => {
       active = false;
       document.fonts.delete(face);
     };
-  }, [assets]);
+  }, [assets, defaultFontId]);
 
-  const fontUrl = assets["font.fusion_pixel"];
-  const fontReady = fontUrl === undefined || loadedFontUrl === fontUrl;
+  const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
+  const fontReady =
+    fontUrl === undefined ||
+    loadedFontUrl === fontUrl ||
+    fontLoadErrorUrl === fontUrl;
 
   const refreshSlots = useCallback(async (): Promise<void> => {
     setSaveSlots(await engineApi.listSaveSlots());

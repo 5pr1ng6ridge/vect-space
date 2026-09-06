@@ -2,14 +2,15 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use ts_rs::TS;
 use vectspace_core::model::{
-    AudioSnapshot, BootstrapPayload, DialoguePageSnapshot, LongTextPageSnapshot, PlaybackSnapshot,
-    PresentationCue, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, StoryLocation,
-    WorldSnapshot,
+    AudioSnapshot, BootstrapPayload, DialogueHistoryEntry, DialoguePageSnapshot,
+    LongTextPageSnapshot, PlaybackSnapshot, PresentationCue, PromptSnapshot, RuntimeSnapshot,
+    RuntimeUpdate, ScalarValue, StoryLocation, WorldSnapshot,
 };
+use vectspace_core::runtime::RuntimeError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -21,11 +22,156 @@ pub enum WireScalarValue {
     String(String),
 }
 
+/// An unsigned integer which is not guaranteed to fit in JavaScript's safe
+/// integer range.  Keeping the wire representation textual prevents a
+/// WebView JSON round-trip from silently changing revisions or event IDs.
+#[derive(Debug, Clone, PartialEq, Eq, TS)]
+#[ts(
+    type = "string",
+    export,
+    export_to = "../../../shared/generated/WireU64.ts"
+)]
+pub struct WireU64(pub String);
+
+impl Serialize for WireU64 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WireU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_u64(&value).map_err(serde::de::Error::custom)?;
+        Ok(Self(value))
+    }
+}
+
+impl WireU64 {
+    pub fn parse(&self) -> Result<u64, ProtocolError> {
+        parse_u64(&self.0)
+    }
+}
+
+impl From<u64> for WireU64 {
+    fn from(value: u64) -> Self {
+        Self(value.to_string())
+    }
+}
+
 pub type WireVariableMap = BTreeMap<String, WireScalarValue>;
+
+/// Stable error envelope returned by every Tauri command.  Keeping the code
+/// separate from the localized message lets the UI decide whether to focus
+/// the problems panel, ask the user to reload, or merely show a toast without
+/// parsing human-readable text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireCommandError.ts")]
+pub struct WireCommandError {
+    pub code: WireCommandErrorCode,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<Box<WireStoryLocation>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireCommandErrorCode.ts"
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WireCommandErrorCode {
+    Validation,
+    StaleProject,
+    Io,
+    Asset,
+    PreviewUnreachable,
+    Runtime,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireStoryLocation.ts")]
+pub struct WireStoryLocation {
+    pub scene_id: String,
+    pub node_id: String,
+}
+
+impl From<StoryLocation> for WireStoryLocation {
+    fn from(location: StoryLocation) -> Self {
+        Self {
+            scene_id: location.scene_id,
+            node_id: location.node_id,
+        }
+    }
+}
+
+impl WireCommandError {
+    pub fn new(code: WireCommandErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            path: None,
+            location: None,
+            element_id: None,
+        }
+    }
+
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn with_location(mut self, location: StoryLocation) -> Self {
+        self.location = Some(Box::new(location.into()));
+        self
+    }
+}
+
+impl From<String> for WireCommandError {
+    fn from(message: String) -> Self {
+        Self::new(WireCommandErrorCode::Internal, message)
+    }
+}
+
+impl From<&str> for WireCommandError {
+    fn from(message: &str) -> Self {
+        Self::new(WireCommandErrorCode::Internal, message)
+    }
+}
+
+impl From<ProtocolError> for WireCommandError {
+    fn from(error: ProtocolError) -> Self {
+        Self::new(WireCommandErrorCode::Validation, error.to_string())
+    }
+}
+
+impl From<RuntimeError> for WireCommandError {
+    fn from(error: RuntimeError) -> Self {
+        let code = match &error {
+            RuntimeError::Content(_) | RuntimeError::InvalidSnapshot(_) => {
+                WireCommandErrorCode::Validation
+            }
+            RuntimeError::StaleRevision { .. } => WireCommandErrorCode::Runtime,
+            _ => WireCommandErrorCode::Runtime,
+        };
+        Self::new(code, error.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRuntimeSnapshot {
-    pub revision: u64,
+    pub revision: WireU64,
     pub location: StoryLocation,
     pub variables: WireVariableMap,
     pub world: WorldSnapshot,
@@ -40,10 +186,29 @@ pub struct WireRuntimeSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRuntimeUpdate {
-    pub update_id: u64,
+    pub update_id: WireU64,
     pub snapshot: WireRuntimeSnapshot,
+    #[serde(serialize_with = "serialize_cues")]
     pub cues: Vec<PresentationCue>,
     pub requires_ack: bool,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireDialogueHistoryEntry.ts"
+)]
+pub struct WireDialogueHistoryEntry {
+    pub entry_id: WireU64,
+    pub prompt_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    pub speaker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +217,8 @@ pub struct WireBootstrapPayload {
     pub asset_ids: Vec<String>,
     pub content_version: String,
     pub story_flow_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -90,7 +257,7 @@ impl From<ScalarValue> for WireScalarValue {
 impl From<RuntimeSnapshot> for WireRuntimeSnapshot {
     fn from(snapshot: RuntimeSnapshot) -> Self {
         Self {
-            revision: snapshot.revision,
+            revision: snapshot.revision.into(),
             location: snapshot.location,
             variables: snapshot
                 .variables
@@ -110,10 +277,24 @@ impl From<RuntimeSnapshot> for WireRuntimeSnapshot {
 impl From<RuntimeUpdate> for WireRuntimeUpdate {
     fn from(update: RuntimeUpdate) -> Self {
         Self {
-            update_id: update.update_id,
+            update_id: update.update_id.into(),
             snapshot: update.snapshot.into(),
             cues: update.cues,
             requires_ack: update.requires_ack,
+        }
+    }
+}
+
+impl From<DialogueHistoryEntry> for WireDialogueHistoryEntry {
+    fn from(entry: DialogueHistoryEntry) -> Self {
+        Self {
+            entry_id: entry.entry_id.into(),
+            prompt_id: entry.prompt_id,
+            speaker_id: entry.speaker_id,
+            speaker: entry.speaker,
+            name_color: entry.name_color,
+            text_color: entry.text_color,
+            text: entry.text,
         }
     }
 }
@@ -125,6 +306,7 @@ impl From<BootstrapPayload> for WireBootstrapPayload {
             asset_ids: payload.asset_ids,
             content_version: payload.content_version,
             story_flow_available: payload.story_flow_available,
+            default_font: payload.default_font,
         }
     }
 }
@@ -148,6 +330,49 @@ fn parse_integer(value: &str) -> Result<i64, ProtocolError> {
     Ok(parsed)
 }
 
+fn parse_u64(value: &str) -> Result<u64, ProtocolError> {
+    if value.is_empty()
+        || (value.starts_with('+'))
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(ProtocolError::InvalidInteger(value.to_owned()));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| ProtocolError::InvalidInteger(value.to_owned()))
+}
+
+/// Presentation cues still use the native core model internally.  Their
+/// `cue_id` fields are converted to strings at the serialization boundary so
+/// every occurrence (including the nested UI-motion cue variant) is safe.
+fn serialize_cues<S>(cues: &[PresentationCue], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut value = serde_json::to_value(cues).map_err(serde::ser::Error::custom)?;
+    stringify_id_fields(&mut value);
+    value.serialize(serializer)
+}
+
+fn stringify_id_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => values.iter_mut().for_each(stringify_id_fields),
+        serde_json::Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if key == "cue_id" {
+                    if let Some(number) = child.as_u64() {
+                        *child = serde_json::Value::String(number.to_string());
+                    }
+                } else {
+                    stringify_id_fields(child);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +390,17 @@ mod tests {
         for value in ["+1", "01", "-0", "9223372036854775808", "1.0", ""] {
             assert!(matches!(
                 ScalarValue::try_from(WireScalarValue::Integer(value.to_owned())),
+                Err(ProtocolError::InvalidInteger(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn u64_wire_ids_are_canonical_strings() {
+        assert_eq!(WireU64::from(u64::MAX).parse(), Ok(u64::MAX));
+        for value in ["+1", "01", "-1", "", "18446744073709551616"] {
+            assert!(matches!(
+                WireU64(value.to_owned()).parse(),
                 Err(ProtocolError::InvalidInteger(_))
             ));
         }

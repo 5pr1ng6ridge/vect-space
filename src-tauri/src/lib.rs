@@ -5,17 +5,20 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use save::{ProfileManager, SaveManager};
+use save::{ProfileManager, SaveError, SaveManager};
 use tauri::{path::BaseDirectory, Manager, State};
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AdvanceSource, DialogueHistoryEntry, PresentationOutcome, ResolvedAsset, RuntimeUpdate,
-        SaveSlotRequest, SaveSlotSummary, SceneNode, Settings, StoryFlowSnapshot,
+        AdvanceSource, PresentationOutcome, ResolvedAsset, RuntimeUpdate, SaveSlotRequest,
+        SaveSlotSummary, SceneNode, Settings, StoryFlowSnapshot,
     },
     runtime::{self, RuntimeEngine},
 };
-use vectspace_protocol::{WireBootstrapPayload, WireRuntimeSnapshot, WireRuntimeUpdate};
+use vectspace_protocol::{
+    WireBootstrapPayload, WireCommandError, WireCommandErrorCode, WireDialogueHistoryEntry,
+    WireRuntimeSnapshot, WireRuntimeUpdate, WireU64,
+};
 
 struct EngineState {
     content: ContentCatalog,
@@ -25,24 +28,22 @@ struct EngineState {
 }
 
 impl EngineState {
-    fn runtime(&self) -> Result<MutexGuard<'_, RuntimeEngine>, String> {
-        self.runtime
-            .lock()
-            .map_err(|_| "运行时互斥锁已损坏".to_owned())
+    fn runtime(&self) -> Result<MutexGuard<'_, RuntimeEngine>, WireCommandError> {
+        self.runtime.lock().map_err(|_| {
+            WireCommandError::new(WireCommandErrorCode::Internal, "运行时互斥锁已损坏")
+        })
     }
 
     fn transact_runtime(
         &self,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
-    ) -> Result<RuntimeUpdate, String> {
+    ) -> Result<RuntimeUpdate, WireCommandError> {
         let mut runtime = self.runtime()?;
         let mut candidate = runtime.clone();
-        let update = operation(&mut candidate).map_err(|error| error.to_string())?;
+        let update = operation(&mut candidate).map_err(WireCommandError::from)?;
         let candidate_profile = candidate.profile_state(&self.content);
         if candidate_profile != runtime.profile_state(&self.content) {
-            self.profile
-                .save(&candidate_profile)
-                .map_err(|error| error.to_string())?;
+            self.profile.save(&candidate_profile).map_err(save_error)?;
         }
         *runtime = candidate;
         Ok(update)
@@ -50,12 +51,12 @@ impl EngineState {
 }
 
 #[tauri::command]
-fn bootstrap(state: State<'_, EngineState>) -> Result<WireBootstrapPayload, String> {
+fn bootstrap(state: State<'_, EngineState>) -> Result<WireBootstrapPayload, WireCommandError> {
     Ok(state.runtime()?.bootstrap(&state.content).into())
 }
 
 #[tauri::command]
-fn start_new_game(state: State<'_, EngineState>) -> Result<WireRuntimeUpdate, String> {
+fn start_new_game(state: State<'_, EngineState>) -> Result<WireRuntimeUpdate, WireCommandError> {
     state
         .transact_runtime(|runtime| runtime.start_new_game(&state.content))
         .map(Into::into)
@@ -63,10 +64,11 @@ fn start_new_game(state: State<'_, EngineState>) -> Result<WireRuntimeUpdate, St
 
 #[tauri::command]
 fn advance(
-    expected_revision: u64,
+    expected_revision: WireU64,
     source: AdvanceSource,
     state: State<'_, EngineState>,
-) -> Result<WireRuntimeUpdate, String> {
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
     state
         .transact_runtime(|runtime| runtime.advance(&state.content, expected_revision, source))
         .map(Into::into)
@@ -75,9 +77,10 @@ fn advance(
 #[tauri::command]
 fn choose(
     choice_id: String,
-    expected_revision: u64,
+    expected_revision: WireU64,
     state: State<'_, EngineState>,
-) -> Result<WireRuntimeUpdate, String> {
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
     state
         .transact_runtime(|runtime| runtime.choose(&state.content, &choice_id, expected_revision))
         .map(Into::into)
@@ -85,10 +88,11 @@ fn choose(
 
 #[tauri::command]
 fn presentation_complete(
-    update_id: u64,
+    update_id: WireU64,
     outcome: PresentationOutcome,
     state: State<'_, EngineState>,
-) -> Result<WireRuntimeUpdate, String> {
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let update_id = update_id.parse().map_err(WireCommandError::from)?;
     state
         .transact_runtime(|runtime| {
             runtime.presentation_complete(&state.content, update_id, outcome)
@@ -97,34 +101,42 @@ fn presentation_complete(
 }
 
 #[tauri::command]
-fn get_snapshot(state: State<'_, EngineState>) -> Result<WireRuntimeSnapshot, String> {
+fn get_snapshot(state: State<'_, EngineState>) -> Result<WireRuntimeSnapshot, WireCommandError> {
     Ok(state.runtime()?.snapshot().clone().into())
 }
 
 #[tauri::command]
 fn get_dialogue_history(
     state: State<'_, EngineState>,
-) -> Result<Vec<DialogueHistoryEntry>, String> {
-    Ok(state.runtime()?.dialogue_history().to_vec())
+) -> Result<Vec<WireDialogueHistoryEntry>, WireCommandError> {
+    Ok(state
+        .runtime()?
+        .dialogue_history()
+        .iter()
+        .cloned()
+        .map(Into::into)
+        .collect())
 }
 
 #[tauri::command]
-fn get_story_flow(state: State<'_, EngineState>) -> Result<Option<StoryFlowSnapshot>, String> {
+fn get_story_flow(
+    state: State<'_, EngineState>,
+) -> Result<Option<StoryFlowSnapshot>, WireCommandError> {
     let runtime = state.runtime()?;
     runtime
         .story_flow(&state.content)
-        .map_err(|error| error.to_string())
+        .map_err(WireCommandError::from)
 }
 
 #[tauri::command]
 fn resolve_assets(
     asset_ids: Vec<String>,
     state: State<'_, EngineState>,
-) -> Result<Vec<ResolvedAsset>, String> {
+) -> Result<Vec<ResolvedAsset>, WireCommandError> {
     state
         .content
         .resolve_assets(&asset_ids)
-        .map_err(|error| error.to_string())
+        .map_err(|error| WireCommandError::new(WireCommandErrorCode::Asset, error.to_string()))
 }
 
 #[tauri::command]
@@ -136,10 +148,13 @@ fn list_save_slots(state: State<'_, EngineState>) -> Vec<SaveSlotSummary> {
 fn save_slot(
     request: SaveSlotRequest,
     state: State<'_, EngineState>,
-) -> Result<SaveSlotSummary, String> {
+) -> Result<SaveSlotSummary, WireCommandError> {
     let runtime = state.runtime()?;
     if let Some(update_id) = runtime.pending_runtime_update() {
-        return Err(format!("表现层仍在执行 update {update_id}，暂时不能存档"));
+        return Err(WireCommandError::new(
+            WireCommandErrorCode::Runtime,
+            format!("表现层仍在执行 update {update_id}，暂时不能存档"),
+        ));
     }
     state
         .saves
@@ -148,12 +163,15 @@ fn save_slot(
             runtime.snapshot(),
             request.thumbnail_data_url,
         )
-        .map_err(|error| error.to_string())
+        .map_err(save_error)
 }
 
 #[tauri::command]
-fn load_slot(slot: String, state: State<'_, EngineState>) -> Result<WireRuntimeUpdate, String> {
-    let snapshot = state.saves.load(&slot).map_err(|error| error.to_string())?;
+fn load_slot(
+    slot: String,
+    state: State<'_, EngineState>,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let snapshot = state.saves.load(&slot).map_err(save_error)?;
     state
         .transact_runtime(|runtime| runtime.load_snapshot(&state.content, snapshot))
         .map(Into::into)
@@ -165,11 +183,29 @@ fn load_settings(state: State<'_, EngineState>) -> Settings {
 }
 
 #[tauri::command]
-fn save_settings(settings: Settings, state: State<'_, EngineState>) -> Result<Settings, String> {
-    state
-        .saves
-        .save_settings(settings)
-        .map_err(|error| error.to_string())
+fn save_settings(
+    settings: Settings,
+    state: State<'_, EngineState>,
+) -> Result<Settings, WireCommandError> {
+    state.saves.save_settings(settings).map_err(save_error)
+}
+
+fn save_error(error: SaveError) -> WireCommandError {
+    match error {
+        SaveError::InvalidSlot(message)
+        | SaveError::MissingSlot(message)
+        | SaveError::InvalidData(message) => {
+            WireCommandError::new(WireCommandErrorCode::Validation, message)
+        }
+        SaveError::ContentVersion { expected, actual } => WireCommandError::new(
+            WireCommandErrorCode::Validation,
+            format!("存档内容版本不兼容: 需要 {expected}，实际 {actual}"),
+        ),
+        SaveError::Io { path, source } => {
+            WireCommandError::new(WireCommandErrorCode::Io, source.to_string())
+                .with_path(path.to_string_lossy())
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -387,7 +423,7 @@ mod tests {
         };
         let before = state.runtime().unwrap().snapshot().clone();
         let result = state.transact_runtime(|runtime| runtime.start_new_game(&state.content));
-        assert!(result.unwrap_err().contains("溢出"));
+        assert!(result.unwrap_err().message.contains("溢出"));
         assert_eq!(state.runtime().unwrap().snapshot(), &before);
     }
 

@@ -5,7 +5,7 @@ nodes:
   algebra_line:
     type: say
     speaker: test
-    text: 若$A$可逆，则每个$b$都有唯一解 $x=A^{-1}b$。[pause=5000ms] 这是[pause=5000ms] 同一事实的代数表述。
+    text: 若$A$可逆，则每个$b$都有唯一解 $x=A^{-1}b$。[pause=5000ms] 这是[pause=5000ms]同一事实的代数表述。
     mode: start
     speed_cps: null
     next: flash_result
@@ -45,8 +45,17 @@ nodes:
   conclusion:
     type: say
     speaker: 系统
-    text: 分支已经汇合。读档只恢复这个最终世界，不会重放刚才的转场、音效、闪光或镜头运动。
+    text: 分支已经汇合。
     mode: start
+    page_id: conclusion
+    speed_cps: 32.0
+    next: conclusion_continue
+  conclusion_continue:
+    type: say
+    speaker: 系统
+    text: 读档只恢复这个最终世界，不会重放刚才的转场、音效、闪光或镜头运动。
+    mode: append
+    page_id: conclusion
     speed_cps: 32.0
     next: ctrl_restore
   ctrl_block:
@@ -123,26 +132,303 @@ nodes:
     auto: normal
     ctrl_fast_forward: allow
     next: move_jelly
+  forced_end_copy:
+    type: playback
+    auto: normal
+    ctrl_fast_forward: block
+    next: dialogue_emphasis
   geometry_line:
     type: say
     speaker: test
-    text: 非零行列式意味着线性变换不压扁空间；[fx=glow]体积缩放因子[/fx]是 $|\det(A)|$。
+    text: |-
+      非零行列式意味着线性变换不压扁空间；
+      [fx=glow]体积缩放因子[/fx]是 $|\det(A)|$。
     mode: start
     speed_cps: null
     next: flash_result
   introduction:
     type: say
     speaker: test
-    text: >-
-      这里是固定的$1920\times1080$舞台。公式$V=\operatorname{span}\{v_1,v_2\}$会先完成排版，再逐个显示。当前分数为
-      $[var=score]$。
+    text: |
+      这里是固定的$1920\times1080$舞台。[auto]
     mode: start
+    page_id: introduction
     speed_cps: 28.0
-    next: dialogue_emphasis
+    next: introduction_continue
+  introduction_continue:
+    type: say
+    speaker: test
+    text: |-
+      公式$V=\operatorname{span}\{v_1,v_2\}$
+      会先完成排版，再逐个显示。当前分数为 $[var=score]$。
+    mode: append
+    page_id: introduction
+    speed_cps: 28.0
+    next: forced_end_copy
   jump_say_3:
     type: jump
     scene: test_scene
     target: background_start
+  long_text_long_text_say_copy:
+    type: long_text
+    paper: gui.scratch_paper
+    font_size: 28.0
+    steps:
+    - id: step_1
+      text: |-
+        要证：
+        $$
+        \frac{a_1+\cdots+a_n}{n}\ge \sqrt[n]{a_1a_2\cdots a_n}
+        $$
+        也就是算术平均数大于等于几何平均数。
+        一个很初等的证明方法叫 归纳加“均匀化”。
+      page_break_before: false
+    - id: step_2
+      text: |-
+        第一步：两个数的情况
+        对正数 $x,y$，
+        $$
+        \frac{x+y}{2}\ge \sqrt{xy}
+        $$
+        因为
+        $$
+        x+y-2\sqrt{xy}=(\sqrt{x}-\sqrt{y})^2\ge 0
+        $$
+        所以二元均值不等式成立。
+      page_break_before: false
+    - id: step_3
+      text: |-
+        第二步：$2^k$ 个数的情况
+
+        先证明项数是 $2^k$ 时成立。
+
+        当 $n=2$ 已经成立。
+
+        假设 $n=2^k$ 时成立。现在证明 $n=2^{k+1}$。
+
+        设有 $2^{k+1}$ 个正数：
+        $$
+        a_1,\dots,a_{2^{k+1}}
+        $$
+        把它们分成两半：
+        $$
+        a_1,\dots,a_{2^k}
+        $$
+        和
+        $$
+        a_{2^k+1},\dots,a_{2^{k+1}}
+        $$
+      page_break_before: false
+    - id: step_4
+      text: |-
+        由归纳假设，
+        $$
+        \frac{a_1+\cdots+a_{2^k}}{2^k}
+        \ge
+        \sqrt[2^k]{a_1\cdots a_{2^k}}
+        $$
+        以及
+        $$
+        \frac{a_{2^k+1}+\cdots+a_{2^{k+1}}}{2^k}
+        \ge
+        \sqrt[2^k]{a_{2^k+1}\cdots a_{2^{k+1}}}
+        $$
+        记这两个算术平均数为 $A_1,A_2$，两个几何平均数为 $G_1,G_2$。
+        于是
+        $$
+        A_1\ge G_1,\qquad A_2\ge G_2
+        $$
+        整体的算术平均数是
+        $$
+        A=\frac{A_1+A_2}{2}
+        $$
+      page_break_before: false
+    - id: step_5
+      text: |-
+        所以由二元均值不等式，
+        $$
+        A=\frac{A_1+A_2}{2}\ge \sqrt{A_1A_2}\ge \sqrt{G_1G_2}
+        $$
+        而
+        $$
+        \sqrt{G_1G_2}
+
+        \sqrt[2^{k+1}]{a_1a_2\cdots a_{2^{k+1}}}
+        $$
+        所以 $2^{k+1}$ 项时也成立。
+        因此对所有 $2^k$ 项，$A\ge G$ 成立。
+      page_break_before: false
+    - id: step_7
+      text: |-
+        第三步：推广到任意 $n$
+
+        这个技巧很漂亮喵。
+
+        设
+        $$
+        A=\frac{a_1+\cdots+a_n}{n}
+        $$
+        我们想证：
+        $$
+        A\ge \sqrt[n]{a_1\cdots a_n}
+        $$
+      page_break_before: false
+    - id: step_8
+      text: |-
+        取一个 $2^k\ge n$。然后补上 $2^k-n$ 个数，全部取为 $A$。
+        于是这 $2^k$ 个数是：
+        $$
+        a_1,\dots,a_n,\underbrace{A,\dots,A}_{2^k-n\text{个}}
+        $$
+        它们的算术平均数仍然是 $A$，因为总和为
+        $$
+        a_1+\cdots+a_n+(2^k-n)A
+
+        nA+(2^k-n)A
+
+        2^kA
+        $$
+        所以这 $2^k$ 个数的平均数是 $A$。
+      page_break_before: false
+    - id: step_9
+      text: |-
+        由 $2^k$ 项的均值不等式，
+        $$
+        A\ge \sqrt[2^k]{a_1a_2\cdots a_n A^{2^k-n}}
+        $$
+        两边取 $2^k$ 次方：
+        $$
+        A^{2^k}\ge a_1a_2\cdots a_n A^{2^k-n}
+        $$
+        因为 $A>0$，所以两边除以 $A^{2^k-n}$，得到
+        $$
+        A^n\ge a_1a_2\cdots a_n
+        $$
+        也就是
+        $$
+        A\ge \sqrt[n]{a_1a_2\cdots a_n}
+        $$
+        证毕喵。
+        等号成立当且仅当
+        $$
+        a_1=a_2=\cdots=a_n
+        $$
+      page_break_before: false
+    speed_cps: null
+    next: say_3
+  long_text_long_text_say_copy_copy:
+    type: long_text
+    paper: gui.scratch_paper
+    font_size: 28.0
+    steps:
+    - id: step_1
+      text: abcdefgABCDEFG1234567890
+      page_break_before: false
+    - id: step_2
+      text: >-
+        abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890
+      page_break_before: false
+    - id: step_3
+      text: >-
+        abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890abcdefgABCDEFG1234567890
+      page_break_before: false
+    - id: step_4
+      text: |-
+        由归纳假设，
+        $$
+        \frac{a_1+\cdots+a_{2^k}}{2^k}
+        \ge
+        \sqrt[2^k]{a_1\cdots a_{2^k}}
+        $$
+        以及
+        $$
+        \frac{a_{2^k+1}+\cdots+a_{2^{k+1}}}{2^k}
+        \ge
+        \sqrt[2^k]{a_{2^k+1}\cdots a_{2^{k+1}}}
+        $$
+        记这两个算术平均数为 $A_1,A_2$，两个几何平均数为 $G_1,G_2$。
+        于是
+        $$
+        A_1\ge G_1,\qquad A_2\ge G_2
+        $$
+        整体的算术平均数是
+        $$
+        A=\frac{A_1+A_2}{2}
+        $$
+      page_break_before: false
+    - id: step_5
+      text: |-
+        所以由二元均值不等式，
+        $$
+        A=\frac{A_1+A_2}{2}\ge \sqrt{A_1A_2}\ge \sqrt{G_1G_2}
+        $$
+        而
+        $$
+        \sqrt{G_1G_2}
+
+        \sqrt[2^{k+1}]{a_1a_2\cdots a_{2^{k+1}}}
+        $$
+        所以 $2^{k+1}$ 项时也成立。
+        因此对所有 $2^k$ 项，$A\ge G$ 成立。
+      page_break_before: false
+    - id: step_7
+      text: |-
+        第三步：推广到任意 $n$
+
+        这个技巧很漂亮喵。
+
+        设
+        $$
+        A=\frac{a_1+\cdots+a_n}{n}
+        $$
+        我们想证：
+        $$
+        A\ge \sqrt[n]{a_1\cdots a_n}
+        $$
+      page_break_before: false
+    - id: step_8
+      text: |-
+        取一个 $2^k\ge n$。然后补上 $2^k-n$ 个数，全部取为 $A$。
+        于是这 $2^k$ 个数是：
+        $$
+        a_1,\dots,a_n,\underbrace{A,\dots,A}_{2^k-n\text{个}}
+        $$
+        它们的算术平均数仍然是 $A$，因为总和为
+        $$
+        a_1+\cdots+a_n+(2^k-n)A
+
+        nA+(2^k-n)A
+
+        2^kA
+        $$
+        所以这 $2^k$ 个数的平均数是 $A$。
+      page_break_before: false
+    - id: step_9
+      text: |-
+        由 $2^k$ 项的均值不等式，
+        $$
+        A\ge \sqrt[2^k]{a_1a_2\cdots a_n A^{2^k-n}}
+        $$
+        两边取 $2^k$ 次方：
+        $$
+        A^{2^k}\ge a_1a_2\cdots a_n A^{2^k-n}
+        $$
+        因为 $A>0$，所以两边除以 $A^{2^k-n}$，得到
+        $$
+        A^n\ge a_1a_2\cdots a_n
+        $$
+        也就是
+        $$
+        A\ge \sqrt[n]{a_1a_2\cdots a_n}
+        $$
+        证毕喵。
+        等号成立当且仅当
+        $$
+        a_1=a_2=\cdots=a_n
+        $$
+      page_break_before: false
+    speed_cps: null
+    next: jump_say_3
   mark_ending:
     type: set
     variable: ending_seen
@@ -236,11 +522,11 @@ nodes:
       0$，所以二元均值不等式$\frac{x+y}{2} \ge \sqrt{xy}$成立。[auto]
     mode: start
     speed_cps: null
-    next: say_3
+    next: long_text_long_text_say_copy
   say_3:
     type: say
     speaker: null
-    text: 均值不等式链，
+    text: "均值不等式链，ADKFJHsdfiuvksjh#rt$678932{}|{}[AFKV;"
     mode: start
     page_id: say_3
     speed_cps: null
@@ -250,26 +536,18 @@ nodes:
     speaker: null
     text: |-
       $$
-      
       \sqrt{\frac{a_1^2+\cdots+a_n^2}{n}}
-      
       \ge
-      
       \frac{a_1+\cdots+a_n}{n}
-      
       \ge
-      
       \sqrt[n]{a_1a_2\cdots a_n}
-      
       \ge
-      
       \frac{n}{\frac1{a_1}+\cdots+\frac1{a_n}}
-      
       $$
     mode: append
     page_id: say_3
     speed_cps: null
-    next: jump_say_3
+    next: long_text_long_text_say_copy_copy
   sprite_move_jelly:
     type: timeline
     duration_ms: 500
@@ -314,6 +592,9 @@ nodes:
         - at_ms: 0
           value: inherit
           easing: ease_out
+        - at_ms: 50
+          value: 1999.0
+          easing: linear
         - at_ms: 500
           value: 1898.243
           easing: linear

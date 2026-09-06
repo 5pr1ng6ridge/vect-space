@@ -13,6 +13,7 @@ import {
   nodeLabel,
 } from "../story";
 import { interpolateTemplate } from "../textTemplate";
+import { isCanonicalIntegerText, scalarType } from "../scalars";
 import type {
   AssetKind,
   ConditionExpression,
@@ -50,7 +51,7 @@ interface NodeInspectorProps {
   onDelete(nodeId: string): void;
   onDuplicate(nodeId: string): void;
   onConvertToTimeline(nodeId: string): void;
-  onSplitDialogue(nodeId: string, offset: number): void;
+  onSplitDialogue(nodeId: string, offset: number, text?: string): void;
   onSetEntry(nodeId: string): void;
   onOpenLongTextWorkspace(nodeId: string): void;
   uiMotions: UiMotionFile[];
@@ -148,7 +149,7 @@ export function NodeInspector({
           scene,
           manifest,
           uiMotions,
-          (offset) => onSplitDialogue(nodeId, offset),
+          (offset, text) => onSplitDialogue(nodeId, offset, text),
           () => onOpenLongTextWorkspace(nodeId),
         )}
       </section>
@@ -197,7 +198,7 @@ function renderFields(
   scene: SceneDefinition,
   manifest: ContentManifest,
   uiMotions: UiMotionFile[],
-  splitDialogue: (offset: number) => void,
+  splitDialogue: (offset: number, text?: string) => void,
   openLongTextWorkspace: () => void,
 ): ReactNode {
   const targets = Object.keys(scene.nodes);
@@ -424,6 +425,7 @@ function renderFields(
             </div>
           )}
           <DialogueTextEditor
+            key={node.text}
             onChange={(text) => update({ ...node, text })}
             onSplit={splitDialogue}
             value={node.text}
@@ -1770,6 +1772,7 @@ function LiteralEditor({
   value: ScalarValue;
 }): ReactElement {
   const valueType = expectedType ?? scalarVariableType(value);
+  const integerInputRef = useRef<HTMLInputElement>(null);
   if (valueType === "boolean") {
     return (
       <select
@@ -1781,20 +1784,38 @@ function LiteralEditor({
       </select>
     );
   }
+  if (valueType === "integer") {
+    return (
+      <input
+        aria-label="整数值"
+        inputMode="numeric"
+        key={String(value)}
+        ref={integerInputRef}
+        type="text"
+        defaultValue={String(value)}
+        onBlur={() => {
+          const raw = integerInputRef.current?.value ?? String(value);
+          if (isCanonicalIntegerText(raw)) onChange(BigInt(raw));
+        }}
+        onKeyDown={(event) => {
+          const raw = integerInputRef.current?.value ?? String(value);
+          if (event.key === "Enter" && isCanonicalIntegerText(raw)) {
+            onChange(BigInt(raw));
+          }
+        }}
+      />
+    );
+  }
   return (
     <input
-      step={valueType === "integer" ? 1 : "any"}
-      type={
-        valueType === "integer" || valueType === "number" ? "number" : "text"
-      }
+      step="any"
+      type={valueType === "number" ? "number" : "text"}
       value={String(value)}
       onChange={(event) =>
         onChange(
-          valueType === "integer"
-            ? Math.trunc(Number(event.currentTarget.value))
-            : valueType === "number"
-              ? Number(event.currentTarget.value)
-              : event.currentTarget.value,
+          valueType === "number"
+            ? Number(event.currentTarget.value)
+            : event.currentTarget.value,
         )
       }
     />
@@ -1848,9 +1869,7 @@ function operandVariableType(
 }
 
 function scalarVariableType(value: ScalarValue): VariableType {
-  if (typeof value === "boolean") return "boolean";
-  if (typeof value === "string") return "string";
-  return Number.isInteger(value) ? "integer" : "number";
+  return scalarType(value);
 }
 
 function defaultScalar(type: VariableType): ScalarValue {
@@ -1858,6 +1877,7 @@ function defaultScalar(type: VariableType): ScalarValue {
     case "boolean":
       return false;
     case "integer":
+      return 0n;
     case "number":
       return 0;
     case "string":
@@ -1989,24 +2009,42 @@ function DialogueTextEditor({
   value,
 }: {
   onChange(value: string): void;
-  onSplit(offset: number): void;
+  onSplit(offset: number, text?: string): void;
   value: string;
 }): ReactElement {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [offset, setOffset] = useState(0);
+  const [textLength, setTextLength] = useState(value.length);
+  const commit = (): void => {
+    const draft = inputRef.current?.value ?? value;
+    if (draft !== value) onChange(draft);
+  };
   return (
     <Field label="对话文本" hint="支持 KaTeX、pause、speed 和 fx 标记">
       <textarea
         ref={inputRef}
         rows={8}
-        value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        defaultValue={value}
+        key={value}
+        onChange={(event) => setTextLength(event.currentTarget.value.length)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            commit();
+          }
+        }}
         onSelect={(event) => setOffset(event.currentTarget.selectionStart)}
       />
       <button
         className="wide-button"
-        disabled={offset <= 0 || offset >= value.length}
-        onClick={() => onSplit(inputRef.current?.selectionStart ?? 0)}
+        disabled={offset <= 0 || offset >= textLength}
+        onClick={() =>
+          onSplit(
+            inputRef.current?.selectionStart ?? 0,
+            inputRef.current?.value ?? value,
+          )
+        }
         type="button"
       >
         在光标处分段并接续
@@ -2207,12 +2245,25 @@ function TextField({
   onChange(value: string): void;
   value: string;
 }): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commit = (): void => {
+    const draft = inputRef.current?.value ?? value;
+    if (draft !== value) onChange(draft);
+  };
   return (
     <Field label={label}>
       <input
         required={!allowEmpty}
-        value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        defaultValue={value}
+        key={value}
+        ref={inputRef}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit();
+          }
+        }}
       />
     </Field>
   );
@@ -2233,6 +2284,16 @@ function NumberField({
   step?: number;
   value: number;
 }): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commit = (): void => {
+    const raw = inputRef.current?.value ?? String(value);
+    const parsed = Number(raw);
+    if (raw.trim() !== "" && Number.isFinite(parsed)) {
+      if (parsed !== value) onChange(parsed);
+    } else {
+      if (inputRef.current !== null) inputRef.current.value = String(value);
+    }
+  };
   return (
     <Field label={label}>
       <input
@@ -2240,8 +2301,16 @@ function NumberField({
         min={min}
         step={step}
         type="number"
-        value={value}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        defaultValue={String(value)}
+        key={String(value)}
+        ref={inputRef}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit();
+          }
+        }}
       />
     </Field>
   );
@@ -2262,6 +2331,22 @@ function OptionalNumber({
   step?: number;
   value: number | null;
 }): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commit = (): void => {
+    const raw =
+      inputRef.current?.value ?? (value === null ? "" : String(value));
+    if (raw.trim() === "") {
+      if (value !== null) onChange(null);
+      return;
+    }
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) {
+      if (parsed !== value) onChange(parsed);
+    } else {
+      if (inputRef.current !== null)
+        inputRef.current.value = value === null ? "" : String(value);
+    }
+  };
   return (
     <Field label={label}>
       <input
@@ -2270,14 +2355,16 @@ function OptionalNumber({
         placeholder="保持不变"
         step={step}
         type="number"
-        value={value ?? ""}
-        onChange={(event) =>
-          onChange(
-            event.currentTarget.value === ""
-              ? null
-              : Number(event.currentTarget.value),
-          )
-        }
+        defaultValue={value === null ? "" : String(value)}
+        key={value === null ? "null" : String(value)}
+        ref={inputRef}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit();
+          }
+        }}
       />
     </Field>
   );

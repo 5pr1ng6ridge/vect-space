@@ -5,6 +5,7 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
   plugins: [react()],
+  cacheDir: "../.vite-editor-cache",
   clearScreen: false,
   server: {
     port: 1421,

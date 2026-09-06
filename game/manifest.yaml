@@ -24,6 +24,9 @@ assets:
   bg.nvctsp:
     kind: background
     path: backgrounds/Photoshop_3a52oGnGn0.png
+  bg.taiwan:
+    kind: background
+    path: backgrounds/RFTI0925.PNG
   bg.vector_space:
     kind: background
     path: backgrounds/bg_vstest.png
@@ -39,6 +42,9 @@ assets:
   gui.name_box:
     kind: gui
     path: gui/nameboxtest.png
+  gui.scratch_paper:
+    kind: gui
+    path: gui/scratchpapertest.png
   sfx.typing:
     kind: sfx
     path: audio/sfx_typing.wav

@@ -1,3 +1,5 @@
+import type { LayoutUnit } from "./markup";
+
 /** Renderer-neutral measured layout data, always expressed in unscaled CSS/design pixels. */
 export interface TextUnitBox {
   index: number;
@@ -84,6 +86,51 @@ export function createTextLayoutSnapshot(
 }
 
 /**
+ * Groups measured inline units into visual CSS rows.  Both the game and the
+ * editor supply their DOM boxes here so pagination does not depend on two
+ * subtly different "same line" heuristics.
+ */
+export function resolveTextLayoutLineGroups(
+  units: readonly LayoutUnit[],
+  boxes: ReadonlyMap<number, TextUnitBox>,
+): readonly (readonly number[])[] {
+  const groups: number[][] = [];
+  let lastCenter: number | null = null;
+  let lastHeight = 0;
+  let previousWasDisplayMath = false;
+  let forceNextLine = false;
+
+  for (let index = 0; index < units.length; index += 1) {
+    const unit = units[index];
+    if (unit === undefined) return [];
+    if (unit.kind === "hard_break") {
+      forceNextLine = true;
+      previousWasDisplayMath = false;
+      continue;
+    }
+    const box = boxes.get(index);
+    if (box === undefined) return [];
+    const height = Math.max(0, box.bottom - box.top);
+    const center = box.top + height / 2;
+    const tolerance = Math.max(4, Math.max(lastHeight, height) * 0.45);
+    const isDisplayMath = unit.kind === "math" && unit.display;
+    const startsLine =
+      lastCenter === null ||
+      forceNextLine ||
+      previousWasDisplayMath ||
+      isDisplayMath ||
+      Math.abs(center - lastCenter) > tolerance;
+    if (startsLine) groups.push([]);
+    groups[groups.length - 1]?.push(index);
+    lastCenter = center;
+    lastHeight = height;
+    previousWasDisplayMath = isDisplayMath;
+    forceNextLine = false;
+  }
+  return groups;
+}
+
+/**
  * Distributes already measured visual rows onto logical paper pages.
  *
  * `auto` is deliberately row-based: a single story step can cross papers,
@@ -139,9 +186,13 @@ export function paginateTextLayouts(
   for (const item of items) {
     const layout = item.layout;
     const lines = layout?.lines ?? [];
+    // Inline roots (especially ones containing vertically aligned KaTeX)
+    // can report a smaller union rect than their lowest child.  Keep the
+    // final source boundary at least as low as the measured visual rows.
     const sourceHeight = Math.max(
       1,
       layout?.contentHeight ?? item.fallbackHeight ?? 180,
+      ...lines.map((line) => line.bottom),
     );
     if (fragments.length > 0 && mode !== "continuous" && item.pageBreakBefore) {
       finishPage();
@@ -167,7 +218,23 @@ export function paginateTextLayouts(
       let endIndex = lineIndex;
       while (endIndex < lines.length) {
         const line = lines[endIndex];
-        if (line === undefined || line.bottom - sourceTop > available) break;
+        if (line === undefined) break;
+        // A unit's DOM rect is a glyph/inline box, not a complete CSS line
+        // box.  Slicing at `line.bottom` therefore clips the descent and the
+        // line-leading below the last visual row of a fragment.  The next
+        // row's stable top is the only shared, renderer-neutral boundary.
+        const nextLine = lines[endIndex + 1];
+        const lastLine = lines[endIndex];
+        // A browser inline rect can overlap the next row's top (large
+        // glyphs, KaTeX and fallback fonts all do this). The boundary must
+        // contain both the following row's leading and the current row's
+        // descent; using only `nextLine.top` crops the lower part of a
+        // fragment in both renderers.
+        const nextBoundary = Math.max(
+          nextLine?.top ?? sourceHeight,
+          lastLine?.bottom ?? sourceHeight,
+        );
+        if (nextBoundary - sourceTop > available) break;
         endIndex += 1;
       }
 
@@ -178,10 +245,12 @@ export function paginateTextLayouts(
         continue;
       }
       endIndex = Math.max(lineIndex + 1, endIndex);
-      const last = lines[endIndex - 1];
-      if (last === undefined) break;
-      const finalFragment = endIndex === lines.length;
-      const sourceBottom = finalFragment ? sourceHeight : last.bottom;
+      const nextLine = lines[endIndex];
+      const lastLine = lines[endIndex - 1];
+      const sourceBottom = Math.max(
+        nextLine?.top ?? sourceHeight,
+        lastLine?.bottom ?? sourceHeight,
+      );
       append(
         item.id,
         sourceTop,

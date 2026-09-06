@@ -57,50 +57,6 @@ export function splitLinesAtPauses(
 }
 
 /**
- * Groups inline markup into visual rows without mistaking KaTeX baseline
- * alignment for a line break. Display formulae deliberately form their own
- * row before and after surrounding text.
- */
-export function resolveVisualLineGroups(
-  units: readonly VisibleUnit[],
-  elements: ReadonlyMap<number, HTMLElement>,
-): readonly (readonly number[])[] {
-  const groups: number[][] = [];
-  let lastCenter: number | null = null;
-  let lastHeight = 0;
-  let previousWasDisplayMath = false;
-  let forceNextLine = false;
-  for (let index = 0; index < units.length; index += 1) {
-    const unit = units[index];
-    if (unit === undefined) return [];
-    if (isHardLineBreak(unit)) {
-      forceNextLine = true;
-      previousWasDisplayMath = false;
-      continue;
-    }
-    const element = elements.get(index);
-    if (element === undefined) return [];
-    const rect = element.getBoundingClientRect();
-    const center = rect.top + rect.height / 2;
-    const tolerance = Math.max(4, Math.max(lastHeight, rect.height) * 0.45);
-    const isDisplayMath = unit.kind === "math" && unit.display;
-    const startsLine =
-      lastCenter === null ||
-      forceNextLine ||
-      previousWasDisplayMath ||
-      isDisplayMath ||
-      Math.abs(center - lastCenter) > tolerance;
-    if (startsLine) groups.push([]);
-    groups[groups.length - 1]?.push(index);
-    lastCenter = center;
-    lastHeight = rect.height;
-    previousWasDisplayMath = isDisplayMath;
-    forceNextLine = false;
-  }
-  return groups;
-}
-
-/**
  * Keep the text DOM in its natural inline layout.  A previous implementation
  * rebuilt the measured rows as block elements, which changed wrapping after
  * measurement and could make every remaining row animate at once.  This plan
@@ -180,13 +136,12 @@ export function lineSweepMaskPositionPx(
   );
   const progress = clamp(spentMs / Math.max(1, timing.durationMs), 0, 1);
   const sweepWidth = timing.lineWidthPx + featherPx;
-  // Move one feather-width beyond the nominal row end.  The gradient's tail
-  // is transparent, so stopping at `-unitOffset` leaves the final glyphs
-  // partially masked.  That was especially visible as tiny gaps between
-  // adjacent Chinese characters after a completed sweep.
-  return (
-    -timing.unitOffsetPx - sweepWidth + (sweepWidth + featherPx) * progress
-  );
+  // At completion the mask image must still cover the element's left edge.
+  // Moving it right by the feather width leaves the first glyph(s) outside
+  // the non-repeating mask image, which WebView2 treats as transparent.  The
+  // gradient already has a black stop at the nominal row end, so `-offset`
+  // is the fully revealed position.
+  return -timing.unitOffsetPx - sweepWidth + sweepWidth * progress;
 }
 
 /** Captures geometry outside React render, in the unscaled CSS layout space. */

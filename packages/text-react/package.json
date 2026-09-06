@@ -1,0 +1,17 @@
+{
+  "name": "@vectspace/text-react",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./measured-markup": "./src/MeasuredMarkup.tsx"
+  },
+  "peerDependencies": {
+    "react": "19.2.8"
+  },
+  "dependencies": {
+    "@vectspace/text": "0.1.0",
+    "katex": "0.18.4"
+  }
+}

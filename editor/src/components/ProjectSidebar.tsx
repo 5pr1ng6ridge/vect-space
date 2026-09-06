@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useMemo, useState, type ReactElement } from "react";
+import { useMemo, useRef, useState, type ReactElement } from "react";
 import { assetUrl } from "../api";
+import { isCanonicalIntegerText } from "../scalars";
 import { useAssetFont } from "../useAssetFont";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import type {
@@ -431,23 +432,20 @@ function ProjectPanel({
     <div className="sidebar-body project-settings">
       <label>
         <span>内容版本</span>
-        <input
+        <DeferredTextInput
           value={manifest.content_version}
-          onChange={(event) =>
-            onChange({
-              ...manifest,
-              content_version: event.currentTarget.value,
-            })
+          onCommit={(content_version) =>
+            onChange({ ...manifest, content_version })
           }
         />
         <small>改变后旧存档将不再兼容</small>
       </label>
       <label>
         <span>默认语言</span>
-        <input
+        <DeferredTextInput
           value={manifest.default_locale}
-          onChange={(event) =>
-            onChange({ ...manifest, default_locale: event.currentTarget.value })
+          onCommit={(default_locale) =>
+            onChange({ ...manifest, default_locale })
           }
         />
       </label>
@@ -593,14 +591,11 @@ function ProjectPanel({
             </header>
             <label>
               <span>显示名</span>
-              <input
+              <DeferredTextInput
                 maxLength={64}
                 value={definition.display_name}
-                onChange={(event) =>
-                  onChangeCharacter(id, {
-                    ...definition,
-                    display_name: event.currentTarget.value,
-                  })
+                onCommit={(display_name) =>
+                  onChangeCharacter(id, { ...definition, display_name })
                 }
               />
             </label>
@@ -752,10 +747,10 @@ function CharacterColorInput({
             /^#[0-9A-Fa-f]{6}$/.test(opaqueColor) ? opaqueColor : "#FFFFFF"
           }
         />
-        <input
+        <DeferredTextInput
           placeholder="#RRGGBB / 留空"
           value={value ?? ""}
-          onChange={(event) => onChange(event.currentTarget.value || null)}
+          onCommit={(next) => onChange(next || null)}
         />
       </span>
     </label>
@@ -769,6 +764,7 @@ function VariableDefaultInput({
   definition: VariableDefinition;
   onChange(value: ScalarValue): void;
 }): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
   if (definition.type === "boolean") {
     return (
       <select
@@ -781,20 +777,93 @@ function VariableDefaultInput({
     );
   }
   const numeric = definition.type === "integer" || definition.type === "number";
+  const defaultText = String(definition.default);
+  const commitInteger = (): void => {
+    const text = inputRef.current?.value ?? defaultText;
+    if (isCanonicalIntegerText(text)) onChange(BigInt(text));
+    else if (inputRef.current !== null) inputRef.current.value = defaultText;
+  };
+  if (definition.type === "integer") {
+    return (
+      <input
+        aria-label="整数默认值"
+        inputMode="numeric"
+        defaultValue={defaultText}
+        key={defaultText}
+        ref={inputRef}
+        type="text"
+        onBlur={commitInteger}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") commitInteger();
+        }}
+      />
+    );
+  }
   return (
     <input
-      step={definition.type === "integer" ? 1 : "any"}
+      step="any"
       type={numeric ? "number" : "text"}
-      value={String(definition.default)}
-      onChange={(event) =>
-        onChange(
-          definition.type === "integer"
-            ? Math.trunc(Number(event.currentTarget.value))
-            : definition.type === "number"
-              ? Number(event.currentTarget.value)
-              : event.currentTarget.value,
-        )
-      }
+      defaultValue={defaultText}
+      key={defaultText}
+      ref={inputRef}
+      onBlur={() => {
+        const raw = inputRef.current?.value ?? defaultText;
+        if (definition.type === "number") {
+          const parsed = Number(raw);
+          if (Number.isFinite(parsed) && parsed !== definition.default)
+            onChange(parsed);
+          else if (!Number.isFinite(parsed) && inputRef.current !== null)
+            inputRef.current.value = defaultText;
+        } else if (raw !== defaultText) {
+          onChange(raw);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const raw = inputRef.current?.value ?? defaultText;
+        if (definition.type === "number") {
+          const parsed = Number(raw);
+          if (Number.isFinite(parsed) && parsed !== definition.default)
+            onChange(parsed);
+        } else if (raw !== defaultText) {
+          onChange(raw);
+        }
+      }}
+    />
+  );
+}
+
+function DeferredTextInput({
+  maxLength,
+  onCommit,
+  placeholder,
+  value,
+}: {
+  maxLength?: number;
+  onCommit(value: string): void;
+  placeholder?: string;
+  value: string;
+}): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commit = (): void => {
+    const draft = inputRef.current?.value ?? value;
+    if (draft !== value) onCommit(draft);
+  };
+  return (
+    <input
+      defaultValue={value}
+      key={value}
+      maxLength={maxLength}
+      ref={inputRef}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        }
+      }}
+      placeholder={placeholder}
     />
   );
 }
@@ -804,6 +873,7 @@ function defaultForVariableType(type: VariableType): ScalarValue {
     case "boolean":
       return false;
     case "integer":
+      return 0n;
     case "number":
       return 0;
     case "string":

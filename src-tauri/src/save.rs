@@ -268,8 +268,13 @@ impl ProfileManager {
             return Ok(defaults);
         }
 
-        let loaded =
-            read_json_with_backup_limit::<serde_json::Value>(&self.path, MAX_PROFILE_FILE_BYTES);
+        let (loaded, loaded_from_backup) = match read_json_with_backup_limit_source::<
+            serde_json::Value,
+        >(&self.path, MAX_PROFILE_FILE_BYTES)
+        {
+            Ok((value, from_backup)) => (Ok(value), from_backup),
+            Err(error) => (Err(error), false),
+        };
         let (stored, mut rewrite) = match loaded {
             Ok(value)
                 if matches!(
@@ -278,51 +283,73 @@ impl ProfileManager {
                 ) =>
             {
                 let is_v3 = value.get("schema_version").and_then(|v| v.as_u64()) == Some(3);
-                let file: ProfileFile = serde_json::from_value(value)
-                    .map_err(|error| SaveError::InvalidData(error.to_string()))?;
-                (
-                    ProfileState {
-                        variables: file.variables,
-                        read_content_version: file.read_content_version,
-                        read_dialogues: file.read_dialogues,
-                        seen_presentations: file.seen_presentations,
-                        dialogue_history: file.dialogue_history,
-                        completed_scenes: file.completed_scenes,
-                    },
-                    is_v3,
-                )
+                match serde_json::from_value::<ProfileFile>(value) {
+                    Ok(file) => (
+                        ProfileState {
+                            variables: file.variables,
+                            read_content_version: file.read_content_version,
+                            read_dialogues: file.read_dialogues,
+                            seen_presentations: file.seen_presentations,
+                            dialogue_history: file.dialogue_history,
+                            completed_scenes: file.completed_scenes,
+                        },
+                        is_v3,
+                    ),
+                    Err(error) => {
+                        eprintln!(
+                            "profile v{version} 内容损坏，已备份并重建: {error}",
+                            version = if is_v3 { 3 } else { 4 }
+                        );
+                        self.backup_incompatible()?;
+                        (self.default_state()?, true)
+                    }
+                }
             }
             Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(2) => {
-                let file: LegacyProfileV2File = serde_json::from_value(value)
-                    .map_err(|error| SaveError::InvalidData(error.to_string()))?;
-                eprintln!("profile v2 已迁移为 v3，已观看表现集合从空集合开始");
-                (
-                    ProfileState {
-                        variables: file.variables,
-                        read_content_version: file.read_content_version,
-                        read_dialogues: file.read_dialogues,
-                        seen_presentations: Default::default(),
-                        dialogue_history: Default::default(),
-                        completed_scenes: Default::default(),
-                    },
-                    true,
-                )
+                match serde_json::from_value::<LegacyProfileV2File>(value) {
+                    Ok(file) => {
+                        eprintln!("profile v2 已迁移为 v4，新增集合从空集合开始");
+                        (
+                            ProfileState {
+                                variables: file.variables,
+                                read_content_version: file.read_content_version,
+                                read_dialogues: file.read_dialogues,
+                                seen_presentations: Default::default(),
+                                dialogue_history: Default::default(),
+                                completed_scenes: Default::default(),
+                            },
+                            true,
+                        )
+                    }
+                    Err(error) => {
+                        eprintln!("profile v2 内容损坏，已备份并重建: {error}");
+                        self.backup_incompatible()?;
+                        (self.default_state()?, true)
+                    }
+                }
             }
             Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(1) => {
-                let file: LegacyProfileFile = serde_json::from_value(value)
-                    .map_err(|error| SaveError::InvalidData(error.to_string()))?;
-                eprintln!("profile v1 已迁移为 v3，已读与已观看表现集合从空集合开始");
-                (
-                    ProfileState {
-                        variables: file.variables,
-                        read_content_version: self.content_version.clone(),
-                        read_dialogues: Default::default(),
-                        seen_presentations: Default::default(),
-                        dialogue_history: Default::default(),
-                        completed_scenes: Default::default(),
-                    },
-                    true,
-                )
+                match serde_json::from_value::<LegacyProfileFile>(value) {
+                    Ok(file) => {
+                        eprintln!("profile v1 已迁移为 v4，已读与新增集合从空集合开始");
+                        (
+                            ProfileState {
+                                variables: file.variables,
+                                read_content_version: self.content_version.clone(),
+                                read_dialogues: Default::default(),
+                                seen_presentations: Default::default(),
+                                dialogue_history: Default::default(),
+                                completed_scenes: Default::default(),
+                            },
+                            true,
+                        )
+                    }
+                    Err(error) => {
+                        eprintln!("profile v1 内容损坏，已备份并重建: {error}");
+                        self.backup_incompatible()?;
+                        (self.default_state()?, true)
+                    }
+                }
             }
             Ok(value) => {
                 eprintln!(
@@ -338,6 +365,10 @@ impl ProfileManager {
                 (self.default_state()?, true)
             }
         };
+        // A valid backup is still only a recovery source.  Rewrite the
+        // primary file so a transient/corrupt primary does not force every
+        // subsequent launch through the same fallback path.
+        rewrite |= loaded_from_backup;
         let variables = self.reconcile(&stored.variables)?;
         rewrite |= variables != stored.variables;
         let mut reconciled = ProfileState {
@@ -356,8 +387,20 @@ impl ProfileManager {
         }
         rewrite |= self.reconcile_metadata(&mut reconciled);
         if rewrite {
+            // Reconciliation can be triggered by a content-version change,
+            // stale scene IDs, malformed history metadata, or a variable
+            // declaration change.  Preserve the exact source file before
+            // writing the repaired state so a bad migration never destroys
+            // the user's recoverable profile.
+            if self.path.is_file() {
+                self.backup_incompatible()?;
+            }
             eprintln!("profile 已按当前声明与内容版本调整，并保留上一版本备份");
-            self.write(&reconciled)?;
+            if loaded_from_backup {
+                self.write_without_rotating_backup(&reconciled)?;
+            } else {
+                self.write(&reconciled)?;
+            }
         }
         Ok(reconciled)
     }
@@ -436,6 +479,23 @@ impl ProfileManager {
     }
 
     fn write(&self, state: &ProfileState) -> Result<(), SaveError> {
+        self.write_with_backup(state, true)
+    }
+
+    /// Persist a state recovered from the ordinary `.json.bak` without
+    /// rotating that backup away. The backup is the only known-good copy in
+    /// this situation; replacing it with the malformed primary would make a
+    /// second recovery attempt impossible if the repaired write is
+    /// interrupted.
+    fn write_without_rotating_backup(&self, state: &ProfileState) -> Result<(), SaveError> {
+        self.write_with_backup(state, false)
+    }
+
+    fn write_with_backup(
+        &self,
+        state: &ProfileState,
+        rotate_backup: bool,
+    ) -> Result<(), SaveError> {
         let file = ProfileFile {
             schema_version: PROFILE_SCHEMA_VERSION,
             variables: state.variables.clone(),
@@ -447,7 +507,11 @@ impl ProfileManager {
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| SaveError::InvalidData(error.to_string()))?;
-        atomic_write(&self.path, &bytes)
+        if rotate_backup {
+            atomic_write(&self.path, &bytes)
+        } else {
+            atomic_write_preserving_backup(&self.path, &bytes)
+        }
     }
 
     fn backup_incompatible(&self) -> Result<(), SaveError> {
@@ -610,15 +674,20 @@ fn read_json_with_backup<T: serde::de::DeserializeOwned>(path: &Path) -> Result<
     }
 }
 
-fn read_json_with_backup_limit<T: serde::de::DeserializeOwned>(
+/// Read a bounded JSON file and report whether the recovery backup was used.
+/// Callers that can repair the primary file should persist the recovered value
+/// instead of leaving a permanently broken primary beside a valid backup.
+fn read_json_with_backup_limit_source<T: serde::de::DeserializeOwned>(
     path: &Path,
     maximum_bytes: usize,
-) -> Result<T, SaveError> {
+) -> Result<(T, bool), SaveError> {
     match read_json_limited(path, maximum_bytes) {
-        Ok(value) => Ok(value),
+        Ok(value) => Ok((value, false)),
         Err(primary_error) => {
             let backup = backup_path(path);
-            read_json_limited(&backup, maximum_bytes).map_err(|_| primary_error)
+            read_json_limited(&backup, maximum_bytes)
+                .map(|value| (value, true))
+                .map_err(|_| primary_error)
         }
     }
 }
@@ -674,15 +743,63 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
             path: backup.clone(),
             source,
         })?;
-        fs::remove_file(path).map_err(|source| SaveError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
     }
-    fs::rename(&temporary, path).map_err(|source| SaveError::Io {
+    replace_file(&temporary, path).map_err(|source| SaveError::Io {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn atomic_write_preserving_backup(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes).map_err(|source| SaveError::Io {
+        path: temporary.clone(),
+        source,
+    })?;
+    replace_file(&temporary, path).map_err(|source| SaveError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Replace a save/profile document without exposing a delete-then-rename gap
+/// on Windows.  The game is shipped on Windows, where `rename` does not
+/// replace an existing file.  Keeping this operation atomic means a crash
+/// cannot leave an empty or missing profile between writes.
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    if target.exists() {
+        fs::remove_file(target)?;
+    }
+    fs::rename(source, target)
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -913,6 +1030,66 @@ mod tests {
     }
 
     #[test]
+    fn malformed_current_profile_is_backed_up_and_rebuilt() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("profile.json"),
+            br#"{
+                "schema_version": 4,
+                "variables": {},
+                "read_content_version": "demo-2",
+                "read_dialogues": [],
+                "seen_presentations": [],
+                "dialogue_history": [{"entry_id":"not-an-integer"}],
+                "completed_scenes": []
+            }"#,
+        )
+        .unwrap();
+
+        let (_, state) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &std::collections::BTreeMap::new(),
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        assert!(state.dialogue_history.is_empty());
+        assert!(directory
+            .path()
+            .join("profile.incompatible.json.bak")
+            .is_file());
+    }
+
+    #[test]
+    fn profile_recovery_repairs_primary_without_overwriting_valid_backup() {
+        let directory = tempdir().unwrap();
+        let (_, initial) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &std::collections::BTreeMap::new(),
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        let primary = directory.path().join("profile.json");
+        let backup = directory.path().join("profile.json.bak");
+        let known_good = fs::read(&primary).unwrap();
+        fs::write(&backup, &known_good).unwrap();
+        fs::write(&primary, b"{\"schema_version\":4").unwrap();
+
+        let (_, recovered) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &std::collections::BTreeMap::new(),
+            "demo-2".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(recovered, initial);
+        assert!(serde_json::from_slice::<serde_json::Value>(&fs::read(&primary).unwrap()).is_ok());
+        assert_eq!(fs::read(&backup).unwrap(), known_good);
+        assert!(directory
+            .path()
+            .join("profile.incompatible.json.bak")
+            .is_file());
+    }
+
+    #[test]
     fn profile_reconciliation_drops_locations_removed_from_current_content() {
         let directory = tempdir().unwrap();
         fs::write(
@@ -1042,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_v2_migrates_to_v3_without_losing_variables_or_read_history() {
+    fn profile_v2_migrates_to_v4_without_losing_variables_or_read_history() {
         let directory = tempdir().unwrap();
         let definitions = std::collections::BTreeMap::from([(
             "ending_seen".to_owned(),

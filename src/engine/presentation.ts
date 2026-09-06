@@ -11,6 +11,7 @@ import {
 
 import { AudioManager } from "./audio";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
+import { evaluateTimelineFrame } from "@vectspace/presentation-core/timeline-evaluator";
 import type {
   AssetUrlMap,
   CameraSnapshot,
@@ -25,7 +26,7 @@ import type {
   TimelineTrack,
   UiMotionPreset,
 } from "./types";
-import { evaluateChannel, TimelineClock } from "./timeline";
+import { TimelineClock } from "./timeline";
 import { UiMotionHost } from "./uiMotion";
 import { advanceVirtualElapsed } from "./virtualClock";
 import { DESIGN_HEIGHT, DESIGN_WIDTH } from "../viewport/viewport";
@@ -48,7 +49,7 @@ export class PresentationController {
   #camera: CameraSnapshot = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
   #generation = 0;
   #abort = new AbortController();
-  #currentUpdateId: number | null = null;
+  #currentUpdateId: string | null = null;
   #currentPromise: Promise<PresentationOutcome> | null = null;
   #playbackRate = 1;
   #suppressOneShots = false;
@@ -224,7 +225,7 @@ export class PresentationController {
   }
 
   async #executeCue(
-    updateId: number,
+    updateId: string,
     cue: PresentationCue,
     assets: AssetUrlMap,
     signal: AbortSignal,
@@ -262,7 +263,7 @@ export class PresentationController {
       case "play_sfx":
         if (this.#oneShotLedger.consume(key)) {
           if (!this.#suppressOneShots) {
-            await this.#audio.playSfx(cue.asset, cue.volume, assets);
+            await this.#audio.playSfx(cue.asset, cue.volume, assets, signal);
           }
         }
         break;
@@ -552,7 +553,6 @@ export class PresentationController {
     signal: AbortSignal,
   ): Promise<PresentationOutcome> {
     const firedEvents = new Set<string>();
-    const spriteBases = new Map<string, Omit<SpriteSnapshot, "asset">>();
     const cameraBase = { ...this.#camera };
     const bgmBase = this.#audio.currentBgmVolume() ?? 1;
     const spriteTracks = cue.tracks.filter(
@@ -561,7 +561,6 @@ export class PresentationController {
     );
     for (const track of spriteTracks) {
       let view = this.#spriteViews.get(track.sprite_id);
-      const inheritedBase = view === undefined ? undefined : readSprite(view);
       if (track.asset === null && view === undefined) {
         throw new Error(`立绘 ${track.sprite_id} 没有可继承的素材`);
       }
@@ -592,7 +591,6 @@ export class PresentationController {
       if (view === undefined) {
         throw new Error(`立绘 ${track.sprite_id} 无法建立时间轴对象`);
       }
-      spriteBases.set(track.sprite_id, inheritedBase ?? readSprite(view));
     }
 
     const videoTrack = cue.tracks.find(
@@ -647,16 +645,77 @@ export class PresentationController {
 
     let previousElapsed = -1;
     const render = (elapsedMs: number): void => {
-      for (const track of cue.tracks) {
-        this.#applyTimelineTrack(
-          track,
-          elapsedMs,
-          video,
-          videoView,
-          spriteBases,
-          cameraBase,
-          bgmBase,
+      // Keep the game's transform math identical to the editor's timeline
+      // surface.  The evaluator is pure; this adapter only applies its frame
+      // to Pixi/media objects and handles side effects such as audio volume.
+      const evaluated = evaluateTimelineFrame(
+        { duration_ms: cue.duration_ms, tracks: cue.tracks },
+        {
+          sprites: Object.fromEntries(
+            [...this.#spriteViews.entries()].map(([id, view]) => [
+              id,
+              { asset: view.label, ...readSprite(view) },
+            ]),
+          ),
+          camera: cameraBase,
+          bgm_volume: bgmBase,
+        },
+        elapsedMs,
+      );
+      for (const sprite of evaluated.sprites) {
+        const view = this.#spriteViews.get(sprite.id);
+        if (view === undefined) continue;
+        view.x = sprite.x;
+        view.y = sprite.y;
+        view.scale.set(
+          sprite.scale * sprite.scale_x,
+          sprite.scale * sprite.scale_y,
         );
+        view.rotation = (sprite.rotation_deg * Math.PI) / 180;
+        view.alpha = sprite.opacity;
+        view.zIndex = sprite.z;
+      }
+      this.#camera = evaluated.camera;
+      this.#applyCamera();
+      this.#audio.setBgmTimelineVolume(evaluated.bgm_volume);
+      const evaluatedVideo = evaluated.videos[0];
+      if (
+        video !== null &&
+        videoView !== null &&
+        evaluatedVideo !== undefined
+      ) {
+        const videoTrack = cue.tracks.find(
+          (track): track is Extract<TimelineTrack, { type: "video" }> =>
+            track.type === "video",
+        );
+        if (videoTrack !== undefined) {
+          const naturalWidth = Math.max(1, video.videoWidth);
+          const naturalHeight = Math.max(1, video.videoHeight);
+          if (videoTrack.fit === "stretch") {
+            videoView.position.set(evaluatedVideo.x, evaluatedVideo.y);
+            videoView.width = evaluatedVideo.width;
+            videoView.height = evaluatedVideo.height;
+          } else {
+            const factor =
+              videoTrack.fit === "cover"
+                ? Math.max(
+                    evaluatedVideo.width / naturalWidth,
+                    evaluatedVideo.height / naturalHeight,
+                  )
+                : Math.min(
+                    evaluatedVideo.width / naturalWidth,
+                    evaluatedVideo.height / naturalHeight,
+                  );
+            videoView.width = naturalWidth * factor;
+            videoView.height = naturalHeight * factor;
+            videoView.position.set(
+              evaluatedVideo.x + (evaluatedVideo.width - videoView.width) / 2,
+              evaluatedVideo.y + (evaluatedVideo.height - videoView.height) / 2,
+            );
+          }
+          videoView.alpha = evaluatedVideo.opacity;
+          videoView.zIndex = evaluatedVideo.z;
+        }
       }
       if (!this.#skipSuppressTimelineEvents) {
         for (const event of cue.events) {
@@ -682,15 +741,9 @@ export class PresentationController {
         const rate = Math.max(0.25, Math.min(8, this.#playbackRate));
         video.playbackRate = rate;
         if (videoTrack.audio_enabled) {
-          const volume = evaluateChannel(
-            videoTrack.channels,
-            "volume",
-            elapsedMs,
-            1,
-          );
           this.#audio.setVideoVolume(
             video,
-            this.#playbackRate >= 8 ? 0 : volume,
+            this.#playbackRate >= 8 ? 0 : (evaluatedVideo?.volume ?? 1),
           );
         }
         if (!buffering && Math.abs(video.currentTime - desired) > 0.08) {
@@ -733,128 +786,8 @@ export class PresentationController {
     }
   }
 
-  #applyTimelineTrack(
-    track: TimelineTrack,
-    elapsedMs: number,
-    video: HTMLVideoElement | null,
-    videoView: Sprite | null,
-    spriteBases: ReadonlyMap<string, Omit<SpriteSnapshot, "asset">>,
-    cameraBase: CameraSnapshot,
-    bgmBase: number,
-  ): void {
-    switch (track.type) {
-      case "sprite": {
-        const view = this.#spriteViews.get(track.sprite_id);
-        if (view === undefined) return;
-        const base = spriteBases.get(track.sprite_id) ?? readSprite(view);
-        const scale = evaluateChannel(
-          track.channels,
-          "scale",
-          elapsedMs,
-          base.scale,
-        );
-        view.x = evaluateChannel(track.channels, "x", elapsedMs, base.x);
-        view.y = evaluateChannel(track.channels, "y", elapsedMs, base.y);
-        view.scale.set(
-          scale *
-            evaluateChannel(track.channels, "scale_x", elapsedMs, base.scale_x),
-          scale *
-            evaluateChannel(track.channels, "scale_y", elapsedMs, base.scale_y),
-        );
-        view.rotation =
-          (evaluateChannel(
-            track.channels,
-            "rotation_deg",
-            elapsedMs,
-            base.rotation_deg,
-          ) *
-            Math.PI) /
-          180;
-        view.alpha = evaluateChannel(
-          track.channels,
-          "opacity",
-          elapsedMs,
-          base.opacity,
-        );
-        view.zIndex = Math.round(
-          evaluateChannel(track.channels, "z", elapsedMs, base.z),
-        );
-        break;
-      }
-      case "camera":
-        this.#camera = {
-          x: evaluateChannel(track.channels, "x", elapsedMs, cameraBase.x),
-          y: evaluateChannel(track.channels, "y", elapsedMs, cameraBase.y),
-          zoom: evaluateChannel(
-            track.channels,
-            "zoom",
-            elapsedMs,
-            cameraBase.zoom,
-          ),
-          rotation_deg: evaluateChannel(
-            track.channels,
-            "rotation_deg",
-            elapsedMs,
-            cameraBase.rotation_deg,
-          ),
-        };
-        this.#applyCamera();
-        break;
-      case "video": {
-        if (video === null || videoView === null) return;
-        const x = evaluateChannel(track.channels, "x", elapsedMs, 0);
-        const y = evaluateChannel(track.channels, "y", elapsedMs, 0);
-        const width = evaluateChannel(
-          track.channels,
-          "width",
-          elapsedMs,
-          DESIGN_WIDTH,
-        );
-        const height = evaluateChannel(
-          track.channels,
-          "height",
-          elapsedMs,
-          DESIGN_HEIGHT,
-        );
-        const naturalWidth = Math.max(1, video.videoWidth);
-        const naturalHeight = Math.max(1, video.videoHeight);
-        if (track.fit === "stretch") {
-          videoView.position.set(x, y);
-          videoView.width = width;
-          videoView.height = height;
-        } else {
-          const factor =
-            track.fit === "cover"
-              ? Math.max(width / naturalWidth, height / naturalHeight)
-              : Math.min(width / naturalWidth, height / naturalHeight);
-          videoView.width = naturalWidth * factor;
-          videoView.height = naturalHeight * factor;
-          videoView.position.set(
-            x + (width - videoView.width) / 2,
-            y + (height - videoView.height) / 2,
-          );
-        }
-        videoView.alpha = evaluateChannel(
-          track.channels,
-          "opacity",
-          elapsedMs,
-          1,
-        );
-        videoView.zIndex = Math.round(
-          evaluateChannel(track.channels, "z", elapsedMs, 0),
-        );
-        break;
-      }
-      case "bgm":
-        this.#audio.setBgmTimelineVolume(
-          evaluateChannel(track.channels, "volume", elapsedMs, bgmBase),
-        );
-        break;
-    }
-  }
-
   #fireTimelineEvent(
-    cueId: number,
+    cueId: string,
     event: TimelineEvent,
     assets: AssetUrlMap,
     signal: AbortSignal,
@@ -864,7 +797,7 @@ export class PresentationController {
     if (event.type === "sfx") {
       if (!this.#suppressOneShots) {
         void this.#audio
-          .playSfx(event.asset, event.volume, assets)
+          .playSfx(event.asset, event.volume, assets, signal)
           .catch((error: unknown) =>
             this.#diagnostic(`时间线 SFX 失败：${errorMessage(error)}`),
           );
@@ -915,7 +848,7 @@ export class PresentationController {
     this.#camera = { ...snapshot.world.camera };
     this.#applyCamera();
     this.#application.render();
-    await this.#audio.reconcile(snapshot.audio, assets);
+    await this.#audio.reconcile(snapshot.audio, assets, signal);
   }
 
   #runUiMotion(

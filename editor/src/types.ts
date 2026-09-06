@@ -1,7 +1,8 @@
 export type AssetKind =
   "background" | "sprite" | "gui" | "bgm" | "sfx" | "font" | "video";
 
-export type ScalarValue = boolean | number | string;
+/** Integer values use bigint when they do not fit in a safe JS number. */
+export type ScalarValue = boolean | number | bigint | string;
 export type VariableScope = "save" | "profile";
 export type VariableType = "boolean" | "integer" | "number" | "string";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
@@ -78,6 +79,7 @@ export interface ContentManifest {
   content_version: string;
   entry_scene: string;
   default_locale: string;
+  default_font?: string | null;
   variables: Record<string, VariableDefinition>;
   characters: Record<string, CharacterDefinition>;
   assets: Record<string, AssetDefinition>;
@@ -437,6 +439,14 @@ export interface SaveProjectRequest {
   expected_fingerprint: string;
 }
 
+export interface SaveProjectResult {
+  project: EditorProject;
+  changed_paths: string[];
+  deleted_paths: string[];
+  warnings: EditorDiagnostic[];
+  transaction_id: string | null;
+}
+
 export interface StoryLocation {
   scene_id: string;
   node_id: string;
@@ -454,14 +464,15 @@ export interface SpriteSnapshot {
   z: number;
 }
 
-export interface TimelinePreviewRequest {
+export interface BuildNodePreviewRequest {
   project: SaveProjectRequest;
   target: StoryLocation;
+  origin?: "story_entry" | "scene_entry";
   variable_overrides: Record<string, ScalarValue>;
   choices: PreviewChoiceDecision[];
 }
 
-export type TimelinePreviewResult =
+export type BuildNodePreviewResult =
   | {
       status: "needs_choice";
       location: StoryLocation;
@@ -474,8 +485,14 @@ export type TimelinePreviewResult =
       start_snapshot: RuntimeSnapshot;
       update: RuntimeUpdate;
       trace: StoryLocation[];
+      resolved_texts?: Record<string, string>;
     }
-  | { status: "unreachable"; message: string; trace: StoryLocation[] };
+  | {
+      status: "unreachable";
+      message: string;
+      trace: StoryLocation[];
+      can_retry_from_scene_entry: boolean;
+    };
 
 export interface ImportedAsset {
   id: string;

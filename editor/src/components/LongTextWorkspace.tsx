@@ -8,8 +8,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from "react";
-import { assetUrl } from "../api";
-import { interpolateTemplate } from "../textTemplate";
+import { assetUrl, editorApi } from "../api";
+import { projectRequest } from "../story";
 import { useAssetFont } from "../useAssetFont";
 import {
   paginateTextLayouts,
@@ -19,12 +19,10 @@ import {
   type TextRevealAnimation,
 } from "@vectspace/text";
 import type {
-  ContentManifest,
   EditorAsset,
   EditorProject,
   LongTextLayout,
   LongTextNode,
-  SceneDefinition,
 } from "../types";
 import { MarkupPreview } from "./MarkupPreview";
 
@@ -104,6 +102,16 @@ export function LongTextWorkspace({
   const [previewStepIndex, setPreviewStepIndex] = useState(0);
   const [previewRun, setPreviewRun] = useState<EditorPreviewRun | null>(null);
   const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [previewBackgroundId, setPreviewBackgroundId] = useState<string | null>(
+    null,
+  );
+  const [resolvedStepTexts, setResolvedStepTexts] = useState<
+    Readonly<Record<string, string>>
+  >({});
+  const [previewContextError, setPreviewContextError] = useState<string | null>(
+    null,
+  );
+  const [previewContextBusy, setPreviewContextBusy] = useState(false);
   const stageWrapRef = useRef<HTMLDivElement>(null);
   const designRef = useRef<HTMLDivElement>(null);
   const gestureRef = useRef<LayoutGesture | null>(null);
@@ -113,13 +121,9 @@ export function LongTextWorkspace({
     () => new Map(assets.map((asset) => [asset.id, asset] as const)),
     [assets],
   );
-  const inferredBackground = useMemo(
-    () => resolveSceneBackground(project, sceneId, nodeId),
-    [nodeId, project, sceneId],
-  );
   const backgroundId =
     backgroundChoice === "__current__"
-      ? inferredBackground
+      ? previewBackgroundId
       : backgroundChoice === "__none__"
         ? null
         : backgroundChoice;
@@ -135,7 +139,10 @@ export function LongTextWorkspace({
       : assetsById.get(draft.paper);
   const paperUrl =
     paperAsset?.kind === "gui" ? assetUrl(paperAsset.absolute_path) : undefined;
-  const previewFont = assets.find((asset) => asset.kind === "font");
+  const previewFont =
+    assets.find((asset) => asset.id === project.manifest.default_font) ??
+    assets.find((asset) => asset.id === "font.fusion_pixel") ??
+    assets.find((asset) => asset.kind === "font");
   const font = useAssetFont(
     previewFont === undefined ? undefined : assetUrl(previewFont.absolute_path),
     `Long Text ${previewFont?.id ?? "default"}`,
@@ -221,11 +228,71 @@ export function LongTextWorkspace({
       new Map(
         previewSteps.map((step) => [
           step.id,
-          previewText(step.text, project.manifest),
+          resolvedStepTexts[step.id] ??
+            (step.id === previewSteps[0]?.id ? "等待 Rust 预览…" : ""),
         ]),
       ),
-    [previewSteps, project.manifest],
+    [previewSteps, resolvedStepTexts],
   );
+  const previewRequestGeneration = useRef(0);
+  useEffect(() => {
+    const generation = ++previewRequestGeneration.current;
+    const loadPreview = async (): Promise<void> => {
+      setPreviewContextBusy(true);
+      setPreviewContextError(null);
+      const savedSettings =
+        project.layout.timeline_previews?.[`${sceneId}/${nodeId}`];
+      try {
+        const result = await editorApi.buildNodePreview({
+          project: projectRequest(project),
+          target: { scene_id: sceneId, node_id: nodeId },
+          origin: "story_entry",
+          variable_overrides: savedSettings?.variable_overrides ?? {},
+          choices: savedSettings?.choices ?? [],
+        });
+        if (generation !== previewRequestGeneration.current) return;
+        if (result.status === "needs_choice") {
+          setPreviewContextError(
+            `真实预览需要先选择 ${result.location.scene_id}/${result.location.node_id}`,
+          );
+          setResolvedStepTexts({});
+          setPreviewBackgroundId(null);
+          return;
+        }
+        if (result.status === "unreachable") {
+          setPreviewContextError(result.message);
+          setResolvedStepTexts({});
+          setPreviewBackgroundId(null);
+          return;
+        }
+        const fromPage = Object.fromEntries(
+          (result.update.snapshot.long_text_page?.steps ?? []).map((step) => [
+            step.step_id,
+            step.text,
+          ]),
+        );
+        setResolvedStepTexts({ ...fromPage, ...(result.resolved_texts ?? {}) });
+        setPreviewBackgroundId(result.update.snapshot.world.background);
+      } catch (error: unknown) {
+        if (generation !== previewRequestGeneration.current) return;
+        setPreviewContextError(
+          error instanceof Error ? error.message : "真实预览构建失败",
+        );
+        setResolvedStepTexts({});
+        setPreviewBackgroundId(null);
+      } finally {
+        if (generation === previewRequestGeneration.current)
+          setPreviewContextBusy(false);
+      }
+    };
+    void loadPreview();
+    return () => {
+      // Incrementing the generation cancels stale promise commits. The Rust
+      // command itself remains stateless and can finish in the background.
+      if (generation === previewRequestGeneration.current)
+        previewRequestGeneration.current += 1;
+    };
+  }, [nodeId, project, sceneId]);
   const safePreviewStepIndex = clamp(
     previewStepIndex,
     0,
@@ -389,25 +456,6 @@ export function LongTextWorkspace({
     resetPreview,
     safePreviewStepIndex,
   ]);
-
-  const interpolationWarnings = useMemo(
-    () =>
-      previewSteps.flatMap((step) => {
-        try {
-          interpolateTemplate(step.text, (id) => {
-            const definition = project.manifest.variables[id];
-            if (definition === undefined) throw new Error(`未知变量：${id}`);
-            return definition.default;
-          });
-          return [];
-        } catch (error) {
-          return [
-            `${step.id}：${error instanceof Error ? error.message : "变量插值失败"}`,
-          ];
-        }
-      }),
-    [previewSteps, project.manifest.variables],
-  );
 
   const replaceDraft = useCallback((next: LongTextNode): void => {
     draftRef.current = next;
@@ -728,7 +776,14 @@ export function LongTextWorkspace({
                       />
                     ))}
                   </div>
-                  <div className="long-text-workspace-text-clip">
+                  <div
+                    className="long-text-workspace-text-clip"
+                    style={
+                      {
+                        "--long-text-fade": `${Math.min(96, layout.height / 4)}px`,
+                      } as CSSProperties
+                    }
+                  >
                     <div
                       className="long-text-workspace-surface"
                       style={{
@@ -745,46 +800,52 @@ export function LongTextWorkspace({
                             top: `${previewPageOffsets[index] ?? 0}px`,
                           }}
                         >
-                          {page.fragments.map((fragment) => {
-                            const fragmentStepIndex =
-                              previewStepIndexById.get(fragment.itemId) ?? -1;
-                            if (fragmentStepIndex > safePreviewStepIndex) {
-                              return null;
-                            }
-                            const active =
-                              fragmentStepIndex === safePreviewStepIndex;
-                            return (
-                              <div
-                                className="long-text-workspace-step-fragment"
-                                key={`${fragment.itemId}:${fragment.sourceTop}`}
-                                style={{
-                                  height: `${fragment.height}px`,
-                                  top: `${fragment.top}px`,
-                                }}
-                              >
-                                <div
-                                  className="long-text-workspace-step-fragment-content"
-                                  style={{
-                                    transform: `translate3d(0, -${fragment.sourceTop}px, 0)`,
-                                  }}
-                                >
-                                  <MarkupPreview
-                                    revealAnimation={previewAnimation}
-                                    source={
-                                      previewSourceById.get(fragment.itemId) ??
-                                      ""
-                                    }
-                                    visibleCount={
-                                      active
-                                        ? (previewSession?.state
-                                            .revealedCount ?? 0)
-                                        : Number.POSITIVE_INFINITY
-                                    }
-                                  />
-                                </div>
-                              </div>
-                            );
-                          })}
+                          <div className="long-text-workspace-paper-inner">
+                            <div className="long-text-workspace-paper-stage">
+                              {page.fragments.map((fragment) => {
+                                const fragmentStepIndex =
+                                  previewStepIndexById.get(fragment.itemId) ??
+                                  -1;
+                                if (fragmentStepIndex > safePreviewStepIndex) {
+                                  return null;
+                                }
+                                const active =
+                                  fragmentStepIndex === safePreviewStepIndex;
+                                return (
+                                  <div
+                                    className="long-text-workspace-step-fragment"
+                                    key={`${fragment.itemId}:${fragment.sourceTop}`}
+                                    style={{
+                                      height: `${fragment.height}px`,
+                                      top: `${fragment.top}px`,
+                                    }}
+                                  >
+                                    <div
+                                      className="long-text-workspace-step-fragment-content"
+                                      style={{
+                                        transform: `translate3d(0, -${fragment.sourceTop}px, 0)`,
+                                      }}
+                                    >
+                                      <MarkupPreview
+                                        revealAnimation={previewAnimation}
+                                        source={
+                                          previewSourceById.get(
+                                            fragment.itemId,
+                                          ) ?? ""
+                                        }
+                                        visibleCount={
+                                          active
+                                            ? (previewSession?.state
+                                                .revealedCount ?? 0)
+                                            : Number.POSITIVE_INFINITY
+                                        }
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
                         </article>
                       ))}
                     </div>
@@ -822,9 +883,11 @@ export function LongTextWorkspace({
               value={backgroundChoice}
             >
               <option value="__current__">
-                {inferredBackground === null
-                  ? "自动：无背景"
-                  : `自动：${inferredBackground}`}
+                {previewContextBusy
+                  ? "自动：正在构建真实预览…"
+                  : previewBackgroundId === null
+                    ? "自动：无背景"
+                    : `自动：${previewBackgroundId}`}
               </option>
               <option value="__none__">无背景</option>
               {assets
@@ -843,12 +906,10 @@ export function LongTextWorkspace({
             预览使用共享文本解析器；pause、speed 和 auto
             只控制播放，不占据正文排版空间。
           </p>
-          {interpolationWarnings.length > 0 && (
+          {previewContextError !== null && (
             <div className="long-text-workspace-warning">
-              <strong>预览插值诊断</strong>
-              {interpolationWarnings.map((warning) => (
-                <div key={warning}>{warning}</div>
-              ))}
+              <strong>真实预览诊断</strong>
+              <div>{previewContextError}</div>
             </div>
           )}
           <label>
@@ -993,100 +1054,6 @@ function TextColorField({
       />
     </label>
   );
-}
-
-function previewText(source: string, manifest: ContentManifest): string {
-  try {
-    return interpolateTemplate(source, (id) => {
-      const definition = manifest.variables[id];
-      if (definition === undefined) throw new Error(`未知变量 ${id}`);
-      return definition.default;
-    });
-  } catch {
-    return source;
-  }
-}
-
-function resolveSceneBackground(
-  project: EditorProject,
-  targetSceneId: string,
-  targetNodeId: string,
-): string | null {
-  const scenes = new Map(
-    project.scenes.map((file) => [file.definition.id, file.definition]),
-  );
-  const entrySceneId = scenes.has(project.manifest.entry_scene)
-    ? project.manifest.entry_scene
-    : targetSceneId;
-  const fromEntry = searchBackground(
-    scenes,
-    entrySceneId,
-    targetSceneId,
-    targetNodeId,
-  );
-  if (fromEntry !== undefined) return fromEntry;
-
-  // An unreferenced scene can still be edited. In that case use its own entry
-  // as a useful local preview instead of presenting an empty surface.
-  return (
-    searchBackground(scenes, targetSceneId, targetSceneId, targetNodeId) ?? null
-  );
-}
-
-function searchBackground(
-  scenes: ReadonlyMap<string, SceneDefinition>,
-  startSceneId: string,
-  targetSceneId: string,
-  targetNodeId: string,
-): string | null | undefined {
-  const start = scenes.get(startSceneId);
-  if (start === undefined) return undefined;
-  const queue: {
-    sceneId: string;
-    nodeId: string;
-    background: string | null;
-  }[] = [{ sceneId: startSceneId, nodeId: start.entry, background: null }];
-  const visited = new Set<string>();
-  for (const current of queue) {
-    const key = `${current.sceneId}/${current.nodeId}`;
-    if (visited.has(key)) continue;
-    visited.add(key);
-    if (current.sceneId === targetSceneId && current.nodeId === targetNodeId) {
-      return current.background;
-    }
-    const scene = scenes.get(current.sceneId);
-    const node = scene?.nodes[current.nodeId];
-    if (scene === undefined || node === undefined) continue;
-    const background =
-      node.type === "background" ? node.background : current.background;
-    for (const successor of previewSuccessors(current.sceneId, node)) {
-      if (
-        scenes.get(successor.sceneId)?.nodes[successor.nodeId] !== undefined
-      ) {
-        queue.push({ ...successor, background });
-      }
-    }
-  }
-  return undefined;
-}
-
-function previewSuccessors(
-  sceneId: string,
-  node: SceneDefinition["nodes"][string],
-): { sceneId: string; nodeId: string }[] {
-  if (node.type === "jump") {
-    return [{ sceneId: node.scene ?? sceneId, nodeId: node.target }];
-  }
-  if (node.type === "condition") {
-    return [
-      { sceneId, nodeId: node.then },
-      { sceneId, nodeId: node.otherwise },
-    ];
-  }
-  if (node.type === "choice") {
-    return node.choices.map((choice) => ({ sceneId, nodeId: choice.next }));
-  }
-  return "next" in node ? [{ sceneId, nodeId: node.next }] : [];
 }
 
 function clamp(value: number, min: number, max: number): number {

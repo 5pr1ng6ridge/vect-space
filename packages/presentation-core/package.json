@@ -9,6 +9,8 @@
     "./timeline": "./src/timeline.ts",
     "./ledger": "./src/ledger.ts",
     "./timeline-preview": "./src/timelinePreview.ts",
+    "./timeline-evaluator": "./src/timelineEvaluator.ts",
+    "./scene-surface": "./src/sceneSurface.ts",
     "./types": "./src/types.ts",
     "./ui-motion": "./src/uiMotion.ts",
     "./virtual-clock": "./src/virtualClock.ts"

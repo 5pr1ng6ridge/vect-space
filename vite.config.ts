@@ -6,6 +6,10 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  // Keep Vite's mutable optimizer cache outside node_modules.  On Windows,
+  // antivirus/WebView processes can hold node_modules/.vite and make the
+  // first `tauri dev` fail while Vite tries to replace its dependency tree.
+  cacheDir: ".vite-cache",
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

@@ -570,12 +570,31 @@ button:disabled {
 .long-text-paper-content {
   box-sizing: border-box;
   width: 100%;
-  padding: var(--long-text-padding-y) var(--long-text-padding-x);
+  height: 100%;
+  overflow: hidden;
   color: var(--long-text-color, #212533);
   font-family: "VECT Pixel", "Microsoft YaHei", sans-serif;
   font-size: var(--long-text-font-size, 32px);
   line-height: 1.78;
   letter-spacing: 0.035em;
+}
+
+/* Fragment coordinates are measured in the paper content box.  Without a
+   positioned inner box, every absolute fragment resolves against the whole
+   document stack and pages overlap/clamp each other. */
+.long-text-paper-content-inner {
+  box-sizing: border-box;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: var(--long-text-padding-y) var(--long-text-padding-x);
+}
+
+.long-text-paper-content-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
 }
 
 .long-text-text-clip {

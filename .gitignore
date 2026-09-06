@@ -8,6 +8,8 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.vite-cache
+.vite-editor-cache
 dist
 dist-ssr
 *.local
@@ -21,6 +23,10 @@ editor/src-tauri/target
 # Story editor recovery data is local and must never become game content.
 game/.vectspace/backups/
 game/.vectspace/tmp/
+# Keep recovery data ignored for projects opened directly at the repository
+# root as well; the tracked layout-v1.json remains visible to Git.
+.vectspace/backups/
+.vectspace/tmp/
 *.vectspace.bak
 *.vectspace.tmp
 

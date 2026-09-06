@@ -1,6 +1,7 @@
 import katex from "katex";
 import {
   createTextLayoutSnapshot,
+  resolveTextLayoutLineGroups,
   type TextLayoutSnapshot,
 } from "@vectspace/text";
 import {
@@ -27,7 +28,6 @@ import {
   buildLineSweepTimings,
   isHardLineBreak,
   lineSweepMaskPositionPx,
-  resolveVisualLineGroups,
   splitLinesAtPauses,
   type LineSweepUnitGeometry,
   type LineSweepUnitTiming,
@@ -149,7 +149,31 @@ export const MarkupText = memo(function MarkupText({
     }
     const root = rootRef.current;
     const measure = (): void => {
-      const rawGroups = resolveVisualLineGroups(units, unitElementsRef.current);
+      const rootRect = root?.getBoundingClientRect();
+      const boxes = new Map<
+        number,
+        {
+          index: number;
+          top: number;
+          bottom: number;
+          left: number;
+          right: number;
+        }
+      >();
+      units.forEach((unit, index) => {
+        if (isHardLineBreak(unit)) return;
+        const element = unitElementsRef.current.get(index);
+        if (element === undefined || rootRect === undefined) return;
+        const rect = element.getBoundingClientRect();
+        boxes.set(index, {
+          index,
+          top: rect.top - rootRect.top,
+          bottom: rect.bottom - rootRect.top,
+          left: rect.left - rootRect.left,
+          right: rect.right - rootRect.left,
+        });
+      });
+      const rawGroups = resolveTextLayoutLineGroups(units, boxes);
       const groups = splitLinesAtPauses(
         rawGroups,
         layoutSchedule,
@@ -167,31 +191,6 @@ export const MarkupText = memo(function MarkupText({
         ? buildLineSweepGeometry(groups, unitElementsRef.current)
         : new Map<number, LineSweepUnitGeometry>();
       if (lineSweepRequested && geometry.size !== paintableUnitCount) return;
-      const rootRect = root?.getBoundingClientRect();
-      const boxes = new Map<
-        number,
-        {
-          index: number;
-          top: number;
-          bottom: number;
-          left: number;
-          right: number;
-        }
-      >();
-      for (const group of rawGroups) {
-        for (const index of group) {
-          const element = unitElementsRef.current.get(index);
-          if (element === undefined || rootRect === undefined) continue;
-          const rect = element.getBoundingClientRect();
-          boxes.set(index, {
-            index,
-            top: rect.top - rootRect.top,
-            bottom: rect.bottom - rootRect.top,
-            left: rect.left - rootRect.left,
-            right: rect.right - rootRect.left,
-          });
-        }
-      }
       const layout = createTextLayoutSnapshot(
         rawGroups,
         boxes,

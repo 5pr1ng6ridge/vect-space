@@ -80,6 +80,9 @@ describe("LongTextPanel", () => {
     expect(html).toContain("第一段：设");
     expect(html).toContain("第二段：于是");
     expect(html.match(/class="long-text-paper"/g)).toHaveLength(2);
+    expect(html.match(/class="long-text-paper-content-inner"/g)).toHaveLength(
+      2,
+    );
     expect(html).toContain("long-text-indicator");
   });
 

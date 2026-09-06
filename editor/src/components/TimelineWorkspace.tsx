@@ -10,7 +10,9 @@ import {
 } from "react";
 import { assetUrl, editorApi } from "../api";
 import { projectRequest } from "../story";
+import { stringifyScalarJson } from "../scalars";
 import type {
+  BuildNodePreviewResult,
   EditorAsset,
   EditorProject,
   PreviewChoiceDecision,
@@ -20,7 +22,6 @@ import type {
   TimelineKeyframe,
   TimelineNode,
   TimelineTrack,
-  TimelinePreviewResult,
   TimelinePreviewSettings,
 } from "../types";
 import {
@@ -31,10 +32,10 @@ import {
 import {
   DESIGN_HEIGHT,
   DESIGN_WIDTH,
-  TimelinePreviewSurface,
   type PreviewObjectFrame,
   type TimelinePreviewFrame,
 } from "@vectspace/presentation-core/timeline-preview";
+import { SceneSurface } from "@vectspace/presentation-core/scene-surface";
 
 interface TimelineWorkspaceProps {
   project: EditorProject;
@@ -97,14 +98,14 @@ export function TimelineWorkspace({
     useState<TimelineEventSelection | null>(null);
   const [frame, setFrame] = useState<TimelinePreviewFrame | null>(null);
   const [preview, setPreview] = useState<Extract<
-    TimelinePreviewResult,
+    BuildNodePreviewResult,
     { status: "ready" }
   > | null>(null);
   const [contextStatus, setContextStatus] = useState("尚未建立真实上下文");
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
   const [pendingChoice, setPendingChoice] = useState<Extract<
-    TimelinePreviewResult,
+    BuildNodePreviewResult,
     { status: "needs_choice" }
   > | null>(null);
   const [pendingTransforms, setPendingTransforms] = useState<
@@ -119,10 +120,10 @@ export function TimelineWorkspace({
   const [exitPrompt, setExitPrompt] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(320);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const surfaceRef = useRef<TimelinePreviewSurface | null>(null);
+  const surfaceRef = useRef<SceneSurface | null>(null);
   const surfaceReadyRef = useRef<Promise<void>>(Promise.resolve());
   const surfaceSessionRef = useRef<{
-    surface: TimelinePreviewSurface;
+    surface: SceneSurface;
     initialized: Promise<void>;
   } | null>(null);
   const surfaceDestroyTimerRef = useRef<number | null>(null);
@@ -186,7 +187,7 @@ export function TimelineWorkspace({
     }
     let session = surfaceSessionRef.current;
     if (session === null) {
-      const next = new TimelinePreviewSurface(
+      const next = new SceneSurface(
         canvas,
         handleDiagnostic,
         handlePreviewFrame,
@@ -239,7 +240,7 @@ export function TimelineWorkspace({
       setContextError(null);
       setPendingChoice(null);
       try {
-        const result = await editorApi.buildTimelinePreview({
+        const result = await editorApi.buildNodePreview({
           project: projectRequest(projectRef.current),
           target: {
             scene_id: sceneId,
@@ -1179,12 +1180,8 @@ export function TimelineWorkspace({
           <label className="timeline-json-field">
             变量覆盖（JSON）
             <textarea
-              defaultValue={JSON.stringify(
-                settings.variable_overrides,
-                null,
-                2,
-              )}
-              key={JSON.stringify(settings.variable_overrides)}
+              defaultValue={stringifyScalarJson(settings.variable_overrides, 2)}
+              key={stringifyScalarJson(settings.variable_overrides)}
               onBlur={(event) => {
                 try {
                   const value = JSON.parse(event.currentTarget.value) as Record<

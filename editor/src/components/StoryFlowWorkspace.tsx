@@ -333,41 +333,31 @@ export function StoryFlowWorkspace({
               <h3>{selectedNodeId}</h3>
               <label>
                 标题
-                <input
+                <DeferredTextInput
                   value={selectedNode.title}
-                  onChange={(event) =>
-                    updateNode(selectedNodeId, {
-                      title: event.currentTarget.value,
-                    })
-                  }
+                  onCommit={(title) => updateNode(selectedNodeId, { title })}
                 />
               </label>
               <label>
                 X
-                <input
-                  type="number"
+                <DeferredNumberInput
                   step={GRID}
                   value={selectedNode.x}
-                  onChange={(event) =>
+                  onCommit={(x) =>
                     updateNode(selectedNodeId, {
-                      x:
-                        Math.round(Number(event.currentTarget.value) / GRID) *
-                        GRID,
+                      x: Math.round(x / GRID) * GRID,
                     })
                   }
                 />
               </label>
               <label>
                 Y
-                <input
-                  type="number"
+                <DeferredNumberInput
                   step={GRID}
                   value={selectedNode.y}
-                  onChange={(event) =>
+                  onCommit={(y) =>
                     updateNode(selectedNodeId, {
-                      y:
-                        Math.round(Number(event.currentTarget.value) / GRID) *
-                        GRID,
+                      y: Math.round(y / GRID) * GRID,
                     })
                   }
                 />
@@ -457,11 +447,9 @@ export function StoryFlowWorkspace({
               <h3>{selectedEdge.id}</h3>
               <label>
                 边 ID
-                <input
+                <DeferredTextInput
                   value={selectedEdge.id}
-                  onChange={(event) =>
-                    renameEdge(selectedEdge.id, event.currentTarget.value)
-                  }
+                  onCommit={(id) => renameEdge(selectedEdge.id, id)}
                 />
               </label>
               <label>
@@ -500,12 +488,10 @@ export function StoryFlowWorkspace({
               </label>
               <label>
                 标签
-                <input
+                <DeferredTextInput
                   value={selectedEdge.label ?? ""}
-                  onChange={(event) =>
-                    updateEdge(selectedEdge.id, {
-                      label: event.currentTarget.value || null,
-                    })
+                  onCommit={(label) =>
+                    updateEdge(selectedEdge.id, { label: label || null })
                   }
                 />
               </label>
@@ -528,5 +514,67 @@ export function StoryFlowWorkspace({
         </aside>
       </div>
     </div>
+  );
+}
+
+function DeferredTextInput({
+  onCommit,
+  value,
+}: {
+  onCommit(value: string): void;
+  value: string;
+}): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commit = (): void => {
+    const draft = inputRef.current?.value ?? value;
+    if (draft !== value) onCommit(draft);
+  };
+  return (
+    <input
+      defaultValue={value}
+      key={value}
+      ref={inputRef}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        }
+      }}
+    />
+  );
+}
+
+function DeferredNumberInput({
+  onCommit,
+  step,
+  value,
+}: {
+  onCommit(value: number): void;
+  step: number;
+  value: number;
+}): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commit = (): void => {
+    const draft = inputRef.current?.value ?? String(value);
+    const parsed = Number(draft);
+    if (draft.trim() !== "" && Number.isFinite(parsed)) onCommit(parsed);
+    else if (inputRef.current !== null) inputRef.current.value = String(value);
+  };
+  return (
+    <input
+      defaultValue={String(value)}
+      key={String(value)}
+      ref={inputRef}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        }
+      }}
+      step={step}
+      type="number"
+    />
   );
 }

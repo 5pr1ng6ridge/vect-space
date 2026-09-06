@@ -9,7 +9,11 @@ import {
   VideoSource,
 } from "pixi.js";
 import { AudioManager } from "./audio";
-import { evaluateChannel } from "./timeline";
+import {
+  evaluateActiveScreenEffects,
+  evaluateTimelineFrame,
+} from "./timelineEvaluator";
+import { BoundedLedger } from "./ledger";
 import type {
   AssetUrlMap,
   RuntimeSnapshot,
@@ -80,7 +84,7 @@ const MUTED_PREVIEW_SETTINGS: Settings = {
  * The editor uses the seek/interaction methods; the game can use the same
  * frame application semantics when it receives a Timeline cue.
  */
-export class TimelinePreviewSurface {
+export class SceneSurface {
   readonly #application = new Application();
   readonly #world = new Container();
   readonly #backgrounds = new Container();
@@ -105,6 +109,7 @@ export class TimelinePreviewSurface {
   #lastElapsed = -1;
   #muted = true;
   #playing = false;
+  #playbackRate = 1;
   #frame = 0;
   #lastFrameAt = 0;
   #onFrame: ((frame: TimelinePreviewFrame) => void) | null = null;
@@ -112,11 +117,15 @@ export class TimelinePreviewSurface {
   #objectOverrides = new Map<string, PreviewObjectPatch>();
   #cameraOverride: Partial<TimelinePreviewFrame["camera"]> = {};
   #flashView: Graphics | null = null;
-  #flashStartedAt = 0;
-  #flashDuration = 0;
-  #shakeStartedAt = 0;
-  #shakeDuration = 0;
+  #shakeEffect: { startMs: number; durationMs: number } | null = null;
+  #effectElapsedMs = 0;
   #destroyed = false;
+  #seekGeneration = 0;
+  #seekAbort: AbortController | null = null;
+  #audioActivationAbort: AbortController | null = null;
+  #loadGeneration = 0;
+  #loadAbort: AbortController | null = null;
+  readonly #timelineEventLedger = new BoundedLedger<string>(4_096);
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -129,7 +138,9 @@ export class TimelinePreviewSurface {
     // Timeline previews are silent until the user explicitly unmutes them.
     // Applying this before the first snapshot reconcile prevents an entry BGM
     // from becoming audible while the context is still loading (or failing).
-    this.#audio = new AudioManager(MUTED_PREVIEW_SETTINGS);
+    this.#audio = new AudioManager(MUTED_PREVIEW_SETTINGS, {
+      deferUntilUnmuted: true,
+    });
   }
 
   async init(): Promise<void> {
@@ -158,14 +169,37 @@ export class TimelinePreviewSurface {
     update: RuntimeUpdate,
     assets: AssetUrlMap,
   ): Promise<void> {
+    // Cancel an earlier load before even validating this request.  Otherwise
+    // a malformed replacement update could leave the old asynchronous load
+    // alive and allow it to win the race later.
+    this.stop();
     const cue = update.cues.find(
       (
         candidate,
       ): candidate is Extract<typeof candidate, { type: "timeline" }> =>
         candidate.type === "timeline",
     );
-    if (cue === undefined) throw new Error("目标 update 不包含 timeline Cue");
-    this.stop();
+    if (cue === undefined) {
+      // `stop()` cancels the old asynchronous work but deliberately keeps
+      // the shared audio graph alive for a normal replacement.  A malformed
+      // replacement has no later reconcile step, so explicitly clear the
+      // previous BGM before surfacing the validation error.
+      await this.#audio
+        .reconcile({ bgm: null }, this.#assets)
+        .catch(() => undefined);
+      throw new Error("目标 update 不包含 timeline Cue");
+    }
+    // Browser image/media promises are not uniformly abortable.  Pair an
+    // AbortController with a monotonically increasing generation so a stale
+    // load can never install objects after a newer target has taken over.
+    const loadGeneration = this.#loadGeneration;
+    const loadAbort = new AbortController();
+    this.#loadAbort = loadAbort;
+    const isCurrentLoad = (): boolean =>
+      !this.#destroyed &&
+      !loadAbort.signal.aborted &&
+      this.#loadGeneration === loadGeneration &&
+      this.#loadAbort === loadAbort;
     // A new context can contain timeline-only objects that did not exist in
     // the previous entry snapshot. Rebuild the display list from scratch so
     // stale tracks never leak into another target node.
@@ -177,10 +211,14 @@ export class TimelinePreviewSurface {
     this.#camera = { ...start.world.camera };
     this.#bgmStartVolume = start.audio.bgm?.volume ?? 1;
     this.#lastElapsed = -1;
+    this.#timelineEventLedger.clear();
     this.#objectOverrides.clear();
     this.#cameraOverride = {};
     try {
-      await this.#reconcile(start);
+      if (!isCurrentLoad()) return;
+      if (!(await this.#reconcile(start, isCurrentLoad, loadAbort.signal)))
+        return;
+      if (!isCurrentLoad()) return;
       this.#spriteBases.clear();
       for (const track of cue.tracks) {
         if (track.type === "sprite") {
@@ -188,6 +226,7 @@ export class TimelinePreviewSurface {
             track.asset ?? start.world.sprites[track.sprite_id]?.asset;
           if (effectiveAsset === undefined)
             throw new Error(`立绘 ${track.sprite_id} 没有可继承的素材`);
+          if (!isCurrentLoad()) return;
           let view = this.#spriteViews.get(track.sprite_id);
           if (view === undefined || view.label !== assets[effectiveAsset]) {
             view?.destroy();
@@ -202,6 +241,10 @@ export class TimelinePreviewSurface {
               opacity: 1,
               z: 0,
             });
+            if (!isCurrentLoad()) {
+              view.destroy();
+              return;
+            }
             view.label = assets[effectiveAsset] ?? effectiveAsset;
             this.#world.addChild(view);
             this.#spriteViews.set(track.sprite_id, view);
@@ -219,14 +262,23 @@ export class TimelinePreviewSurface {
         (track): track is Extract<TimelineTrack, { type: "video" }> =>
           track.type === "video",
       );
-      if (videoTrack !== undefined) await this.#prepareVideo(videoTrack);
+      if (videoTrack !== undefined) {
+        if (!(await this.#prepareVideo(videoTrack, loadGeneration, loadAbort)))
+          return;
+      }
+      if (!isCurrentLoad()) return;
       await this.seek(0, false);
+      if (!isCurrentLoad()) return;
       if (this.#video !== null) {
-        await waitForPresentedVideoFrame(this.#video);
+        await waitForPresentedVideoFrame(this.#video, loadAbort.signal);
+        if (!isCurrentLoad()) return;
         this.#videoSource?.update();
         this.#application.render();
       }
     } catch (error) {
+      // A superseded load must not tear down the newer context.  Its own
+      // helpers release any local image/video resources before returning.
+      if (!isCurrentLoad()) return;
       this.stop();
       // A partially restored context must not leave its BGM running after the
       // preview reports an image/video/WebGL error.
@@ -234,6 +286,8 @@ export class TimelinePreviewSurface {
         .reconcile({ bgm: null }, this.#assets)
         .catch(() => undefined);
       throw error;
+    } finally {
+      if (this.#loadAbort === loadAbort) this.#loadAbort = null;
     }
   }
 
@@ -270,40 +324,56 @@ export class TimelinePreviewSurface {
     this.#application.render();
   }
 
-  seek(elapsedMs: number, fireEvents = false): Promise<void> {
+  async seek(elapsedMs: number, fireEvents = false): Promise<void> {
     if (this.#cue === null) return Promise.resolve();
+    const generation = ++this.#seekGeneration;
+    this.#seekAbort?.abort();
+    const controller = new AbortController();
+    this.#seekAbort = controller;
     const elapsed = Math.max(0, Math.min(this.#cue.duration_ms, elapsedMs));
     // Any backwards seek starts a fresh event ledger. Forward scrubbing does
     // not emit events, but playback after a rewind must be able to replay the
     // events that occur after the new playhead position.
     if (elapsed < this.#lastElapsed) {
-      this.#lastElapsed = -1;
+      for (const event of this.#cue.events) {
+        if (event.at_ms >= elapsed) this.#timelineEventLedger.delete(event.id);
+      }
       this.#clearTransientEffects();
     }
-    for (const track of this.#cue.tracks) this.#applyTrack(track, elapsed);
-    this.#syncVideo(elapsed);
+    this.#applyFrame(this.frameAt(elapsed));
+    await this.#syncVideo(elapsed, controller.signal, generation);
+    if (controller.signal.aborted || generation !== this.#seekGeneration)
+      return;
     if (fireEvents) {
       for (const event of this.#cue.events) {
-        if (event.at_ms > this.#lastElapsed && event.at_ms <= elapsed) {
+        if (
+          event.at_ms >= this.#lastElapsed &&
+          event.at_ms <= elapsed &&
+          this.#timelineEventLedger.consume(event.id)
+        ) {
           if (event.type === "sfx" && !this.#muted)
             void this.#audio
-              .playSfx(event.asset, event.volume, this.#assets)
+              .playSfx(
+                event.asset,
+                event.volume,
+                this.#assets,
+                controller.signal,
+              )
               .catch((error: unknown) =>
                 this.#diagnostic(`预览 SFX 失败：${errorMessage(error)}`),
               );
-          if (event.type === "screen_effect")
-            this.#showEffect(event.effect, event.duration_ms);
+          // Screen effects are rebuilt from timeline time below.  This keeps
+          // normal playback and scrubbing identical and avoids starting a
+          // wall-clock animation that would drift when the rate changes.
         }
       }
     }
-    // Keep the zero boundary armed so an event authored at 0 ms fires on the
-    // first normal playback tick after loading or rewinding.
-    this.#lastElapsed = elapsed === 0 ? -1 : elapsed;
-    this.#updateTransientEffects(performance.now());
+    this.#lastElapsed = elapsed;
+    this.#rebuildTransientEffects(elapsed);
     if (elapsed >= this.#cue.duration_ms) this.#clearTransientEffects();
     this.#application.render();
     this.#emitFrame(elapsed);
-    return Promise.resolve();
+    if (this.#seekAbort === controller) this.#seekAbort = null;
   }
 
   async play(): Promise<void> {
@@ -311,6 +381,7 @@ export class TimelinePreviewSurface {
     this.#playing = true;
     this.#onPlayingChange?.(true);
     await this.#audio.unlock().catch(() => undefined);
+    if (!this.#playing || this.#cue === null) return;
     const videoTrack = this.#cue.tracks.find(
       (track): track is Extract<TimelineTrack, { type: "video" }> =>
         track.type === "video",
@@ -324,19 +395,27 @@ export class TimelinePreviewSurface {
     // single clock. The media element is still played here to prime decoding;
     // seek() keeps it aligned and pauses it when the editor pauses.
     if (this.#video !== null) await this.#video.play().catch(() => undefined);
+    if (!this.#playing || this.#cue === null) return;
     this.#lastFrameAt = performance.now();
     const tick = (now: number): void => {
       if (!this.#playing || this.#cue === null) return;
       const delta = now - this.#lastFrameAt;
       this.#lastFrameAt = now;
-      void this.seek(this.#lastElapsed + delta, true).finally(() => {
-        if (this.#cue !== null && this.#lastElapsed >= this.#cue.duration_ms) {
-          this.#playing = false;
-          this.#onPlayingChange?.(false);
-          return;
-        }
-        this.#frame = requestAnimationFrame(tick);
-      });
+      void this.seek(this.#lastElapsed + delta * this.#playbackRate, true)
+        .catch((error: unknown) => {
+          this.#diagnostic(`时间轴定位失败：${errorMessage(error)}`);
+        })
+        .finally(() => {
+          if (
+            this.#cue !== null &&
+            this.#lastElapsed >= this.#cue.duration_ms
+          ) {
+            this.#playing = false;
+            this.#onPlayingChange?.(false);
+            return;
+          }
+          this.#frame = requestAnimationFrame(tick);
+        });
     };
     this.#frame = requestAnimationFrame(tick);
   }
@@ -349,9 +428,27 @@ export class TimelinePreviewSurface {
     this.#video?.pause();
   }
 
+  /** Change virtual time speed without jumping the current playhead. */
+  setRate(rate: number): void {
+    this.#playbackRate =
+      Number.isFinite(rate) && rate > 0 ? Math.min(16, rate) : 1;
+    this.#audio.setPlaybackRate(this.#playbackRate);
+  }
+
   stop(): void {
     this.pause();
+    this.#playbackRate = 1;
+    this.#audio.setPlaybackRate(1);
+    this.#audioActivationAbort?.abort();
+    this.#audioActivationAbort = null;
+    this.#seekAbort?.abort();
+    this.#seekAbort = null;
+    this.#loadAbort?.abort();
+    this.#loadAbort = null;
+    this.#loadGeneration += 1;
+    this.#seekGeneration += 1;
     this.#lastElapsed = -1;
+    this.#timelineEventLedger.clear();
     this.#clearTransientEffects();
     this.#destroyVideo();
   }
@@ -362,6 +459,21 @@ export class TimelinePreviewSurface {
       ...DEFAULT_SETTINGS,
       master_volume: muted ? 0 : 1,
     });
+    this.#audioActivationAbort?.abort();
+    this.#audioActivationAbort = null;
+    if (!muted) {
+      const activation = new AbortController();
+      this.#audioActivationAbort = activation;
+      void this.#audio
+        .activateDeferred(activation.signal)
+        .catch((error: unknown) =>
+          this.#diagnostic(`预览音频初始化失败: ${String(error)}`),
+        )
+        .finally(() => {
+          if (this.#audioActivationAbort === activation)
+            this.#audioActivationAbort = null;
+        });
+    }
     if (this.#video !== null) {
       const track = this.#cue?.tracks.find(
         (candidate): candidate is Extract<TimelineTrack, { type: "video" }> =>
@@ -393,103 +505,71 @@ export class TimelinePreviewSurface {
     const objects: PreviewObjectFrame[] = [];
     const represented = new Set<string>();
     const startSprites = this.#start?.world.sprites ?? {};
-    const camera = { ...this.#cameraStart };
+    const evaluated =
+      this.#cue === null
+        ? null
+        : evaluateTimelineFrame(
+            { duration_ms: this.#cue.duration_ms, tracks: this.#cue.tracks },
+            {
+              sprites: startSprites,
+              camera: this.#cameraStart,
+              bgm_volume: this.#bgmStartVolume,
+            },
+            elapsed,
+          );
+    const camera = evaluated?.camera ?? { ...this.#cameraStart };
     if (this.#cue !== null) {
       for (const track of this.#cue.tracks) {
         if (track.type === "sprite") {
           represented.add(track.sprite_id);
           const base =
             this.#spriteBases.get(track.sprite_id) ?? defaultSpriteFrame();
+          const evaluatedSprite = evaluated?.sprites.find(
+            (sprite) => sprite.id === track.sprite_id,
+          );
           const state = {
-            scale: evaluateChannel(
-              track.channels,
-              "scale",
-              elapsed,
-              base.scale,
-            ),
-            scale_x: evaluateChannel(
-              track.channels,
-              "scale_x",
-              elapsed,
-              base.scale_x,
-            ),
-            scale_y: evaluateChannel(
-              track.channels,
-              "scale_y",
-              elapsed,
-              base.scale_y,
-            ),
+            scale: evaluatedSprite?.scale ?? base.scale,
+            scale_x: evaluatedSprite?.scale_x ?? base.scale_x,
+            scale_y: evaluatedSprite?.scale_y ?? base.scale_y,
           };
           const dimensions = this.#spriteDimensions(track.sprite_id, state);
           objects.push({
             id: track.sprite_id,
             kind: "sprite",
-            x: evaluateChannel(track.channels, "x", elapsed, base.x),
-            y: evaluateChannel(track.channels, "y", elapsed, base.y),
+            x: evaluatedSprite?.x ?? base.x,
+            y: evaluatedSprite?.y ?? base.y,
             width: dimensions.width,
             height: dimensions.height,
             scale: state.scale,
             scale_x: state.scale_x,
             scale_y: state.scale_y,
-            rotation_deg: evaluateChannel(
-              track.channels,
-              "rotation_deg",
-              elapsed,
-              base.rotation_deg,
-            ),
-            opacity: evaluateChannel(
-              track.channels,
-              "opacity",
-              elapsed,
-              base.opacity,
-            ),
-            z: evaluateChannel(track.channels, "z", elapsed, base.z),
+            rotation_deg: evaluatedSprite?.rotation_deg ?? base.rotation_deg,
+            opacity: evaluatedSprite?.opacity ?? base.opacity,
+            z: evaluatedSprite?.z ?? base.z,
             asset:
               track.asset ??
               this.#start?.world.sprites[track.sprite_id]?.asset ??
               "",
           });
         } else if (track.type === "video") {
+          const evaluatedVideo = evaluated?.videos.find(
+            (video) => video.asset === track.asset,
+          );
           objects.push({
             id: `video:${track.asset}`,
             kind: "video",
-            x: evaluateChannel(track.channels, "x", elapsed, 0),
-            y: evaluateChannel(track.channels, "y", elapsed, 0),
-            width: evaluateChannel(
-              track.channels,
-              "width",
-              elapsed,
-              DESIGN_WIDTH,
-            ),
-            height: evaluateChannel(
-              track.channels,
-              "height",
-              elapsed,
-              DESIGN_HEIGHT,
-            ),
+            x: evaluatedVideo?.x ?? 0,
+            y: evaluatedVideo?.y ?? 0,
+            width: evaluatedVideo?.width ?? DESIGN_WIDTH,
+            height: evaluatedVideo?.height ?? DESIGN_HEIGHT,
             scale: 1,
             scale_x: 1,
             scale_y: 1,
             rotation_deg: 0,
-            opacity: evaluateChannel(track.channels, "opacity", elapsed, 1),
-            z: evaluateChannel(track.channels, "z", elapsed, 0),
+            opacity: evaluatedVideo?.opacity ?? 1,
+            z: evaluatedVideo?.z ?? 0,
             asset: track.asset,
           });
-        } else if (track.type === "camera") {
-          camera.x = evaluateChannel(track.channels, "x", elapsed, camera.x);
-          camera.y = evaluateChannel(track.channels, "y", elapsed, camera.y);
-          camera.zoom = evaluateChannel(
-            track.channels,
-            "zoom",
-            elapsed,
-            camera.zoom,
-          );
-          camera.rotation_deg = evaluateChannel(
-            track.channels,
-            "rotation_deg",
-            elapsed,
-            camera.rotation_deg,
-          );
         }
       }
     }
@@ -535,7 +615,13 @@ export class TimelinePreviewSurface {
       thumbnail.height = 180;
       const context = thumbnail.getContext("2d");
       if (context === null) return null;
-      context.drawImage(this.#canvas, 0, 0, 320, 180);
+      // preserveDrawingBuffer is deliberately disabled for normal rendering.
+      // Extracting the stage into an offscreen canvas keeps thumbnails
+      // reliable without imposing a GPU readback cost on every frame.
+      const source = this.#application.renderer.extract.canvas(
+        this.#application.stage,
+      );
+      context.drawImage(source as unknown as CanvasImageSource, 0, 0, 320, 180);
       return thumbnail.toDataURL("image/png", 0.86);
     } catch {
       return null;
@@ -548,6 +634,11 @@ export class TimelinePreviewSurface {
     this.stop();
     this.#audio.destroy();
     this.#application.destroy({ removeView: false }, { children: true });
+  }
+
+  /** Explicit lifecycle name used by the shared TimelineSession contract. */
+  dispose(): void {
+    this.destroy();
   }
 
   #emitFrame(elapsedMs: number): void {
@@ -570,7 +661,11 @@ export class TimelinePreviewSurface {
     };
   }
 
-  async #reconcile(snapshot: RuntimeSnapshot): Promise<void> {
+  async #reconcile(
+    snapshot: RuntimeSnapshot,
+    isCurrentLoad: () => boolean,
+    signal: AbortSignal,
+  ): Promise<boolean> {
     if (snapshot.world.background === null) {
       for (const child of this.#backgrounds.removeChildren()) child.destroy();
       this.#background = null;
@@ -578,6 +673,10 @@ export class TimelinePreviewSurface {
       this.#background?.label !== this.#assets[snapshot.world.background]
     ) {
       const background = await this.#makeBackground(snapshot.world.background);
+      if (!isCurrentLoad()) {
+        background.destroy();
+        return false;
+      }
       this.#background?.destroy();
       this.#background = background;
       this.#backgrounds.addChild(background);
@@ -594,6 +693,10 @@ export class TimelinePreviewSurface {
       if (view === undefined || view.label !== this.#assets[state.asset]) {
         view?.destroy();
         view = await this.#makeSprite(state.asset, state);
+        if (!isCurrentLoad()) {
+          view.destroy();
+          return false;
+        }
         view.label = this.#assets[state.asset] ?? state.asset;
         this.#world.addChild(view);
         this.#spriteViews.set(id, view);
@@ -603,7 +706,8 @@ export class TimelinePreviewSurface {
     this.#cameraStart = { ...snapshot.world.camera };
     this.#camera = { ...snapshot.world.camera };
     this.#applyCamera();
-    await this.#audio.reconcile(snapshot.audio, this.#assets);
+    await this.#audio.reconcile(snapshot.audio, this.#assets, signal);
+    return isCurrentLoad();
   }
 
   async #makeBackground(asset: string): Promise<Sprite> {
@@ -633,7 +737,9 @@ export class TimelinePreviewSurface {
 
   async #prepareVideo(
     track: Extract<TimelineTrack, { type: "video" }>,
-  ): Promise<void> {
+    loadGeneration: number,
+    loadAbort: AbortController,
+  ): Promise<boolean> {
     this.#destroyVideo();
     const video = document.createElement("video");
     video.preload = "auto";
@@ -643,29 +749,74 @@ export class TimelinePreviewSurface {
     // audio-enabled video is routed through AudioManager after that gesture.
     video.muted = true;
     video.src = requireAssetUrl(this.#assets, track.asset);
-    await waitForVideoMetadata(video);
-    video.currentTime = track.clip_start_ms / 1000;
-    this.#video = video;
-    if (track.audio_enabled && !this.#muted) {
-      this.#audio.attachVideo(video, 1);
-      this.#videoAudioAttached = true;
-      video.muted = false;
+    let source: VideoSource | null = null;
+    let view: Sprite | null = null;
+    const isCurrentLoad = (): boolean =>
+      !this.#destroyed &&
+      !loadAbort.signal.aborted &&
+      this.#loadGeneration === loadGeneration &&
+      this.#loadAbort === loadAbort;
+    try {
+      await waitForVideoMetadata(video, loadAbort.signal);
+      if (!isCurrentLoad()) {
+        disposeVideoElements(video);
+        return false;
+      }
+      // Register the listener before assigning currentTime so a fast decoder
+      // cannot complete the initial seek before we start waiting for it.  A
+      // zero clip start is already the media's initial position; in that case
+      // waiting for the first presented frame below is sufficient.
+      if (track.clip_start_ms > 0) {
+        const seek = waitForVideoSeek(video, loadAbort.signal);
+        video.currentTime = track.clip_start_ms / 1000;
+        await seek;
+        if (!isCurrentLoad()) {
+          disposeVideoElements(video);
+          return false;
+        }
+      }
+      await waitForPresentedVideoFrame(video, loadAbort.signal);
+      if (!isCurrentLoad()) {
+        disposeVideoElements(video);
+        return false;
+      }
+      source = new VideoSource({
+        resource: video,
+        autoLoad: false,
+        autoPlay: false,
+        updateFPS: 0,
+      });
+      await source.load();
+      if (!isCurrentLoad()) {
+        disposeVideoElements(video, source);
+        return false;
+      }
+      source.autoUpdate = false;
+      source.update();
+      view = new Sprite(new Texture({ source }));
+      view.anchor.set(0, 0);
+      this.#video = video;
+      this.#videoSource = source;
+      this.#videoView = view;
+      this.#world.addChild(view);
+      if (track.audio_enabled && !this.#muted) {
+        this.#audio.attachVideo(video, 1);
+        this.#videoAudioAttached = true;
+        video.muted = false;
+      }
+      return true;
+    } catch (error) {
+      disposeVideoElements(video, source, view);
+      if (!isCurrentLoad()) return false;
+      throw error;
     }
-    this.#videoSource = new VideoSource({
-      resource: video,
-      autoLoad: false,
-      autoPlay: false,
-      updateFPS: 0,
-    });
-    await this.#videoSource.load();
-    this.#videoSource.autoUpdate = false;
-    this.#videoSource.update();
-    this.#videoView = new Sprite(new Texture({ source: this.#videoSource }));
-    this.#videoView.anchor.set(0, 0);
-    this.#world.addChild(this.#videoView);
   }
 
-  #syncVideo(elapsedMs: number): void {
+  async #syncVideo(
+    elapsedMs: number,
+    signal: AbortSignal,
+    generation: number,
+  ): Promise<void> {
     const video = this.#video;
     const view = this.#videoView;
     const cue = this.#cue;
@@ -681,191 +832,94 @@ export class TimelinePreviewSurface {
     const desired = track.loop
       ? clipStart + ((raw - clipStart) % duration)
       : Math.min(clipEnd, raw);
-    if (Math.abs(video.currentTime - desired) > 0.04)
+    if (Math.abs(video.currentTime - desired) > 0.04) {
       video.currentTime = desired;
+      try {
+        await waitForVideoSeek(video, signal);
+        if (signal.aborted || generation !== this.#seekGeneration) return;
+        await waitForPresentedVideoFrame(video, signal);
+      } catch (error) {
+        if (!signal.aborted) {
+          this.#diagnostic(
+            `视频定位失败（${track.asset} @ ${elapsedMs}ms）：${errorMessage(error)}`,
+          );
+        }
+        return;
+      }
+      if (signal.aborted || generation !== this.#seekGeneration) return;
+    }
     if (this.#playing && video.paused) void video.play().catch(() => undefined);
     this.#videoSource?.update();
   }
 
-  #applyTrack(track: TimelineTrack, elapsedMs: number): void {
-    if (track.type === "sprite") {
-      const view = this.#spriteViews.get(track.sprite_id);
-      if (view === undefined) return;
-      const base =
-        this.#spriteBases.get(track.sprite_id) ?? defaultSpriteFrame();
-      const scale = evaluateChannel(
-        track.channels,
-        "scale",
-        elapsedMs,
-        base.scale,
-      );
-      applySprite(view, {
-        asset:
-          track.asset ??
-          this.#start?.world.sprites[track.sprite_id]?.asset ??
-          "",
-        x: evaluateChannel(track.channels, "x", elapsedMs, base.x),
-        y: evaluateChannel(track.channels, "y", elapsedMs, base.y),
-        scale,
-        scale_x: evaluateChannel(
-          track.channels,
-          "scale_x",
-          elapsedMs,
-          base.scale_x,
-        ),
-        scale_y: evaluateChannel(
-          track.channels,
-          "scale_y",
-          elapsedMs,
-          base.scale_y,
-        ),
-        rotation_deg: evaluateChannel(
-          track.channels,
-          "rotation_deg",
-          elapsedMs,
-          base.rotation_deg,
-        ),
-        opacity: evaluateChannel(
-          track.channels,
-          "opacity",
-          elapsedMs,
-          base.opacity,
-        ),
-        z: Math.round(evaluateChannel(track.channels, "z", elapsedMs, base.z)),
-      });
-      const override = this.#objectOverrides.get(track.sprite_id);
-      if (override !== undefined) {
-        if (override.x !== undefined) view.x = override.x;
-        if (override.y !== undefined) view.y = override.y;
-        if (
-          override.scale !== undefined ||
-          override.scale_x !== undefined ||
-          override.scale_y !== undefined
-        ) {
-          const currentScale = override.scale ?? scale;
-          const currentScaleX =
-            override.scale_x ??
-            evaluateChannel(track.channels, "scale_x", elapsedMs, base.scale_x);
-          const currentScaleY =
-            override.scale_y ??
-            evaluateChannel(track.channels, "scale_y", elapsedMs, base.scale_y);
-          view.scale.set(
-            currentScale * currentScaleX,
-            currentScale * currentScaleY,
-          );
-        }
-        if (override.rotation_deg !== undefined)
-          view.rotation = (override.rotation_deg * Math.PI) / 180;
-        if (override.opacity !== undefined) view.alpha = override.opacity;
-        if (override.z !== undefined) view.zIndex = Math.round(override.z);
+  #applyFrame(frame: TimelinePreviewFrame): void {
+    this.#camera = { ...frame.camera };
+    this.#applyCamera();
+    for (const object of frame.objects) {
+      if (object.kind === "sprite") {
+        const view = this.#spriteViews.get(object.id);
+        if (view === undefined) continue;
+        applySprite(view, {
+          asset: object.asset,
+          x: object.x,
+          y: object.y,
+          scale: object.scale,
+          scale_x: object.scale_x,
+          scale_y: object.scale_y,
+          rotation_deg: object.rotation_deg,
+          opacity: object.opacity,
+          z: object.z,
+        });
+        continue;
       }
-    } else if (track.type === "camera") {
-      this.#camera = {
-        x: evaluateChannel(track.channels, "x", elapsedMs, this.#cameraStart.x),
-        y: evaluateChannel(track.channels, "y", elapsedMs, this.#cameraStart.y),
-        zoom: evaluateChannel(
-          track.channels,
-          "zoom",
-          elapsedMs,
-          this.#cameraStart.zoom,
-        ),
-        rotation_deg: evaluateChannel(
-          track.channels,
-          "rotation_deg",
-          elapsedMs,
-          this.#cameraStart.rotation_deg,
-        ),
-      };
-      this.#applyCamera();
-    } else if (
-      track.type === "video" &&
-      this.#videoView !== null &&
-      this.#video !== null
-    ) {
-      const x = evaluateChannel(track.channels, "x", elapsedMs, 0);
-      const y = evaluateChannel(track.channels, "y", elapsedMs, 0);
-      const width = evaluateChannel(
-        track.channels,
-        "width",
-        elapsedMs,
-        DESIGN_WIDTH,
+      if (this.#videoView === null || this.#video === null) continue;
+      const track = this.#cue?.tracks.find(
+        (candidate): candidate is Extract<TimelineTrack, { type: "video" }> =>
+          candidate.type === "video" && candidate.asset === object.asset,
       );
-      const height = evaluateChannel(
-        track.channels,
-        "height",
-        elapsedMs,
-        DESIGN_HEIGHT,
+      if (track === undefined) continue;
+      applyVideoFrame(this.#videoView, this.#video, track, object);
+      const evaluated = this.#evaluateFrame(frame.elapsed_ms);
+      const videoState = evaluated?.videos.find(
+        (candidate) => candidate.asset === object.asset,
       );
-      const naturalWidth = Math.max(1, this.#video.videoWidth);
-      const naturalHeight = Math.max(1, this.#video.videoHeight);
-      if (track.fit === "stretch") {
-        this.#videoView.position.set(x, y);
-        this.#videoView.width = width;
-        this.#videoView.height = height;
-      } else {
-        const factor =
-          track.fit === "cover"
-            ? Math.max(width / naturalWidth, height / naturalHeight)
-            : Math.min(width / naturalWidth, height / naturalHeight);
-        this.#videoView.width = naturalWidth * factor;
-        this.#videoView.height = naturalHeight * factor;
-        this.#videoView.position.set(
-          x + (width - this.#videoView.width) / 2,
-          y + (height - this.#videoView.height) / 2,
-        );
-      }
-      this.#videoView.alpha = evaluateChannel(
-        track.channels,
-        "opacity",
-        elapsedMs,
-        1,
-      );
-      this.#videoView.zIndex = Math.round(
-        evaluateChannel(track.channels, "z", elapsedMs, 0),
-      );
-      const override = this.#objectOverrides.get(`video:${track.asset}`);
-      if (override !== undefined) {
-        if (override.x !== undefined) this.#videoView.x = override.x;
-        if (override.y !== undefined) this.#videoView.y = override.y;
-        if (override.width !== undefined)
-          this.#videoView.width = override.width;
-        if (override.height !== undefined)
-          this.#videoView.height = override.height;
-        if (override.opacity !== undefined)
-          this.#videoView.alpha = override.opacity;
-        if (override.z !== undefined)
-          this.#videoView.zIndex = Math.round(override.z);
-      }
-      if (track.audio_enabled && !this.#muted)
-        this.#audio.setVideoVolume(
-          this.#video,
-          evaluateChannel(track.channels, "volume", elapsedMs, 1),
-        );
-    } else if (track.type === "bgm") {
-      this.#audio.setBgmTimelineVolume(
-        evaluateChannel(
-          track.channels,
-          "volume",
-          elapsedMs,
-          this.#bgmStartVolume,
-        ),
-      );
+      if (track.audio_enabled && !this.#muted && videoState !== undefined)
+        this.#audio.setVideoVolume(this.#video, videoState.volume);
     }
+    const evaluated = this.#evaluateFrame(frame.elapsed_ms);
+    if (evaluated !== null)
+      this.#audio.setBgmTimelineVolume(evaluated.bgm_volume);
+  }
+
+  #evaluateFrame(elapsedMs: number) {
+    if (this.#cue === null) return null;
+    return evaluateTimelineFrame(
+      { duration_ms: this.#cue.duration_ms, tracks: this.#cue.tracks },
+      {
+        sprites: this.#start?.world.sprites ?? {},
+        camera: this.#cameraStart,
+        bgm_volume: this.#bgmStartVolume,
+      },
+      elapsedMs,
+    );
   }
 
   #applyCamera(): void {
-    const now = performance.now();
     let shakeX = 0;
     let shakeY = 0;
-    if (this.#shakeDuration > 0) {
-      const progress = (now - this.#shakeStartedAt) / this.#shakeDuration;
-      if (progress >= 1) {
-        this.#shakeDuration = 0;
-      } else {
-        const strength = (1 - Math.max(0, progress)) * 16;
-        shakeX = Math.sin(progress * Math.PI * 18) * strength;
-        shakeY = Math.cos(progress * Math.PI * 22) * strength * 0.6;
-      }
+    const shake = this.#shakeEffect;
+    if (shake !== null) {
+      const progress = Math.max(
+        0,
+        Math.min(
+          1,
+          (this.#effectElapsedMs - shake.startMs) /
+            Math.max(1, shake.durationMs),
+        ),
+      );
+      const strength = (1 - progress) * 16;
+      shakeX = Math.sin(progress * Math.PI * 18) * strength;
+      shakeY = Math.cos(progress * Math.PI * 22) * strength * 0.6;
     }
     this.#world.position.set(
       DESIGN_WIDTH / 2 + shakeX,
@@ -882,66 +936,34 @@ export class TimelinePreviewSurface {
   #applyOverrides(): void {
     if (this.#cue === null) return;
     const elapsed = this.#lastElapsed < 0 ? 0 : this.#lastElapsed;
-    for (const track of this.#cue.tracks) this.#applyTrack(track, elapsed);
-    // A sprite can be present in the real entering snapshot without having a
-    // timeline track yet. Keep temporary editor gestures visible for those
-    // sprites too; the first committed gesture creates the track in YAML.
-    const trackedSprites = new Set(
-      this.#cue.tracks
-        .filter(
-          (track): track is Extract<TimelineTrack, { type: "sprite" }> =>
-            track.type === "sprite",
-        )
-        .map((track) => track.sprite_id),
+    this.#applyFrame(this.frameAt(elapsed));
+  }
+
+  #rebuildTransientEffects(elapsedMs: number): void {
+    this.#effectElapsedMs = elapsedMs;
+    const { flash, shake } = evaluateActiveScreenEffects(
+      this.#cue?.events ?? [],
+      elapsedMs,
     );
-    for (const [id, override] of this.#objectOverrides) {
-      if (trackedSprites.has(id)) continue;
-      const base = this.#start?.world.sprites[id];
-      const view = this.#spriteViews.get(id);
-      if (base === undefined || view === undefined) continue;
-      applySprite(view, {
-        ...base,
-        ...override,
-      });
-    }
-    this.#camera = { ...this.#camera, ...this.#cameraOverride };
-    this.#applyCamera();
-  }
-
-  #showEffect(effect: "shake" | "flash", durationMs: number): void {
-    const duration = Math.max(1, durationMs);
-    if (effect === "flash") {
+    this.#shakeEffect = shake;
+    if (flash === null) {
       this.#flashView?.destroy();
-      const flash = new Graphics()
-        .rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT)
-        .fill(0xffffff);
-      flash.alpha = 0.88;
-      this.#effects.addChild(flash);
-      this.#flashView = flash;
-      this.#flashStartedAt = performance.now();
-      this.#flashDuration = duration;
-      return;
-    }
-    this.#shakeStartedAt = performance.now();
-    this.#shakeDuration = duration;
-    this.#applyCamera();
-  }
-
-  #updateTransientEffects(now: number): void {
-    if (this.#flashView !== null) {
+      this.#flashView = null;
+    } else {
+      if (this.#flashView === null) {
+        this.#flashView = new Graphics()
+          .rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT)
+          .fill(0xffffff);
+        this.#effects.addChild(this.#flashView);
+      }
       const progress = Math.max(
         0,
         Math.min(
           1,
-          (now - this.#flashStartedAt) / Math.max(1, this.#flashDuration),
+          (elapsedMs - flash.startMs) / Math.max(1, flash.durationMs),
         ),
       );
       this.#flashView.alpha = 0.88 * (1 - progress);
-      if (progress >= 1) {
-        this.#flashView.destroy();
-        this.#flashView = null;
-        this.#flashDuration = 0;
-      }
     }
     this.#applyCamera();
   }
@@ -949,9 +971,8 @@ export class TimelinePreviewSurface {
   #clearTransientEffects(): void {
     this.#flashView?.destroy();
     this.#flashView = null;
-    this.#flashDuration = 0;
-    this.#shakeDuration = 0;
-    this.#shakeStartedAt = 0;
+    this.#shakeEffect = null;
+    this.#effectElapsedMs = 0;
     this.#applyCamera();
   }
 
@@ -975,6 +996,11 @@ export class TimelinePreviewSurface {
     this.#videoAudioAttached = false;
   }
 }
+
+// Compatibility name for callers from the first editor timeline milestone.
+// There is only one implementation; both game and editor now instantiate
+// SceneSurface through the shared package.
+export { SceneSurface as TimelinePreviewSurface };
 
 function applySprite(view: Sprite, state: SpriteSnapshot): void {
   view.position.set(state.x, state.y);
@@ -1016,6 +1042,34 @@ function requireAssetUrl(assets: AssetUrlMap, id: string): string {
   return url;
 }
 
+function applyVideoFrame(
+  view: Sprite,
+  video: HTMLVideoElement,
+  track: Extract<TimelineTrack, { type: "video" }>,
+  frame: PreviewObjectFrame,
+): void {
+  const naturalWidth = Math.max(1, video.videoWidth);
+  const naturalHeight = Math.max(1, video.videoHeight);
+  if (track.fit === "stretch") {
+    view.position.set(frame.x, frame.y);
+    view.width = frame.width;
+    view.height = frame.height;
+  } else {
+    const factor =
+      track.fit === "cover"
+        ? Math.max(frame.width / naturalWidth, frame.height / naturalHeight)
+        : Math.min(frame.width / naturalWidth, frame.height / naturalHeight);
+    view.width = naturalWidth * factor;
+    view.height = naturalHeight * factor;
+    view.position.set(
+      frame.x + (frame.width - view.width) / 2,
+      frame.y + (frame.height - view.height) / 2,
+    );
+  }
+  view.alpha = frame.opacity;
+  view.zIndex = Math.round(frame.z);
+}
+
 function loadTexture(url: string): Promise<Texture> {
   return new Promise<Texture>((resolve, reject) => {
     const image = new Image();
@@ -1030,7 +1084,11 @@ function loadTexture(url: string): Promise<Texture> {
   });
 }
 
-function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
+function waitForVideoMetadata(
+  video: HTMLVideoElement,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
   if (video.readyState >= HTMLMediaElement.HAVE_METADATA)
     return Promise.resolve();
   return new Promise<void>((resolve, reject) => {
@@ -1042,27 +1100,88 @@ function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
       cleanup();
       reject(new Error("视频元数据加载失败"));
     };
+    const aborted = (): void => {
+      cleanup();
+      resolve();
+    };
     const cleanup = (): void => {
       video.removeEventListener("loadedmetadata", loaded);
       video.removeEventListener("error", failed);
+      signal?.removeEventListener("abort", aborted);
     };
     video.addEventListener("loadedmetadata", loaded, { once: true });
     video.addEventListener("error", failed, { once: true });
+    signal?.addEventListener("abort", aborted, { once: true });
     video.load();
   });
 }
 
-function waitForPresentedVideoFrame(video: HTMLVideoElement): Promise<void> {
+function disposeVideoElements(
+  video: HTMLVideoElement,
+  source?: VideoSource | null,
+  view?: Sprite | null,
+): void {
+  video.pause();
+  view?.destroy({ texture: true, textureSource: true });
+  source?.destroy();
+  video.removeAttribute("src");
+  video.load();
+}
+
+function waitForVideoSeek(
+  video: HTMLVideoElement,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    let timer = 0;
+    const finish = (): void => {
+      cleanup();
+      resolve();
+    };
+    const failed = (): void => {
+      cleanup();
+      reject(new Error("视频 seek 失败"));
+    };
+    const aborted = (): void => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = (): void => {
+      video.removeEventListener("seeked", finish);
+      video.removeEventListener("error", failed);
+      signal.removeEventListener("abort", aborted);
+      window.clearTimeout(timer);
+    };
+    video.addEventListener("seeked", finish, { once: true });
+    video.addEventListener("error", failed, { once: true });
+    signal.addEventListener("abort", aborted, { once: true });
+    timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("超过 2 秒"));
+    }, 2_000);
+  });
+}
+
+function waitForPresentedVideoFrame(
+  video: HTMLVideoElement,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
   if (typeof video.requestVideoFrameCallback === "function") {
     return new Promise<void>((resolve) => {
       let settled = false;
+      let timer = 0;
       const finish = (): void => {
         if (settled) return;
         settled = true;
+        if (timer !== 0) window.clearTimeout(timer);
+        signal?.removeEventListener("abort", finish);
         resolve();
       };
       video.requestVideoFrameCallback(() => finish());
-      window.setTimeout(finish, 250);
+      signal?.addEventListener("abort", finish, { once: true });
+      timer = window.setTimeout(finish, 250);
     });
   }
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)
@@ -1071,10 +1190,12 @@ function waitForPresentedVideoFrame(video: HTMLVideoElement): Promise<void> {
     const finish = (): void => {
       video.removeEventListener("seeked", finish);
       video.removeEventListener("canplay", finish);
+      signal?.removeEventListener("abort", finish);
       resolve();
     };
     video.addEventListener("seeked", finish, { once: true });
     video.addEventListener("canplay", finish, { once: true });
+    signal?.addEventListener("abort", finish, { once: true });
     window.setTimeout(finish, 250);
   });
 }

@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { resolveTextLayoutLineGroups } from "@vectspace/text";
 
 import { parseMarkup, visibleUnits } from "../engine/markup";
 import { MarkupText } from "./MarkupText";
@@ -7,7 +8,6 @@ import {
   buildLineSweepGeometry,
   buildLineSweepTimings,
   lineSweepMaskPositionPx,
-  resolveVisualLineGroups,
   splitLinesAtPauses,
 } from "./visualLineGroups";
 
@@ -100,19 +100,22 @@ describe("MarkupText math reveal", () => {
 
   it("keeps an inline formula with text that shares its visual baseline", () => {
     const units = visibleUnits(parseMarkup("示例：$A \\cong B$"));
-    const element = (top: number, height: number): HTMLElement =>
-      ({
-        getBoundingClientRect: () => ({ top, height }) as DOMRect,
-      }) as HTMLElement;
-    const groups = resolveVisualLineGroups(
+    const box = (index: number, top: number, height: number) => ({
+      index,
+      top,
+      bottom: top + height,
+      left: index * 32,
+      right: (index + 1) * 32,
+    });
+    const groups = resolveTextLayoutLineGroups(
       units,
       new Map([
-        [0, element(100, 34)],
-        [1, element(100, 34)],
-        [2, element(100, 34)],
+        [0, box(0, 100, 34)],
+        [1, box(1, 100, 34)],
+        [2, box(2, 100, 34)],
         // KaTeX is taller and vertically aligned above nearby characters,
         // but its center belongs to the same visual row.
-        [3, element(92, 50)],
+        [3, box(3, 92, 50)],
       ]),
     );
     expect(groups).toEqual([[0, 1, 2, 3]]);
@@ -120,15 +123,11 @@ describe("MarkupText math reveal", () => {
 
   it("keeps explicit source line breaks in separate visual rows", () => {
     const units = visibleUnits(parseMarkup("甲\n乙"));
-    const element = (top: number): HTMLElement =>
-      ({
-        getBoundingClientRect: () => ({ top, height: 34 }) as DOMRect,
-      }) as HTMLElement;
-    const groups = resolveVisualLineGroups(
+    const groups = resolveTextLayoutLineGroups(
       units,
       new Map([
-        [0, element(100)],
-        [2, element(100)],
+        [0, { index: 0, top: 100, bottom: 134, left: 0, right: 32 }],
+        [2, { index: 2, top: 100, bottom: 134, left: 0, right: 32 }],
       ]),
     );
     expect(groups).toEqual([[0], [2]]);
@@ -195,10 +194,10 @@ describe("MarkupText math reveal", () => {
     ).toBeGreaterThan(
       lineSweepMaskPositionPx(timing, 50, [{ startMs: 50, endMs: 550 }]),
     );
-    // The finished mask moves past the gradient feather, leaving the final
-    // character fully opaque rather than permanently fading its right edge.
-    expect(lineSweepMaskPositionPx(timing, timing.endMs, [], 16)).toBe(
-      -timing.unitOffsetPx + 16,
+    // The finished mask still covers the first glyph; moving it one feather
+    // farther right would leave that glyph outside a non-repeating mask.
+    expect(lineSweepMaskPositionPx(timing, timing.endMs, [], 16)).toBeCloseTo(
+      -timing.unitOffsetPx,
     );
   });
 

@@ -1,4 +1,5 @@
 import type { ScalarValue, VariableType } from "./types";
+import { scalarText } from "./scalars";
 
 export type TemplateContext = "text" | "math";
 
@@ -191,17 +192,20 @@ function nextUnescapedDollar(source: string, from: number): number {
 }
 
 function escapePlainValue(value: ScalarValue): string {
-  return String(value)
+  return scalarText(value)
     .replaceAll("\\", "\\\\")
     .replaceAll("$", "\\$")
     .replaceAll("[", "\\[");
 }
 
 function formatMathValue(value: ScalarValue): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
+  if (
+    typeof value !== "bigint" &&
+    (typeof value !== "number" || !Number.isFinite(value))
+  ) {
     throw new Error("公式插值只接受 integer 或 number");
   }
-  const text = String(value);
+  const text = scalarText(value);
   const match = /^(.+?)[eE]([+-]?\d+)$/.exec(text);
   if (match === null) return text;
   const exponent = match[2].replace(/^\+/, "");
