@@ -10,8 +10,8 @@ use thiserror::Error;
 
 use crate::model::{
     AssetDefinition, AssetKind, AudioAction, CharacterDefinition, ConditionExpression,
-    ContentManifest, DialogueMode, LongTextPagination, MutationValue, ResolvedAsset, ScalarValue,
-    SceneDefinition, SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal,
+    ContentManifest, DialogueMode, LongTextMode, LongTextPagination, MutationValue, ResolvedAsset,
+    ScalarValue, SceneDefinition, SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal,
     TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings,
     UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation, VariableScope,
     VariableType, LONG_TEXT_FONT_SIZE_MAX, LONG_TEXT_FONT_SIZE_MIN,
@@ -644,12 +644,74 @@ fn validate_scenes(
     characters: &BTreeMap<String, CharacterDefinition>,
     ui_motions: &BTreeMap<String, UiMotionPreset>,
 ) -> Result<(), ContentError> {
+    #[derive(Clone)]
+    struct LongTextPresentation {
+        pagination: LongTextPagination,
+        font_size: f32,
+        text_color: String,
+        layout: crate::model::LongTextLayout,
+    }
+
     for (scene_id, scene) in scenes {
         if !scene.nodes.contains_key(&scene.entry) {
             return Err(ContentError::Validation(format!(
                 "场景 {scene_id} 的入口节点不存在: {}",
                 scene.entry
             )));
+        }
+        let mut long_text_documents = BTreeMap::<String, (bool, BTreeSet<String>)>::new();
+        let mut long_text_starts = BTreeMap::<String, LongTextPresentation>::new();
+        for (node_id, node) in &scene.nodes {
+            if let SceneNode::LongText {
+                document,
+                mode,
+                pagination,
+                font_size,
+                text_color,
+                layout,
+                steps,
+                ..
+            } = node
+            {
+                let document_id = document.clone().unwrap_or_else(|| node_id.clone());
+                validate_identifier("long text document id", &document_id)?;
+                if *mode == LongTextMode::Continue && document.is_none() {
+                    return node_error(scene_id, node_id, "continue 长文本必须提供 document");
+                }
+                let entry = long_text_documents
+                    .entry(document_id.clone())
+                    .or_insert_with(|| (false, BTreeSet::new()));
+                if *mode == LongTextMode::Start {
+                    if entry.0 {
+                        return node_error(scene_id, node_id, "同一文稿只能有一个 start 节点");
+                    }
+                    entry.0 = true;
+                    long_text_starts.insert(
+                        document_id.clone(),
+                        LongTextPresentation {
+                            pagination: pagination.unwrap_or_default(),
+                            font_size: font_size
+                                .unwrap_or(crate::model::LONG_TEXT_FONT_SIZE_DEFAULT),
+                            text_color: text_color.clone().unwrap_or_else(|| {
+                                crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()
+                            }),
+                            layout: layout.clone().unwrap_or_default(),
+                        },
+                    );
+                }
+                for step in steps {
+                    if !entry.1.insert(step.id.clone()) {
+                        return node_error(scene_id, node_id, "同一文稿的 step id 重复");
+                    }
+                }
+            }
+        }
+        for (document_id, (has_start, _)) in &long_text_documents {
+            if !has_start {
+                return Err(ContentError::Validation(format!(
+                    "场景 {scene_id} 的长文本 {document_id} 缺少 start 节点"
+                )));
+            }
         }
         for (node_id, node) in &scene.nodes {
             validate_identifier("node id", node_id)?;
@@ -737,6 +799,8 @@ fn validate_scenes(
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::LongText {
+                    document,
+                    mode,
                     paper,
                     pagination,
                     font_size,
@@ -747,18 +811,59 @@ fn validate_scenes(
                     next,
                     ..
                 } => {
+                    if *mode == LongTextMode::Continue
+                        && (paper.is_some()
+                            || pagination.is_some()
+                            || font_size.is_some()
+                            || text_color.is_some()
+                            || layout.is_some())
+                    {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            "continue 长文本只能继承 start 的纸张、分页、字号、颜色和布局",
+                        );
+                    }
+                    let document_id = document.clone().unwrap_or_else(|| node_id.clone());
+                    let (pagination, font_size, text_color, layout) = if *mode
+                        == LongTextMode::Continue
+                    {
+                        let presentation = long_text_starts.get(&document_id).ok_or_else(|| {
+                            ContentError::Validation(format!(
+                                "{scene_id}/{node_id}: 接续长文本缺少 start 节点"
+                            ))
+                        })?;
+                        (
+                            presentation.pagination,
+                            presentation.font_size,
+                            presentation.text_color.clone(),
+                            presentation.layout.clone(),
+                        )
+                    } else {
+                        (
+                            pagination.unwrap_or_default(),
+                            font_size.unwrap_or(crate::model::LONG_TEXT_FONT_SIZE_DEFAULT),
+                            text_color.clone().unwrap_or_else(|| {
+                                crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()
+                            }),
+                            layout.clone().unwrap_or_default(),
+                        )
+                    };
                     if let Some(paper) = paper {
                         require_asset(assets, paper, AssetKind::Gui, scene_id, node_id)?;
                     }
                     if steps.is_empty() || steps.len() > MAX_LONG_TEXT_STEPS {
                         return node_error(scene_id, node_id, "长文本必须包含 1 到 1024 个步骤");
                     }
+                    if *mode == LongTextMode::Continue && document.is_none() {
+                        return node_error(scene_id, node_id, "continue 长文本必须提供 document");
+                    }
                     if speed_cps.is_some_and(|value| !value.is_finite() || value <= 0.0) {
                         return node_error(scene_id, node_id, "speed_cps 必须是有限正数");
                     }
                     if !font_size.is_finite()
-                        || *font_size < LONG_TEXT_FONT_SIZE_MIN
-                        || *font_size > LONG_TEXT_FONT_SIZE_MAX
+                        || font_size < LONG_TEXT_FONT_SIZE_MIN
+                        || font_size > LONG_TEXT_FONT_SIZE_MAX
                     {
                         return node_error(
                             scene_id,
@@ -766,7 +871,7 @@ fn validate_scenes(
                             "长文本 font_size 必须在 16 到 72 之间",
                         );
                     }
-                    validate_color(text_color).map_err(|message| {
+                    validate_color(&text_color).map_err(|message| {
                         ContentError::Validation(format!(
                             "{scene_id}/{node_id}: 长文本颜色无效: {message}"
                         ))
@@ -810,14 +915,14 @@ fn validate_scenes(
                         if step.text.trim().is_empty() {
                             return node_error(scene_id, node_id, "长文本步骤不能为空");
                         }
-                        if index == 0 && step.page_break_before {
+                        if *mode == LongTextMode::Start && index == 0 && step.page_break_before {
                             return node_error(
                                 scene_id,
                                 node_id,
                                 "长文本第一步骤不能在前方强制分页",
                             );
                         }
-                        if *pagination == LongTextPagination::Continuous && step.page_break_before {
+                        if pagination == LongTextPagination::Continuous && step.page_break_before {
                             return node_error(
                                 scene_id,
                                 node_id,
@@ -825,6 +930,13 @@ fn validate_scenes(
                             );
                         }
                         validate_text_markup(&step.text, variables, scene_id, node_id)?;
+                    }
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::LongTextControl { document, next, .. } => {
+                    validate_identifier("long text document id", document)?;
+                    if !long_text_documents.contains_key(document) {
+                        return node_error(scene_id, node_id, "文稿控制引用了未知文稿");
                     }
                     require_node(scene, next, scene_id, node_id)?;
                 }
@@ -1981,11 +2093,14 @@ mod tests {
         scene.nodes.insert(
             "lecture".to_owned(),
             SceneNode::LongText {
+                document: None,
+                mode: crate::model::LongTextMode::Start,
+                on_exit: crate::model::LongTextExit::Close,
                 paper: Some("gui.dialogue_box".to_owned()),
-                pagination: crate::model::LongTextPagination::Auto,
-                font_size: crate::model::LONG_TEXT_FONT_SIZE_DEFAULT,
-                text_color: crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned(),
-                layout: crate::model::LongTextLayout::default(),
+                pagination: Some(crate::model::LongTextPagination::Auto),
+                font_size: Some(crate::model::LONG_TEXT_FONT_SIZE_DEFAULT),
+                text_color: Some(crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                layout: Some(crate::model::LongTextLayout::default()),
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),
@@ -2031,6 +2146,105 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("第一步骤"));
+    }
+
+    #[test]
+    fn continuation_inherits_start_presentation_and_pagination_rules() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let ui_motion_files: BTreeMap<String, UiMotionPreset> = catalog
+            .manifest
+            .ui_motions
+            .iter()
+            .map(|path| (path.clone(), read_yaml(&root.join(path)).unwrap()))
+            .collect();
+        let mut scenes = catalog.scenes.clone();
+        let scene = scenes.get_mut("prologue").unwrap();
+        scene.nodes.insert(
+            "lecture_start".to_owned(),
+            SceneNode::LongText {
+                document: Some("lecture".to_owned()),
+                mode: LongTextMode::Start,
+                on_exit: crate::model::LongTextExit::KeepVisible,
+                paper: None,
+                pagination: Some(LongTextPagination::Continuous),
+                font_size: Some(32.0),
+                text_color: Some(crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                layout: Some(crate::model::LongTextLayout::default()),
+                steps: vec![crate::model::LongTextStep {
+                    id: "first".to_owned(),
+                    text: "第一段".to_owned(),
+                    page_break_before: false,
+                }],
+                speed_cps: None,
+                reveal_animation: None,
+                next: "introduction".to_owned(),
+            },
+        );
+
+        let mut with_style = scenes.clone();
+        with_style.get_mut("prologue").unwrap().nodes.insert(
+            "lecture_continue_style".to_owned(),
+            SceneNode::LongText {
+                document: Some("lecture".to_owned()),
+                mode: LongTextMode::Continue,
+                on_exit: crate::model::LongTextExit::Close,
+                paper: None,
+                pagination: Some(LongTextPagination::Auto),
+                font_size: None,
+                text_color: None,
+                layout: None,
+                steps: vec![crate::model::LongTextStep {
+                    id: "second".to_owned(),
+                    text: "第二段".to_owned(),
+                    page_break_before: false,
+                }],
+                speed_cps: None,
+                reveal_animation: None,
+                next: "introduction".to_owned(),
+            },
+        );
+        let style_error = ContentCatalog::from_documents(
+            root.clone(),
+            catalog.manifest.clone(),
+            with_style,
+            ui_motion_files.clone(),
+            catalog.story_flow.clone(),
+        )
+        .unwrap_err();
+        assert!(style_error.to_string().contains("只能继承"));
+
+        let mut with_break = scenes;
+        with_break.get_mut("prologue").unwrap().nodes.insert(
+            "lecture_continue_break".to_owned(),
+            SceneNode::LongText {
+                document: Some("lecture".to_owned()),
+                mode: LongTextMode::Continue,
+                on_exit: crate::model::LongTextExit::Close,
+                paper: None,
+                pagination: None,
+                font_size: None,
+                text_color: None,
+                layout: None,
+                steps: vec![crate::model::LongTextStep {
+                    id: "third".to_owned(),
+                    text: "第三段".to_owned(),
+                    page_break_before: true,
+                }],
+                speed_cps: None,
+                reveal_animation: None,
+                next: "introduction".to_owned(),
+            },
+        );
+        let break_error = ContentCatalog::from_documents(
+            root,
+            catalog.manifest,
+            with_break,
+            ui_motion_files,
+            catalog.story_flow,
+        )
+        .unwrap_err();
+        assert!(break_error.to_string().contains("连续长文本"));
     }
 
     #[test]
@@ -2092,11 +2306,14 @@ mod tests {
         long_text_scenes.get_mut("prologue").unwrap().nodes.insert(
             "invalid_long_text_font_size".to_owned(),
             SceneNode::LongText {
+                document: None,
+                mode: crate::model::LongTextMode::Start,
+                on_exit: crate::model::LongTextExit::Close,
                 paper: None,
-                pagination: crate::model::LongTextPagination::Auto,
-                font_size: 73.0,
-                text_color: crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned(),
-                layout: crate::model::LongTextLayout::default(),
+                pagination: Some(crate::model::LongTextPagination::Auto),
+                font_size: Some(73.0),
+                text_color: Some(crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                layout: Some(crate::model::LongTextLayout::default()),
                 steps: vec![crate::model::LongTextStep {
                     id: "step".to_owned(),
                     text: "无效字号".to_owned(),

@@ -119,6 +119,12 @@ fn get_dialogue_history(
 }
 
 #[tauri::command]
+fn clear_dialogue_history(state: State<'_, EngineState>) -> Result<(), WireCommandError> {
+    state.runtime()?.clear_dialogue_history();
+    Ok(())
+}
+
+#[tauri::command]
 fn get_story_flow(
     state: State<'_, EngineState>,
 ) -> Result<Option<StoryFlowSnapshot>, WireCommandError> {
@@ -264,11 +270,15 @@ pub fn run() {
                     scene.nodes.iter().flat_map(move |(node_id, node)| {
                         let node_location = format!("{scene_id}/{node_id}");
                         let mut locations = vec![node_location.clone()];
-                        if let SceneNode::LongText { steps, .. } = node {
+                        if let SceneNode::LongText {
+                            document, steps, ..
+                        } = node
+                        {
+                            let document_id = document.as_deref().unwrap_or(node_id);
                             locations.extend(
                                 steps
                                     .iter()
-                                    .map(|step| format!("{node_location}/{}", step.id)),
+                                    .map(|step| format!("{scene_id}/{document_id}/{}", step.id)),
                             );
                         }
                         locations
@@ -299,6 +309,7 @@ pub fn run() {
             presentation_complete,
             get_snapshot,
             get_dialogue_history,
+            clear_dialogue_history,
             get_story_flow,
             resolve_assets,
             list_save_slots,
@@ -482,5 +493,60 @@ mod tests {
         let runtime = state.runtime().unwrap();
         assert_eq!(runtime.snapshot(), &before_snapshot);
         assert_eq!(runtime.profile_state(&state.content), before_profile);
+    }
+
+    #[test]
+    fn sandbox_scene_loads_and_supports_scene_entry_preview() {
+        let content =
+            ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
+                .unwrap();
+        assert!(content.scenes.contains_key("sandbox"));
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_scene_preview(&content, "sandbox").unwrap();
+        assert!(matches!(
+            first.snapshot.prompt,
+            vectspace_core::model::PromptSnapshot::Dialogue { .. }
+        ));
+        let lecture = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(matches!(
+            lecture.snapshot.prompt,
+            vectspace_core::model::PromptSnapshot::LongText { .. }
+        ));
+        assert_eq!(
+            lecture
+                .snapshot
+                .long_text_page
+                .as_ref()
+                .unwrap()
+                .document_id,
+            "sandbox/sandbox_proof"
+        );
+        let observation = runtime
+            .advance(&content, lecture.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        let interlude = runtime
+            .advance(
+                &content,
+                observation.snapshot.revision,
+                AdvanceSource::Manual,
+            )
+            .unwrap();
+        let timeline = runtime
+            .advance(&content, interlude.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(timeline.requires_ack);
+        let continuation = runtime
+            .presentation_complete(
+                &content,
+                timeline.update_id,
+                vectspace_core::model::PresentationOutcome::Completed,
+            )
+            .unwrap();
+        assert!(matches!(
+            continuation.snapshot.prompt,
+            vectspace_core::model::PromptSnapshot::LongText { .. }
+        ));
     }
 }

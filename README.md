@@ -128,7 +128,7 @@ camera motion, screen effects, Runtime gates, and snapshot-only saves. Supported
 node types are:
 
 ```text
-background  sprite  say  long_text  choice  set  condition  jump  wait
+background  sprite  say  long_text  long_text_control  choice  set  condition  jump  wait
 playback  bgm  sfx  camera  screen_effect  dialogue_ui  timeline  end
 ```
 
@@ -174,9 +174,20 @@ measured visual-line boundaries rather than at paragraph boundaries, so a single
 long step can safely cross a page while formulas remain atomic. `layout` uses
 1920×1080 design pixels.
 
+A document can continue in another node in the same scene. The first node owns
+the paper, pagination, font, color, and layout; continuation nodes omit those
+fields and reuse the retained, already-resolved steps. `on_exit` may be `hide`,
+`keep_visible`, or `close` (the default). A `long_text_control` node can show,
+hide, or close a retained document while dialogue, choices, waits, and timelines
+run normally around it. Starting a document again replaces its accumulated page;
+continuing a missing or closed document is a content error.
+
 ```yaml
 lecture:
   type: long_text
+  document: amgm # optional; defaults to this node's ID
+  mode: start # start (default) or continue
+  on_exit: keep_visible # hide, keep_visible, or close (default)
   paper: gui.lecture_paper # optional
   pagination: auto
   font_size: 32
@@ -199,6 +210,23 @@ lecture:
       page_break_before: true
       text: "因此 $0\\in V$。"
   next: next_node
+
+lecture_continue:
+  type: long_text
+  document: amgm
+  mode: continue
+  on_exit: close
+  steps:
+    - id: proof
+      page_break_before: true
+      text: "由 $(a-b)^2\\ge 0$ 可得……"
+  next: next_node
+
+hide_notes:
+  type: long_text_control
+  document: amgm
+  action: hide # show, hide, or close
+  next: next_node
 ```
 
 ## Current scope
@@ -206,8 +234,19 @@ lecture:
 The runtime includes the fixed viewport, validated Schema v2 content, Pixi
 presentation and timeline cues, video tracks, KaTeX dialogue, BGM/SFX buses,
 automatic playback, three Ctrl fast-forward policies, forced playback sections,
-profile-level read tracking, a 500-entry dialogue history, three manual slots
+profile-level read tracking, a scene-local 500-entry dialogue history, three manual slots
 plus autosave, and a read-only revealed story-flow page.
+
+Dialogue history is deliberately session-scoped: it records only the current
+Scene, survives internal jumps and End until the player returns to the title,
+and is cleared on a cross-Scene jump, new game, load, editor preview, or title
+exit. Legacy profile files may contain the old history field; it is read once
+for migration and omitted from subsequent writes.
+
+The independent `sandbox` Scene is always revealed in Story Flow but is not
+connected to the player route. It is the editor Scene Entry and Rust
+regression fixture for dialogue, formulas, choices, conditions, long-text
+continuations, timelines, and playback controls.
 
 The editor includes typed scene graphs, recursive conditions, characters and
 variables, a diagnostic sidebar, full-screen timeline and UI-motion workspaces,

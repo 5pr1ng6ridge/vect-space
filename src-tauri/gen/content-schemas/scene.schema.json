@@ -305,6 +305,22 @@
         "value"
       ]
     },
+    "LongTextControlAction": {
+      "type": "string",
+      "enum": [
+        "show",
+        "hide",
+        "close"
+      ]
+    },
+    "LongTextExit": {
+      "type": "string",
+      "enum": [
+        "close",
+        "hide",
+        "keep_visible"
+      ]
+    },
     "LongTextLayout": {
       "type": "object",
       "properties": {
@@ -350,6 +366,13 @@
         }
       },
       "additionalProperties": false
+    },
+    "LongTextMode": {
+      "type": "string",
+      "enum": [
+        "start",
+        "continue"
+      ]
     },
     "LongTextPagination": {
       "type": "string",
@@ -628,18 +651,48 @@
           "description": "A sequence of explanatory text blocks rendered on a vertically flowing\npaper surface. Unlike `say`, the runtime stays on this node until its\nfinal step has been advanced, so every step is revision-safe and can be\nsaved independently.",
           "type": "object",
           "properties": {
+            "document": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "font_size": {
-              "type": "number",
+              "type": [
+                "number",
+                "null"
+              ],
               "format": "float"
             },
             "layout": {
-              "$ref": "#/$defs/LongTextLayout"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LongTextLayout"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/LongTextMode"
             },
             "next": {
               "type": "string"
             },
+            "on_exit": {
+              "$ref": "#/$defs/LongTextExit"
+            },
             "pagination": {
-              "$ref": "#/$defs/LongTextPagination"
+              "description": "Presentation fields are optional in the content model so a\ncontinuation can inherit the values declared by its start node.\nRuntime snapshots always contain the resolved concrete values.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LongTextPagination"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "paper": {
               "type": [
@@ -672,7 +725,10 @@
               }
             },
             "text_color": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "type": "string",
@@ -683,6 +739,31 @@
           "required": [
             "type",
             "steps",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/LongTextControlAction"
+            },
+            "document": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "long_text_control"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "document",
+            "action",
             "next"
           ]
         },

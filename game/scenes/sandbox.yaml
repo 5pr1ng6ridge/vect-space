@@ -1,0 +1,198 @@
+schema_version: 2
+id: sandbox
+entry: boot
+nodes:
+  boot:
+    type: background
+    background: bg.vector_space
+    transition: cross_fade
+    duration_ms: 350
+    easing: ease_in_out
+    await: false
+    next: show_jelly
+  show_jelly:
+    type: sprite
+    sprite_id: sandbox_jelly
+    action: show
+    asset: sprite.jelly
+    x: 620.0
+    y: 920.0
+    scale: 0.8
+    opacity: 1.0
+    z: 10
+    duration_ms: 450
+    easing: ease_out
+    await: false
+    next: camera
+  camera:
+    type: camera
+    x: -20.0
+    y: 0.0
+    zoom: 1.03
+    duration_ms: 300
+    easing: ease_in_out
+    await: false
+    next: music
+  music:
+    type: bgm
+    action: start
+    asset: bgm.test1
+    volume: 0.35
+    start_ms: 0
+    duration_ms: 300
+    await: false
+    next: sound
+  sound:
+    type: sfx
+    asset: sfx.typing
+    volume: 0.2
+    next: introduction
+  introduction:
+    type: say
+    speaker: test
+    text: |-
+      欢迎来到功能实验室。这里的分数是 [var=score]，而 $a^2+b^2=c^2$ 仍然是一条稳定的公式。
+    mode: start
+    speed_cps: 36.0
+    next: lecture_start
+  lecture_start:
+    type: long_text
+    document: sandbox_proof
+    mode: start
+    on_exit: hide
+    paper: gui.scratch_paper
+    pagination: auto
+    font_size: 28.0
+    text_color: "#17213A"
+    layout:
+      x: 220.0
+      y: 70.0
+      width: 1480.0
+      height: 940.0
+      padding_x: 118.0
+      padding_y: 112.0
+      page_height: 1340.0
+      page_gap: 92.0
+    steps:
+      - id: statement
+        text: |-
+          讲解文稿从这里开始：对正数 $x,y$，有
+          $$x+y-2\sqrt{xy}=(\sqrt{x}-\sqrt{y})^2\ge 0$$
+          这就是二元均值不等式的最初来源。
+        page_break_before: false
+      - id: observation
+        text: |-
+          先记住这个观察：等号成立当且仅当 $x=y$。
+          接下来会插入一段普通对话和一个时间轴。
+        page_break_before: false
+    speed_cps: 30.0
+    next: interlude
+  interlude:
+    type: say
+    speaker: test
+    text: 文稿可以暂时隐藏，场景仍然能够继续演出。
+    mode: start
+    next: show_document
+  show_document:
+    type: long_text_control
+    document: sandbox_proof
+    action: show
+    next: timeline
+  timeline:
+    type: timeline
+    duration_ms: 600
+    await: true
+    skippable: true
+    tracks:
+      - type: sprite
+        sprite_id: sandbox_jelly
+        asset: sprite.jelly
+        remove_at_end: false
+        channels:
+          x:
+            - at_ms: 0
+              value: inherit
+              easing: linear
+            - at_ms: 600
+              value: 820.0
+              easing: ease_in_out
+          rotation_deg:
+            - at_ms: 0
+              value: 0.0
+              easing: linear
+            - at_ms: 600
+              value: 8.0
+              easing: linear
+    events: []
+    next: lecture_continue
+  lecture_continue:
+    type: long_text
+    document: sandbox_proof
+    mode: continue
+    on_exit: keep_visible
+    steps:
+      - id: derivation
+        text: |-
+          于是可以把结论写成更熟悉的形式：
+          $$\frac{x+y}{2}\ge\sqrt{xy}$$
+          这一步之后，后续分支会演示如何关闭和重新阅读文稿。
+        page_break_before: true
+    speed_cps: 30.0
+    next: hide_document
+  hide_document:
+    type: long_text_control
+    document: sandbox_proof
+    action: hide
+    next: count_visit
+  count_visit:
+    type: set
+    variable: score
+    op: add
+    value: 1
+    next: revisit_condition
+  revisit_condition:
+    type: condition
+    condition:
+      op: eq
+      left:
+        variable: score
+      right:
+        value: 1
+    then: revisit_choice
+    otherwise: close_document
+  revisit_choice:
+    type: choice
+    choices:
+      - id: reread
+        label: 重读刚才的推导
+        next: reread_jump
+      - id: finish
+        label: 继续完成实验
+        next: forced_policy
+  reread_jump:
+    type: jump
+    scene: null
+    target: lecture_continue
+  forced_policy:
+    type: playback
+    auto: forced
+    ctrl_fast_forward: block
+    next: forced_line
+  forced_line:
+    type: say
+    speaker: test
+    text: 这一句必须完整播放，不能手动推进，也不能使用 Ctrl 快进。
+    mode: start
+    next: restore_policy
+  restore_policy:
+    type: playback
+    auto: normal
+    ctrl_fast_forward: allow
+    next: close_document
+  close_document:
+    type: long_text_control
+    document: sandbox_proof
+    action: close
+    next: end
+  end:
+    type: end

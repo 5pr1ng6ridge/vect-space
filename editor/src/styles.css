@@ -3202,6 +3202,121 @@ body.timeline-resizing {
 .long-text-workspace-warning {
   color: #f2bb68;
 }
+
+.long-text-workspace-retry {
+  margin-top: 8px;
+}
+
+.long-text-workspace-preview-unavailable {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  color: #9bacbf;
+  font-size: 18px;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+}
+
+.long-text-workspace-document-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 13px;
+  padding: 0;
+  color: #9bacbf;
+  font-size: 10px;
+  list-style: none;
+}
+
+.long-text-workspace-document-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+}
+
+.long-text-workspace-document-list li.is-current {
+  border-color: #426b9d;
+  background: #192940;
+  color: #e6f0ff;
+}
+
+.long-text-workspace-document-list code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.long-text-workspace-context-status {
+  margin: 8px 0 12px;
+  color: #9fc8e5;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.long-text-workspace-choice-wizard {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 14px;
+  padding: 8px;
+  border: 1px solid #986f3e;
+  border-radius: 4px;
+  background: #241e16;
+}
+
+.long-text-workspace-choice-wizard strong {
+  color: #ffe2a9;
+  font-size: 10px;
+}
+
+.long-text-workspace-choice-wizard button,
+.long-text-workspace-step-editor-list button {
+  min-height: 26px;
+  padding: 4px 7px;
+  border: 1px solid #405777;
+  border-radius: 3px;
+  background: #18243a;
+  color: #d8e8fb;
+  font-size: 10px;
+  text-align: left;
+}
+
+.long-text-workspace-choice-wizard button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.long-text-workspace-step-editor-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.long-text-workspace-step-editor-list > label {
+  display: grid;
+  gap: 5px;
+  color: #9bacbf;
+  font-size: 10px;
+}
+
+.long-text-workspace-step-editor-list textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.long-text-workspace-step-editor-list button {
+  justify-self: start;
+}
+
+.long-text-workspace-step-editor-list code {
+  color: #badbff;
+}
 .flow-graph {
   min-width: 0;
   min-height: 0;

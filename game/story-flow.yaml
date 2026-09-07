@@ -12,6 +12,12 @@ nodes:
     "y": 540
     reveal:
       mode: always
+  sandbox:
+    title: 功能实验室
+    x: 1120
+    "y": 540
+    reveal:
+      mode: always
 edges:
 - id: prologue_to_test_scene
   from: prologue

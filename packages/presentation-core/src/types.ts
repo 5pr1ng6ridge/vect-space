@@ -124,6 +124,7 @@ export interface LongTextLayout {
 
 export interface LongTextPageSnapshot {
   document_id: string;
+  visible?: boolean;
   paper?: string | null;
   pagination: "continuous" | "auto" | "manual";
   font_size: number;

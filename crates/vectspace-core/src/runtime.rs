@@ -5,19 +5,21 @@ use crate::{
     model::{
         AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
         ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueHistoryEntry,
-        DialogueMode, DialoguePageSnapshot, LongTextPageSnapshot, LongTextStepSnapshot,
-        LoopingAudioSnapshot, MutationValue, PlaybackAutoMode, PlaybackSnapshot, PresentationCue,
-        PresentationCueKind, PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot,
-        RuntimeUpdate, ScalarValue, SceneNode, SpriteAction, SpriteSnapshot, StoryFlowReveal,
-        StoryFlowSnapshot, StoryLocation, TimelineChannels, TimelineTrack, UiMotionPreset,
-        UiMotionSlot, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
-        WorldSnapshot,
+        DialogueMode, DialoguePageSnapshot, LongTextControlAction, LongTextExit, LongTextMode,
+        LongTextPageSnapshot, LongTextStepSnapshot, LoopingAudioSnapshot, MutationValue,
+        PlaybackAutoMode, PlaybackSnapshot, PresentationCue, PresentationCueKind,
+        PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate,
+        ScalarValue, SceneNode, SpriteAction, SpriteSnapshot, StoryFlowReveal, StoryFlowSnapshot,
+        StoryLocation, TimelineChannels, TimelineTrack, UiMotionPreset, UiMotionSlot, ValueOperand,
+        VariableMap, VariableOperation, VariableScope, VariableType, WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
 use thiserror::Error;
 
 const MAX_IMMEDIATE_NODES: usize = 10_000;
+const MAX_LONG_TEXT_DOCUMENT_STEPS: usize = 1_024;
+const MAX_LONG_TEXT_DOCUMENT_BYTES: usize = 1024 * 1024;
 
 /// A deterministic choice supplied by the editor's timeline-context wizard.
 /// `visit` disambiguates loops that encounter the same choice node more than
@@ -110,7 +112,6 @@ impl RuntimeEngine {
                 read_content_version: content.manifest.content_version.clone(),
                 read_dialogues: Default::default(),
                 seen_presentations: Default::default(),
-                dialogue_history: Default::default(),
                 completed_scenes: Default::default(),
             },
         )
@@ -127,7 +128,7 @@ impl RuntimeEngine {
             profile_variables: profile.variables,
             read_dialogues: profile.read_dialogues,
             seen_presentations: profile.seen_presentations,
-            dialogue_history: profile.dialogue_history,
+            dialogue_history: Vec::new(),
             completed_scenes: profile.completed_scenes,
             started: false,
             next_update_id: 1,
@@ -379,6 +380,7 @@ impl RuntimeEngine {
         self.snapshot.revision = previous_revision;
         self.started = true;
         self.pending_runtime_update = None;
+        self.dialogue_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -405,6 +407,7 @@ impl RuntimeEngine {
         };
         self.started = true;
         self.pending_runtime_update = None;
+        self.dialogue_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -451,7 +454,6 @@ impl RuntimeEngine {
         prompt_id: String,
         step_index: u32,
     ) -> Result<Vec<PresentationCue>, RuntimeError> {
-        self.read_dialogues.insert(prompt_id);
         let scene_id = self.snapshot.location.scene_id.clone();
         let node_id = self.snapshot.location.node_id.clone();
         let scene = content
@@ -462,46 +464,71 @@ impl RuntimeEngine {
                 RuntimeError::Content(format!("节点不存在: {scene_id}/{node_id}"))
             })?;
         let SceneNode::LongText {
-            paper,
-            pagination,
-            font_size,
-            text_color,
-            layout,
+            document,
+            on_exit,
             steps,
             speed_cps,
             reveal_animation,
             next,
+            ..
         } = node
         else {
             return Err(RuntimeError::AdvanceNotAllowed);
         };
+        let current_step = steps.get(step_index as usize).ok_or_else(|| {
+            RuntimeError::Content(format!("{scene_id}/{node_id}: 当前长文本步骤索引无效"))
+        })?;
+        let document_id = long_text_document_id(&scene_id, &node_id, document.as_deref());
+        if prompt_id != format!("{document_id}/{}", current_step.id) {
+            return Err(RuntimeError::Content(format!(
+                "{scene_id}/{node_id}: 当前长文本提示与节点步骤不一致"
+            )));
+        }
+        let mut page =
+            self.snapshot.long_text_page.clone().ok_or_else(|| {
+                RuntimeError::Content(format!("{document_id}: 缺少长文本稳定页面"))
+            })?;
+        if page.document_id != document_id {
+            return Err(RuntimeError::Content(format!(
+                "{scene_id}/{node_id}: 当前文稿是 {}，不能推进 {document_id}",
+                page.document_id
+            )));
+        }
+        let active_page_index = page
+            .steps
+            .iter()
+            .position(|step| step.step_id == current_step.id)
+            .ok_or_else(|| {
+                RuntimeError::Content(format!("{scene_id}/{node_id}: 当前步骤不在累计文稿中"))
+            })?;
+        if page.active_step_index as usize != active_page_index {
+            return Err(RuntimeError::Content(format!(
+                "{scene_id}/{node_id}: 当前长文本活动段落不一致"
+            )));
+        }
+        self.read_dialogues.insert(prompt_id);
         let next_index = step_index
             .checked_add(1)
             .ok_or_else(|| RuntimeError::Content("长文本步骤索引溢出".to_owned()))?;
         if let Some(step) = steps.get(next_index as usize) {
-            let text = self.interpolate_text(content, &step.text)?;
-            let document_id = format!("{scene_id}/{node_id}");
-            let mut page = self.snapshot.long_text_page.clone().ok_or_else(|| {
-                RuntimeError::Content(format!("{document_id}: 缺少长文本稳定页面"))
-            })?;
-            if page.document_id != document_id
-                || page.paper != paper
-                || page.pagination != pagination
-                || page.font_size != font_size
-                || page.text_color != text_color
-                || page.layout != layout
-                || page.active_step_index != step_index
+            let page_index = if let Some(index) = page
+                .steps
+                .iter()
+                .position(|candidate| candidate.step_id == step.id)
             {
-                return Err(RuntimeError::Content(format!(
-                    "{document_id}: 当前长文本稳定页面不一致"
-                )));
-            }
-            page.steps.push(LongTextStepSnapshot {
-                step_id: step.id.clone(),
-                text: text.clone(),
-                page_break_before: step.page_break_before,
-            });
-            page.active_step_index = next_index;
+                index
+            } else {
+                let text = self.interpolate_text(content, &step.text)?;
+                page.steps.push(LongTextStepSnapshot {
+                    step_id: step.id.clone(),
+                    text,
+                    page_break_before: step.page_break_before,
+                });
+                page.steps.len() - 1
+            };
+            validate_long_text_document_size(&page, &scene_id, &node_id)?;
+            page.active_step_index = page_index as u32;
+            let text = page.steps[page_index].text.clone();
             self.snapshot.long_text_page = Some(page);
             let next_prompt_id = format!("{document_id}/{}", step.id);
             self.append_history(next_prompt_id.clone(), None, None, None, None, text.clone());
@@ -523,7 +550,7 @@ impl RuntimeEngine {
             )]);
         }
 
-        self.snapshot.long_text_page = None;
+        apply_long_text_exit(&mut self.snapshot, on_exit);
         self.snapshot.prompt = PromptSnapshot::None;
         self.snapshot.location.node_id = next;
         self.run_until_boundary(content)
@@ -614,13 +641,17 @@ impl RuntimeEngine {
             read_content_version: content.manifest.content_version.clone(),
             read_dialogues: self.read_dialogues.clone(),
             seen_presentations: self.seen_presentations.clone(),
-            dialogue_history: self.dialogue_history.clone(),
             completed_scenes: self.completed_scenes.clone(),
         }
     }
 
     pub fn dialogue_history(&self) -> &[DialogueHistoryEntry] {
         &self.dialogue_history
+    }
+
+    /// History is session-scoped presentation state and is never persisted.
+    pub fn clear_dialogue_history(&mut self) {
+        self.dialogue_history.clear();
     }
 
     pub fn story_flow(
@@ -698,6 +729,7 @@ impl RuntimeEngine {
         self.snapshot = snapshot;
         self.started = true;
         self.pending_runtime_update = None;
+        self.dialogue_history.clear();
         Ok(self.update_without_cues())
     }
 
@@ -973,6 +1005,9 @@ impl RuntimeEngine {
                     return Ok(cues);
                 }
                 SceneNode::LongText {
+                    document,
+                    mode,
+                    on_exit: _,
                     paper,
                     pagination,
                     font_size,
@@ -988,24 +1023,85 @@ impl RuntimeEngine {
                             "{scene_id}/{node_id}: 长文本没有可显示的步骤"
                         ))
                     })?;
-                    let text = self.interpolate_text(content, &step.text)?;
-                    let document_id = format!("{scene_id}/{node_id}");
-                    let prompt_id = format!("{document_id}/{}", step.id);
-                    self.snapshot.dialogue_page = None;
-                    self.snapshot.long_text_page = Some(LongTextPageSnapshot {
-                        document_id: document_id.clone(),
-                        paper,
-                        pagination,
-                        font_size,
-                        text_color,
-                        layout,
-                        steps: vec![LongTextStepSnapshot {
+                    let document_id =
+                        long_text_document_id(&scene_id, &node_id, document.as_deref());
+                    let mut page = match mode {
+                        LongTextMode::Start => {
+                            if step.page_break_before {
+                                return Err(RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: 长文本第一步骤不能在前方强制分页"
+                                )));
+                            }
+                            let text = self.interpolate_text(content, &step.text)?;
+                            let mut page = LongTextPageSnapshot {
+                                document_id: document_id.clone(),
+                                visible: true,
+                                paper,
+                                pagination: pagination.unwrap_or_default(),
+                                font_size: font_size
+                                    .unwrap_or(crate::model::LONG_TEXT_FONT_SIZE_DEFAULT),
+                                text_color: text_color.unwrap_or_else(|| {
+                                    crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()
+                                }),
+                                layout: layout.unwrap_or_default(),
+                                steps: Vec::new(),
+                                active_step_index: 0,
+                            };
+                            page.steps.push(LongTextStepSnapshot {
+                                step_id: step.id.clone(),
+                                text,
+                                page_break_before: step.page_break_before,
+                            });
+                            page
+                        }
+                        LongTextMode::Continue => {
+                            if paper.is_some()
+                                || pagination.is_some()
+                                || font_size.is_some()
+                                || text_color.is_some()
+                                || layout.is_some()
+                            {
+                                return Err(RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: continue 长文本不能重复定义纸张、分页、字号、颜色或布局"
+                                )));
+                            }
+                            let mut page =
+                                self.snapshot.long_text_page.clone().ok_or_else(|| {
+                                    RuntimeError::Content(format!(
+                                        "{scene_id}/{node_id}: 没有可接续的长文本 {document_id}"
+                                    ))
+                                })?;
+                            if page.document_id != document_id {
+                                return Err(RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: 当前文稿是 {}，不能接续 {document_id}",
+                                    page.document_id
+                                )));
+                            }
+                            page.visible = true;
+                            page
+                        }
+                    };
+                    let page_index = if let Some(index) = page
+                        .steps
+                        .iter()
+                        .position(|candidate| candidate.step_id == step.id)
+                    {
+                        index
+                    } else {
+                        let text = self.interpolate_text(content, &step.text)?;
+                        page.steps.push(LongTextStepSnapshot {
                             step_id: step.id.clone(),
-                            text: text.clone(),
+                            text,
                             page_break_before: step.page_break_before,
-                        }],
-                        active_step_index: 0,
-                    });
+                        });
+                        page.steps.len() - 1
+                    };
+                    validate_long_text_document_size(&page, &scene_id, &node_id)?;
+                    page.active_step_index = page_index as u32;
+                    let text = page.steps[page_index].text.clone();
+                    self.snapshot.dialogue_page = None;
+                    self.snapshot.long_text_page = Some(page);
+                    let prompt_id = format!("{document_id}/{}", step.id);
                     self.append_history(prompt_id.clone(), None, None, None, None, text.clone());
                     self.snapshot.prompt = PromptSnapshot::LongText {
                         prompt_id: prompt_id.clone(),
@@ -1024,6 +1120,30 @@ impl RuntimeEngine {
                         },
                     ));
                     return Ok(cues);
+                }
+                SceneNode::LongTextControl {
+                    document,
+                    action,
+                    next,
+                } => {
+                    let current = self.snapshot.long_text_page.as_mut().ok_or_else(|| {
+                        RuntimeError::Content(format!(
+                            "{scene_id}/{node_id}: 没有可控制的长文本 {document}"
+                        ))
+                    })?;
+                    let expected = long_text_document_id(&scene_id, &node_id, Some(&document));
+                    if current.document_id != expected {
+                        return Err(RuntimeError::Content(format!(
+                            "{scene_id}/{node_id}: 当前文稿是 {}，不能控制 {expected}",
+                            current.document_id
+                        )));
+                    }
+                    match action {
+                        LongTextControlAction::Show => current.visible = true,
+                        LongTextControlAction::Hide => current.visible = false,
+                        LongTextControlAction::Close => self.snapshot.long_text_page = None,
+                    }
+                    self.snapshot.location.node_id = next;
                 }
                 SceneNode::Choice { choices } => {
                     let prompt_id = format!("{scene_id}/{node_id}");
@@ -1052,7 +1172,6 @@ impl RuntimeEngine {
                         )));
                     }
                     self.snapshot.dialogue_page = None;
-                    self.snapshot.long_text_page = None;
                     self.snapshot.prompt = PromptSnapshot::Choice {
                         prompt_id,
                         choices: visible_choices,
@@ -1128,7 +1247,7 @@ impl RuntimeEngine {
                     // background or sprite cue.
                     if crosses_scene {
                         self.completed_scenes.insert(scene_id.clone());
-                        self.clear_scene_visual_state();
+                        self.leave_scene();
                         cues.push(self.cue(
                             CueGate::Runtime,
                             PresentationCueKind::ClearScene {
@@ -1520,6 +1639,11 @@ impl RuntimeEngine {
         self.snapshot.long_text_page = None;
     }
 
+    fn leave_scene(&mut self) {
+        self.clear_scene_visual_state();
+        self.dialogue_history.clear();
+    }
+
     fn finish_update(&mut self, cues: Vec<PresentationCue>, bump_revision: bool) -> RuntimeUpdate {
         if bump_revision {
             self.snapshot.revision = self.snapshot.revision.saturating_add(1);
@@ -1669,6 +1793,7 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::Clear { next, .. }
         | SceneNode::Say { next, .. }
         | SceneNode::LongText { next, .. }
+        | SceneNode::LongTextControl { next, .. }
         | SceneNode::Set { next, .. }
         | SceneNode::Playback { next, .. }
         | SceneNode::Wait { next, .. }
@@ -1686,6 +1811,53 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         }),
         SceneNode::Choice { .. } | SceneNode::Condition { .. } | SceneNode::End => None,
     }
+}
+
+fn long_text_document_id(scene_id: &str, node_id: &str, document: Option<&str>) -> String {
+    match document {
+        Some(document) => format!("{scene_id}/{document}"),
+        None => format!("{scene_id}/{node_id}"),
+    }
+}
+
+fn apply_long_text_exit(snapshot: &mut RuntimeSnapshot, exit: LongTextExit) {
+    match exit {
+        LongTextExit::Close => snapshot.long_text_page = None,
+        LongTextExit::Hide => {
+            if let Some(page) = snapshot.long_text_page.as_mut() {
+                page.visible = false;
+            }
+        }
+        LongTextExit::KeepVisible => {
+            if let Some(page) = snapshot.long_text_page.as_mut() {
+                page.visible = true;
+            }
+        }
+    }
+}
+
+fn validate_long_text_document_size(
+    page: &LongTextPageSnapshot,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), RuntimeError> {
+    if page.steps.len() > MAX_LONG_TEXT_DOCUMENT_STEPS {
+        return Err(RuntimeError::Content(format!(
+            "{scene_id}/{node_id}: 累计长文本步骤超过 {MAX_LONG_TEXT_DOCUMENT_STEPS}"
+        )));
+    }
+    let bytes = page
+        .steps
+        .iter()
+        .try_fold(0usize, |total, step| total.checked_add(step.text.len()))
+        .ok_or_else(|| RuntimeError::Content("累计长文本大小溢出".to_owned()))?;
+    if bytes > MAX_LONG_TEXT_DOCUMENT_BYTES {
+        return Err(RuntimeError::Content(format!(
+            "{scene_id}/{node_id}: 累计长文本超过 {} MiB",
+            MAX_LONG_TEXT_DOCUMENT_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
 }
 
 fn final_channel(channels: &TimelineChannels, id: &str) -> Option<f32> {
@@ -2120,18 +2292,33 @@ fn validate_snapshot(
                 "长文本页面或步骤无效".to_owned(),
             ));
         }
+        validate_long_text_document_size(
+            page,
+            &snapshot.location.scene_id,
+            &snapshot.location.node_id,
+        )
+        .map_err(|error| RuntimeError::InvalidSnapshot(error.to_string()))?;
         if let PromptSnapshot::LongText {
             prompt_id,
             document_id,
             step_id,
-            step_index,
+            step_index: _,
             text,
             ..
         } = &snapshot.prompt
         {
+            let expected_page_index = page
+                .steps
+                .iter()
+                .position(|step| step.step_id == *step_id)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidSnapshot(
+                        "当前长文本提示的步骤不在累计长文本页面中".to_owned(),
+                    )
+                })?;
             let active = &page.steps[page.active_step_index as usize];
             if &page.document_id != document_id
-                || page.active_step_index != *step_index
+                || page.active_step_index as usize != expected_page_index
                 || active.step_id != *step_id
                 || active.text != *text
                 || prompt_id != &format!("{document_id}/{step_id}")
@@ -2155,6 +2342,81 @@ fn validate_snapshot(
             snapshot.location.scene_id, snapshot.location.node_id
         )));
     }
+    if let Some(page) = &snapshot.long_text_page {
+        // A retained manuscript is scene-owned.  Do not allow a crafted save
+        // to inject a document from another scene or arbitrary step IDs into
+        // a dialogue/choice snapshot merely because its paper asset is valid.
+        let mut start_found = false;
+        let mut expected_presentation = None;
+        let mut known_steps = std::collections::BTreeMap::new();
+        for (candidate_id, candidate) in &scene.nodes {
+            let SceneNode::LongText {
+                document,
+                mode,
+                paper,
+                pagination,
+                font_size,
+                text_color,
+                layout,
+                steps,
+                ..
+            } = candidate
+            else {
+                continue;
+            };
+            let document_id = long_text_document_id(
+                &snapshot.location.scene_id,
+                candidate_id,
+                document.as_deref(),
+            );
+            if document_id != page.document_id {
+                continue;
+            }
+            if *mode == LongTextMode::Start {
+                start_found = true;
+                expected_presentation = Some((
+                    paper.clone(),
+                    pagination.unwrap_or_default(),
+                    font_size.unwrap_or(crate::model::LONG_TEXT_FONT_SIZE_DEFAULT),
+                    text_color
+                        .clone()
+                        .unwrap_or_else(|| crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                    layout.clone().unwrap_or_default(),
+                ));
+            }
+            for step in steps {
+                known_steps.insert(step.id.as_str(), step);
+            }
+        }
+        if !start_found {
+            return Err(RuntimeError::InvalidSnapshot(
+                "长文本页面不属于当前场景的已声明文稿".to_owned(),
+            ));
+        }
+        if let Some((paper, pagination, font_size, text_color, layout)) = expected_presentation {
+            if page.paper != paper
+                || page.pagination != pagination
+                || page.font_size != font_size
+                || page.text_color != text_color
+                || page.layout != layout
+            {
+                return Err(RuntimeError::InvalidSnapshot(
+                    "累计长文本的纸张、分页或排版样式与开始节点不一致".to_owned(),
+                ));
+            }
+        }
+        let mut seen_steps = std::collections::BTreeSet::new();
+        if page.steps.iter().any(|step| {
+            !seen_steps.insert(step.step_id.as_str())
+                || known_steps
+                    .get(step.step_id.as_str())
+                    .is_none_or(|definition| definition.page_break_before != step.page_break_before)
+        }) {
+            return Err(RuntimeError::InvalidSnapshot(
+                "累计长文本包含未知或重复步骤".to_owned(),
+            ));
+        }
+    }
     if matches!(snapshot.prompt, PromptSnapshot::LongText { .. })
         && !matches!(
             scene.nodes.get(&snapshot.location.node_id),
@@ -2164,6 +2426,24 @@ fn validate_snapshot(
         return Err(RuntimeError::InvalidSnapshot(
             "长文本提示的位置不是 long_text 节点".to_owned(),
         ));
+    }
+    if let PromptSnapshot::LongText {
+        step_index,
+        step_id,
+        ..
+    } = &snapshot.prompt
+    {
+        if let Some(SceneNode::LongText { steps, .. }) = scene.nodes.get(&snapshot.location.node_id)
+        {
+            let node_step = steps.get(*step_index as usize).ok_or_else(|| {
+                RuntimeError::InvalidSnapshot("当前长文本节点步骤索引无效".to_owned())
+            })?;
+            if node_step.id != *step_id {
+                return Err(RuntimeError::InvalidSnapshot(
+                    "当前长文本提示的节点步骤不一致".to_owned(),
+                ));
+            }
+        }
     }
     let mut referenced_assets = Vec::new();
     if let Some(background) = &snapshot.world.background {
@@ -2340,6 +2620,14 @@ mod tests {
             text_color: None,
             segments: vec!["旧文本".to_owned()],
         });
+        runtime.append_history(
+            "prologue/old".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            "历史应保留".to_owned(),
+        );
 
         let cues = runtime.run_until_boundary(&content).unwrap();
         assert_eq!(runtime.snapshot.world.background, None);
@@ -2347,6 +2635,7 @@ mod tests {
         assert_eq!(runtime.snapshot.world.camera, CameraSnapshot::default());
         assert!(runtime.snapshot.world.persistent_effects.is_empty());
         assert_eq!(runtime.snapshot.dialogue_page, None);
+        assert_eq!(runtime.dialogue_history().len(), 1);
         assert!(matches!(
             cues.as_slice(),
             [PresentationCue {
@@ -2432,6 +2721,7 @@ mod tests {
         );
         assert_eq!(update.snapshot.world.background, None);
         assert!(update.snapshot.world.sprites.is_empty());
+        assert!(runtime.dialogue_history().is_empty());
         assert!(matches!(
             update.cues.as_slice(),
             [PresentationCue {
@@ -2448,6 +2738,53 @@ mod tests {
             destination.snapshot.prompt,
             PromptSnapshot::End { .. }
         ));
+    }
+
+    #[test]
+    fn same_scene_jump_keeps_dialogue_history() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "history_first".to_owned();
+        scene.nodes.insert(
+            "history_first".to_owned(),
+            SceneNode::Say {
+                speaker: None,
+                text: "第一句".to_owned(),
+                mode: DialogueMode::Start,
+                page_id: None,
+                speed_cps: None,
+                reveal_animation: None,
+                next: "history_jump".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "history_jump".to_owned(),
+            SceneNode::Jump {
+                scene: None,
+                target: "history_second".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "history_second".to_owned(),
+            SceneNode::Say {
+                speaker: None,
+                text: "第二句".to_owned(),
+                mode: DialogueMode::Start,
+                page_id: None,
+                speed_cps: None,
+                reveal_animation: None,
+                next: "history_end".to_owned(),
+            },
+        );
+        scene.nodes.insert("history_end".to_owned(), SceneNode::End);
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_new_game(&content).unwrap();
+        assert_eq!(runtime.dialogue_history().len(), 1);
+        let second = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert_eq!(second.snapshot.location.node_id, "history_end");
+        assert_eq!(runtime.dialogue_history().len(), 2);
     }
 
     #[test]
@@ -2859,11 +3196,14 @@ mod tests {
         scene.nodes.insert(
             "long_text_test".to_owned(),
             SceneNode::LongText {
+                document: None,
+                mode: LongTextMode::Start,
+                on_exit: LongTextExit::Close,
                 paper: None,
-                pagination: crate::model::LongTextPagination::Manual,
-                font_size: 36.0,
-                text_color: crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned(),
-                layout: crate::model::LongTextLayout::default(),
+                pagination: Some(crate::model::LongTextPagination::Manual),
+                font_size: Some(36.0),
+                text_color: Some(crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                layout: Some(crate::model::LongTextLayout::default()),
                 steps: vec![
                     crate::model::LongTextStep {
                         id: "definition".to_owned(),
@@ -2963,6 +3303,319 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn long_text_can_be_continued_after_an_intervening_dialogue() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "lesson_start".to_owned();
+        scene.nodes = BTreeMap::from([
+            (
+                "lesson_start".to_owned(),
+                SceneNode::LongText {
+                    document: Some("lesson".to_owned()),
+                    mode: LongTextMode::Start,
+                    on_exit: LongTextExit::Hide,
+                    paper: None,
+                    pagination: Some(crate::model::LongTextPagination::Manual),
+                    font_size: Some(32.0),
+                    text_color: Some(crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                    layout: Some(crate::model::LongTextLayout::default()),
+                    steps: vec![crate::model::LongTextStep {
+                        id: "statement".to_owned(),
+                        text: "命题。".to_owned(),
+                        page_break_before: false,
+                    }],
+                    speed_cps: None,
+                    reveal_animation: None,
+                    next: "interlude".to_owned(),
+                },
+            ),
+            (
+                "interlude".to_owned(),
+                SceneNode::Say {
+                    speaker: None,
+                    text: "先看一个图。".to_owned(),
+                    mode: DialogueMode::Start,
+                    page_id: None,
+                    speed_cps: None,
+                    reveal_animation: None,
+                    next: "lesson_continue".to_owned(),
+                },
+            ),
+            (
+                "lesson_continue".to_owned(),
+                SceneNode::LongText {
+                    document: Some("lesson".to_owned()),
+                    mode: LongTextMode::Continue,
+                    on_exit: LongTextExit::KeepVisible,
+                    paper: None,
+                    pagination: None,
+                    font_size: None,
+                    text_color: None,
+                    layout: None,
+                    steps: vec![crate::model::LongTextStep {
+                        id: "proof".to_owned(),
+                        text: "证明。".to_owned(),
+                        page_break_before: true,
+                    }],
+                    speed_cps: None,
+                    reveal_animation: None,
+                    next: "end".to_owned(),
+                },
+            ),
+            ("end".to_owned(), SceneNode::End),
+        ]);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_new_game(&content).unwrap();
+        assert_eq!(
+            first.snapshot.long_text_page.as_ref().unwrap().steps.len(),
+            1
+        );
+        let interlude = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(interlude
+            .snapshot
+            .long_text_page
+            .as_ref()
+            .is_some_and(|page| !page.visible));
+        let continuation = runtime
+            .advance(&content, interlude.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(matches!(
+            continuation.snapshot.prompt,
+            PromptSnapshot::LongText { .. }
+        ));
+        let page = continuation.snapshot.long_text_page.as_ref().unwrap();
+        assert!(page.visible);
+        assert_eq!(
+            page.steps
+                .iter()
+                .map(|step| step.step_id.as_str())
+                .collect::<Vec<_>>(),
+            ["statement", "proof"]
+        );
+        assert_eq!(page.active_step_index, 1);
+
+        // The prompt's step_index is local to the continuation node (zero),
+        // while the retained page points at the second cumulative step (one).
+        // Loading this snapshot must validate both indexes independently.
+        let saved = continuation.snapshot.clone();
+        let profile = runtime.profile_state(&content);
+        let mut restored = RuntimeEngine::with_profile(&content, profile).unwrap();
+        let loaded = restored.load_snapshot(&content, saved).unwrap();
+        assert!(loaded.cues.is_empty());
+        assert_eq!(
+            loaded
+                .snapshot
+                .long_text_page
+                .as_ref()
+                .unwrap()
+                .active_step_index,
+            1
+        );
+        assert!(matches!(
+            loaded.snapshot.prompt,
+            PromptSnapshot::LongText { step_index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn revisiting_a_continuation_reuses_resolved_text_without_appending() {
+        let mut content = catalog();
+        content.manifest.variables.insert(
+            "lecture_score".to_owned(),
+            crate::model::VariableDefinition {
+                scope: VariableScope::Save,
+                value_type: VariableType::Integer,
+                default: ScalarValue::Integer(0),
+            },
+        );
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "start_lecture".to_owned();
+        scene.nodes = BTreeMap::from([
+            (
+                "start_lecture".to_owned(),
+                SceneNode::LongText {
+                    document: Some("lesson".to_owned()),
+                    mode: LongTextMode::Start,
+                    on_exit: LongTextExit::KeepVisible,
+                    paper: None,
+                    pagination: Some(crate::model::LongTextPagination::Auto),
+                    font_size: Some(32.0),
+                    text_color: Some(crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                    layout: Some(crate::model::LongTextLayout::default()),
+                    steps: vec![crate::model::LongTextStep {
+                        id: "statement".to_owned(),
+                        text: "分数是 [var=lecture_score]。".to_owned(),
+                        page_break_before: false,
+                    }],
+                    speed_cps: None,
+                    reveal_animation: None,
+                    next: "increase".to_owned(),
+                },
+            ),
+            (
+                "increase".to_owned(),
+                SceneNode::Set {
+                    variable: "lecture_score".to_owned(),
+                    op: VariableOperation::Add,
+                    value: Some(MutationValue::Literal(ScalarValue::Integer(1))),
+                    next: "continue_lecture".to_owned(),
+                },
+            ),
+            (
+                "continue_lecture".to_owned(),
+                SceneNode::LongText {
+                    document: Some("lesson".to_owned()),
+                    mode: LongTextMode::Continue,
+                    on_exit: LongTextExit::KeepVisible,
+                    paper: None,
+                    pagination: None,
+                    font_size: None,
+                    text_color: None,
+                    layout: None,
+                    steps: vec![crate::model::LongTextStep {
+                        id: "proof".to_owned(),
+                        text: "证明时分数仍是 [var=lecture_score]。".to_owned(),
+                        page_break_before: false,
+                    }],
+                    speed_cps: None,
+                    reveal_animation: None,
+                    next: "revisit".to_owned(),
+                },
+            ),
+            (
+                "revisit".to_owned(),
+                SceneNode::Jump {
+                    scene: None,
+                    target: "continue_lecture".to_owned(),
+                },
+            ),
+        ]);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_new_game(&content).unwrap();
+        let second = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        let PromptSnapshot::LongText { text, .. } = &second.snapshot.prompt else {
+            panic!("expected continuation prompt")
+        };
+        assert_eq!(text, "证明时分数仍是 1。");
+        assert_eq!(
+            second.snapshot.long_text_page.as_ref().unwrap().steps.len(),
+            2
+        );
+
+        let revisited = runtime
+            .advance(&content, second.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        let PromptSnapshot::LongText { text, is_read, .. } = &revisited.snapshot.prompt else {
+            panic!("expected re-entered continuation prompt")
+        };
+        assert_eq!(
+            text, "证明时分数仍是 1。",
+            "stored text must not be re-interpolated"
+        );
+        assert!(*is_read, "a previously completed step is read on revisit");
+        assert_eq!(
+            revisited
+                .snapshot
+                .long_text_page
+                .as_ref()
+                .unwrap()
+                .steps
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn long_text_controls_toggle_visibility_and_close_the_retained_page() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "start_lecture".to_owned();
+        scene.nodes = BTreeMap::from([
+            (
+                "start_lecture".to_owned(),
+                SceneNode::LongText {
+                    document: Some("lesson".to_owned()),
+                    mode: LongTextMode::Start,
+                    on_exit: LongTextExit::KeepVisible,
+                    paper: None,
+                    pagination: Some(crate::model::LongTextPagination::Auto),
+                    font_size: Some(32.0),
+                    text_color: Some(crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()),
+                    layout: Some(crate::model::LongTextLayout::default()),
+                    steps: vec![crate::model::LongTextStep {
+                        id: "statement".to_owned(),
+                        text: "命题".to_owned(),
+                        page_break_before: false,
+                    }],
+                    speed_cps: None,
+                    reveal_animation: None,
+                    next: "hide".to_owned(),
+                },
+            ),
+            (
+                "hide".to_owned(),
+                SceneNode::LongTextControl {
+                    document: "lesson".to_owned(),
+                    action: LongTextControlAction::Hide,
+                    next: "show".to_owned(),
+                },
+            ),
+            (
+                "show".to_owned(),
+                SceneNode::LongTextControl {
+                    document: "lesson".to_owned(),
+                    action: LongTextControlAction::Show,
+                    next: "observe".to_owned(),
+                },
+            ),
+            (
+                "observe".to_owned(),
+                SceneNode::Say {
+                    speaker: None,
+                    text: "文稿已重新显示。".to_owned(),
+                    mode: DialogueMode::Start,
+                    page_id: None,
+                    speed_cps: None,
+                    reveal_animation: None,
+                    next: "close".to_owned(),
+                },
+            ),
+            (
+                "close".to_owned(),
+                SceneNode::LongTextControl {
+                    document: "lesson".to_owned(),
+                    action: LongTextControlAction::Close,
+                    next: "end".to_owned(),
+                },
+            ),
+            ("end".to_owned(), SceneNode::End),
+        ]);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_new_game(&content).unwrap();
+        let say = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        let page = say.snapshot.long_text_page.as_ref().unwrap();
+        assert!(page.visible, "show must win over the preceding hide");
+        assert!(matches!(
+            say.snapshot.prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        let ended = runtime
+            .advance(&content, say.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(ended.snapshot.long_text_page.is_none());
+        assert!(matches!(ended.snapshot.prompt, PromptSnapshot::End { .. }));
     }
 
     #[test]
@@ -3153,7 +3806,8 @@ mod tests {
             .unwrap();
         assert!(matches!(ending.snapshot.prompt, PromptSnapshot::End { .. }));
         assert!(runtime.completed_scenes.contains("test_scene"));
-        assert_eq!(runtime.dialogue_history().len(), 4);
+        // Crossing into test_scene starts a fresh scene-local history.
+        assert!(runtime.dialogue_history().is_empty());
     }
 
     fn interactive_dialogue(content: &ContentCatalog) -> RuntimeEngine {
@@ -3719,7 +4373,7 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_history_and_story_flow_are_profile_scoped() {
+    fn dialogue_history_is_scene_local_and_resets_on_new_game() {
         let content = catalog();
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         runtime.snapshot.location.node_id = "introduction".to_owned();
@@ -3742,7 +4396,7 @@ mod tests {
             .any(|node| node.scene_id == "prologue" && node.completed));
 
         runtime.start_new_game(&content).unwrap();
-        assert_eq!(runtime.dialogue_history().len(), 1);
+        assert!(runtime.dialogue_history().is_empty());
         assert!(runtime.completed_scenes.contains("prologue"));
     }
 }

@@ -19,10 +19,14 @@ import {
   type TextRevealAnimation,
 } from "@vectspace/text";
 import type {
+  BuildNodePreviewResult,
   EditorAsset,
   EditorProject,
   LongTextLayout,
   LongTextNode,
+  LongTextStep,
+  PreviewChoiceDecision,
+  TimelinePreviewSettings,
 } from "../types";
 import { MarkupPreview } from "./MarkupPreview";
 
@@ -66,6 +70,8 @@ export interface LongTextWorkspaceProps {
   redoAvailable: boolean;
   onBack(): void;
   onChange(node: LongTextNode): void;
+  onPreviewSettingsChange(settings: TimelinePreviewSettings): void;
+  onSplitLongText(stepIndex: number): void;
   onSave(): void;
   onUndo(): void;
   onRedo(): void;
@@ -87,6 +93,8 @@ export function LongTextWorkspace({
   redoAvailable,
   onBack,
   onChange,
+  onPreviewSettingsChange,
+  onSplitLongText,
   onSave,
   onUndo,
   onRedo,
@@ -108,10 +116,31 @@ export function LongTextWorkspace({
   const [resolvedStepTexts, setResolvedStepTexts] = useState<
     Readonly<Record<string, string>>
   >({});
+  // The Rust preview returns the retained document prefix. Keep that prefix
+  // separate from the editable node so continuation nodes can render the
+  // complete accumulated manuscript while still allowing only the current
+  // node's steps to be edited.
+  const [previewDocumentSteps, setPreviewDocumentSteps] = useState<
+    readonly LongTextStep[]
+  >([]);
   const [previewContextError, setPreviewContextError] = useState<string | null>(
     null,
   );
+  const [previewContextStatus, setPreviewContextStatus] =
+    useState("尚未建立真实上下文");
   const [previewContextBusy, setPreviewContextBusy] = useState(false);
+  // The first frame must wait for Rust's deterministic context; rendering raw
+  // YAML here would make a continuation look valid before its retained page
+  // has been proven reachable.
+  const [previewUnavailable, setPreviewUnavailable] = useState(true);
+  const [previewOrigin, setPreviewOrigin] = useState<
+    "story_entry" | "scene_entry"
+  >("story_entry");
+  const [canRetryFromSceneEntry, setCanRetryFromSceneEntry] = useState(false);
+  const [pendingChoice, setPendingChoice] = useState<Extract<
+    BuildNodePreviewResult,
+    { status: "needs_choice" }
+  > | null>(null);
   const stageWrapRef = useRef<HTMLDivElement>(null);
   const designRef = useRef<HTMLDivElement>(null);
   const gestureRef = useRef<LayoutGesture | null>(null);
@@ -133,12 +162,6 @@ export function LongTextWorkspace({
     backgroundAsset?.kind === "background"
       ? assetUrl(backgroundAsset.absolute_path)
       : undefined;
-  const paperAsset =
-    draft.paper === null || draft.paper === undefined
-      ? undefined
-      : assetsById.get(draft.paper);
-  const paperUrl =
-    paperAsset?.kind === "gui" ? assetUrl(paperAsset.absolute_path) : undefined;
   const previewFont =
     assets.find((asset) => asset.id === project.manifest.default_font) ??
     assets.find((asset) => asset.id === "font.fusion_pixel") ??
@@ -147,21 +170,87 @@ export function LongTextWorkspace({
     previewFont === undefined ? undefined : assetUrl(previewFont.absolute_path),
     `Long Text ${previewFont?.id ?? "default"}`,
   );
-  const layout = draft.layout ?? DEFAULT_LAYOUT;
-  const previewSteps = useMemo(
-    () =>
-      draft.steps.length > 0
-        ? draft.steps
-        : [{ id: "preview", text: "长文本预览", page_break_before: false }],
-    [draft.steps],
-  );
+  const isContinuation = draft.mode === "continue";
+  const inheritedStart = useMemo(() => {
+    if (!isContinuation) return undefined;
+    const scene = project.scenes.find((file) => file.definition.id === sceneId);
+    if (scene === undefined) return undefined;
+    const documentId = draft.document ?? nodeId;
+    const found = Object.entries(scene.definition.nodes).find(
+      ([candidateId, candidate]) =>
+        candidate.type === "long_text" &&
+        (candidate.mode ?? "start") === "start" &&
+        (candidate.document ?? candidateId) === documentId,
+    );
+    return found?.[1].type === "long_text" ? found[1] : undefined;
+  }, [draft.document, isContinuation, nodeId, project.scenes, sceneId]);
+  const presentationNode = isContinuation ? inheritedStart : draft;
+  const layout = presentationNode?.layout ?? DEFAULT_LAYOUT;
+  const presentationFontSize = presentationNode?.font_size ?? 32;
+  const presentationTextColor = presentationNode?.text_color ?? "#212533";
+  const presentationPagination = presentationNode?.pagination ?? "auto";
+  const presentationPaper = presentationNode?.paper;
+  const documentId = draft.document ?? nodeId;
+  const sameDocumentNodes = useMemo(() => {
+    const scene = project.scenes.find((file) => file.definition.id === sceneId);
+    if (scene === undefined) return [] as const;
+    return Object.entries(scene.definition.nodes)
+      .filter(([candidateId, candidate]) => {
+        if (candidate.type !== "long_text") return false;
+        return (candidate.document ?? candidateId) === documentId;
+      })
+      .map(([candidateId, candidate]) => ({
+        id: candidateId,
+        mode:
+          candidate.type === "long_text"
+            ? (candidate.mode ?? "start")
+            : "start",
+      }));
+  }, [documentId, project.scenes, sceneId]);
+  const paperAsset =
+    presentationPaper === null || presentationPaper === undefined
+      ? undefined
+      : assetsById.get(presentationPaper);
+  const paperUrl =
+    paperAsset?.kind === "gui" ? assetUrl(paperAsset.absolute_path) : undefined;
+  const previewSteps = useMemo<readonly LongTextStep[]>(() => {
+    // A failed/unfinished continuation must not silently fall back to its
+    // local steps: those steps are not a valid cumulative manuscript until
+    // Rust has proved that the retained document can be reached. Keep the
+    // canvas empty while the diagnostic or choice wizard is visible.
+    if (previewUnavailable) return [];
+    const source =
+      previewDocumentSteps.length > 0 ? previewDocumentSteps : draft.steps;
+    if (source.length === 0) {
+      return [{ id: "preview", text: "长文本预览", page_break_before: false }];
+    }
+    if (previewDocumentSteps.length === 0) return source;
+
+    // A target node may contain steps that have not been reached yet. They do
+    // not exist in the retained page returned by Rust, so append them in node
+    // order using the resolved preview text when available. Existing page
+    // entries deliberately win: revisiting a step must keep its original
+    // interpolation rather than silently rewriting the manuscript.
+    const present = new Set(source.map((step) => step.id));
+    const additions = draft.steps
+      .filter((step) => !present.has(step.id))
+      .map((step) => ({
+        ...step,
+        text: resolvedStepTexts[step.id] ?? step.text,
+      }));
+    return additions.length === 0 ? source : [...source, ...additions];
+  }, [
+    draft.steps,
+    previewDocumentSteps,
+    previewUnavailable,
+    resolvedStepTexts,
+  ]);
   const previewSourceById = useMemo(
     () =>
       new Map(
         previewSteps.map((step) => [
           step.id,
-          resolvedStepTexts[step.id] ??
-            (step.id === previewSteps[0]?.id ? "等待 Rust 预览…" : ""),
+          resolvedStepTexts[step.id] ?? step.text,
         ]),
       ),
     [previewSteps, resolvedStepTexts],
@@ -172,7 +261,7 @@ export function LongTextWorkspace({
       result[step.id] = JSON.stringify([
         step.id,
         previewSourceById.get(step.id) ?? "",
-        draft.font_size ?? 32,
+        presentationFontSize,
         layout.width,
         layout.padding_x,
         font.fontFamily ?? "system",
@@ -181,7 +270,7 @@ export function LongTextWorkspace({
     }
     return result;
   }, [
-    draft.font_size,
+    presentationFontSize,
     font.fontFamily,
     font.ready,
     layout.padding_x,
@@ -219,15 +308,15 @@ export function LongTextWorkspace({
             stepLayouts[step.id]?.key === stepLayoutKeys[step.id]
               ? stepLayouts[step.id].snapshot
               : undefined,
-          fallbackHeight: Math.max(88, (draft.font_size ?? 32) * 2.2),
+          fallbackHeight: Math.max(88, presentationFontSize * 2.2),
         })),
-        draft.pagination ?? "auto",
+        presentationPagination,
         layout.page_height,
         layout.padding_y,
       ),
     [
-      draft.font_size,
-      draft.pagination,
+      presentationFontSize,
+      presentationPagination,
       layout.page_height,
       layout.padding_y,
       previewSteps,
@@ -241,22 +330,24 @@ export function LongTextWorkspace({
     for (const page of previewPages) {
       offsets.push(next);
       next +=
-        page.height + (draft.pagination === "continuous" ? 0 : layout.page_gap);
+        page.height +
+        (presentationPagination === "continuous" ? 0 : layout.page_gap);
     }
     return offsets;
-  }, [draft.pagination, layout.page_gap, previewPages]);
+  }, [layout.page_gap, presentationPagination, previewPages]);
   const previewSurfaceHeight = useMemo(
     () =>
       previewPages.reduce(
         (total, page, index) =>
           total +
           page.height +
-          (draft.pagination !== "continuous" && index < previewPages.length - 1
+          (presentationPagination !== "continuous" &&
+          index < previewPages.length - 1
             ? layout.page_gap
             : 0),
         0,
       ),
-    [draft.pagination, layout.page_gap, previewPages],
+    [layout.page_gap, presentationPagination, previewPages],
   );
   const previewStepIndexById = useMemo(
     () => new Map(previewSteps.map((step, index) => [step.id, index] as const)),
@@ -267,18 +358,30 @@ export function LongTextWorkspace({
     previewSurfaceHeight - layout.height + 240,
   );
   const previewRequestGeneration = useRef(0);
+  const previewSettings = useMemo(
+    () =>
+      project.layout.timeline_previews?.[`${sceneId}/${nodeId}`] ?? {
+        variable_overrides: {},
+        choices: [],
+      },
+    [nodeId, project.layout.timeline_previews, sceneId],
+  );
   useEffect(() => {
     const generation = ++previewRequestGeneration.current;
     const loadPreview = async (): Promise<void> => {
       setPreviewContextBusy(true);
       setPreviewContextError(null);
-      const savedSettings =
-        project.layout.timeline_previews?.[`${sceneId}/${nodeId}`];
+      setPendingChoice(null);
+      setPreviewUnavailable(true);
+      setPreviewDocumentSteps([]);
+      setPreviewRun(null);
+      setPreviewPlaying(false);
+      const savedSettings = previewSettings;
       try {
         const result = await editorApi.buildNodePreview({
           project: projectRequest(project),
           target: { scene_id: sceneId, node_id: nodeId },
-          origin: "story_entry",
+          origin: previewOrigin,
           variable_overrides: savedSettings?.variable_overrides ?? {},
           choices: savedSettings?.choices ?? [],
         });
@@ -287,30 +390,90 @@ export function LongTextWorkspace({
           setPreviewContextError(
             `真实预览需要先选择 ${result.location.scene_id}/${result.location.node_id}`,
           );
+          setCanRetryFromSceneEntry(false);
+          setPreviewContextStatus(
+            `等待选择：${result.location.scene_id}/${result.location.node_id}`,
+          );
+          setPendingChoice(result);
           setResolvedStepTexts({});
+          setPreviewDocumentSteps([]);
+          setPreviewUnavailable(true);
           setPreviewBackgroundId(null);
           return;
         }
         if (result.status === "unreachable") {
+          setPreviewContextStatus("无法到达目标节点");
           setPreviewContextError(result.message);
+          setCanRetryFromSceneEntry(result.can_retry_from_scene_entry);
           setResolvedStepTexts({});
+          setPreviewDocumentSteps([]);
+          setPreviewUnavailable(true);
+          setPreviewRun(null);
+          setPreviewPlaying(false);
           setPreviewBackgroundId(null);
           return;
         }
-        const fromPage = Object.fromEntries(
-          (result.update.snapshot.long_text_page?.steps ?? []).map((step) => [
-            step.step_id,
-            step.text,
-          ]),
+        const page = result.update.snapshot.long_text_page;
+        const resolved = result.resolved_texts ?? {};
+        const pageSteps = page?.steps ?? [];
+        const pageIds = new Set(pageSteps.map((step) => step.step_id));
+        const targetSteps = draft.steps
+          .filter((step) => !pageIds.has(step.id))
+          .map((step) => ({
+            id: step.id,
+            text: resolved[step.id] ?? step.text,
+            page_break_before: step.page_break_before,
+          }));
+        setPreviewDocumentSteps([
+          ...pageSteps.map((step) => ({
+            id: step.step_id,
+            text: step.text,
+            page_break_before: step.page_break_before,
+          })),
+          ...targetSteps,
+        ]);
+        setResolvedStepTexts({
+          ...resolved,
+          // Retained page text is authoritative for steps that were already
+          // visited; a fresh interpolation result must not rewrite a
+          // previously saved/revisited paragraph.
+          ...Object.fromEntries(
+            pageSteps.map((step) => [step.step_id, step.text]),
+          ),
+        });
+        const activeStepId =
+          page === null || page === undefined
+            ? undefined
+            : page.steps[page.active_step_index]?.step_id;
+        if (activeStepId !== undefined) {
+          const activeIndex = [
+            ...pageSteps.map((step) => step.step_id),
+            ...targetSteps.map((step) => step.id),
+          ].indexOf(activeStepId);
+          if (activeIndex >= 0) setPreviewStepIndex(activeIndex);
+        } else {
+          setPreviewStepIndex(0);
+        }
+        setPreviewRun(null);
+        setPreviewPlaying(false);
+        setPreviewContextStatus(
+          `已捕获真实进入状态（${result.trace.length} 个边界）`,
         );
-        setResolvedStepTexts({ ...fromPage, ...(result.resolved_texts ?? {}) });
+        setCanRetryFromSceneEntry(false);
+        setPreviewUnavailable(false);
         setPreviewBackgroundId(result.update.snapshot.world.background);
       } catch (error: unknown) {
         if (generation !== previewRequestGeneration.current) return;
         setPreviewContextError(
           error instanceof Error ? error.message : "真实预览构建失败",
         );
+        setPreviewContextStatus("上下文构建失败");
+        setCanRetryFromSceneEntry(false);
         setResolvedStepTexts({});
+        setPreviewDocumentSteps([]);
+        setPreviewUnavailable(true);
+        setPreviewRun(null);
+        setPreviewPlaying(false);
         setPreviewBackgroundId(null);
       } finally {
         if (generation === previewRequestGeneration.current)
@@ -324,7 +487,38 @@ export function LongTextWorkspace({
       if (generation === previewRequestGeneration.current)
         previewRequestGeneration.current += 1;
     };
-  }, [nodeId, project, sceneId]);
+  }, [draft.steps, nodeId, previewOrigin, previewSettings, project, sceneId]);
+
+  const onChoice = useCallback(
+    (choiceId: string): void => {
+      if (pendingChoice === null) return;
+      const choices: PreviewChoiceDecision[] = [
+        ...previewSettings.choices.filter(
+          (choice) =>
+            !(
+              choice.scene_id === pendingChoice.location.scene_id &&
+              choice.node_id === pendingChoice.location.node_id &&
+              choice.visit === pendingChoice.visit
+            ),
+        ),
+        {
+          scene_id: pendingChoice.location.scene_id,
+          node_id: pendingChoice.location.node_id,
+          visit: pendingChoice.visit,
+          choice_id: choiceId,
+        },
+      ];
+      const nextSettings: TimelinePreviewSettings = {
+        ...previewSettings,
+        choices,
+      };
+      onPreviewSettingsChange(nextSettings);
+      // The project update will re-run the effect as well; invoking the
+      // effect through the normal state update keeps the request source of
+      // truth in the saved .vectspace metadata.
+    },
+    [onPreviewSettingsChange, pendingChoice, previewSettings],
+  );
   const safePreviewStepIndex = clamp(
     previewStepIndex,
     0,
@@ -530,18 +724,19 @@ export function LongTextWorkspace({
 
   const updateLayout = useCallback(
     (nextLayout: LongTextLayout, commit = true): void => {
+      if (isContinuation) return;
       const next = { ...draftRef.current, layout: nextLayout };
       if (commit) commitNode(next);
       else replaceDraft(next);
     },
-    [commitNode, replaceDraft],
+    [commitNode, isContinuation, replaceDraft],
   );
 
   const beginGesture = (
     event: ReactPointerEvent<HTMLElement>,
     mode: LayoutGestureMode,
   ): void => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || isContinuation) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -619,15 +814,26 @@ export function LongTextWorkspace({
 
   const updateField = useCallback(
     <K extends keyof LongTextNode>(field: K, value: LongTextNode[K]): void => {
+      if (
+        isContinuation &&
+        (field === "font_size" ||
+          field === "layout" ||
+          field === "pagination" ||
+          field === "paper" ||
+          field === "text_color")
+      ) {
+        return;
+      }
       commitNode({ ...draftRef.current, [field]: value });
     },
-    [commitNode],
+    [commitNode, isContinuation],
   );
 
   const updateLayoutField = (
     field: keyof LongTextLayout,
     value: number,
   ): void => {
+    if (isContinuation) return;
     updateLayout({
       ...(draftRef.current.layout ?? DEFAULT_LAYOUT),
       [field]: value,
@@ -671,11 +877,11 @@ export function LongTextWorkspace({
     height: `${previewSurfaceHeight}px`,
     "--long-text-padding-x": `${layout.padding_x}px`,
     "--long-text-padding-y": `${layout.padding_y}px`,
-    fontSize: `${draft.font_size ?? 32}px`,
+    fontSize: `${presentationFontSize}px`,
   } as CSSProperties;
   const measureStyle = {
-    color: draft.text_color ?? "#212533",
-    fontSize: `${draft.font_size ?? 32}px`,
+    color: presentationTextColor,
+    fontSize: `${presentationFontSize}px`,
     width: `${Math.max(1, layout.width - layout.padding_x * 2)}px`,
   } as CSSProperties;
 
@@ -690,11 +896,15 @@ export function LongTextWorkspace({
           {sceneId}/{nodeId}
         </code>
         <div className="long-text-workspace-preview-controls">
-          <button onClick={togglePreviewPlayback} type="button">
+          <button
+            disabled={previewUnavailable}
+            onClick={togglePreviewPlayback}
+            type="button"
+          >
             {previewPlaying ? "暂停预览" : "播放预览"}
           </button>
           <button
-            disabled={previewComplete}
+            disabled={previewUnavailable || previewComplete}
             onClick={completePreviewStep}
             type="button"
           >
@@ -702,18 +912,26 @@ export function LongTextWorkspace({
           </button>
           <button
             disabled={
-              previewComplete && safePreviewStepIndex >= previewSteps.length - 1
+              previewUnavailable ||
+              (previewComplete &&
+                safePreviewStepIndex >= previewSteps.length - 1)
             }
             onClick={advancePreviewStep}
             type="button"
           >
             下一分段
           </button>
-          <button onClick={() => resetPreview(0)} type="button">
+          <button
+            disabled={previewUnavailable}
+            onClick={() => resetPreview(0)}
+            type="button"
+          >
             从头重播
           </button>
           <span>
-            {safePreviewStepIndex + 1} / {previewSteps.length}
+            {previewUnavailable
+              ? "等待真实上下文"
+              : `${safePreviewStepIndex + 1} / ${previewSteps.length}`}
           </span>
         </div>
         <span className="long-text-workspace-status">
@@ -761,12 +979,17 @@ export function LongTextWorkspace({
                   src={backgroundUrl}
                 />
               )}
+              {previewUnavailable && (
+                <div className="long-text-workspace-preview-unavailable">
+                  等待 Rust 真实路径后显示累计文稿
+                </div>
+              )}
               <div className="long-text-workspace-grid" />
               <div
                 className={`long-text-workspace-box${gestureActive ? " is-dragging" : ""}`}
                 onPointerDown={(event) => beginGesture(event, "move")}
                 style={{
-                  color: draft.text_color ?? "#212533",
+                  color: presentationTextColor,
                   height: `${layout.height}px`,
                   left: `${layout.x}px`,
                   top: `${layout.y}px`,
@@ -944,15 +1167,61 @@ export function LongTextWorkspace({
             预览使用共享文本解析器；pause、speed 和 auto
             只控制播放，不占据正文排版空间。
           </p>
+          <h3>同文稿节点</h3>
+          <p className="long-text-workspace-note">
+            文稿 ID：<code>{documentId}</code>
+          </p>
+          <ul className="long-text-workspace-document-list">
+            {sameDocumentNodes.map((candidate) => (
+              <li
+                className={candidate.id === nodeId ? "is-current" : undefined}
+                key={candidate.id}
+              >
+                <code>{candidate.id}</code>
+                <span>{candidate.mode === "continue" ? "接续" : "开始"}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="long-text-workspace-context-status">
+            {previewContextBusy ? "正在构建真实路径…" : previewContextStatus}
+          </div>
+          {pendingChoice !== null && (
+            <div className="long-text-workspace-choice-wizard">
+              <strong>请选择预览路径</strong>
+              {pendingChoice.choices.map((choice) => (
+                <button
+                  disabled={!choice.enabled}
+                  key={choice.id}
+                  onClick={() => onChoice(choice.id)}
+                  type="button"
+                >
+                  {choice.label}
+                </button>
+              ))}
+            </div>
+          )}
           {previewContextError !== null && (
             <div className="long-text-workspace-warning">
               <strong>真实预览诊断</strong>
               <div>{previewContextError}</div>
+              {canRetryFromSceneEntry && previewOrigin === "story_entry" && (
+                <button
+                  className="long-text-workspace-retry"
+                  onClick={() => {
+                    setPreviewOrigin("scene_entry");
+                    setPreviewContextError(null);
+                  }}
+                  type="button"
+                >
+                  改用当前 Scene 入口重试
+                </button>
+              )}
             </div>
           )}
           <label>
             纸张素材
             <select
+              disabled={isContinuation}
               onChange={(event) =>
                 updateField(
                   "paper",
@@ -961,7 +1230,7 @@ export function LongTextWorkspace({
                     : event.currentTarget.value,
                 )
               }
-              value={draft.paper ?? ""}
+              value={presentationPaper ?? ""}
             >
               <option value="">透明板书</option>
               {assets
@@ -975,27 +1244,30 @@ export function LongTextWorkspace({
           </label>
           <div className="long-text-workspace-field-grid">
             <NumericField
+              disabled={isContinuation}
               label="字号"
               min={16}
-              value={draft.font_size ?? 32}
+              value={presentationFontSize}
               onChange={(value) => updateField("font_size", value)}
             />
             <TextColorField
+              disabled={isContinuation}
               label="正文颜色"
-              value={draft.text_color ?? "#212533"}
+              value={presentationTextColor}
               onChange={(value) => updateField("text_color", value)}
             />
           </div>
           <label>
             分页方式
             <select
+              disabled={isContinuation}
               onChange={(event) =>
                 updateField(
                   "pagination",
                   event.currentTarget.value as LongTextNode["pagination"],
                 )
               }
-              value={draft.pagination ?? "auto"}
+              value={presentationPagination}
             >
               <option value="continuous">连续长卷</option>
               <option value="auto">自动分页</option>
@@ -1003,6 +1275,11 @@ export function LongTextWorkspace({
             </select>
           </label>
           <h3>文本区域（设计像素）</h3>
+          {isContinuation && (
+            <p className="long-text-workspace-note">
+              接续节点继承开始节点的纸张、分页、字号、颜色和布局；请在开始节点编辑这些属性。
+            </p>
+          )}
           <div className="long-text-workspace-field-grid">
             {(
               [
@@ -1017,6 +1294,7 @@ export function LongTextWorkspace({
               ] as const
             ).map(([field, label, min, max]) => (
               <NumericField
+                disabled={isContinuation}
                 key={field}
                 label={label}
                 max={max}
@@ -1029,6 +1307,38 @@ export function LongTextWorkspace({
           <p className="long-text-workspace-note">
             右侧数值修改会立即写入项目历史；拖动操作在松开鼠标时作为一次撤销记录提交。
           </p>
+          <h3>当前节点步骤</h3>
+          <p className="long-text-workspace-note">
+            前序步骤来自 Rust
+            真实上下文并保持只读；这里的文本在失去焦点时写回当前节点。
+          </p>
+          <div className="long-text-workspace-step-editor-list">
+            {draft.steps.map((step, index) => (
+              <label key={`${step.id}:${step.text}`}>
+                <span>
+                  第 {index + 1} 段 · <code>{step.id}</code>
+                </span>
+                <textarea
+                  defaultValue={step.text}
+                  onBlur={(event) => {
+                    const text = event.currentTarget.value;
+                    const nextSteps = draftRef.current.steps.map((candidate) =>
+                      candidate.id === step.id
+                        ? { ...candidate, text }
+                        : candidate,
+                    );
+                    updateField("steps", nextSteps);
+                  }}
+                  rows={4}
+                />
+                {index > 0 && (
+                  <button onClick={() => onSplitLongText(index)} type="button">
+                    从此步骤前拆分为接续文稿
+                  </button>
+                )}
+              </label>
+            ))}
+          </div>
           {font.error !== null && (
             <p className="long-text-workspace-warning">
               预览字体加载失败，将使用系统回退字体。
@@ -1041,12 +1351,14 @@ export function LongTextWorkspace({
 }
 
 function NumericField({
+  disabled = false,
   label,
   min,
   max,
   value,
   onChange,
 }: {
+  disabled?: boolean;
   label: string;
   min: number;
   max?: number;
@@ -1057,6 +1369,7 @@ function NumericField({
     <label className="long-text-workspace-number">
       <span>{label}</span>
       <input
+        disabled={disabled}
         max={max}
         min={min}
         onChange={(event) => {
@@ -1072,10 +1385,12 @@ function NumericField({
 }
 
 function TextColorField({
+  disabled = false,
   label,
   value,
   onChange,
 }: {
+  disabled?: boolean;
   label: string;
   value: string;
   onChange(value: string): void;
@@ -1084,6 +1399,7 @@ function TextColorField({
     <label className="long-text-workspace-number">
       <span>{label}</span>
       <input
+        disabled={disabled}
         maxLength={9}
         onChange={(event) => onChange(event.currentTarget.value)}
         pattern="#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})"

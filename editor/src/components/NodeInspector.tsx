@@ -52,6 +52,7 @@ interface NodeInspectorProps {
   onDuplicate(nodeId: string): void;
   onConvertToTimeline(nodeId: string): void;
   onSplitDialogue(nodeId: string, offset: number, text?: string): void;
+  onSplitLongText(nodeId: string, stepIndex: number): void;
   onSetEntry(nodeId: string): void;
   onOpenLongTextWorkspace(nodeId: string): void;
   uiMotions: UiMotionFile[];
@@ -67,6 +68,7 @@ export function NodeInspector({
   onDuplicate,
   onConvertToTimeline,
   onSplitDialogue,
+  onSplitLongText,
   onSetEntry,
   onOpenLongTextWorkspace,
   uiMotions,
@@ -150,6 +152,7 @@ export function NodeInspector({
           manifest,
           uiMotions,
           (offset, text) => onSplitDialogue(nodeId, offset, text),
+          (stepIndex) => onSplitLongText(nodeId, stepIndex),
           () => onOpenLongTextWorkspace(nodeId),
         )}
       </section>
@@ -199,6 +202,7 @@ function renderFields(
   manifest: ContentManifest,
   uiMotions: UiMotionFile[],
   splitDialogue: (offset: number, text?: string) => void,
+  splitLongText: (stepIndex: number) => void,
   openLongTextWorkspace: () => void,
 ): ReactNode {
   const targets = Object.keys(scene.nodes);
@@ -454,19 +458,137 @@ function renderFields(
         </>
       );
     }
-    case "long_text":
+    case "long_text": {
+      const isContinuation = node.mode === "continue";
+      const longTextDocuments = Array.from(
+        new Set(
+          Object.entries(scene.nodes)
+            .filter(
+              ([candidateId, candidate]) =>
+                candidate.type === "long_text" &&
+                (candidate.mode ?? "start") === "start" &&
+                (candidate.document ?? candidateId) !== "",
+            )
+            .map(([candidateId, candidate]) =>
+              candidate.type === "long_text"
+                ? (candidate.document ?? candidateId)
+                : candidateId,
+            ),
+        ),
+      );
+      if (
+        isContinuation &&
+        node.document !== undefined &&
+        node.document !== null &&
+        !longTextDocuments.includes(node.document)
+      ) {
+        longTextDocuments.push(node.document);
+      }
+      const inheritedStart = isContinuation
+        ? Object.entries(scene.nodes).find(
+            ([candidateId, candidate]) =>
+              candidate.type === "long_text" &&
+              (candidate.mode ?? "start") === "start" &&
+              (candidate.document ?? candidateId) === node.document,
+          )?.[1]
+        : undefined;
+      const presentationNode =
+        inheritedStart?.type === "long_text" ? inheritedStart : node;
+      const presentationPagination = presentationNode.pagination ?? "auto";
       return (
         <>
+          {isContinuation ? (
+            <Field label="接续文稿">
+              <select
+                onChange={(event) =>
+                  update({
+                    ...node,
+                    document: event.currentTarget.value || null,
+                  })
+                }
+                value={node.document ?? ""}
+              >
+                <option value="">— 请选择开始节点文稿 —</option>
+                {longTextDocuments.map((document) => (
+                  <option key={document} value={document}>
+                    {document}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : (
+            <TextField
+              label="文稿 ID（可选）"
+              onChange={(document) =>
+                update({ ...node, document: document.trim() || null })
+              }
+              value={node.document ?? ""}
+            />
+          )}
+          <Field label="文稿模式">
+            <select
+              onChange={(event) =>
+                (() => {
+                  const mode = event.currentTarget.value as
+                    "start" | "continue";
+                  if (mode === "start") {
+                    update({
+                      ...node,
+                      mode,
+                      paper: node.paper ?? null,
+                      pagination: node.pagination ?? "auto",
+                      font_size: node.font_size ?? 32,
+                      text_color: node.text_color ?? "#212533",
+                      layout: node.layout ?? DEFAULT_LONG_TEXT_LAYOUT,
+                    });
+                    return;
+                  }
+                  // A continuation inherits all layout/paper fields from its
+                  // start node. Explicitly remove them so the YAML cannot
+                  // accidentally shadow the document's stable presentation.
+                  const inherited = { ...node };
+                  delete inherited.font_size;
+                  delete inherited.layout;
+                  delete inherited.pagination;
+                  delete inherited.paper;
+                  delete inherited.text_color;
+                  update({ ...inherited, mode });
+                })()
+              }
+              value={node.mode ?? "start"}
+            >
+              <option value="start">开始新文稿</option>
+              <option value="continue">接续已有文稿</option>
+            </select>
+          </Field>
+          <Field label="离开行为">
+            <select
+              onChange={(event) =>
+                update({
+                  ...node,
+                  on_exit: event.currentTarget.value as
+                    "close" | "hide" | "keep_visible",
+                })
+              }
+              value={node.on_exit ?? "close"}
+            >
+              <option value="close">关闭文稿</option>
+              <option value="hide">隐藏但保留</option>
+              <option value="keep_visible">继续显示</option>
+            </select>
+          </Field>
           <AssetSelect
             allowNone
+            disabled={isContinuation}
             kind="gui"
             label="纸张素材"
             manifest={manifest}
             onChange={(paper) => update({ ...node, paper })}
-            value={node.paper ?? null}
+            value={presentationNode.paper ?? null}
           />
           <Field label="分页方式">
             <select
+              disabled={isContinuation}
               onChange={(event) => {
                 const pagination = event.currentTarget.value as
                   "continuous" | "auto" | "manual";
@@ -484,7 +606,7 @@ function renderFields(
                     : {}),
                 });
               }}
-              value={node.pagination ?? "auto"}
+              value={presentationPagination}
             >
               <option value="continuous">连续长卷</option>
               <option value="auto">自动分页</option>
@@ -492,16 +614,18 @@ function renderFields(
             </select>
           </Field>
           <NumberField
+            disabled={isContinuation}
             label="字号（设计像素）"
             max={72}
             min={16}
             onChange={(font_size) => update({ ...node, font_size })}
-            value={node.font_size ?? 32}
+            value={presentationNode.font_size ?? 32}
           />
           <TextField
+            disabled={isContinuation}
             label="正文颜色"
             onChange={(text_color) => update({ ...node, text_color })}
-            value={node.text_color ?? "#212533"}
+            value={presentationNode.text_color ?? "#212533"}
           />
           <button
             className="primary-button long-text-open-workspace"
@@ -511,7 +635,8 @@ function renderFields(
             全屏背景预览编辑
           </button>
           <LongTextLayoutEditor
-            layout={node.layout ?? DEFAULT_LONG_TEXT_LAYOUT}
+            disabled={isContinuation}
+            layout={presentationNode.layout ?? DEFAULT_LONG_TEXT_LAYOUT}
             onChange={(layout) => update({ ...node, layout })}
             previewText={interpolatePreview(
               node.steps[0]?.text ?? "长文本预览",
@@ -519,12 +644,15 @@ function renderFields(
             )}
           />
           <p className="field-note">
-            每一段在游戏中对应一次推进。自动分页会在空间不足时续页；仅手动分页只响应段落的强制分页标记。
+            {isContinuation
+              ? "接续节点继承开始节点的纸张、分页、字号、颜色和布局；请在开始节点编辑这些属性。"
+              : "每一段在游戏中对应一次推进。自动分页会在空间不足时续页；仅手动分页只响应段落的强制分页标记。"}
           </p>
           <LongTextStepsEditor
-            allowManualBreaks={node.pagination !== "continuous"}
+            allowManualBreaks={presentationPagination !== "continuous"}
             manifest={manifest}
             onChange={(steps) => update({ ...node, steps })}
+            onSplit={splitLongText}
             steps={node.steps}
           />
           <OptionalNumber
@@ -539,6 +667,39 @@ function renderFields(
             }
             value={node.reveal_animation ?? null}
           />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    }
+    case "long_text_control":
+      return (
+        <>
+          <TextField
+            label="文稿 ID"
+            onChange={(document) => update({ ...node, document })}
+            value={node.document}
+          />
+          <Field label="操作">
+            <select
+              onChange={(event) =>
+                update({
+                  ...node,
+                  action: event.currentTarget.value as
+                    "show" | "hide" | "close",
+                })
+              }
+              value={node.action}
+            >
+              <option value="show">显示</option>
+              <option value="hide">隐藏</option>
+              <option value="close">关闭并清除</option>
+            </select>
+          </Field>
           <TargetSelect
             label="下一节点"
             onChange={(next) => update({ ...node, next })}
@@ -1344,6 +1505,7 @@ function UiMotionSelect({
 
 function AssetSelect({
   allowNone = false,
+  disabled = false,
   kind,
   label,
   manifest,
@@ -1351,6 +1513,7 @@ function AssetSelect({
   value,
 }: {
   allowNone?: boolean;
+  disabled?: boolean;
   kind: AssetKind;
   label: string;
   manifest: ContentManifest;
@@ -1367,6 +1530,7 @@ function AssetSelect({
   return (
     <Field label={label}>
       <select
+        disabled={disabled}
         value={value ?? ""}
         onChange={(event) => onChange(event.currentTarget.value || null)}
       >
@@ -1888,11 +2052,13 @@ function defaultScalar(type: VariableType): ScalarValue {
 function LongTextStepsEditor({
   allowManualBreaks,
   manifest,
+  onSplit,
   steps,
   onChange,
 }: {
   allowManualBreaks: boolean;
   manifest: ContentManifest;
+  onSplit(stepIndex: number): void;
   steps: LongTextStep[];
   onChange(steps: LongTextStep[]): void;
 }): ReactElement {
@@ -1948,6 +2114,13 @@ function LongTextStepsEditor({
                 type="button"
               >
                 删除
+              </button>
+              <button
+                disabled={index === 0}
+                onClick={() => onSplit(index)}
+                type="button"
+              >
+                从此处分成接续文稿
               </button>
             </div>
           </header>
@@ -2101,10 +2274,12 @@ function RevealAnimationField({
 }
 
 function LongTextLayoutEditor({
+  disabled = false,
   layout,
   onChange,
   previewText,
 }: {
+  disabled?: boolean;
   layout: LongTextLayout;
   onChange(layout: LongTextLayout): void;
   previewText: string;
@@ -2126,6 +2301,7 @@ function LongTextLayoutEditor({
     event: React.PointerEvent<HTMLElement>,
     mode: "move" | "resize",
   ): void => {
+    if (disabled) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = { mode, x: event.clientX, y: event.clientY, layout };
   };
@@ -2179,6 +2355,7 @@ function LongTextLayoutEditor({
           ref={canvasRef}
         >
           <button
+            disabled={disabled}
             className="long-text-layout-rect"
             onPointerDown={(event) => begin(event, "move")}
             style={{
@@ -2219,6 +2396,7 @@ function LongTextLayoutEditor({
           ] as const
         ).map(([field, label]) => (
           <NumberField
+            disabled={disabled}
             key={field}
             label={label}
             min={0}
@@ -2236,11 +2414,13 @@ function LongTextLayoutEditor({
 
 function TextField({
   allowEmpty = false,
+  disabled = false,
   label,
   onChange,
   value,
 }: {
   allowEmpty?: boolean;
+  disabled?: boolean;
   label: string;
   onChange(value: string): void;
   value: string;
@@ -2253,6 +2433,7 @@ function TextField({
   return (
     <Field label={label}>
       <input
+        disabled={disabled}
         required={!allowEmpty}
         defaultValue={value}
         key={value}
@@ -2270,6 +2451,7 @@ function TextField({
 }
 
 function NumberField({
+  disabled = false,
   label,
   max,
   min,
@@ -2277,6 +2459,7 @@ function NumberField({
   step = 1,
   value,
 }: {
+  disabled?: boolean;
   label: string;
   max?: number;
   min?: number;
@@ -2297,6 +2480,7 @@ function NumberField({
   return (
     <Field label={label}>
       <input
+        disabled={disabled}
         max={max}
         min={min}
         step={step}

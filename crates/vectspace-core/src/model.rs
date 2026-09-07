@@ -16,8 +16,6 @@ pub struct ProfileState {
     #[serde(default)]
     pub seen_presentations: BTreeSet<String>,
     #[serde(default)]
-    pub dialogue_history: Vec<DialogueHistoryEntry>,
-    #[serde(default)]
     pub completed_scenes: BTreeSet<String>,
 }
 
@@ -393,26 +391,34 @@ pub enum SceneNode {
     /// saved independently.
     LongText {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        document: Option<String>,
+        #[serde(default, skip_serializing_if = "LongTextMode::is_start")]
+        mode: LongTextMode,
+        #[serde(default, skip_serializing_if = "LongTextExit::is_close")]
+        on_exit: LongTextExit,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         paper: Option<String>,
-        #[serde(default, skip_serializing_if = "LongTextPagination::is_automatic")]
-        pagination: LongTextPagination,
-        #[serde(
-            default = "default_long_text_font_size",
-            skip_serializing_if = "is_default_long_text_font_size"
-        )]
-        font_size: f32,
-        #[serde(
-            default = "default_long_text_color",
-            skip_serializing_if = "is_default_long_text_color"
-        )]
-        text_color: String,
-        #[serde(default, skip_serializing_if = "LongTextLayout::is_default")]
-        layout: LongTextLayout,
+        /// Presentation fields are optional in the content model so a
+        /// continuation can inherit the values declared by its start node.
+        /// Runtime snapshots always contain the resolved concrete values.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pagination: Option<LongTextPagination>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_size: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<LongTextLayout>,
         steps: Vec<LongTextStep>,
         #[serde(default)]
         speed_cps: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reveal_animation: Option<TextRevealAnimation>,
+        next: String,
+    },
+    LongTextControl {
+        document: String,
+        action: LongTextControlAction,
         next: String,
     },
     Choice {
@@ -533,6 +539,43 @@ pub enum DialogueMode {
     Append,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTextMode {
+    #[default]
+    Start,
+    Continue,
+}
+
+impl LongTextMode {
+    fn is_start(value: &Self) -> bool {
+        *value == Self::Start
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTextExit {
+    #[default]
+    Close,
+    Hide,
+    KeepVisible,
+}
+
+impl LongTextExit {
+    fn is_close(value: &Self) -> bool {
+        *value == Self::Close
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTextControlAction {
+    Show,
+    Hide,
+    Close,
+}
+
 /// Player-selectable reveal styles. A story node may optionally override the
 /// current player setting for a specific prompt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -553,12 +596,6 @@ pub enum LongTextPagination {
     Manual,
 }
 
-impl LongTextPagination {
-    fn is_automatic(value: &Self) -> bool {
-        *value == Self::Auto
-    }
-}
-
 pub const LONG_TEXT_FONT_SIZE_DEFAULT: f32 = 32.0;
 pub const LONG_TEXT_FONT_SIZE_MIN: f32 = 16.0;
 pub const LONG_TEXT_FONT_SIZE_MAX: f32 = 72.0;
@@ -576,16 +613,8 @@ fn default_long_text_font_size() -> f32 {
     LONG_TEXT_FONT_SIZE_DEFAULT
 }
 
-fn is_default_long_text_font_size(value: &f32) -> bool {
-    *value == LONG_TEXT_FONT_SIZE_DEFAULT
-}
-
 fn default_long_text_color() -> String {
     LONG_TEXT_COLOR_DEFAULT.to_owned()
-}
-
-fn is_default_long_text_color(value: &str) -> bool {
-    value == LONG_TEXT_COLOR_DEFAULT
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -621,12 +650,6 @@ impl Default for LongTextLayout {
             page_height: LONG_TEXT_LAYOUT_PAGE_HEIGHT_DEFAULT,
             page_gap: LONG_TEXT_LAYOUT_PAGE_GAP_DEFAULT,
         }
-    }
-}
-
-impl LongTextLayout {
-    fn is_default(value: &Self) -> bool {
-        value == &Self::default()
     }
 }
 
@@ -899,6 +922,11 @@ pub struct DialoguePageSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct LongTextPageSnapshot {
     pub document_id: String,
+    /// Whether the retained document is currently drawn by the presentation
+    /// layer. The accumulated, already-resolved steps remain in the snapshot
+    /// while this is false.
+    #[serde(default = "default_long_text_visible")]
+    pub visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<String>,
     #[serde(default)]
@@ -911,6 +939,10 @@ pub struct LongTextPageSnapshot {
     pub layout: LongTextLayout,
     pub steps: Vec<LongTextStepSnapshot>,
     pub active_step_index: u32,
+}
+
+fn default_long_text_visible() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

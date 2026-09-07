@@ -506,10 +506,15 @@ button:disabled {
 
 .long-text-panel {
   position: absolute;
-  z-index: 15;
+  z-index: 10;
   inset: 0;
   overflow: hidden;
   pointer-events: auto;
+}
+
+.long-text-panel.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .long-text-measure-root {

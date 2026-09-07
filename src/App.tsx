@@ -257,6 +257,7 @@ export default function App(): ReactElement {
 
   const startNewGame = (): void => {
     autosavedRevisions.current.clear();
+    setHistory([]);
     setNormalAuto(false);
     setPhase("playing");
     phaseRef.current = "playing";
@@ -306,6 +307,7 @@ export default function App(): ReactElement {
 
   const load = (slot: string): void => {
     autosavedRevisions.current.clear();
+    setHistory([]);
     setNormalAuto(false);
     setPhase("playing");
     phaseRef.current = "playing";
@@ -336,6 +338,10 @@ export default function App(): ReactElement {
 
   const returnToTitle = (): void => {
     setNormalAuto(false);
+    setHistory([]);
+    void engineApi
+      .clearDialogueHistory()
+      .catch((reason: unknown) => setError(errorMessage(reason)));
     setPanel("none");
     setPhase("title");
     phaseRef.current = "title";
@@ -817,10 +823,10 @@ export default function App(): ReactElement {
               />
             )}
 
-            {longText !== null && longTextPage !== null && (
+            {longTextPage !== null && (
               <LongTextPanel
                 defaultCps={revealDefaultCps}
-                disabled={busy || runtimeLocked}
+                disabled={busy || runtimeLocked || longText === null}
                 fastForward={fastForwardActive}
                 initialCps={revealCps}
                 key={longTextPage.document_id}
@@ -840,8 +846,9 @@ export default function App(): ReactElement {
                 fontKey={defaultFontId ?? "system"}
                 ref={longTextRef}
                 revealImmediately={!hasTextRevealCue}
-                sessionKey={`${update.update_id}:${longText.prompt_id}`}
+                sessionKey={`${update.update_id}:${longText?.prompt_id ?? `retained:${longTextPage.active_step_index}`}`}
                 suspended={panel !== "none" || pageHidden}
+                visible={longTextPage.visible !== false}
               />
             )}
 

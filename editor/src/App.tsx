@@ -602,7 +602,38 @@ export function App(): ReactElement {
   const changeNode = (nodeId: string, node: SceneNode): void => {
     commit((draft) => {
       const scene = findScene(draft, activeSceneId);
-      if (scene !== undefined) scene.definition.nodes[nodeId] = node;
+      if (scene === undefined) return;
+      const previous = scene.definition.nodes[nodeId];
+      const previousDocument =
+        previous?.type === "long_text" && (previous.mode ?? "start") === "start"
+          ? (previous.document ?? nodeId)
+          : null;
+      const nextDocument =
+        node.type === "long_text" && (node.mode ?? "start") === "start"
+          ? (node.document ?? nodeId)
+          : null;
+      scene.definition.nodes[nodeId] = node;
+      if (
+        previousDocument !== null &&
+        nextDocument !== null &&
+        previousDocument !== nextDocument
+      ) {
+        for (const [candidateId, candidate] of Object.entries(
+          scene.definition.nodes,
+        )) {
+          if (candidateId === nodeId) continue;
+          if (
+            (candidate.type === "long_text" ||
+              candidate.type === "long_text_control") &&
+            candidate.document === previousDocument
+          ) {
+            scene.definition.nodes[candidateId] = {
+              ...candidate,
+              document: nextDocument,
+            };
+          }
+        }
+      }
     });
   };
 
@@ -670,6 +701,62 @@ export function App(): ReactElement {
     setNotice("已拆成两个对话段；可在它们之间插入动画节点。");
   };
 
+  const splitLongText = (nodeId: string, stepIndex: number): void => {
+    const scene = activeScene;
+    const source = scene?.nodes[nodeId];
+    if (scene === undefined || source?.type !== "long_text") return;
+    if (stepIndex <= 0 || stepIndex >= source.steps.length) {
+      setError("只能在第二段及之后拆分长文本。");
+      return;
+    }
+    const continuationId = uniqueNodeId(scene, `${nodeId}_continue`);
+    const usedDocuments = new Set(
+      Object.entries(scene.nodes).flatMap(([id, node]) =>
+        node.type === "long_text" ? [node.document ?? id] : [],
+      ),
+    );
+    let document = source.document ?? `${nodeId}_document`;
+    let suffix = 2;
+    while (usedDocuments.has(document) && document !== source.document) {
+      document = `${nodeId}_document_${suffix}`;
+      suffix += 1;
+    }
+    const sourceMode = source.mode ?? "start";
+    const first = {
+      ...source,
+      document,
+      mode: sourceMode,
+      on_exit: "keep_visible" as const,
+      steps: source.steps.slice(0, stepIndex),
+      next: continuationId,
+    };
+    const continuation = {
+      ...source,
+      document,
+      mode: "continue" as const,
+      steps: source.steps.slice(stepIndex),
+      next: source.next,
+    };
+    // Continuation nodes inherit the stable presentation from the first
+    // node. Do not copy optional style fields into the generated YAML, or the
+    // Rust validator will (correctly) reject the split document.
+    delete continuation.paper;
+    delete continuation.pagination;
+    delete continuation.text_color;
+    delete continuation.layout;
+    commit((draft) => {
+      const file = findScene(draft, activeSceneId);
+      if (file === undefined) return;
+      file.definition.nodes[nodeId] = first;
+      file.definition.nodes[continuationId] = continuation;
+      const layout = ensureSceneLayout(draft.layout, activeSceneId);
+      const origin = layout.nodes[nodeId] ?? { x: 0, y: 0 };
+      layout.nodes[continuationId] = { x: origin.x + 320, y: origin.y };
+    });
+    setSelectedNodeId(continuationId);
+    setNotice("已拆成长文稿接续节点；可在两段之间插入对话或动画。");
+  };
+
   const addNode = (): void => {
     if (activeScene === undefined) return;
     const id = uniqueNodeId(activeScene, addType);
@@ -719,6 +806,24 @@ export function App(): ReactElement {
       return;
     const node = activeScene.nodes[nodeId];
     if (node === undefined) return;
+    if (node.type === "long_text" && (node.mode ?? "start") === "start") {
+      const documentId = node.document ?? nodeId;
+      const references = Object.entries(activeScene.nodes).filter(
+        ([candidateId, candidate]) =>
+          candidateId !== nodeId &&
+          ((candidate.type === "long_text" &&
+            candidate.document === documentId &&
+            candidate.mode === "continue") ||
+            (candidate.type === "long_text_control" &&
+              candidate.document === documentId)),
+      ).length;
+      if (references > 0) {
+        setError(
+          `文稿 ${documentId} 仍被 ${references} 个接续或控制节点引用，不能删除开始节点。`,
+        );
+        return;
+      }
+    }
     const fallback =
       outputPorts(node).find(
         (port) => port.target !== nodeId && port.targetScene === null,
@@ -1041,12 +1146,24 @@ export function App(): ReactElement {
           <LongTextWorkspace
             assets={project.assets}
             dirty={dirty}
+            key={`${longTextTarget.sceneId}/${longTextTarget.nodeId}`}
             node={longTextNode}
             nodeId={longTextTarget.nodeId}
             onBack={() => setLongTextTarget(null)}
             onChange={(next) => changeNode(longTextTarget.nodeId, next)}
+            onPreviewSettingsChange={(settings) =>
+              commit((draft) => {
+                draft.layout.timeline_previews ??= {};
+                draft.layout.timeline_previews[
+                  `${longTextTarget.sceneId}/${longTextTarget.nodeId}`
+                ] = settings;
+              }, false)
+            }
             onRedo={redo}
             onSave={() => void saveProject()}
+            onSplitLongText={(stepIndex) =>
+              splitLongText(longTextTarget.nodeId, stepIndex)
+            }
             onUndo={undo}
             project={project}
             redoAvailable={future.length > 0}
@@ -1466,6 +1583,7 @@ export function App(): ReactElement {
           onDuplicate={duplicateNode}
           onConvertToTimeline={convertNodeToTimeline}
           onSplitDialogue={splitDialogue}
+          onSplitLongText={splitLongText}
           onOpenLongTextWorkspace={(nodeId) => {
             setTimelineTarget(null);
             setUiMotionTarget(null);

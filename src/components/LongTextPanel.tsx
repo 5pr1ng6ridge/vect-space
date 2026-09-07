@@ -49,7 +49,7 @@ export interface LongTextPanelHandle {
 }
 
 interface LongTextPanelProps {
-  prompt: LongTextPrompt;
+  prompt: LongTextPrompt | null;
   page: LongTextPageSnapshot;
   initialCps: number;
   defaultCps: number;
@@ -69,6 +69,8 @@ interface LongTextPanelProps {
   fastForward: boolean;
   /** Menu/page-hidden suspension freezes both reveal and scroll clocks. */
   suspended?: boolean;
+  /** Retained documents stay mounted while hidden so their scroll position is preserved. */
+  visible?: boolean;
   onTypingChange(typing: boolean, cps: number): void;
   onRevealComplete(instanceKey: string): void;
 }
@@ -149,13 +151,22 @@ export const LongTextPanel = forwardRef<
     fontKey = "system",
     fastForward,
     suspended = false,
+    visible = true,
     onTypingChange,
     onRevealComplete,
   },
   ref,
 ): ReactElement {
-  const instanceKey = sessionKey ?? prompt.prompt_id;
-  const units = useMemo(() => parseMarkup(prompt.text), [prompt.text]);
+  // A retained document can coexist with dialogue, choices, or a neutral
+  // prompt. Only a current long-text prompt is an active reveal; when the
+  // document is merely being kept visible every accumulated step is static.
+  const activeStep =
+    prompt === null ? undefined : page.steps[page.active_step_index];
+  const activeStepId = prompt?.step_id ?? "retained";
+  const activeText = prompt?.text ?? "";
+  const instanceKey =
+    sessionKey ?? prompt?.prompt_id ?? `${page.document_id}/${activeStepId}`;
+  const units = useMemo(() => parseMarkup(activeText), [activeText]);
   const unitCps = useMemo(
     () => buildVisibleUnitCps(units, initialCps, defaultCps),
     [defaultCps, initialCps, units],
@@ -238,14 +249,20 @@ export const LongTextPanel = forwardRef<
     moved: boolean;
   } | null>(null);
   const suppressAdvanceClickRef = useRef(false);
-  const documentRef = useRef(page.document_id);
+  const pageShapeRef = useRef({
+    documentId: page.document_id,
+    firstStepId: page.steps[0]?.step_id ?? "",
+    firstText: page.steps[0]?.text ?? "",
+    stepCount: page.steps.length,
+    activeStepIndex: page.active_step_index,
+    instanceKey,
+  });
   const handleLineSweepLayoutChange = useCallback(
     (ready: boolean): void => {
       setLineSweepReadyKey(ready ? instanceKey : null);
     },
     [instanceKey],
   );
-  const activeStep = page.steps[page.active_step_index];
   const activeLayoutUnits = useMemo(
     () =>
       activeStep === undefined
@@ -276,8 +293,30 @@ export const LongTextPanel = forwardRef<
   }, []);
 
   useLayoutEffect(() => {
-    if (documentRef.current === page.document_id) return;
-    documentRef.current = page.document_id;
+    const previous = pageShapeRef.current;
+    const next = {
+      documentId: page.document_id,
+      firstStepId: page.steps[0]?.step_id ?? "",
+      firstText: page.steps[0]?.text ?? "",
+      stepCount: page.steps.length,
+      activeStepIndex: page.active_step_index,
+      instanceKey,
+    };
+    pageShapeRef.current = next;
+    const replaced =
+      previous.documentId !== next.documentId ||
+      previous.firstStepId !== next.firstStepId ||
+      previous.firstText !== next.firstText ||
+      next.stepCount < previous.stepCount ||
+      // Starting the same document again (or revisiting its first step) must
+      // return the viewport to the beginning even when the retained list has
+      // the same shape as the previous visit.
+      (next.activeStepIndex === 0 && previous.activeStepIndex > 0) ||
+      (prompt !== null &&
+        next.activeStepIndex === 0 &&
+        previous.activeStepIndex === 0 &&
+        previous.instanceKey !== instanceKey);
+    if (!replaced) return;
     manuallyBrowsingRef.current = false;
     applyScrollOffset(0);
     scrollStartOffsetRef.current = 0;
@@ -289,7 +328,14 @@ export const LongTextPanel = forwardRef<
     const emptyWindow = { start: 0, end: 0 };
     pageWindowRef.current = emptyWindow;
     setPageWindow(emptyWindow);
-  }, [applyScrollOffset, instanceKey, page.document_id]);
+  }, [
+    applyScrollOffset,
+    instanceKey,
+    page.active_step_index,
+    page.document_id,
+    page.steps,
+    prompt,
+  ]);
 
   const unmeasuredSteps = useMemo(
     () =>
@@ -471,10 +517,14 @@ export const LongTextPanel = forwardRef<
     fontReady &&
     metricsReady &&
     (revealAnimation !== "line_sweep" || lineSweepReadyKey === instanceKey);
-  const handleSessionComplete = useCallback(
-    (): void => onRevealComplete(instanceKey),
-    [instanceKey, onRevealComplete],
-  );
+  const handleSessionComplete = useCallback((): void => {
+    // A retained document can stay mounted while the current prompt is a
+    // dialogue, choice, or neutral boundary. Its empty reveal session is
+    // intentionally static and must not satisfy the game's active prompt
+    // completion gate.
+    if (prompt === null) return;
+    onRevealComplete(instanceKey);
+  }, [instanceKey, onRevealComplete, prompt]);
   const session = useTextRevealSession({
     animation: revealAnimation,
     defaultCps,
@@ -524,6 +574,7 @@ export const LongTextPanel = forwardRef<
 
   useEffect(() => {
     const typing =
+      prompt !== null &&
       !disabled &&
       !suspended &&
       !complete &&
@@ -536,6 +587,7 @@ export const LongTextPanel = forwardRef<
     onTypingChange,
     session.state.activePause,
     suspended,
+    prompt,
     typingCps,
   ]);
 
@@ -796,7 +848,8 @@ export const LongTextPanel = forwardRef<
   return (
     <section
       aria-label="长文本"
-      className="long-text-panel"
+      className={`long-text-panel${visible ? "" : " is-hidden"}`}
+      aria-hidden={!visible}
       onClickCapture={(event) => {
         if (!suppressAdvanceClickRef.current) return;
         suppressAdvanceClickRef.current = false;
@@ -877,7 +930,7 @@ export const LongTextPanel = forwardRef<
                 <div className="long-text-paper-content-inner">
                   <div className="long-text-paper-content-stage">
                     {paper.fragments.map((fragment) => {
-                      const current = fragment.step.step_id === prompt.step_id;
+                      const current = fragment.step.step_id === activeStepId;
                       return (
                         <div
                           className="long-text-step-fragment"

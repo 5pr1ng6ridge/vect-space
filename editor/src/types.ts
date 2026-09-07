@@ -170,8 +170,14 @@ export interface LongTextStep {
   page_break_before: boolean;
 }
 
+export type LongTextMode = "start" | "continue";
+export type LongTextExit = "close" | "hide" | "keep_visible";
+
 export interface LongTextNode extends NextNode {
   type: "long_text";
+  document?: string | null;
+  mode?: LongTextMode;
+  on_exit?: LongTextExit;
   paper?: string | null;
   pagination?: "continuous" | "auto" | "manual";
   font_size?: number;
@@ -180,6 +186,12 @@ export interface LongTextNode extends NextNode {
   steps: LongTextStep[];
   speed_cps: number | null;
   reveal_animation?: "line_sweep" | "typewriter" | "drop_fade" | null;
+}
+
+export interface LongTextControlNode extends NextNode {
+  type: "long_text_control";
+  document: string;
+  action: "show" | "hide" | "close";
 }
 
 export interface LongTextLayout {
@@ -337,6 +349,7 @@ export type SceneNode =
   | ClearNode
   | SayNode
   | LongTextNode
+  | LongTextControlNode
   | ChoiceNode
   | SetNode
   | ConditionNode

@@ -60,6 +60,7 @@ assets:
 scenes:
 - scenes/prologue.yaml
 - scenes/test_scene.yaml
+- scenes/sandbox.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml

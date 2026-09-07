@@ -1851,6 +1851,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::Clear { next, .. }
         | SceneNode::Say { next, .. }
         | SceneNode::LongText { next, .. }
+        | SceneNode::LongTextControl { next, .. }
         | SceneNode::Set { next, .. }
         | SceneNode::Playback { next, .. }
         | SceneNode::Wait { next, .. }
@@ -1915,7 +1916,8 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::Playback { .. }
         | SceneNode::Jump { .. }
         | SceneNode::UiMotionSet { .. }
-        | SceneNode::Sfx { .. } => true,
+        | SceneNode::Sfx { .. }
+        | SceneNode::LongTextControl { .. } => true,
     }
 }
 

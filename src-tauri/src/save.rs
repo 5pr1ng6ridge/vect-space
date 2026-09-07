@@ -8,20 +8,18 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use vectspace_core::model::{
-    DialogueHistoryEntry, ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary,
-    ScalarValue, Settings, VariableDefinition, VariableMap, VariableScope, VariableType,
+    ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary, ScalarValue, Settings,
+    VariableDefinition, VariableMap, VariableScope, VariableType,
 };
 
 const SAVE_SCHEMA_VERSION: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const PROFILE_SCHEMA_VERSION: u32 = 4;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
-const MAX_HISTORY_ENTRIES: usize = 500;
-const MAX_HISTORY_TEXT_BYTES: usize = 64 * 1024;
-// A profile can legitimately contain 500 long entries, but should never be
-// allowed to make the WebView parse an unbounded JSON document.
-const MAX_PROFILE_FILE_BYTES: usize =
-    MAX_HISTORY_ENTRIES * MAX_HISTORY_TEXT_BYTES + 2 * 1024 * 1024;
+// Profile history used to be persisted here.  Keep a generous file bound for
+// old v4 files while the deprecated field is read and discarded; the field is
+// no longer validated or exposed to the WebView.
+const MAX_PROFILE_FILE_BYTES: usize = 64 * 1024 * 1024;
 const SLOT_IDS: [&str; 4] = ["auto", "1", "2", "3"];
 
 #[derive(Debug, Error)]
@@ -81,8 +79,10 @@ struct ProfileFile {
     read_content_version: String,
     read_dialogues: std::collections::BTreeSet<String>,
     seen_presentations: std::collections::BTreeSet<String>,
-    #[serde(default)]
-    dialogue_history: Vec<DialogueHistoryEntry>,
+    /// Deprecated v4 field.  It is accepted for one-way compatibility and is
+    /// intentionally omitted from all newly written profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dialogue_history: Option<serde_json::Value>,
     #[serde(default)]
     completed_scenes: std::collections::BTreeSet<String>,
 }
@@ -284,17 +284,19 @@ impl ProfileManager {
             {
                 let is_v3 = value.get("schema_version").and_then(|v| v.as_u64()) == Some(3);
                 match serde_json::from_value::<ProfileFile>(value) {
-                    Ok(file) => (
-                        ProfileState {
-                            variables: file.variables,
-                            read_content_version: file.read_content_version,
-                            read_dialogues: file.read_dialogues,
-                            seen_presentations: file.seen_presentations,
-                            dialogue_history: file.dialogue_history,
-                            completed_scenes: file.completed_scenes,
-                        },
-                        is_v3,
-                    ),
+                    Ok(file) => {
+                        let had_legacy_history = file.dialogue_history.is_some();
+                        (
+                            ProfileState {
+                                variables: file.variables,
+                                read_content_version: file.read_content_version,
+                                read_dialogues: file.read_dialogues,
+                                seen_presentations: file.seen_presentations,
+                                completed_scenes: file.completed_scenes,
+                            },
+                            is_v3 || had_legacy_history,
+                        )
+                    }
                     Err(error) => {
                         eprintln!(
                             "profile v{version} 内容损坏，已备份并重建: {error}",
@@ -315,7 +317,6 @@ impl ProfileManager {
                                 read_content_version: file.read_content_version,
                                 read_dialogues: file.read_dialogues,
                                 seen_presentations: Default::default(),
-                                dialogue_history: Default::default(),
                                 completed_scenes: Default::default(),
                             },
                             true,
@@ -338,7 +339,6 @@ impl ProfileManager {
                                 read_content_version: self.content_version.clone(),
                                 read_dialogues: Default::default(),
                                 seen_presentations: Default::default(),
-                                dialogue_history: Default::default(),
                                 completed_scenes: Default::default(),
                             },
                             true,
@@ -381,7 +381,6 @@ impl ProfileManager {
                 .clone_from(&self.content_version);
             reconciled.read_dialogues.clear();
             reconciled.seen_presentations.clear();
-            reconciled.dialogue_history.clear();
             reconciled.completed_scenes.clear();
             rewrite = true;
         }
@@ -411,34 +410,23 @@ impl ProfileManager {
             read_content_version: self.content_version.clone(),
             read_dialogues: Default::default(),
             seen_presentations: Default::default(),
-            dialogue_history: Default::default(),
             completed_scenes: Default::default(),
         })
     }
 
     fn reconcile_metadata(&self, state: &mut ProfileState) -> bool {
-        let mut changed = reconcile_profile_metadata(state);
+        let mut changed = false;
         if let Some(valid_locations) = &self.valid_locations {
             let before_read = state.read_dialogues.len();
             let before_seen = state.seen_presentations.len();
-            let before_history = state.dialogue_history.len();
             state
                 .read_dialogues
                 .retain(|location| valid_locations.contains(location));
             state
                 .seen_presentations
                 .retain(|location| valid_locations.contains(location));
-            state
-                .dialogue_history
-                .retain(|entry| valid_locations.contains(&entry.prompt_id));
-            for (index, entry) in state.dialogue_history.iter_mut().enumerate() {
-                let next_id = index as u64 + 1;
-                changed |= entry.entry_id != next_id;
-                entry.entry_id = next_id;
-            }
             changed |= before_read != state.read_dialogues.len()
-                || before_seen != state.seen_presentations.len()
-                || before_history != state.dialogue_history.len();
+                || before_seen != state.seen_presentations.len();
         }
         if let Some(valid_scenes) = &self.valid_scenes {
             let before = state.completed_scenes.len();
@@ -446,6 +434,16 @@ impl ProfileManager {
                 .completed_scenes
                 .retain(|scene| valid_scenes.contains(scene));
             changed |= before != state.completed_scenes.len();
+        } else {
+            let before = state.completed_scenes.clone();
+            state.completed_scenes.retain(|scene| {
+                !scene.is_empty()
+                    && scene.len() <= 128
+                    && scene.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "._-".contains(character)
+                    })
+            });
+            changed |= before != state.completed_scenes;
         }
         changed
     }
@@ -502,7 +500,7 @@ impl ProfileManager {
             read_content_version: state.read_content_version.clone(),
             read_dialogues: state.read_dialogues.clone(),
             seen_presentations: state.seen_presentations.clone(),
-            dialogue_history: state.dialogue_history.clone(),
+            dialogue_history: None,
             completed_scenes: state.completed_scenes.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&file)
@@ -525,69 +523,6 @@ impl ProfileManager {
         })?;
         Ok(())
     }
-}
-
-fn reconcile_profile_metadata(state: &mut ProfileState) -> bool {
-    let before_history = state.dialogue_history.clone();
-    let before_scenes = state.completed_scenes.clone();
-    state.dialogue_history.retain(valid_history_entry);
-    if state.dialogue_history.len() > MAX_HISTORY_ENTRIES {
-        state
-            .dialogue_history
-            .drain(..state.dialogue_history.len() - MAX_HISTORY_ENTRIES);
-    }
-    for (index, entry) in state.dialogue_history.iter_mut().enumerate() {
-        entry.entry_id = index as u64 + 1;
-    }
-    state
-        .completed_scenes
-        .retain(|scene_id| valid_identifier(scene_id));
-    state.dialogue_history != before_history || state.completed_scenes != before_scenes
-}
-
-fn valid_history_entry(entry: &DialogueHistoryEntry) -> bool {
-    entry.entry_id > 0
-        && valid_story_location(&entry.prompt_id)
-        && entry.text.len() <= MAX_HISTORY_TEXT_BYTES
-        && entry.speaker_id.as_deref().is_none_or(valid_identifier)
-        && entry.speaker.as_deref().is_none_or(valid_display_name)
-        && entry.name_color.as_deref().is_none_or(valid_color)
-        && entry.text_color.as_deref().is_none_or(valid_color)
-}
-
-fn valid_story_location(value: &str) -> bool {
-    let mut parts = value.split('/');
-    let Some(scene) = parts.next() else {
-        return false;
-    };
-    let Some(node) = parts.next() else {
-        return false;
-    };
-    let step = parts.next();
-    parts.next().is_none()
-        && valid_identifier(scene)
-        && valid_identifier(node)
-        && step.is_none_or(valid_identifier)
-}
-
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
-}
-
-fn valid_display_name(value: &str) -> bool {
-    !value.trim().is_empty() && value.chars().count() <= 64 && !value.chars().any(char::is_control)
-}
-
-fn valid_color(value: &str) -> bool {
-    matches!(value.len(), 7 | 9)
-        && value.starts_with('#')
-        && value[1..]
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
 }
 
 fn normalize_profile_value(value: &ScalarValue, expected: VariableType) -> Option<ScalarValue> {
@@ -977,28 +912,8 @@ mod tests {
     }
 
     #[test]
-    fn profile_history_is_bounded_validated_and_renumbered_on_load() {
+    fn legacy_profile_history_is_discarded_and_not_written() {
         let directory = tempdir().unwrap();
-        let mut history = (0..505)
-            .map(|index| DialogueHistoryEntry {
-                entry_id: 7,
-                prompt_id: format!("prologue/line_{index}"),
-                speaker_id: None,
-                speaker: None,
-                name_color: None,
-                text_color: None,
-                text: format!("line {index}"),
-            })
-            .collect::<Vec<_>>();
-        history.push(DialogueHistoryEntry {
-            entry_id: 8,
-            prompt_id: "invalid".to_owned(),
-            speaker_id: None,
-            speaker: None,
-            name_color: None,
-            text_color: None,
-            text: "discard me".to_owned(),
-        });
         fs::write(
             directory.path().join("profile.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -1007,7 +922,7 @@ mod tests {
                 "read_content_version": "demo-2",
                 "read_dialogues": [],
                 "seen_presentations": [],
-                "dialogue_history": history,
+                "dialogue_history": [{"entry_id": 1, "prompt_id": "prologue/line", "speaker": null, "text": "legacy"}],
                 "completed_scenes": ["prologue", "../invalid"]
             }))
             .unwrap(),
@@ -1020,23 +935,28 @@ mod tests {
             "demo-2".to_owned(),
         )
         .unwrap();
-        assert_eq!(state.dialogue_history.len(), MAX_HISTORY_ENTRIES);
-        assert_eq!(state.dialogue_history.first().unwrap().entry_id, 1);
-        assert_eq!(state.dialogue_history.last().unwrap().entry_id, 500);
         assert_eq!(
             state.completed_scenes,
             std::collections::BTreeSet::from(["prologue".to_owned()])
         );
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("profile.json")).unwrap())
+                .unwrap();
+        assert!(written.get("dialogue_history").is_none());
+        assert!(directory
+            .path()
+            .join("profile.incompatible.json.bak")
+            .is_file());
     }
 
     #[test]
-    fn malformed_current_profile_is_backed_up_and_rebuilt() {
+    fn malformed_legacy_history_is_ignored_without_losing_profile_variables() {
         let directory = tempdir().unwrap();
         fs::write(
             directory.path().join("profile.json"),
             br#"{
                 "schema_version": 4,
-                "variables": {},
+                "variables": {"ending_seen": true},
                 "read_content_version": "demo-2",
                 "read_dialogues": [],
                 "seen_presentations": [],
@@ -1046,13 +966,24 @@ mod tests {
         )
         .unwrap();
 
+        let definitions = std::collections::BTreeMap::from([(
+            "ending_seen".to_owned(),
+            VariableDefinition {
+                scope: VariableScope::Profile,
+                value_type: VariableType::Boolean,
+                default: ScalarValue::Boolean(false),
+            },
+        )]);
         let (_, state) = ProfileManager::new(
             directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
+            &definitions,
             "demo-2".to_owned(),
         )
         .unwrap();
-        assert!(state.dialogue_history.is_empty());
+        assert_eq!(
+            state.variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
         assert!(directory
             .path()
             .join("profile.incompatible.json.bak")
@@ -1100,10 +1031,6 @@ mod tests {
                 "read_content_version": "demo-2",
                 "read_dialogues": ["prologue/kept", "removed/line"],
                 "seen_presentations": ["prologue/kept", "prologue/removed"],
-                "dialogue_history": [
-                    {"entry_id": 9, "prompt_id": "removed/line", "speaker": null, "text": "old"},
-                    {"entry_id": 11, "prompt_id": "prologue/kept", "speaker": null, "text": "kept"}
-                ],
                 "completed_scenes": ["prologue", "removed"]
             }))
             .unwrap(),
@@ -1122,8 +1049,6 @@ mod tests {
         .unwrap();
         assert_eq!(state.read_dialogues.len(), 1);
         assert_eq!(state.seen_presentations.len(), 1);
-        assert_eq!(state.dialogue_history.len(), 1);
-        assert_eq!(state.dialogue_history[0].entry_id, 1);
         assert_eq!(state.completed_scenes.len(), 1);
     }
 
@@ -1138,9 +1063,6 @@ mod tests {
                 "read_content_version": "demo-2",
                 "read_dialogues": ["prologue/lecture/definition"],
                 "seen_presentations": [],
-                "dialogue_history": [
-                    {"entry_id": 1, "prompt_id": "prologue/lecture/definition", "speaker": null, "text": "定义"}
-                ],
                 "completed_scenes": []
             }))
             .unwrap(),
@@ -1158,9 +1080,6 @@ mod tests {
         )
         .unwrap();
         assert!(state.read_dialogues.contains("prologue/lecture/definition"));
-        assert_eq!(state.dialogue_history.len(), 1);
-        assert!(valid_story_location("prologue/lecture/definition"));
-        assert!(!valid_story_location("prologue/lecture/definition/extra"));
     }
 
     #[test]

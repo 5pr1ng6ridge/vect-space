@@ -38,6 +38,7 @@ export const engineApi = {
   getSnapshot: () => command<RuntimeSnapshot>("get_snapshot"),
   getDialogueHistory: () =>
     command<DialogueHistoryEntry[]>("get_dialogue_history"),
+  clearDialogueHistory: () => command<unknown>("clear_dialogue_history"),
   getStoryFlow: () => command<StoryFlowSnapshot | null>("get_story_flow"),
   resolveAssets: (assetIds: string[]) =>
     command<ResolvedAsset[]>("resolve_assets", { assetIds }),

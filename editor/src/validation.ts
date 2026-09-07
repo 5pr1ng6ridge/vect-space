@@ -143,6 +143,88 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
       );
     }
 
+    const longTextDocuments = new Map<
+      string,
+      {
+        hasStart: boolean;
+        nodeId: string;
+        stepIds: Map<string, string>;
+        startPagination?: "continuous" | "auto" | "manual";
+      }
+    >();
+    for (const [nodeId, candidate] of Object.entries(scene.nodes)) {
+      if (candidate.type !== "long_text") continue;
+      const documentId = candidate.document ?? nodeId;
+      const existing = longTextDocuments.get(documentId);
+      if (existing === undefined) {
+        const stepIds = new Map<string, string>();
+        for (const step of candidate.steps) {
+          if (stepIds.has(step.id)) {
+            diagnostics.push(
+              error(
+                "duplicate_long_text_step",
+                `文稿 ${documentId} 的步骤 ID ${step.id} 在同一节点中重复`,
+                scene.id,
+                nodeId,
+              ),
+            );
+          }
+          stepIds.set(step.id, nodeId);
+        }
+        longTextDocuments.set(documentId, {
+          hasStart: (candidate.mode ?? "start") === "start",
+          nodeId,
+          startPagination:
+            (candidate.mode ?? "start") === "start"
+              ? (candidate.pagination ?? "auto")
+              : undefined,
+          stepIds,
+        });
+      } else {
+        if ((candidate.mode ?? "start") === "start" && existing.hasStart) {
+          diagnostics.push(
+            error(
+              "duplicate_long_text_start",
+              `文稿 ${documentId} 只能有一个开始节点`,
+              scene.id,
+              nodeId,
+            ),
+          );
+        }
+        if ((candidate.mode ?? "start") === "start") {
+          existing.hasStart = true;
+          existing.nodeId = nodeId;
+          existing.startPagination = candidate.pagination ?? "auto";
+        }
+        for (const step of candidate.steps) {
+          const previousNodeId = existing.stepIds.get(step.id);
+          if (previousNodeId !== undefined && previousNodeId !== nodeId) {
+            diagnostics.push(
+              error(
+                "duplicate_long_text_step",
+                `文稿 ${documentId} 的步骤 ID ${step.id} 与节点 ${previousNodeId} 重复`,
+                scene.id,
+                nodeId,
+              ),
+            );
+          }
+          existing.stepIds.set(step.id, nodeId);
+        }
+      }
+    }
+    for (const [documentId, document] of longTextDocuments) {
+      if (!document.hasStart) {
+        diagnostics.push(
+          error(
+            "missing_long_text_start",
+            `文稿 ${documentId} 缺少开始节点`,
+            scene.id,
+            document.nodeId,
+          ),
+        );
+      }
+    }
+
     for (const [nodeId, node] of Object.entries(scene.nodes)) {
       if (!ID_PATTERN.test(nodeId)) {
         diagnostics.push(
@@ -150,6 +232,22 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
         );
       }
       validateNode(project, scene.id, nodeId, node, diagnostics);
+      if (node.type === "long_text" && node.mode === "continue") {
+        const document = node.document ?? nodeId;
+        if (
+          longTextDocuments.get(document)?.startPagination === "continuous" &&
+          node.steps.some((step) => step.page_break_before)
+        ) {
+          diagnostics.push(
+            error(
+              "continuous_long_text_break",
+              "开始节点使用连续长卷时，接续段不能使用强制分页",
+              scene.id,
+              nodeId,
+            ),
+          );
+        }
+      }
       for (const port of outputPorts(node)) {
         const destinationScene = port.targetScene ?? scene.id;
         const destination = sceneById.get(destinationScene);
@@ -172,6 +270,22 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
             ),
           );
         }
+      }
+    }
+
+    for (const [nodeId, node] of Object.entries(scene.nodes)) {
+      if (
+        node.type === "long_text_control" &&
+        !longTextDocuments.has(node.document)
+      ) {
+        diagnostics.push(
+          error(
+            "unknown_long_text_document",
+            `文稿控制引用了未知文稿：${node.document}`,
+            scene.id,
+            nodeId,
+          ),
+        );
       }
     }
   }
@@ -386,6 +500,41 @@ function validateNode(
       }
       break;
     case "long_text": {
+      if (node.document !== undefined && node.document !== null) {
+        if (!ID_PATTERN.test(node.document))
+          issue("invalid_long_text_document", "文稿 ID 非法");
+      }
+      if (
+        node.mode !== undefined &&
+        node.mode !== "start" &&
+        node.mode !== "continue"
+      ) {
+        issue("invalid_long_text_mode", "长文本模式无效");
+      }
+      if (node.mode === "continue" && !node.document) {
+        issue("missing_long_text_document", "接续长文本必须指定文稿 ID");
+      }
+      if (
+        node.mode === "continue" &&
+        (node.paper != null ||
+          node.pagination !== undefined ||
+          node.font_size !== undefined ||
+          node.text_color !== undefined ||
+          node.layout !== undefined)
+      ) {
+        issue(
+          "long_text_inherited_style",
+          "接续长文本不能重复定义纸张、分页、字号、颜色或布局",
+        );
+      }
+      if (
+        node.on_exit !== undefined &&
+        node.on_exit !== "close" &&
+        node.on_exit !== "hide" &&
+        node.on_exit !== "keep_visible"
+      ) {
+        issue("invalid_long_text_exit", "长文本离开行为无效");
+      }
       checkAsset(node.paper ?? null, "gui", false);
       if (
         node.pagination !== undefined &&
@@ -447,7 +596,11 @@ function validateNode(
         if (step.text.trim() === "") {
           issue("empty_long_text_step", `第 ${index + 1} 段不能为空`);
         }
-        if (index === 0 && step.page_break_before) {
+        if (
+          (node.mode ?? "start") === "start" &&
+          index === 0 &&
+          step.page_break_before
+        ) {
           issue("leading_long_text_break", "第一段不应在前方强制分页");
         }
         if (node.pagination === "continuous" && step.page_break_before) {
@@ -464,6 +617,16 @@ function validateNode(
       }
       break;
     }
+    case "long_text_control":
+      if (!ID_PATTERN.test(node.document))
+        issue("invalid_long_text_document", "文稿 ID 非法");
+      if (
+        node.action !== "show" &&
+        node.action !== "hide" &&
+        node.action !== "close"
+      )
+        issue("invalid_long_text_action", "文稿控制操作无效");
+      break;
     case "choice": {
       if (node.choices.length === 0) issue("empty_choice", "至少需要一个选项");
       const ids = new Set<string>();

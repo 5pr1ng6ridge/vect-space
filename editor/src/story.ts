@@ -23,6 +23,7 @@ import {
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
   { type: "long_text", label: "长文本", group: "叙事" },
+  { type: "long_text_control", label: "文稿控制", group: "叙事" },
   { type: "choice", label: "选择", group: "逻辑" },
   { type: "condition", label: "条件分支", group: "逻辑" },
   { type: "playback", label: "播放控制", group: "流程" },
@@ -131,7 +132,9 @@ export function summarizeNode(node: SceneNode): string {
     case "say":
       return `${node.mode === "append" ? "接续 · " : ""}${node.speaker ?? "旁白"}：${node.text}`;
     case "long_text":
-      return `${node.steps.length} 段 · ${node.pagination === "manual" ? "仅手动分页" : "自动分页"} · ${node.paper ?? "透明"}`;
+      return `${node.mode === "continue" ? "接续" : "开始"} · ${node.document ?? "节点文稿"} · ${node.steps.length} 段`;
+    case "long_text_control":
+      return `${node.action === "show" ? "显示" : node.action === "hide" ? "隐藏" : "关闭"} · ${node.document}`;
     case "choice":
       return `${node.choices.length} 个选项`;
     case "set":
@@ -221,6 +224,9 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
     case "long_text":
       return {
         type,
+        document: null,
+        mode: "start",
+        on_exit: "close",
         paper: null,
         pagination: "auto",
         font_size: 32,
@@ -240,6 +246,13 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         ],
         speed_cps: null,
         reveal_animation: null,
+        next: fallback,
+      };
+    case "long_text_control":
+      return {
+        type,
+        document: "lecture",
+        action: "show",
         next: fallback,
       };
     case "choice":
@@ -1158,6 +1171,32 @@ export function renameNode(
   targetScene.definition.nodes[nextId] = node;
   if (targetScene.definition.entry === previousId) {
     targetScene.definition.entry = nextId;
+  }
+
+  // An unnamed start long-text uses its node ID as the document ID. Renaming
+  // that node therefore changes the document's effective ID; keep local
+  // continuation/control references valid instead of leaving a hidden stale
+  // document reference behind.
+  if (
+    node.type === "long_text" &&
+    (node.mode ?? "start") === "start" &&
+    (node.document === undefined || node.document === null)
+  ) {
+    for (const [candidateId, candidate] of Object.entries(
+      targetScene.definition.nodes,
+    )) {
+      if (candidateId === nextId) continue;
+      if (
+        (candidate.type === "long_text" ||
+          candidate.type === "long_text_control") &&
+        candidate.document === previousId
+      ) {
+        targetScene.definition.nodes[candidateId] = {
+          ...candidate,
+          document: nextId,
+        };
+      }
+    }
   }
 
   for (const file of updated.scenes) {
