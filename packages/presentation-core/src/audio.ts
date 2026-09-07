@@ -33,6 +33,13 @@ interface PlayingTypingSfx {
   sources: Set<ActiveSfx>;
 }
 
+interface BgmTransition {
+  generation: number;
+  controller: AbortController;
+  previous: PlayingBgm | null;
+  next: PlayingBgm | null;
+}
+
 export interface AudioManagerOptions {
   /**
    * Keep a silent preview from creating an AudioContext or downloading BGM
@@ -59,6 +66,8 @@ export class AudioManager {
   #sfxBus: GainNode | null = null;
   #videoBus: GainNode | null = null;
   #currentBgm: PlayingBgm | null = null;
+  #bgmTransition: BgmTransition | null = null;
+  #bgmTransitionGeneration = 0;
   #typingSfx: PlayingTypingSfx | null = null;
   #typingGeneration = 0;
   #playbackRate = 1;
@@ -220,46 +229,79 @@ export class AudioManager {
     signal?: AbortSignal,
   ): Promise<void> {
     if (signal?.aborted) return;
-    if (target === null && this.#currentBgm === null) return;
-    const previous = this.#currentBgm;
-    if (target !== null && previous?.state.asset === target.asset) {
-      const from = previous.gain.gain.value;
+    this.#invalidateBgmTransition();
+    const transition: BgmTransition = {
+      generation: ++this.#bgmTransitionGeneration,
+      controller: new AbortController(),
+      previous: this.#currentBgm,
+      next: null,
+    };
+    this.#bgmTransition = transition;
+    const relayAbort = (): void => transition.controller.abort();
+    signal?.addEventListener("abort", relayAbort, { once: true });
+    const isCurrent = (): boolean =>
+      this.#bgmTransition === transition &&
+      transition.generation === this.#bgmTransitionGeneration &&
+      !transition.controller.signal.aborted;
+    let committed = false;
+    try {
+      const previous = transition.previous;
+      if (target === null && previous === null) return;
+      if (target !== null && previous?.state.asset === target.asset) {
+        const from = previous.gain.gain.value;
+        await dynamicFade(
+          durationMs,
+          () => (this.#paused ? 0 : this.#playbackRate),
+          (progress) =>
+            setGain(previous.gain, from + (target.volume - from) * progress),
+          transition.controller.signal,
+        );
+        if (!isCurrent()) return;
+        previous.state = { ...target };
+        previous.element.loop = target.loop_end_ms == null;
+        return;
+      }
+
+      if (target !== null) {
+        const next = this.#createBgm(
+          target,
+          requireAssetUrl(assets, target.asset),
+        );
+        transition.next = next;
+        setGain(next.gain, durationMs > 0 ? 0 : target.volume);
+        await playBgm(next.element, transition.controller.signal);
+        if (!isCurrent()) return;
+      }
+
+      const next = transition.next;
+      const previousVolume = previous?.gain.gain.value ?? 0;
       await dynamicFade(
         durationMs,
         () => (this.#paused ? 0 : this.#playbackRate),
-        (progress) =>
-          setGain(previous.gain, from + (target.volume - from) * progress),
-        signal,
+        (progress) => {
+          if (next !== null && target !== null)
+            setGain(next.gain, target.volume * progress);
+          if (previous !== null)
+            setGain(previous.gain, previousVolume * (1 - progress));
+        },
+        transition.controller.signal,
       );
-      if (signal?.aborted) return;
-      previous.state = { ...target };
-      previous.element.loop = target.loop_end_ms == null;
-      return;
-    }
-    let next: PlayingBgm | null = null;
-    if (target !== null) {
-      next = this.#createBgm(target, requireAssetUrl(assets, target.asset));
-      setGain(next.gain, durationMs > 0 ? 0 : target.volume);
-      await next.element.play().catch(() => undefined);
-      if (signal?.aborted) {
-        this.#destroyBgm(next);
-        return;
+      if (!isCurrent()) return;
+      if (previous !== null) this.#destroyBgm(previous);
+      this.#currentBgm = next;
+      transition.next = null;
+      committed = true;
+    } finally {
+      signal?.removeEventListener("abort", relayAbort);
+      if (this.#bgmTransition === transition) this.#bgmTransition = null;
+      // A cancelled transition owns its newly-created element.  The active
+      // BGM is deliberately left intact so a later snapshot can reconcile it.
+      if (!committed && transition.next !== null) {
+        if (transition.next !== this.#currentBgm)
+          this.#destroyBgm(transition.next);
+        transition.next = null;
       }
     }
-    this.#currentBgm = next;
-    const previousVolume = previous?.gain.gain.value ?? 0;
-    await dynamicFade(
-      durationMs,
-      () => (this.#paused ? 0 : this.#playbackRate),
-      (progress) => {
-        if (next !== null && target !== null)
-          setGain(next.gain, target.volume * progress);
-        if (previous !== null)
-          setGain(previous.gain, previousVolume * (1 - progress));
-      },
-      signal,
-    );
-    if (!signal?.aborted && previous !== null) this.#destroyBgm(previous);
   }
 
   async reconcile(
@@ -294,6 +336,7 @@ export class AudioManager {
   }
 
   destroy(): void {
+    this.#invalidateBgmTransition();
     this.#typingGeneration += 1;
     this.#stopTypingSfx();
     for (const voice of [...this.#activeSfx]) this.#stopVoice(voice);
@@ -303,6 +346,18 @@ export class AudioManager {
     this.#context = null;
     this.#buffers.clear();
     this.#deferredBgm = null;
+  }
+
+  #invalidateBgmTransition(): void {
+    this.#bgmTransitionGeneration += 1;
+    const transition = this.#bgmTransition;
+    this.#bgmTransition = null;
+    if (transition === null) return;
+    transition.controller.abort();
+    if (transition.next !== null && transition.next !== this.#currentBgm) {
+      this.#destroyBgm(transition.next);
+      transition.next = null;
+    }
   }
 
   #ensureContext(): AudioContext {
@@ -546,5 +601,27 @@ function dynamicFade(
       } else frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
+  });
+}
+
+function playBgm(
+  element: HTMLAudioElement,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    signal.addEventListener("abort", finish, { once: true });
+    try {
+      void element.play().then(finish, finish);
+    } catch {
+      finish();
+    }
   });
 }

@@ -553,8 +553,6 @@ export class PresentationController {
     signal: AbortSignal,
   ): Promise<PresentationOutcome> {
     const firedEvents = new Set<string>();
-    const cameraBase = { ...this.#camera };
-    const bgmBase = this.#audio.currentBgmVolume() ?? 1;
     const spriteTracks = cue.tracks.filter(
       (track): track is Extract<TimelineTrack, { type: "sprite" }> =>
         track.type === "sprite",
@@ -592,16 +590,6 @@ export class PresentationController {
         throw new Error(`立绘 ${track.sprite_id} 无法建立时间轴对象`);
       }
     }
-
-    // Capture the starting transform once, after all timeline assets have
-    // been prepared.  Feeding the rendered transform back into the evaluator
-    // on every frame compounds animation and makes `inherit` tracks drift.
-    const spriteBases = Object.fromEntries(
-      [...this.#spriteViews.entries()].map(([id, view]) => [
-        id,
-        { asset: view.label, ...readSprite(view) },
-      ]),
-    );
 
     const videoTrack = cue.tracks.find(
       (track): track is Extract<TimelineTrack, { type: "video" }> =>
@@ -652,6 +640,19 @@ export class PresentationController {
       await waitForPresentedVideoFrame(video, signal);
       videoSource.update();
     }
+
+    // Capture every starting value once, after all timeline assets have been
+    // prepared and immediately before the first draw. Feeding the rendered
+    // transform back into the evaluator on every frame compounds animation
+    // and makes `inherit` tracks drift.
+    const cameraBase = { ...this.#camera };
+    const bgmBase = this.#audio.currentBgmVolume() ?? 1;
+    const spriteBases = Object.fromEntries(
+      [...this.#spriteViews.entries()].map(([id, view]) => [
+        id,
+        { asset: view.label, ...readSprite(view) },
+      ]),
+    );
 
     let previousElapsed = -1;
     const render = (elapsedMs: number): void => {
