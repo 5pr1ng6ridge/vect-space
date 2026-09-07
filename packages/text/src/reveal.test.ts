@@ -108,4 +108,26 @@ describe("TextRevealSession", () => {
     expect(plan.pauses[0]).toMatchObject({ startMs: 100, endMs: 200 });
     expect(plan.events.map((event) => event.atMs)).toEqual([100, 300]);
   });
+
+  it.each([
+    "[pause=0ms]AB",
+    "A[pause=0ms]B",
+    "A[pause=0ms][pause=0ms]B",
+    "AB[pause=0ms]",
+  ])("treats a zero-length pause as a no-op (%s)", (source) => {
+    const session = new TextRevealSession({
+      units: parseMarkup(source),
+      initialCps: 20,
+      defaultCps: 20,
+    });
+
+    expect(session.plan.pauses).toHaveLength(0);
+    expect(session.plan.completionMs).toBe(100);
+    expect(session.advance(1_000).state).toMatchObject({
+      status: "completed",
+      elapsedMs: 100,
+      revealedCount: 2,
+      activePause: null,
+    });
+  });
 });

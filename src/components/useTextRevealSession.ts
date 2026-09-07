@@ -223,7 +223,7 @@ export function useTextRevealSession(
       ++epochRef.current;
       cancelAnimationFrame(frame);
     };
-  }, [commit, ready, suspended]);
+  }, [commit, ready, rendered.key, rendered.session.plan, suspended]);
 
   useEffect(() => {
     if (!suspended) return;

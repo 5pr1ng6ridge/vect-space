@@ -254,8 +254,9 @@ export function buildRevealSchedule(
   let cps = validCps(initialCps, defaultCps);
   let revealIndex = 0;
   for (const unit of units) {
-    if (unit.kind === "pause") elapsed += unit.durationMs;
-    else if (unit.kind === "speed") {
+    if (unit.kind === "pause") {
+      if (unit.durationMs > 0) elapsed += unit.durationMs;
+    } else if (unit.kind === "speed") {
       cps =
         unit.cps === null
           ? validCps(defaultCps, 30)
@@ -289,6 +290,7 @@ export function buildPauseWindows(
   let revealIndex = 0;
   for (const unit of units) {
     if (unit.kind === "pause") {
+      if (unit.durationMs <= 0) continue;
       windows.push({
         startMs: elapsed,
         endMs: elapsed + unit.durationMs,
@@ -437,7 +439,7 @@ function totalTimelineMs(
   let revealIndex = 0;
   for (const unit of units) {
     if (unit.kind === "pause") {
-      elapsed += unit.durationMs;
+      if (unit.durationMs > 0) elapsed += unit.durationMs;
       continue;
     }
     if (unit.kind === "speed") continue;

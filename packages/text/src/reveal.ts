@@ -63,6 +63,10 @@ export function createRevealPlan(
 
   for (const unit of options.units) {
     if (unit.kind === "pause") {
+      // Keep the marker syntactically valid, but do not materialize a
+      // zero-width pause window.  A window with identical start/end times
+      // would be rediscovered on every advance and pin the virtual clock.
+      if (unit.durationMs <= 0) continue;
       // A pause is a hard reveal boundary, not just an annotation on the
       // timeline.  In drop-fade mode an inline formula (and the preceding
       // characters) may still be animating concurrently, so the explicit
@@ -147,14 +151,19 @@ export function advanceRevealSession(
   const target = Math.min(plan.completionMs, state.elapsedMs + delta);
   const activePause = plan.pauses.find(
     (pause) =>
-      state.elapsedMs >= pause.startMs && state.elapsedMs < pause.endMs,
+      pause.endMs > pause.startMs &&
+      state.elapsedMs >= pause.startMs &&
+      state.elapsedMs < pause.endMs,
   );
   // Never let one RAF tick jump from before a pause to after it.  When a
   // pause is active, consume at most its own remaining duration; a separate
   // tick is required before the following segment may start.  This also
   // handles adjacent pauses without exposing even a frame of later text.
   const nextPause = plan.pauses.find(
-    (pause) => pause.startMs >= state.elapsedMs && pause.startMs <= target,
+    (pause) =>
+      pause.endMs > pause.startMs &&
+      pause.startMs >= state.elapsedMs &&
+      pause.startMs <= target,
   );
   const bounded =
     activePause === undefined
@@ -312,7 +321,12 @@ function pauseAt(
   elapsed: number,
 ): PauseWindow | null {
   for (const pause of pauses)
-    if (elapsed >= pause.startMs && elapsed < pause.endMs) return pause;
+    if (
+      pause.endMs > pause.startMs &&
+      elapsed >= pause.startMs &&
+      elapsed < pause.endMs
+    )
+      return pause;
   return null;
 }
 
