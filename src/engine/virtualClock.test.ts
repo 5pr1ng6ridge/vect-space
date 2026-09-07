@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { advanceVirtualElapsed } from "./virtualClock";
+import { advanceVirtualElapsed } from "@vectspace/presentation-core/virtual-clock";
 
 describe("dynamic presentation clock", () => {
   it("changes the speed of the remaining virtual time without jumping state", () => {

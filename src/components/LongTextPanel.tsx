@@ -18,7 +18,7 @@ import {
   formulaRevealDurationMs,
   parseMarkup,
   visibleUnits,
-} from "../engine/markup";
+} from "@vectspace/text";
 import type {
   LongTextPageSnapshot,
   LongTextPrompt,

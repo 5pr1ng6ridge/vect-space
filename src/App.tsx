@@ -26,10 +26,10 @@ import {
   buildVisibleUnitCps,
   hasImmediateAutoAdvance,
   parseMarkup,
-} from "./engine/markup";
+} from "@vectspace/text";
 import { useTextRevealSession } from "./components/useTextRevealSession";
 import { canFastForwardPrompt } from "./engine/playback";
-import { UiMotionHost } from "./engine/uiMotion";
+import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type {
   AdvanceSource,
   AssetUrlMap,

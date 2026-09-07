@@ -13,7 +13,8 @@
     "./scene-surface": "./src/sceneSurface.ts",
     "./types": "./src/types.ts",
     "./ui-motion": "./src/uiMotion.ts",
-    "./virtual-clock": "./src/virtualClock.ts"
+    "./virtual-clock": "./src/virtualClock.ts",
+    "./browser-guards": "./src/browserGuards.ts"
   },
   "peerDependencies": {
     "pixi.js": "8.20.0"

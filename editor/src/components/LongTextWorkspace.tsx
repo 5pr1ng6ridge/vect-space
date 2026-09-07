@@ -28,7 +28,7 @@ import type {
   PreviewChoiceDecision,
   TimelinePreviewSettings,
 } from "../types";
-import { MarkupPreview } from "./MarkupPreview";
+import { MeasuredMarkup } from "@vectspace/text-react";
 
 const DESIGN_WIDTH = 1920;
 const DESIGN_HEIGHT = 1080;
@@ -1002,7 +1002,7 @@ export function LongTextWorkspace({
                   style={measureStyle}
                 >
                   {previewSteps.map((step) => (
-                    <MarkupPreview
+                    <MeasuredMarkup
                       fontFamily={font.fontFamily}
                       fontReady={font.ready}
                       key={step.id}
@@ -1084,11 +1084,11 @@ export function LongTextWorkspace({
                                         transform: `translate3d(0, -${fragment.sourceTop}px, 0)`,
                                       }}
                                     >
-                                      <MarkupPreview
+                                      <MeasuredMarkup
                                         fontFamily={font.fontFamily}
                                         fontReady={font.ready}
                                         measurementScale={previewScale}
-                                        revealAnimation={previewAnimation}
+                                        reveal={previewAnimation}
                                         source={
                                           previewSourceById.get(
                                             fragment.itemId,

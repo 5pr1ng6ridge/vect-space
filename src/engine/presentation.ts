@@ -9,7 +9,7 @@ import {
   VideoSource,
 } from "pixi.js";
 
-import { AudioManager } from "./audio";
+import { AudioManager } from "@vectspace/presentation-core/audio";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import { evaluateTimelineFrame } from "@vectspace/presentation-core/timeline-evaluator";
 import type {
@@ -26,9 +26,9 @@ import type {
   TimelineTrack,
   UiMotionPreset,
 } from "./types";
-import { TimelineClock } from "./timeline";
-import { UiMotionHost } from "./uiMotion";
-import { advanceVirtualElapsed } from "./virtualClock";
+import { TimelineClock } from "@vectspace/presentation-core/timeline";
+import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
+import { advanceVirtualElapsed } from "@vectspace/presentation-core/virtual-clock";
 import { DESIGN_HEIGHT, DESIGN_WIDTH } from "../viewport/viewport";
 
 const MAX_SESSION_TEXTURES = 256;

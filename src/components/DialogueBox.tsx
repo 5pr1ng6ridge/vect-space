@@ -12,13 +12,13 @@ import {
   buildVisibleUnitCps,
   formulaRevealDurationMs,
   parseMarkup,
-} from "../engine/markup";
+} from "@vectspace/text";
 import type {
   DialoguePageSnapshot,
   DialoguePrompt,
   TextRevealAnimation,
 } from "../engine/types";
-import type { UiMotionHost } from "../engine/uiMotion";
+import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import { MarkupText } from "./MarkupText";
 import { useTextRevealSession } from "./useTextRevealSession";
 

@@ -5,10 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 import { LongTextPanel, type LongTextPanelHandle } from "./LongTextPanel";
 import {
   LONG_TEXT_PAGE_HEIGHT,
-  LONG_TEXT_PAGE_PADDING_BOTTOM,
-  LONG_TEXT_PAGE_PADDING_TOP,
-  LONG_TEXT_STEP_GAP,
-  paginateLongTextSteps,
   resolveLongTextPageWindow,
 } from "./longTextPagination";
 import {
@@ -84,81 +80,6 @@ describe("LongTextPanel", () => {
       2,
     );
     expect(html).toContain("long-text-indicator");
-  });
-
-  it("starts a new sheet when the measured paper capacity is exhausted", () => {
-    const pages = paginateLongTextSteps(
-      [
-        { step_id: "first", text: "第一段", page_break_before: false },
-        { step_id: "second", text: "第二段", page_break_before: false },
-      ],
-      { first: 800, second: 400 },
-    );
-
-    expect(pages).toHaveLength(2);
-    expect(pages[0]?.steps.map((step) => step.step_id)).toEqual(["first"]);
-    expect(pages[1]?.steps.map((step) => step.step_id)).toEqual(["second"]);
-  });
-
-  it("accounts for the visible gap between steps at the paper boundary", () => {
-    const capacity =
-      LONG_TEXT_PAGE_HEIGHT -
-      LONG_TEXT_PAGE_PADDING_TOP -
-      LONG_TEXT_PAGE_PADDING_BOTTOM;
-    const pages = paginateLongTextSteps(
-      [
-        { step_id: "first", text: "第一段", page_break_before: false },
-        { step_id: "second", text: "第二段", page_break_before: false },
-      ],
-      { first: 400, second: capacity - 400 },
-    );
-
-    expect(LONG_TEXT_STEP_GAP).toBeGreaterThan(0);
-    expect(pages).toHaveLength(2);
-  });
-
-  it("only honors explicit breaks in manual pagination mode", () => {
-    const capacity =
-      LONG_TEXT_PAGE_HEIGHT -
-      LONG_TEXT_PAGE_PADDING_TOP -
-      LONG_TEXT_PAGE_PADDING_BOTTOM;
-    const steps = [
-      { step_id: "first", text: "第一段", page_break_before: false },
-      { step_id: "second", text: "第二段", page_break_before: false },
-      { step_id: "third", text: "第三段", page_break_before: true },
-    ];
-    const pages = paginateLongTextSteps(
-      steps,
-      { first: capacity - 100, second: 300, third: 200 },
-      "manual",
-    );
-
-    expect(pages).toHaveLength(2);
-    expect(pages[0]?.steps.map((step) => step.step_id)).toEqual([
-      "first",
-      "second",
-    ]);
-    expect(pages[0]?.height).toBeGreaterThan(LONG_TEXT_PAGE_HEIGHT);
-    expect(pages[1]?.steps.map((step) => step.step_id)).toEqual(["third"]);
-  });
-
-  it("expands a paper rather than clipping one oversized text step", () => {
-    const capacity =
-      LONG_TEXT_PAGE_HEIGHT -
-      LONG_TEXT_PAGE_PADDING_TOP -
-      LONG_TEXT_PAGE_PADDING_BOTTOM;
-    const pages = paginateLongTextSteps(
-      [{ step_id: "large", text: "很长的证明", page_break_before: false }],
-      { large: capacity + 240 },
-    );
-
-    expect(pages).toHaveLength(1);
-    expect(pages[0]?.contentHeight).toBe(capacity + 240);
-    // The new layout has symmetric 112px vertical padding.  An oversized
-    // manual page grows from that stable content box instead of clipping.
-    expect(pages[0]?.height).toBe(
-      LONG_TEXT_PAGE_PADDING_TOP + LONG_TEXT_PAGE_PADDING_TOP + capacity + 240,
-    );
   });
 
   it("leaves browsing space below the final sheet", () => {

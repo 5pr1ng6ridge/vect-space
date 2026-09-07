@@ -29,7 +29,7 @@ import type {
   VariableType,
   UiMotionFile,
 } from "../types";
-import { MarkupPreview } from "./MarkupPreview";
+import { MeasuredMarkup } from "@vectspace/text-react";
 
 const DEFAULT_LONG_TEXT_LAYOUT: LongTextLayout = {
   x: 340,
@@ -435,7 +435,7 @@ function renderFields(
             value={node.text}
           />
           <Field label="实际渲染预览">
-            <MarkupPreview source={interpolatePreview(node.text, manifest)} />
+            <MeasuredMarkup source={interpolatePreview(node.text, manifest)} />
           </Field>
           <OptionalNumber
             label="文字速度 CPS"
@@ -835,7 +835,7 @@ function renderFields(
                   }
                   value={choice.enabled_if}
                 />
-                <MarkupPreview
+                <MeasuredMarkup
                   source={interpolatePreview(choice.label, manifest)}
                 />
               </article>
@@ -2153,7 +2153,7 @@ function LongTextStepsEditor({
             rows={6}
             value={step.text}
           />
-          <MarkupPreview source={interpolatePreview(step.text, manifest)} />
+          <MeasuredMarkup source={interpolatePreview(step.text, manifest)} />
         </article>
       ))}
       <button
@@ -2367,7 +2367,7 @@ function LongTextLayoutEditor({
             type="button"
           >
             <div className="long-text-layout-preview-content">
-              <MarkupPreview source={previewText} />
+              <MeasuredMarkup source={previewText} />
             </div>
             <i
               onPointerDown={(event) => {

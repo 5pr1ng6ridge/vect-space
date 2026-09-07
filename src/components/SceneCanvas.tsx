@@ -8,7 +8,7 @@ import {
 } from "react";
 
 import { PresentationController } from "../engine/presentation";
-import type { UiMotionHost } from "../engine/uiMotion";
+import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type {
   AssetUrlMap,
   PresentationOutcome,

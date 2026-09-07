@@ -2973,7 +2973,8 @@ body.timeline-resizing {
   background-repeat: repeat-y;
   background-size: 100% 1340px;
   box-shadow: none;
-  font-size: 32px;
+  /* Keep the rendered pages on the same design size used by measurement. */
+  font-size: inherit;
   line-height: 1.78;
   letter-spacing: 0.035em;
   overflow-wrap: anywhere;

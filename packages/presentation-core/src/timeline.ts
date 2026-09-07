@@ -92,16 +92,14 @@ export function evaluateChannel(
   fallback: number,
 ): number {
   const frames = channels[name];
-  if (frames === undefined || frames.length === 0) return fallback;
+  if (frames === undefined) return fallback;
   const first = frames[0];
   const last = frames[frames.length - 1];
   if (first === undefined || last === undefined) return fallback;
   if (elapsedMs <= first.at_ms) return resolveValue(first.value, fallback);
   if (elapsedMs >= last.at_ms) return resolveValue(last.value, fallback);
-  for (let index = 0; index < frames.length - 1; index += 1) {
-    const left = frames[index];
-    const right = frames[index + 1];
-    if (left === undefined || right === undefined) continue;
+  let left = first;
+  for (const right of frames) {
     if (elapsedMs <= right.at_ms) {
       const span = right.at_ms - left.at_ms;
       const progress = span <= 0 ? 1 : (elapsedMs - left.at_ms) / span;
@@ -111,6 +109,7 @@ export function evaluateChannel(
         applyEasing(progress, left.easing),
       );
     }
+    left = right;
   }
   return resolveValue(last.value, fallback);
 }

@@ -2,6 +2,10 @@ schema_version: 2
 id: prologue
 entry: establish
 nodes:
+  JUMPSANDBOX:
+    type: jump
+    scene: sandbox
+    target: boot
   algebra_line:
     type: say
     speaker: test
@@ -199,13 +203,13 @@ nodes:
     - id: step_3
       text: |-
         第二步：$2^k$ 个数的情况
-
+        
         先证明项数是 $2^k$ 时成立。
-
+        
         当 $n=2$ 已经成立。
-
+        
         假设 $n=2^k$ 时成立。现在证明 $n=2^{k+1}$。
-
+        
         设有 $2^{k+1}$ 个正数：
         $$
         a_1,\dots,a_{2^{k+1}}
@@ -252,7 +256,7 @@ nodes:
         而
         $$
         \sqrt{G_1G_2}
-
+        
         \sqrt[2^{k+1}]{a_1a_2\cdots a_{2^{k+1}}}
         $$
         所以 $2^{k+1}$ 项时也成立。
@@ -261,9 +265,9 @@ nodes:
     - id: step_7
       text: |-
         第三步：推广到任意 $n$
-
+        
         这个技巧很漂亮喵。
-
+        
         设
         $$
         A=\frac{a_1+\cdots+a_n}{n}
@@ -283,9 +287,9 @@ nodes:
         它们的算术平均数仍然是 $A$，因为总和为
         $$
         a_1+\cdots+a_n+(2^k-n)A
-
+        
         nA+(2^k-n)A
-
+        
         2^kA
         $$
         所以这 $2^k$ 个数的平均数是 $A$。
@@ -318,7 +322,7 @@ nodes:
     next: say_3
   long_text_long_text_say_copy_copy:
     type: long_text
-    paper: gui.scratch_paper
+    pagination: continuous
     font_size: 28.0
     steps:
     - id: step_1
@@ -365,7 +369,7 @@ nodes:
         而
         $$
         \sqrt{G_1G_2}
-
+        
         \sqrt[2^{k+1}]{a_1a_2\cdots a_{2^{k+1}}}
         $$
         所以 $2^{k+1}$ 项时也成立。
@@ -374,9 +378,9 @@ nodes:
     - id: step_7
       text: |-
         第三步：推广到任意 $n$
-
+        
         这个技巧很漂亮喵。
-
+        
         设
         $$
         A=\frac{a_1+\cdots+a_n}{n}
@@ -396,9 +400,9 @@ nodes:
         它们的算术平均数仍然是 $A$，因为总和为
         $$
         a_1+\cdots+a_n+(2^k-n)A
-
+        
         nA+(2^k-n)A
-
+        
         2^kA
         $$
         所以这 $2^k$ 个数的平均数是 $A$。
@@ -505,6 +509,9 @@ nodes:
           variable: ending_seen
         right:
           value: true
+    - id: SANDBOX
+      label: SANDBOX
+      next: JUMPSANDBOX
   say:
     type: bgm
     action: start

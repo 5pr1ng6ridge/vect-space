@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { resolveTextLayoutLineGroups } from "@vectspace/text";
 
-import { parseMarkup, visibleUnits } from "../engine/markup";
+import { parseMarkup, visibleUnits } from "@vectspace/text";
 import { MarkupText } from "./MarkupText";
 import {
   buildLineSweepGeometry,

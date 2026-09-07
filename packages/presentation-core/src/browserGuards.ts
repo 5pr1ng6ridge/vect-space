@@ -59,7 +59,6 @@ function isBrowserShortcut(event: KeyboardEvent): boolean {
 
   if (event.altKey && ["arrowleft", "arrowright", "home"].includes(key))
     return true;
-  if (event.shiftKey && key === "f10") return true;
 
   const command = event.ctrlKey || event.metaKey;
   if (!command) {
@@ -73,11 +72,12 @@ function isBrowserShortcut(event: KeyboardEvent): boolean {
 }
 
 /** Disable browser chrome behavior while leaving app shortcuts such as Ctrl+S/Z/Y intact. */
-export function installBrowserGuards(): void {
+export function installBrowserGuards(allowContextMenu = false): void {
   if (!isTauriRuntime()) return;
 
   const preventContextMenu = (event: MouseEvent): void => {
     if (
+      allowContextMenu &&
       event.target instanceof Element &&
       event.target.closest("[data-allow-context-menu]") !== null
     ) {

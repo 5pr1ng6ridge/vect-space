@@ -19,7 +19,7 @@ import type {
   UiMotionTarget,
 } from "../types";
 import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
-import { MarkupPreview } from "./MarkupPreview";
+import { MeasuredMarkup } from "@vectspace/text-react";
 
 const TARGET_LABELS: Record<UiMotionTarget, string> = {
   dialogue_root: "对话框整体",
@@ -415,7 +415,7 @@ export function UiMotionWorkspace({
                 }
                 ref={dialogueTextRef}
               >
-                <MarkupPreview source={"向量 $v\\in V$ 可以写成 $v=u+w$。"} />
+                <MeasuredMarkup source={"向量 $v\\in V$ 可以写成 $v=u+w$。"} />
               </span>
               <span
                 className={`ui-preview-indicator${selectedTarget === "dialogue_advance_indicator" ? " selected" : ""}`}

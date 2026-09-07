@@ -23,7 +23,7 @@ import {
   parseMarkup,
   visibleUnits,
   type MathUnit,
-} from "../engine/markup";
+} from "@vectspace/text";
 import type { TextRevealAnimation } from "../engine/types";
 import type { TextRevealClock } from "./useTextRevealSession";
 import {

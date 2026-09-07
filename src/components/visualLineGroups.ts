@@ -1,8 +1,8 @@
 import {
   formulaPresentationDurationMs,
   mathRevealDurationMs,
-  type VisibleUnit,
-} from "../engine/markup";
+  type LayoutUnit,
+} from "@vectspace/text";
 
 export interface LineSweepUnitTiming {
   /** The first unit that starts this visual row. */
@@ -23,7 +23,7 @@ export interface LineSweepUnitGeometry {
   readonly unitOffsetPx: number;
 }
 
-export function isHardLineBreak(unit: VisibleUnit): boolean {
+export function isHardLineBreak(unit: LayoutUnit): boolean {
   return (
     unit.kind === "hard_break" ||
     (unit.kind === "character" && unit.value === "\n")
@@ -63,7 +63,7 @@ export function splitLinesAtPauses(
  * instead gives each already-laid-out unit a time window in its own row.
  */
 export function buildLineSweepTimings(
-  units: readonly VisibleUnit[],
+  units: readonly LayoutUnit[],
   groups: readonly (readonly number[])[],
   schedule: readonly number[],
   unitCps: readonly number[],
