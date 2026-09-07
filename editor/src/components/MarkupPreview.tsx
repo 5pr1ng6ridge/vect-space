@@ -11,6 +11,9 @@ export interface MarkupPreviewProps {
   onLayout?(layout: TextLayoutSnapshot): void;
   className?: string;
   style?: CSSProperties;
+  fontFamily?: string;
+  fontReady?: boolean;
+  measurementScale?: number;
   visibleCount?: number;
   revealAnimation?: TextRevealAnimation;
 }
@@ -20,6 +23,9 @@ export function MarkupPreview({
   onLayout,
   className,
   style,
+  fontFamily,
+  fontReady,
+  measurementScale,
   visibleCount,
   revealAnimation,
 }: MarkupPreviewProps): ReactElement {
@@ -28,6 +34,9 @@ export function MarkupPreview({
     onLayout,
     className,
     style,
+    fontFamily,
+    fontReady,
+    measurementScale,
     visibleCount,
     reveal: revealAnimation,
   };

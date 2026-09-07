@@ -9,6 +9,59 @@ export interface TextUnitBox {
   right: number;
 }
 
+/** A DOM rectangle expressed in the renderer's current (possibly scaled) space. */
+export interface TextMeasurementRect {
+  readonly top: number;
+  readonly bottom: number;
+  readonly left: number;
+  readonly right: number;
+  readonly height?: number;
+}
+
+/**
+ * Converts a browser rectangle to the unscaled design space used by the
+ * paginator.  The browser reports transformed rectangles in viewport pixels,
+ * while scrollHeight/offsetLeft remain in layout pixels; keeping this
+ * conversion in the shared package prevents the game and editor from drifting.
+ */
+export function normalizeTextUnitBox(
+  index: number,
+  rect: TextMeasurementRect,
+  origin: Pick<TextMeasurementRect, "top" | "left">,
+  measurementScale = 1,
+): TextUnitBox {
+  const scale = safeMeasurementScale(measurementScale);
+  return {
+    index,
+    top: (rect.top - origin.top) / scale,
+    bottom: (rect.bottom - origin.top) / scale,
+    left: (rect.left - origin.left) / scale,
+    right: (rect.right - origin.left) / scale,
+  };
+}
+
+/** Measurement adapters must wait for a real, finite design-surface scale. */
+export function isValidTextMeasurementScale(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+/** Returns a stable content height in the same unscaled space as unit boxes. */
+export function normalizeTextContentHeight(
+  contentHeight: number,
+  rootHeight: number,
+  boxes: ReadonlyMap<number, TextUnitBox>,
+  measurementScale = 1,
+): number {
+  const scale = safeMeasurementScale(measurementScale);
+  return finitePositive(
+    Math.max(
+      contentHeight,
+      rootHeight / scale,
+      ...[...boxes.values()].map((box) => box.bottom),
+    ),
+  );
+}
+
 export interface TextLayoutLine {
   readonly unitIndices: readonly number[];
   readonly top: number;
@@ -206,61 +259,61 @@ export function paginateTextLayouts(
       continue;
     }
 
-    let lineIndex = 0;
-    while (lineIndex < lines.length) {
-      const first = lines[lineIndex];
-      if (first === undefined) break;
+    const blocks = mergeOverlappingLines(lines);
+    let blockIndex = 0;
+    while (blockIndex < blocks.length) {
+      const block = blocks[blockIndex];
+      if (block === undefined) break;
       const previous = fragments[fragments.length - 1];
       const gap =
         previous === undefined || previous.itemId === item.id ? 0 : safeGap;
+      const sourceTop = block.firstLine === 0 ? 0 : block.top;
       const available = capacity - used - gap;
-      const sourceTop = lineIndex === 0 ? 0 : first.top;
-      let endIndex = lineIndex;
-      while (endIndex < lines.length) {
-        const line = lines[endIndex];
-        if (line === undefined) break;
-        // A unit's DOM rect is a glyph/inline box, not a complete CSS line
-        // box.  Slicing at `line.bottom` therefore clips the descent and the
-        // line-leading below the last visual row of a fragment.  The next
-        // row's stable top is the only shared, renderer-neutral boundary.
-        const nextLine = lines[endIndex + 1];
-        const lastLine = lines[endIndex];
-        // A browser inline rect can overlap the next row's top (large
-        // glyphs, KaTeX and fallback fonts all do this). The boundary must
-        // contain both the following row's leading and the current row's
-        // descent; using only `nextLine.top` crops the lower part of a
-        // fragment in both renderers.
-        const nextBoundary = Math.max(
-          nextLine?.top ?? sourceHeight,
-          lastLine?.bottom ?? sourceHeight,
-        );
-        if (nextBoundary - sourceTop > available) break;
-        endIndex += 1;
-      }
 
-      // If the current page has no room for the next row, start a fresh
-      // paper. An over-height atomic row is then allowed to extend that page.
-      if (endIndex === lineIndex && fragments.length > 0) {
+      // A block contains every consecutive row whose glyph boxes overlap.
+      // Keeping it atomic prevents one row's descent from being rendered on
+      // the preceding paper while the next row starts on the following one.
+      if (
+        fragmentBoundary(blocks, blockIndex, sourceHeight) - sourceTop >
+          available &&
+        fragments.length > 0
+      ) {
         finishPage();
         continue;
       }
-      endIndex = Math.max(lineIndex + 1, endIndex);
-      const nextLine = lines[endIndex];
-      const lastLine = lines[endIndex - 1];
-      const sourceBottom = Math.max(
-        nextLine?.top ?? sourceHeight,
-        lastLine?.bottom ?? sourceHeight,
+      let endBlockIndex = blockIndex;
+      while (endBlockIndex + 1 < blocks.length) {
+        const next = blocks[endBlockIndex + 1];
+        if (next === undefined) break;
+        const candidateBottom = fragmentBoundary(
+          blocks,
+          endBlockIndex + 1,
+          sourceHeight,
+        );
+        if (candidateBottom - sourceTop > available) break;
+        endBlockIndex += 1;
+      }
+      const lastBlock = blocks[endBlockIndex];
+      if (lastBlock === undefined) break;
+      // Leave the inter-row gap on the page that owns the preceding rows.
+      // The next block's top is the clipping boundary; using the last glyph
+      // bottom here would pull that gap into the fragment and change the
+      // established reveal/scroll geometry.
+      const sourceBottom = fragmentBoundary(
+        blocks,
+        endBlockIndex,
+        sourceHeight,
       );
       append(
         item.id,
         sourceTop,
         sourceBottom - sourceTop,
-        lineIndex,
-        endIndex - 1,
+        block.firstLine,
+        lastBlock.lastLine,
         gap,
       );
-      lineIndex = endIndex;
-      if (lineIndex < lines.length) finishPage();
+      blockIndex = endBlockIndex + 1;
+      if (blockIndex < blocks.length) finishPage();
     }
   }
   finishPage();
@@ -269,4 +322,53 @@ export function paginateTextLayouts(
 
 function finitePositive(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+interface LineBlock {
+  readonly firstLine: number;
+  readonly lastLine: number;
+  readonly top: number;
+  readonly bottom: number;
+}
+
+function mergeOverlappingLines(lines: readonly TextLayoutLine[]): LineBlock[] {
+  const blocks: LineBlock[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line === undefined) continue;
+    const previous = blocks[blocks.length - 1];
+    if (previous !== undefined && line.top < previous.bottom) {
+      blocks[blocks.length - 1] = {
+        firstLine: previous.firstLine,
+        lastLine: index,
+        top: previous.top,
+        bottom: Math.max(previous.bottom, line.bottom),
+      };
+      continue;
+    }
+    blocks.push({
+      firstLine: index,
+      lastLine: index,
+      top: line.top,
+      bottom: line.bottom,
+    });
+  }
+  return blocks;
+}
+
+function safeMeasurementScale(value: number): number {
+  return isValidTextMeasurementScale(value) ? value : 1;
+}
+
+function fragmentBoundary(
+  blocks: readonly LineBlock[],
+  blockIndex: number,
+  sourceHeight: number,
+): number {
+  const block = blocks[blockIndex];
+  if (block === undefined) return sourceHeight;
+  const next = blocks[blockIndex + 1];
+  return next === undefined
+    ? Math.max(block.bottom, sourceHeight)
+    : Math.max(block.bottom, next.top);
 }

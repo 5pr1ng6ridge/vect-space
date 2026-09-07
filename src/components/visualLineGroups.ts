@@ -148,13 +148,14 @@ export function lineSweepMaskPositionPx(
 export function buildLineSweepGeometry(
   groups: readonly (readonly number[])[],
   elements: ReadonlyMap<number, HTMLElement>,
+  measurementScale?: number,
 ): ReadonlyMap<number, LineSweepUnitGeometry> {
   const result = new Map<number, LineSweepUnitGeometry>();
   for (const group of groups) {
     const laidOutUnits = group.flatMap((index) => {
       const element = elements.get(index);
       if (element === undefined) return [];
-      const box = visibleElementBox(element);
+      const box = visibleElementBox(element, measurementScale);
       return [{ index, leftPx: box.leftPx, rightPx: box.rightPx }];
     });
     if (laidOutUnits.length !== group.length) continue;
@@ -191,7 +192,10 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function visibleElementBox(element: HTMLElement): {
+function visibleElementBox(
+  element: HTMLElement,
+  measurementScale?: number,
+): {
   leftPx: number;
   rightPx: number;
 } {
@@ -208,7 +212,13 @@ function visibleElementBox(element: HTMLElement): {
   // makes a row mask sweep across empty space and hides the real animation.
   const outerRect = element.getBoundingClientRect();
   const katexRect = katex.getBoundingClientRect();
-  const scale = outerRect.width / element.offsetWidth;
+  const inferredScale = outerRect.width / element.offsetWidth;
+  const scale =
+    measurementScale !== undefined &&
+    Number.isFinite(measurementScale) &&
+    measurementScale > 0
+      ? measurementScale
+      : inferredScale;
   if (!Number.isFinite(scale) || scale <= 0 || katexRect.width <= 0) {
     return fallback;
   }

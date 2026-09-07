@@ -91,7 +91,7 @@ export function paginateLongTextSteps(
  */
 export function paginateLongTextVisualSteps(
   steps: readonly LongTextStepSnapshot[],
-  layouts: Readonly<Record<string, TextLayoutSnapshot>>,
+  layouts: Readonly<Record<string, TextLayoutSnapshot | undefined>>,
   mode: "continuous" | "auto" | "manual" = "auto",
   pageHeight = LONG_TEXT_PAGE_HEIGHT,
   paddingY = LONG_TEXT_PAGE_PADDING_TOP,

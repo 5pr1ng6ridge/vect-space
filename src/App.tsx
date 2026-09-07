@@ -808,6 +808,7 @@ export default function App(): ReactElement {
                 prompt={dialogue}
                 revealAnimation={revealAnimation}
                 fontReady={fontReady}
+                measurementScale={viewportMetrics.scale}
                 ref={dialogueRef}
                 revealImmediately={dialogue === null || !hasTextRevealCue}
                 sessionKey={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${renderedDialoguePage.page_id}`}`}
@@ -836,6 +837,7 @@ export default function App(): ReactElement {
                 revealAnimation={revealAnimation}
                 designScale={viewportMetrics.scale}
                 fontReady={fontReady}
+                fontKey={defaultFontId ?? "system"}
                 ref={longTextRef}
                 revealImmediately={!hasTextRevealCue}
                 sessionKey={`${update.update_id}:${longText.prompt_id}`}

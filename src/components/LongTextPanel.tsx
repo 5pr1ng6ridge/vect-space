@@ -29,7 +29,10 @@ import {
   paginateLongTextVisualSteps,
   resolveLongTextPageWindow,
 } from "./longTextPagination";
-import type { TextLayoutSnapshot } from "@vectspace/text";
+import {
+  isValidTextMeasurementScale,
+  type TextLayoutSnapshot,
+} from "@vectspace/text";
 import {
   advanceLongTextScroll,
   clamp,
@@ -61,6 +64,8 @@ interface LongTextPanelProps {
   designScale?: number;
   /** Rendering is held until the runtime font has finished loading. */
   fontReady?: boolean;
+  /** Identifies the font used by the layout cache. */
+  fontKey?: string;
   fastForward: boolean;
   /** Menu/page-hidden suspension freezes both reveal and scroll clocks. */
   suspended?: boolean;
@@ -141,6 +146,7 @@ export const LongTextPanel = forwardRef<
     revealAnimation = "typewriter",
     designScale = 1,
     fontReady = true,
+    fontKey = "system",
     fastForward,
     suspended = false,
     onTypingChange,
@@ -181,8 +187,33 @@ export const LongTextPanel = forwardRef<
   const [lineSweepReadyKey, setLineSweepReadyKey] = useState<string | null>(
     null,
   );
+  const layout = page.layout;
+  const stepLayoutKeys = useMemo(() => {
+    const result: Record<string, string> = {};
+    for (const step of page.steps) {
+      result[step.step_id] = JSON.stringify([
+        page.document_id,
+        step.step_id,
+        step.text,
+        page.font_size,
+        layout.width,
+        layout.padding_x,
+        fontKey,
+        fontReady ? "ready" : "pending",
+      ]);
+    }
+    return result;
+  }, [
+    fontKey,
+    fontReady,
+    layout.padding_x,
+    layout.width,
+    page.document_id,
+    page.font_size,
+    page.steps,
+  ]);
   const [stepLayouts, setStepLayouts] = useState<
-    Readonly<Record<string, TextLayoutSnapshot>>
+    Readonly<Record<string, { key: string; snapshot: TextLayoutSnapshot }>>
   >({});
   const [scrollPreparedKey, setScrollPreparedKey] = useState<string | null>(
     null,
@@ -233,7 +264,6 @@ export const LongTextPanel = forwardRef<
     return result;
   }, [activeLayoutUnits]);
   const paperArtworkReady = usePaperArtworkReady(paperUrl);
-  const layout = page.layout;
   const applyScrollOffset = useCallback((offset: number): void => {
     scrollOffsetRef.current = offset;
     const transform = `translate3d(0, ${-offset}px, 0)`;
@@ -262,8 +292,12 @@ export const LongTextPanel = forwardRef<
   }, [applyScrollOffset, instanceKey, page.document_id]);
 
   const unmeasuredSteps = useMemo(
-    () => page.steps.filter((step) => stepLayouts[step.step_id] === undefined),
-    [page.steps, stepLayouts],
+    () =>
+      page.steps.filter(
+        (step) =>
+          stepLayouts[step.step_id]?.key !== stepLayoutKeys[step.step_id],
+      ),
+    [page.steps, stepLayoutKeys, stepLayouts],
   );
   const measurementBatch = useMemo(
     () => unmeasuredSteps.slice(0, 16),
@@ -272,23 +306,41 @@ export const LongTextPanel = forwardRef<
 
   const handleStepLayout = useCallback(
     (stepId: string, layoutSnapshot: TextLayoutSnapshot): void => {
+      const key = stepLayoutKeys[stepId];
+      if (key === undefined) return;
       setStepLayouts((current) => {
-        // A committed step never changes later. This is the stable-layout
-        // boundary: a subsequent font/ResizeObserver callback cannot move a
-        // prior page while later steps are appended.
-        if (current[stepId] !== undefined) return current;
-        return { ...current, [stepId]: layoutSnapshot };
+        const previous = current[stepId];
+        if (
+          previous?.key === key &&
+          sameTextLayoutSnapshot(previous.snapshot, layoutSnapshot)
+        ) {
+          return current;
+        }
+        return { ...current, [stepId]: { key, snapshot: layoutSnapshot } };
       });
     },
-    [],
+    [stepLayoutKeys],
   );
 
-  const layoutReady = fontReady && unmeasuredSteps.length === 0;
+  const layoutReady =
+    fontReady &&
+    isValidTextMeasurementScale(designScale) &&
+    unmeasuredSteps.length === 0;
   const pages = useMemo(
     () =>
       paginateLongTextVisualSteps(
         page.steps,
-        stepLayouts,
+        Object.fromEntries(
+          page.steps.map((step) => {
+            const entry = stepLayouts[step.step_id];
+            return [
+              step.step_id,
+              entry !== undefined && entry.key === stepLayoutKeys[step.step_id]
+                ? entry.snapshot
+                : undefined,
+            ] as const;
+          }),
+        ),
         page.pagination,
         layout.page_height,
         layout.padding_y,
@@ -298,6 +350,7 @@ export const LongTextPanel = forwardRef<
       layout.padding_y,
       page.pagination,
       page.steps,
+      stepLayoutKeys,
       stepLayouts,
     ],
   );
@@ -549,7 +602,9 @@ export const LongTextPanel = forwardRef<
       return;
     }
     const activeLayout =
-      activeStep === undefined ? undefined : stepLayouts[activeStep.step_id];
+      activeStep === undefined
+        ? undefined
+        : stepLayouts[activeStep.step_id]?.snapshot;
     const revealIndex = renderedVisibleCount - 1;
     const lineIndex =
       activeLayout?.lines.findIndex((line) =>
@@ -761,8 +816,13 @@ export const LongTextPanel = forwardRef<
         ref={measuringRootRef}
       >
         {measurementBatch.map((step) => (
-          <div className="long-text-step" key={step.step_id}>
+          <div
+            className="long-text-step long-text-measure-step"
+            key={step.step_id}
+          >
             <MarkupText
+              fontReady={fontReady}
+              measurementScale={designScale}
               onTextLayout={(layoutSnapshot) =>
                 handleStepLayout(step.step_id, layoutSnapshot)
               }
@@ -846,6 +906,7 @@ export const LongTextPanel = forwardRef<
                                 )}
                                 pauseWindows={session.plan.pauses}
                                 fontReady={fontReady}
+                                measurementScale={designScale}
                                 source={fragment.step.text}
                                 {...(current
                                   ? { onMathMetrics: handleMathMetrics }
@@ -886,3 +947,29 @@ export const LongTextPanel = forwardRef<
     </section>
   );
 });
+
+function sameTextLayoutSnapshot(
+  left: TextLayoutSnapshot,
+  right: TextLayoutSnapshot,
+): boolean {
+  if (
+    Math.abs(left.contentHeight - right.contentHeight) > 0.25 ||
+    left.lines.length !== right.lines.length
+  ) {
+    return false;
+  }
+  return left.lines.every((line, index) => {
+    const candidate = right.lines[index];
+    return (
+      candidate !== undefined &&
+      line.unitIndices.length === candidate.unitIndices.length &&
+      line.unitIndices.every(
+        (unit, unitIndex) => unit === candidate.unitIndices[unitIndex],
+      ) &&
+      Math.abs(line.top - candidate.top) <= 0.25 &&
+      Math.abs(line.bottom - candidate.bottom) <= 0.25 &&
+      Math.abs(line.left - candidate.left) <= 0.25 &&
+      Math.abs(line.right - candidate.right) <= 0.25
+    );
+  });
+}

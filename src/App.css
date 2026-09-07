@@ -625,6 +625,13 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+/* Pagination measures against a stable block box.  The rendered dialogue
+   surface keeps MarkupText inline for normal wrapping; only the hidden
+   long-text probe needs a multi-line container as its origin. */
+.long-text-measure-step > span {
+  display: block;
+}
+
 .long-text-step-fragment {
   position: absolute;
   right: 0;

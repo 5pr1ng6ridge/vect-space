@@ -1,6 +1,9 @@
 import katex from "katex";
 import {
   createTextLayoutSnapshot,
+  isValidTextMeasurementScale,
+  normalizeTextContentHeight,
+  normalizeTextUnitBox,
   resolveTextLayoutLineGroups,
   type TextLayoutSnapshot,
 } from "@vectspace/text";
@@ -61,6 +64,8 @@ interface MarkupTextProps {
   instantReveal?: boolean;
   /** Optional frame clock used to update line masks without React renders. */
   revealClock?: TextRevealClock;
+  /** Scale of the containing 1920×1080 design surface. */
+  measurementScale?: number;
 }
 
 export const MarkupText = memo(function MarkupText({
@@ -81,6 +86,7 @@ export const MarkupText = memo(function MarkupText({
   lineSweepElapsedMs = 0,
   instantReveal = false,
   revealClock,
+  measurementScale = 1,
 }: MarkupTextProps): ReactElement {
   const units = useMemo(() => visibleUnits(parseMarkup(source)), [source]);
   // Reveal plans deliberately omit hard breaks: they take no time, but remain
@@ -128,9 +134,13 @@ export const MarkupText = memo(function MarkupText({
   const lineSweepMode =
     revealAnimation === "line_sweep" &&
     visibleCount !== Number.POSITIVE_INFINITY;
-  const lineSweepRequested = lineSweepMode && fontReady;
+  const validMeasurementScale = isValidTextMeasurementScale(measurementScale);
+  const lineSweepRequested =
+    lineSweepMode && fontReady && validMeasurementScale;
   const measurementRequested =
-    fontReady && (lineSweepRequested || onTextLayout !== undefined);
+    validMeasurementScale &&
+    fontReady &&
+    (lineSweepRequested || onTextLayout !== undefined);
   const unitElementsRef = useRef(new Map<number, HTMLElement>());
   const rootRef = useRef<HTMLSpanElement>(null);
   const [lineGroups, setLineGroups] = useState<{
@@ -165,13 +175,10 @@ export const MarkupText = memo(function MarkupText({
         const element = unitElementsRef.current.get(index);
         if (element === undefined || rootRect === undefined) return;
         const rect = element.getBoundingClientRect();
-        boxes.set(index, {
+        boxes.set(
           index,
-          top: rect.top - rootRect.top,
-          bottom: rect.bottom - rootRect.top,
-          left: rect.left - rootRect.left,
-          right: rect.right - rootRect.left,
-        });
+          normalizeTextUnitBox(index, rect, rootRect, measurementScale),
+        );
       });
       const rawGroups = resolveTextLayoutLineGroups(units, boxes);
       const groups = splitLinesAtPauses(
@@ -188,13 +195,22 @@ export const MarkupText = memo(function MarkupText({
       ).length;
       if (measuredUnitCount !== paintableUnitCount) return;
       const geometry = lineSweepRequested
-        ? buildLineSweepGeometry(groups, unitElementsRef.current)
+        ? buildLineSweepGeometry(
+            groups,
+            unitElementsRef.current,
+            measurementScale,
+          )
         : new Map<number, LineSweepUnitGeometry>();
       if (lineSweepRequested && geometry.size !== paintableUnitCount) return;
       const layout = createTextLayoutSnapshot(
         rawGroups,
         boxes,
-        Math.max(root?.scrollHeight ?? 0, rootRect?.height ?? 0),
+        normalizeTextContentHeight(
+          root?.scrollHeight ?? 0,
+          rootRect?.height ?? 0,
+          boxes,
+          measurementScale,
+        ),
       );
       const fontSizePx =
         root === null
@@ -229,6 +245,7 @@ export const MarkupText = memo(function MarkupText({
     layoutSchedule,
     lineSweepRequested,
     measurementRequested,
+    measurementScale,
     pauseWindows,
     source,
     units,
@@ -247,7 +264,8 @@ export const MarkupText = memo(function MarkupText({
   ).length;
   const lineSweepReady =
     !lineSweepMode ||
-    (activeLineGroups !== null &&
+    (validMeasurementScale &&
+      activeLineGroups !== null &&
       activeLineGeometry !== null &&
       groupedUnitCount === paintableUnitCount &&
       activeLineGeometry.size === paintableUnitCount);
@@ -310,9 +328,9 @@ export const MarkupText = memo(function MarkupText({
   }, [lineSweepReady, onLineSweepLayoutChange]);
 
   useLayoutEffect(() => {
-    if (lineGroups?.source !== source) return;
+    if (!validMeasurementScale || lineGroups?.source !== source) return;
     onTextLayout?.(lineGroups.layout);
-  }, [lineGroups, onTextLayout, source]);
+  }, [lineGroups, onTextLayout, source, validMeasurementScale]);
 
   const renderUnit = (
     unit: (typeof units)[number],

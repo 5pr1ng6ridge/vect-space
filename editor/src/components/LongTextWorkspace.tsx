@@ -95,7 +95,7 @@ export function LongTextWorkspace({
   const draftRef = useRef(node);
   const [previewScale, setPreviewScale] = useState(0.5);
   const [stepLayouts, setStepLayouts] = useState<
-    Readonly<Record<string, TextLayoutSnapshot>>
+    Readonly<Record<string, { key: string; snapshot: TextLayoutSnapshot }>>
   >({});
   const [gestureActive, setGestureActive] = useState(false);
   const [backgroundChoice, setBackgroundChoice] = useState("__current__");
@@ -155,17 +155,56 @@ export function LongTextWorkspace({
         : [{ id: "preview", text: "长文本预览", page_break_before: false }],
     [draft.steps],
   );
+  const previewSourceById = useMemo(
+    () =>
+      new Map(
+        previewSteps.map((step) => [
+          step.id,
+          resolvedStepTexts[step.id] ??
+            (step.id === previewSteps[0]?.id ? "等待 Rust 预览…" : ""),
+        ]),
+      ),
+    [previewSteps, resolvedStepTexts],
+  );
+  const stepLayoutKeys = useMemo(() => {
+    const result: Record<string, string> = {};
+    for (const step of previewSteps) {
+      result[step.id] = JSON.stringify([
+        step.id,
+        previewSourceById.get(step.id) ?? "",
+        draft.font_size ?? 32,
+        layout.width,
+        layout.padding_x,
+        font.fontFamily ?? "system",
+        font.ready ? "ready" : "pending",
+      ]);
+    }
+    return result;
+  }, [
+    draft.font_size,
+    font.fontFamily,
+    font.ready,
+    layout.padding_x,
+    layout.width,
+    previewSourceById,
+    previewSteps,
+  ]);
   const reportStepLayout = useCallback(
     (stepId: string, nextLayout: TextLayoutSnapshot): void => {
+      const key = stepLayoutKeys[stepId];
+      if (key === undefined) return;
       setStepLayouts((previous) => {
         const current = previous[stepId];
-        if (current !== undefined && sameLayoutSnapshot(current, nextLayout)) {
+        if (
+          current?.key === key &&
+          sameLayoutSnapshot(current.snapshot, nextLayout)
+        ) {
           return previous;
         }
-        return { ...previous, [stepId]: nextLayout };
+        return { ...previous, [stepId]: { key, snapshot: nextLayout } };
       });
     },
-    [],
+    [stepLayoutKeys],
   );
   // This is the identical row-based paginator used by the game.  Before an
   // asynchronous font/KaTeX measurement arrives it uses only a provisional
@@ -176,7 +215,10 @@ export function LongTextWorkspace({
         previewSteps.map((step) => ({
           id: step.id,
           pageBreakBefore: step.page_break_before,
-          layout: stepLayouts[step.id],
+          layout:
+            stepLayouts[step.id]?.key === stepLayoutKeys[step.id]
+              ? stepLayouts[step.id].snapshot
+              : undefined,
           fallbackHeight: Math.max(88, (draft.font_size ?? 32) * 2.2),
         })),
         draft.pagination ?? "auto",
@@ -189,6 +231,7 @@ export function LongTextWorkspace({
       layout.page_height,
       layout.padding_y,
       previewSteps,
+      stepLayoutKeys,
       stepLayouts,
     ],
   );
@@ -222,17 +265,6 @@ export function LongTextWorkspace({
   const previewMaxScroll = Math.max(
     0,
     previewSurfaceHeight - layout.height + 240,
-  );
-  const previewSourceById = useMemo(
-    () =>
-      new Map(
-        previewSteps.map((step) => [
-          step.id,
-          resolvedStepTexts[step.id] ??
-            (step.id === previewSteps[0]?.id ? "等待 Rust 预览…" : ""),
-        ]),
-      ),
-    [previewSteps, resolvedStepTexts],
   );
   const previewRequestGeneration = useRef(0);
   useEffect(() => {
@@ -748,7 +780,10 @@ export function LongTextWorkspace({
                 >
                   {previewSteps.map((step) => (
                     <MarkupPreview
+                      fontFamily={font.fontFamily}
+                      fontReady={font.ready}
                       key={step.id}
+                      measurementScale={previewScale}
                       onLayout={(nextLayout) =>
                         reportStepLayout(step.id, nextLayout)
                       }
@@ -827,6 +862,9 @@ export function LongTextWorkspace({
                                       }}
                                     >
                                       <MarkupPreview
+                                        fontFamily={font.fontFamily}
+                                        fontReady={font.ready}
+                                        measurementScale={previewScale}
                                         revealAnimation={previewAnimation}
                                         source={
                                           previewSourceById.get(

@@ -45,6 +45,8 @@ interface DialogueBoxProps {
   revealImmediately?: boolean;
   revealAnimation?: TextRevealAnimation;
   fontReady?: boolean;
+  /** Scale of the containing 1920×1080 design surface. */
+  measurementScale?: number;
   /** Menus and visibility changes freeze the virtual reveal clock. */
   suspended?: boolean;
   motionHost?: UiMotionHost;
@@ -79,6 +81,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       revealImmediately = false,
       revealAnimation = "typewriter",
       fontReady = true,
+      measurementScale = 1,
       suspended = false,
       motionHost,
     },
@@ -272,7 +275,10 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
           ref={dialogueTextRef}
           style={{ color: page.text_color ?? undefined }}
         >
-          <MarkupText source={completedText} />
+          <MarkupText
+            measurementScale={measurementScale}
+            source={completedText}
+          />
           <MarkupText
             animateMath
             fontReady={fontReady}
@@ -280,6 +286,7 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
             instantReveal={complete}
             lineSweepElapsedMs={session.state.elapsedMs}
             mathRevealDurations={mathRevealDurations}
+            measurementScale={measurementScale}
             onMathMetrics={handleMathMetrics}
             onLineSweepLayoutChange={handleLineSweepLayoutChange}
             pauseWindows={session.plan.pauses}

@@ -1,6 +1,9 @@
 import katex from "katex";
 import {
   createTextLayoutSnapshot,
+  isValidTextMeasurementScale,
+  normalizeTextContentHeight,
+  normalizeTextUnitBox,
   parseMarkup,
   resolveTextLayoutLineGroups,
   visibleUnits,
@@ -27,6 +30,10 @@ export interface MeasuredMarkupProps {
   visibleCount?: number;
   className?: string;
   style?: CSSProperties;
+  /** Transform scale applied by the containing design surface. */
+  measurementScale?: number;
+  /** Do not publish geometry until the selected font has settled. */
+  fontReady?: boolean;
   onLayout?(layout: TextLayoutSnapshot): void;
 }
 
@@ -44,6 +51,8 @@ export function MeasuredMarkup({
   visibleCount = Number.POSITIVE_INFINITY,
   className,
   style,
+  measurementScale = 1,
+  fontReady = true,
   onLayout,
 }: MeasuredMarkupProps): ReactElement {
   const units = useMemo(() => parseMarkup(source), [source]);
@@ -57,7 +66,7 @@ export function MeasuredMarkup({
       revealIndex += 1;
     });
     return result;
-  }, [layoutUnits]);
+  }, [layoutUnits, measurementScale]);
   const rootRef = useRef<HTMLDivElement>(null);
   const callbackRef = useRef(onLayout);
   useLayoutEffect(() => {
@@ -86,13 +95,10 @@ export function MeasuredMarkup({
       );
       const rect = element?.getBoundingClientRect();
       if (rect === undefined || rect.width < 0) return;
-      boxes.set(index, {
+      boxes.set(
         index,
-        top: rect.top - rootRect.top,
-        bottom: rect.bottom - rootRect.top,
-        left: rect.left - rootRect.left,
-        right: rect.right - rootRect.left,
-      });
+        normalizeTextUnitBox(index, rect, rootRect, measurementScale),
+      );
     });
     const groups = resolveTextLayoutLineGroups(layoutUnits, boxes);
     const expected = layoutUnits.filter(
@@ -103,17 +109,28 @@ export function MeasuredMarkup({
       createTextLayoutSnapshot(
         groups,
         boxes,
-        Math.max(root.scrollHeight, rootRect.height),
+        normalizeTextContentHeight(
+          root.scrollHeight,
+          rootRect.height,
+          boxes,
+          measurementScale,
+        ),
       ),
     );
-  }, [layoutUnits]);
+  }, [layoutUnits, measurementScale]);
 
   useLayoutEffect(() => {
-    if (onLayout === undefined) return;
+    if (
+      onLayout === undefined ||
+      !fontReady ||
+      !isValidTextMeasurementScale(measurementScale)
+    )
+      return;
     let disposed = false;
     let frame = 0;
+    let fontsSettled = document.fonts?.ready === undefined;
     const schedule = (): void => {
-      if (disposed) return;
+      if (disposed || !fontsSettled) return;
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(measure);
     };
@@ -122,7 +139,17 @@ export function MeasuredMarkup({
     // every subsequent line after the bundled game font finishes loading.
     const fontsReady = document.fonts?.ready;
     if (fontsReady === undefined) schedule();
-    else void fontsReady.then(schedule, schedule);
+    else
+      void fontsReady.then(
+        () => {
+          fontsSettled = true;
+          schedule();
+        },
+        () => {
+          fontsSettled = true;
+          schedule();
+        },
+      );
     const root = rootRef.current;
     if (root === null || typeof ResizeObserver === "undefined") {
       return () => {
@@ -139,7 +166,15 @@ export function MeasuredMarkup({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [fontFamily, fontSize, measure, onLayout, textColor]);
+  }, [
+    fontFamily,
+    fontReady,
+    fontSize,
+    measure,
+    measurementScale,
+    onLayout,
+    textColor,
+  ]);
 
   const rootStyle: CSSProperties = {
     ...style,

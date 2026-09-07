@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 export interface AssetFontState {
   fontFamily: string | undefined;
   error: string | null;
+  /** True when loading finished, including the explicit system fallback path. */
+  ready: boolean;
 }
 
 interface LoadState {
@@ -54,5 +56,6 @@ export function useAssetFont(
   return {
     fontFamily: current?.loaded === true ? family : undefined,
     error: current?.error ?? null,
+    ready: url === undefined || current !== null,
   };
 }
