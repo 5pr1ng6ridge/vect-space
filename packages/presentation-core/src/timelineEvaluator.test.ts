@@ -105,6 +105,105 @@ describe("evaluateTimelineFrame", () => {
     });
   });
 
+  it("keeps inherited transforms anchored to one captured base", () => {
+    const cue = {
+      duration_ms: 1_000,
+      tracks: [
+        {
+          type: "sprite" as const,
+          sprite_id: "alice",
+          asset: null,
+          channels: {
+            x: [
+              {
+                at_ms: 500,
+                value: "inherit" as const,
+                easing: "linear" as const,
+              },
+              { at_ms: 1_000, value: 100, easing: "linear" as const },
+            ],
+            scale: [
+              {
+                at_ms: 500,
+                value: "inherit" as const,
+                easing: "linear" as const,
+              },
+              { at_ms: 1_000, value: 3, easing: "linear" as const },
+            ],
+            scale_x: [
+              {
+                at_ms: 500,
+                value: "inherit" as const,
+                easing: "linear" as const,
+              },
+              { at_ms: 1_000, value: 2, easing: "linear" as const },
+            ],
+            scale_y: [
+              {
+                at_ms: 500,
+                value: "inherit" as const,
+                easing: "linear" as const,
+              },
+              { at_ms: 1_000, value: 0.5, easing: "linear" as const },
+            ],
+          },
+        },
+      ],
+    };
+    const base = {
+      sprites: {
+        alice: {
+          asset: "sprite.alice",
+          x: 0,
+          y: 20,
+          scale: 1,
+          scale_x: 1,
+          scale_y: 1,
+          rotation_deg: 0,
+          opacity: 1,
+          z: 0,
+        },
+      },
+      camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
+    };
+
+    const atHalf = evaluateTimelineFrame(cue, base, 750);
+    const atThreeQuarters = evaluateTimelineFrame(cue, base, 900);
+    const afterSeek = evaluateTimelineFrame(cue, base, 900);
+    const half = atHalf.sprites[0];
+    if (half === undefined) throw new Error("missing evaluated sprite");
+    const refed = evaluateTimelineFrame(
+      cue,
+      {
+        ...base,
+        sprites: {
+          alice: {
+            asset: half.asset,
+            x: half.x,
+            y: half.y,
+            scale: half.scale,
+            scale_x: half.scale_x,
+            scale_y: half.scale_y,
+            rotation_deg: half.rotation_deg,
+            opacity: half.opacity,
+            z: half.z,
+          },
+        },
+      },
+      900,
+    );
+    const expected = atThreeQuarters.sprites[0];
+    expect(expected).toMatchObject({
+      x: 80,
+      scale: 2.6,
+      scale_x: 1.8,
+      scale_y: 0.6,
+    });
+    expect(afterSeek.sprites[0]).toEqual(expected);
+    expect(refed.sprites[0]?.x).not.toBe(expected?.x);
+    expect(refed.sprites[0]?.scale).not.toBe(expected?.scale);
+  });
+
   it("reconstructs overlapping screen effects from timeline time", () => {
     const events = [
       {

@@ -593,6 +593,16 @@ export class PresentationController {
       }
     }
 
+    // Capture the starting transform once, after all timeline assets have
+    // been prepared.  Feeding the rendered transform back into the evaluator
+    // on every frame compounds animation and makes `inherit` tracks drift.
+    const spriteBases = Object.fromEntries(
+      [...this.#spriteViews.entries()].map(([id, view]) => [
+        id,
+        { asset: view.label, ...readSprite(view) },
+      ]),
+    );
+
     const videoTrack = cue.tracks.find(
       (track): track is Extract<TimelineTrack, { type: "video" }> =>
         track.type === "video",
@@ -651,12 +661,7 @@ export class PresentationController {
       const evaluated = evaluateTimelineFrame(
         { duration_ms: cue.duration_ms, tracks: cue.tracks },
         {
-          sprites: Object.fromEntries(
-            [...this.#spriteViews.entries()].map(([id, view]) => [
-              id,
-              { asset: view.label, ...readSprite(view) },
-            ]),
-          ),
+          sprites: spriteBases,
           camera: cameraBase,
           bgm_volume: bgmBase,
         },
