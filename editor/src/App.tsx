@@ -42,8 +42,10 @@ import {
   renameNode,
   renameScene,
   renameVariable,
+  rewriteLongTextDocumentReferences,
   setPortTarget,
   splitDialogueAt,
+  splitLongTextAt,
   uniqueNodeId,
 } from "./story";
 import type {
@@ -618,21 +620,12 @@ export function App(): ReactElement {
         nextDocument !== null &&
         previousDocument !== nextDocument
       ) {
-        for (const [candidateId, candidate] of Object.entries(
-          scene.definition.nodes,
-        )) {
-          if (candidateId === nodeId) continue;
-          if (
-            (candidate.type === "long_text" ||
-              candidate.type === "long_text_control") &&
-            candidate.document === previousDocument
-          ) {
-            scene.definition.nodes[candidateId] = {
-              ...candidate,
-              document: nextDocument,
-            };
-          }
-        }
+        rewriteLongTextDocumentReferences(
+          scene.definition,
+          previousDocument,
+          nextDocument,
+          nodeId,
+        );
       }
     });
   };
@@ -705,55 +698,32 @@ export function App(): ReactElement {
     const scene = activeScene;
     const source = scene?.nodes[nodeId];
     if (scene === undefined || source?.type !== "long_text") return;
-    if (stepIndex <= 0 || stepIndex >= source.steps.length) {
-      setError("只能在第二段及之后拆分长文本。");
+    let result: ReturnType<typeof splitLongTextAt>;
+    try {
+      result = splitLongTextAt(scene, nodeId, stepIndex);
+    } catch (reason) {
+      reportCommandError(reason);
       return;
     }
-    const continuationId = uniqueNodeId(scene, `${nodeId}_continue`);
-    const usedDocuments = new Set(
-      Object.entries(scene.nodes).flatMap(([id, node]) =>
-        node.type === "long_text" ? [node.document ?? id] : [],
-      ),
-    );
-    let document = source.document ?? `${nodeId}_document`;
-    let suffix = 2;
-    while (usedDocuments.has(document) && document !== source.document) {
-      document = `${nodeId}_document_${suffix}`;
-      suffix += 1;
-    }
-    const sourceMode = source.mode ?? "start";
-    const first = {
-      ...source,
-      document,
-      mode: sourceMode,
-      on_exit: "keep_visible" as const,
-      steps: source.steps.slice(0, stepIndex),
-      next: continuationId,
-    };
-    const continuation = {
-      ...source,
-      document,
-      mode: "continue" as const,
-      steps: source.steps.slice(stepIndex),
-      next: source.next,
-    };
-    // Continuation nodes inherit the stable presentation from the first
-    // node. Do not copy optional style fields into the generated YAML, or the
-    // Rust validator will (correctly) reject the split document.
-    delete continuation.paper;
-    delete continuation.pagination;
-    delete continuation.text_color;
-    delete continuation.layout;
     commit((draft) => {
       const file = findScene(draft, activeSceneId);
       if (file === undefined) return;
-      file.definition.nodes[nodeId] = first;
-      file.definition.nodes[continuationId] = continuation;
+      file.definition.nodes[nodeId] = result.first;
+      file.definition.nodes[result.continuationId] = result.continuation;
+      rewriteLongTextDocumentReferences(
+        file.definition,
+        result.previousDocument,
+        result.document,
+        nodeId,
+      );
       const layout = ensureSceneLayout(draft.layout, activeSceneId);
       const origin = layout.nodes[nodeId] ?? { x: 0, y: 0 };
-      layout.nodes[continuationId] = { x: origin.x + 320, y: origin.y };
+      layout.nodes[result.continuationId] = {
+        x: origin.x + 320,
+        y: origin.y,
+      };
     });
-    setSelectedNodeId(continuationId);
+    setSelectedNodeId(result.continuationId);
     setNotice("已拆成长文稿接续节点；可在两段之间插入对话或动画。");
   };
 

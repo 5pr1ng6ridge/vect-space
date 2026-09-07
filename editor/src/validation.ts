@@ -198,11 +198,15 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
         }
         for (const step of candidate.steps) {
           const previousNodeId = existing.stepIds.get(step.id);
-          if (previousNodeId !== undefined && previousNodeId !== nodeId) {
+          if (previousNodeId !== undefined) {
+            const location =
+              previousNodeId === nodeId
+                ? "同一节点中重复"
+                : `与节点 ${previousNodeId} 重复`;
             diagnostics.push(
               error(
                 "duplicate_long_text_step",
-                `文稿 ${documentId} 的步骤 ID ${step.id} 与节点 ${previousNodeId} 重复`,
+                `文稿 ${documentId} 的步骤 ID ${step.id}${location}`,
                 scene.id,
                 nodeId,
               ),

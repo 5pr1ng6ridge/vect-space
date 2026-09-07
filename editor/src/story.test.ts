@@ -11,7 +11,9 @@ import {
   renameScene,
   renameCharacter,
   renameVariable,
+  rewriteLongTextDocumentReferences,
   setPortTarget,
+  splitLongTextAt,
   splitDialogueAt,
 } from "./story";
 import type { EditorProject } from "./types";
@@ -104,6 +106,98 @@ describe("story graph mapping", () => {
       page_id: "line",
       next: "end",
     });
+  });
+
+  it("splits long text with inherited continuation style and rewrites implicit references", () => {
+    const sourceProject = project();
+    const scene = sourceProject.scenes[0].definition;
+    const source = defaultNode("long_text", "end");
+    if (source.type !== "long_text") throw new Error("missing long-text node");
+    source.steps = [
+      { id: "statement", text: "第一段", page_break_before: false },
+      { id: "proof", text: "第二段", page_break_before: false },
+      { id: "remark", text: "第三段", page_break_before: false },
+    ];
+    scene.nodes.lecture = source;
+    scene.nodes.hide_lecture = {
+      type: "long_text_control",
+      document: "lecture",
+      action: "hide",
+      next: "end",
+    };
+
+    const result = splitLongTextAt(scene, "lecture", 1);
+    expect(result.previousDocument).toBe("lecture");
+    expect(result.document).toBe("lecture_document");
+    expect(result.first).toMatchObject({
+      document: "lecture_document",
+      mode: "start",
+      on_exit: "keep_visible",
+      font_size: 32,
+      steps: [source.steps[0]],
+    });
+    expect(result.continuation).toMatchObject({
+      document: "lecture_document",
+      mode: "continue",
+      steps: source.steps.slice(1),
+    });
+    expect(result.continuation).not.toHaveProperty("paper");
+    expect(result.continuation).not.toHaveProperty("pagination");
+    expect(result.continuation).not.toHaveProperty("font_size");
+    expect(result.continuation).not.toHaveProperty("text_color");
+    expect(result.continuation).not.toHaveProperty("layout");
+
+    scene.nodes.lecture = result.first;
+    scene.nodes[result.continuationId] = result.continuation;
+    rewriteLongTextDocumentReferences(
+      scene,
+      result.previousDocument,
+      result.document,
+      "lecture",
+    );
+    expect(scene.nodes.hide_lecture).toMatchObject({
+      type: "long_text_control",
+      document: "lecture_document",
+    });
+    expect(
+      validateLive(sourceProject).some((issue) =>
+        issue.code.startsWith("long_text_"),
+      ),
+    ).toBe(false);
+  });
+
+  it("reports duplicate step IDs repeated inside a later continuation", () => {
+    const invalid = project();
+    const scene = invalid.scenes[0].definition;
+    const start = defaultNode("long_text", "continuation");
+    if (start.type !== "long_text") throw new Error("missing long-text node");
+    start.document = "lecture";
+    start.steps = [{ id: "statement", text: "开始", page_break_before: false }];
+    const continuation = {
+      ...start,
+      mode: "continue" as const,
+      steps: [
+        { id: "repeat", text: "一", page_break_before: false },
+        { id: "repeat", text: "二", page_break_before: false },
+      ],
+      next: "end",
+    };
+    delete continuation.paper;
+    delete continuation.pagination;
+    delete continuation.font_size;
+    delete continuation.text_color;
+    delete continuation.layout;
+    scene.nodes.lecture = start;
+    scene.nodes.continuation = continuation;
+
+    expect(validateLive(invalid)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_long_text_step",
+          node_id: "continuation",
+        }),
+      ]),
+    );
   });
 
   it("expands quick presentation nodes into editable timeline data", () => {
