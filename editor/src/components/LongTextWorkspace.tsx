@@ -147,10 +147,6 @@ export function LongTextWorkspace({
   // YAML here would make a continuation look valid before its retained page
   // has been proven reachable.
   const [previewUnavailable, setPreviewUnavailable] = useState(true);
-  const [previewOrigin, setPreviewOrigin] = useState<
-    "story_entry" | "scene_entry"
-  >("story_entry");
-  const [canRetryFromSceneEntry, setCanRetryFromSceneEntry] = useState(false);
   const [pendingChoice, setPendingChoice] = useState<Extract<
     BuildNodePreviewResult,
     { status: "needs_choice" }
@@ -444,14 +440,18 @@ export function LongTextWorkspace({
     ],
   );
   const previewRequestGeneration = useRef(0);
-  const previewSettings = useMemo(
-    () =>
-      project.layout.timeline_previews?.[`${sceneId}/${nodeId}`] ?? {
+  const previewSettings = useMemo(() => {
+    const saved = project.layout.timeline_previews?.[
+      `${sceneId}/${nodeId}`
+    ] ?? {
         variable_overrides: {},
         choices: [],
-      },
-    [nodeId, project.layout.timeline_previews, sceneId],
-  );
+      };
+    return {
+      ...saved,
+      choices: saved.choices.filter((choice) => choice.scene_id === sceneId),
+    };
+  }, [nodeId, project.layout.timeline_previews, sceneId]);
   useEffect(() => {
     const generation = ++previewRequestGeneration.current;
     const loadPreview = async (): Promise<void> => {
@@ -480,7 +480,6 @@ export function LongTextWorkspace({
         const result = await editorApi.buildNodePreview({
           project: projectRequest(project, importTokens),
           target: { scene_id: sceneId, node_id: nodeId },
-          origin: previewOrigin,
           variable_overrides: savedSettings?.variable_overrides ?? {},
           choices: savedSettings?.choices ?? [],
         });
@@ -489,7 +488,6 @@ export function LongTextWorkspace({
           setPreviewContextError(
             `真实预览需要先选择 ${result.location.scene_id}/${result.location.node_id}`,
           );
-          setCanRetryFromSceneEntry(false);
           setPreviewContextStatus(
             `等待选择：${result.location.scene_id}/${result.location.node_id}`,
           );
@@ -503,7 +501,6 @@ export function LongTextWorkspace({
         if (result.status === "unreachable") {
           setPreviewContextStatus("无法到达目标节点");
           setPreviewContextError(result.message);
-          setCanRetryFromSceneEntry(result.can_retry_from_scene_entry);
           setResolvedStepTexts({});
           setPreviewDocumentSteps([]);
           setPreviewUnavailable(true);
@@ -558,7 +555,6 @@ export function LongTextWorkspace({
         setPreviewContextStatus(
           `已捕获真实进入状态（${result.trace.length} 个边界）`,
         );
-        setCanRetryFromSceneEntry(false);
         setPreviewUnavailable(false);
         setPreviewBackgroundId(result.update.snapshot.world.background);
       } catch (error: unknown) {
@@ -567,7 +563,6 @@ export function LongTextWorkspace({
           error instanceof Error ? error.message : "真实预览构建失败",
         );
         setPreviewContextStatus("上下文构建失败");
-        setCanRetryFromSceneEntry(false);
         setResolvedStepTexts({});
         setPreviewDocumentSteps([]);
         setPreviewUnavailable(true);
@@ -590,7 +585,6 @@ export function LongTextWorkspace({
     draft.steps,
     importTokens,
     nodeId,
-    previewOrigin,
     previewSettings,
     project,
     sceneId,
@@ -1632,18 +1626,6 @@ export function LongTextWorkspace({
             <div className="long-text-workspace-warning">
               <strong>真实预览诊断</strong>
               <div>{previewContextError}</div>
-              {canRetryFromSceneEntry && previewOrigin === "story_entry" && (
-                <button
-                  className="long-text-workspace-retry"
-                  onClick={() => {
-                    setPreviewOrigin("scene_entry");
-                    setPreviewContextError(null);
-                  }}
-                  type="button"
-                >
-                  改用当前 Scene 入口重试
-                </button>
-              )}
             </div>
           )}
           <label>

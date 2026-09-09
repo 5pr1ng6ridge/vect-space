@@ -255,6 +255,25 @@ fn choose(
 }
 
 #[tauri::command]
+fn click_button(
+    instance_id: String,
+    expected_revision: WireU64,
+    expected_session_id: Option<WireU64>,
+    state: State<'_, EngineState>,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
+    let (update, session_id, mode) = state
+        .transact_active_runtime(expected_session_id.as_ref(), |runtime| {
+            runtime.click_button(&state.content, &instance_id, expected_revision)
+        })?;
+    Ok(WireRuntimeUpdate::with_session(
+        update,
+        session_id.into(),
+        mode,
+    ))
+}
+
+#[tauri::command]
 fn presentation_complete(
     update_id: WireU64,
     outcome: PresentationOutcome,
@@ -691,6 +710,7 @@ pub fn run() {
             start_new_game,
             advance,
             choose,
+            click_button,
             presentation_complete,
             get_snapshot,
             get_dialogue_history,

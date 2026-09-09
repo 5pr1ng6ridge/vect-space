@@ -5,6 +5,56 @@ import {
 } from "./timelineEvaluator";
 
 describe("evaluateTimelineFrame", () => {
+  it("evaluates button transform tracks without changing the hit-area model", () => {
+    const frame = evaluateTimelineFrame(
+      {
+        duration_ms: 1_000,
+        tracks: [
+          {
+            type: "button",
+            instance_id: "confirm",
+            channels: {
+              x: [
+                { at_ms: 0, value: "inherit", easing: "linear" },
+                { at_ms: 1_000, value: 600, easing: "ease_in_out" },
+              ],
+              width: [
+                { at_ms: 0, value: 200, easing: "linear" },
+                { at_ms: 1_000, value: 300, easing: "linear" },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        sprites: {},
+        buttons: {
+          confirm: {
+            x: 100,
+            y: 200,
+            width: 200,
+            height: 80,
+            scale_x: 1,
+            scale_y: 1,
+            rotation_deg: 0,
+            opacity: 1,
+            z: 4,
+          },
+        },
+        camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
+      },
+      500,
+    );
+    expect(frame.buttons).toHaveLength(1);
+    expect(frame.buttons[0]).toMatchObject({
+      id: "confirm",
+      x: 350,
+      y: 200,
+      width: 250,
+      z: 4,
+    });
+  });
+
   it("evaluates sprite, camera and BGM channels from the same base state", () => {
     const frame = evaluateTimelineFrame(
       {

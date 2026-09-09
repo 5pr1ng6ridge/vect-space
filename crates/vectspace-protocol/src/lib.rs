@@ -7,8 +7,8 @@ use thiserror::Error;
 use ts_rs::TS;
 use vectspace_core::model::{
     AudioSnapshot, BootstrapPayload, DialogueHistoryEntry, DialoguePageSnapshot,
-    LongTextPageSnapshot, PlaybackSnapshot, PresentationCue, PromptSnapshot, RuntimeSnapshot,
-    RuntimeUpdate, ScalarValue, StoryLocation, WorldSnapshot,
+    LongTextPageSnapshot, MutationValue, PlaybackSnapshot, PresentationCue, PromptSnapshot,
+    RuntimeSnapshot, RuntimeUpdate, ScalarValue, StoryLocation, WorldSnapshot,
 };
 use vectspace_core::runtime::RuntimeError;
 
@@ -302,6 +302,7 @@ pub struct WireRuntimeSnapshot {
     pub revision: WireU64,
     pub location: StoryLocation,
     pub variables: WireVariableMap,
+    #[serde(serialize_with = "serialize_world_snapshot")]
     pub world: WorldSnapshot,
     pub audio: AudioSnapshot,
     pub playback: PlaybackSnapshot,
@@ -310,6 +311,55 @@ pub struct WireRuntimeSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub long_text_page: Option<LongTextPageSnapshot>,
     pub prompt: PromptSnapshot,
+}
+
+/// Button click actions can carry i64 literals.  Runtime variables already
+/// use the tagged wire scalar representation, so apply the same lossless
+/// encoding to the nested action values before they cross into a WebView.
+fn serialize_world_snapshot<S>(world: &WorldSnapshot, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut value = serde_json::to_value(world).map_err(serde::ser::Error::custom)?;
+    let Some(buttons) = value
+        .get_mut("buttons")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return value.serialize(serializer);
+    };
+    for (id, button) in &world.buttons {
+        let Some(serialized_button) = buttons
+            .get_mut(id)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(serialized_sets) = serialized_button
+            .get_mut("action")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|action| action.get_mut("sets"))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for (set, source) in serialized_sets.iter_mut().zip(&button.action.sets) {
+            let Some(MutationValue::Literal(ScalarValue::Integer(integer))) = source.value.as_ref()
+            else {
+                continue;
+            };
+            let Some(set_object) = set.as_object_mut() else {
+                continue;
+            };
+            set_object.insert(
+                "value".to_owned(),
+                serde_json::json!({
+                    "kind": "integer",
+                    "value": integer.to_string(),
+                }),
+            );
+        }
+    }
+    value.serialize(serializer)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -529,6 +579,10 @@ fn stringify_id_fields(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vectspace_core::model::{
+        ButtonAssetFit, ButtonAssetMode, ButtonClickAction, ButtonSetAction, ButtonSnapshot,
+        MutationValue, VariableOperation,
+    };
 
     #[test]
     fn full_i64_range_round_trips_without_javascript_numbers() {
@@ -557,5 +611,63 @@ mod tests {
                 Err(ProtocolError::InvalidInteger(_))
             ));
         }
+    }
+
+    #[test]
+    fn nested_button_integer_actions_use_lossless_wire_scalars() {
+        let mut world = WorldSnapshot::default();
+        world.buttons.insert(
+            "large".to_owned(),
+            ButtonSnapshot {
+                id: "large".to_owned(),
+                template: "button.large".to_owned(),
+                asset_mode: ButtonAssetMode::Separate,
+                fit: ButtonAssetFit::Stretch,
+                normal: None,
+                hover: None,
+                pressed: None,
+                animations: Default::default(),
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 80.0,
+                rotation_deg: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                opacity: 1.0,
+                z: 0,
+                visible: true,
+                enabled: true,
+                action: ButtonClickAction {
+                    sets: vec![ButtonSetAction {
+                        variable: "score".to_owned(),
+                        op: VariableOperation::Assign,
+                        value: Some(MutationValue::Literal(ScalarValue::Integer(i64::MAX))),
+                    }],
+                    next: None,
+                },
+            },
+        );
+        let wire = WireRuntimeSnapshot {
+            session_id: WireU64::from(1),
+            mode: WireSessionMode::Story,
+            revision: WireU64::from(2),
+            location: StoryLocation {
+                scene_id: "scene".to_owned(),
+                node_id: "node".to_owned(),
+            },
+            variables: BTreeMap::new(),
+            world,
+            audio: AudioSnapshot::default(),
+            playback: PlaybackSnapshot::default(),
+            dialogue_page: None,
+            long_text_page: None,
+            prompt: PromptSnapshot::None,
+        };
+        let value = serde_json::to_value(wire).unwrap();
+        assert_eq!(
+            value["world"]["buttons"]["large"]["action"]["sets"][0]["value"],
+            serde_json::json!({"kind": "integer", "value": i64::MAX.to_string()}),
+        );
     }
 }

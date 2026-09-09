@@ -1,0 +1,359 @@
+schema_version: 2
+id: button_test
+entry: background
+nodes:
+  background:
+    type: background
+    background: bg.vector_space
+    transition: cross_fade
+    duration_ms: 250
+    easing: ease_in_out
+    await: true
+    next: intro
+  intro:
+    type: say
+    speaker: test
+    text: |-
+      这是按钮控件回归场景。按钮没有文字，位置就是测试提示的一部分。
+      左列从上到下：透明点击区、独立贴图、叠加贴图、打开历史面板。
+      中列从上到下：禁用按钮、隐藏按钮、重叠按钮（点击重叠区域应由最高层接收）。
+      右下按钮会先播放一段位置、缩放、旋转和透明度时间线。
+      点击按钮时，背景剧情推进应保持拦截；按下后移出再释放应取消。
+    mode: start
+    speed_cps: null
+    next: reset_click_state
+  reset_click_state:
+    type: set
+    variable: button_test_clicks
+    op: assign
+    value: 0
+    next: reset_last_button
+  reset_last_button:
+    type: set
+    variable: button_test_last
+    op: assign
+    value: ""
+    next: create_transparent
+  create_transparent:
+    type: button_create
+    instance_id: transparent_area
+    template: demo.transparent
+    x: 120.0
+    "y": 170.0
+    width: 360.0
+    height: 90.0
+    z: 30
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: button_test_clicks
+        op: add
+        value: 1
+      - variable: button_test_last
+        op: assign
+        value: transparent
+      next:
+        type: jump
+        scene: null
+        target: feedback
+    next: create_separate
+  create_separate:
+    type: button_create
+    instance_id: separate_visual
+    template: demo.separate
+    x: 120.0
+    "y": 290.0
+    width: 360.0
+    height: 90.0
+    z: 31
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: button_test_clicks
+        op: add
+        value: 1
+      - variable: button_test_last
+        op: assign
+        value: separate
+      next:
+        type: jump
+        scene: null
+        target: feedback
+    next: create_overlay
+  create_overlay:
+    type: button_create
+    instance_id: overlay_visual
+    template: demo.overlay
+    x: 120.0
+    "y": 410.0
+    width: 360.0
+    height: 90.0
+    z: 32
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: button_test_clicks
+        op: add
+        value: 1
+      - variable: button_test_last
+        op: assign
+        value: overlay
+      next:
+        type: jump
+        scene: null
+        target: feedback
+    next: create_history
+  create_history:
+    type: button_create
+    instance_id: history_panel
+    template: demo.separate
+    x: 120.0
+    "y": 530.0
+    width: 360.0
+    height: 90.0
+    z: 33
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: button_test_clicks
+        op: add
+        value: 1
+      - variable: button_test_last
+        op: assign
+        value: history_panel
+      next:
+        type: open_panel
+        panel: history
+    next: create_disabled
+  create_disabled:
+    type: button_create
+    instance_id: disabled_button
+    template: demo.separate
+    x: 680.0
+    "y": 170.0
+    width: 360.0
+    height: 90.0
+    z: 30
+    visible: true
+    enabled: false
+    action: {}
+    next: create_hidden
+  create_hidden:
+    type: button_create
+    instance_id: hidden_button
+    template: demo.overlay
+    x: 680.0
+    "y": 290.0
+    width: 360.0
+    height: 90.0
+    z: 30
+    visible: false
+    enabled: true
+    action: {}
+    next: create_overlap_low
+  create_overlap_low:
+    type: button_create
+    instance_id: overlap_low
+    template: demo.separate
+    x: 680.0
+    "y": 410.0
+    width: 400.0
+    height: 120.0
+    z: 40
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: button_test_clicks
+        op: add
+        value: 1
+      - variable: button_test_last
+        op: assign
+        value: overlap_low
+      next:
+        type: jump
+        scene: null
+        target: feedback
+    next: create_overlap_high
+  create_overlap_high:
+    type: button_create
+    instance_id: overlap_high
+    template: demo.overlay
+    x: 680.0
+    "y": 410.0
+    width: 400.0
+    height: 120.0
+    z: 41
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: button_test_clicks
+        op: add
+        value: 1
+      - variable: button_test_last
+        op: assign
+        value: overlap_high
+      next:
+        type: jump
+        scene: null
+        target: feedback
+    next: create_animated
+  create_animated:
+    type: button_create
+    instance_id: animated_button
+    template: demo.overlay
+    x: 1260.0
+    "y": 680.0
+    width: 400.0
+    height: 110.0
+    z: 50
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: button_test_clicks
+        op: add
+        value: 1
+      - variable: button_test_last
+        op: assign
+        value: animated
+      next:
+        type: jump
+        scene: null
+        target: feedback
+    next: create_remove_probe
+  create_remove_probe:
+    type: button_create
+    instance_id: removed_probe
+    template: demo.transparent
+    x: 20.0
+    "y": 20.0
+    width: 40.0
+    height: 40.0
+    visible: false
+    enabled: false
+    action: {}
+    next: remove_probe
+  remove_probe:
+    type: button_remove
+    instance_id: removed_probe
+    next: update_animated
+  update_animated:
+    type: button_update
+    instance_id: animated_button
+    rotation_deg: -2.0
+    opacity: 0.95
+    next: button_motion
+  button_motion:
+    type: timeline
+    duration_ms: 2400
+    await: true
+    skippable: true
+    tracks:
+    - type: button
+      instance_id: animated_button
+      channels:
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 1200
+          value: 1030.0
+          easing:
+            cubic_bezier:
+            - 0.2
+            - 0.8
+            - 0.2
+            - 1.0
+        - at_ms: 2400
+          value: 1260.0
+          easing: ease_in_out
+        "y":
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 1200
+          value: 570.0
+          easing: ease_in_out
+        - at_ms: 2400
+          value: 680.0
+          easing: ease_in_out
+        scale_x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 1200
+          value: 1.18
+          easing: ease_in_out
+        - at_ms: 2400
+          value: 1.0
+          easing: ease_in_out
+        scale_y:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 1200
+          value: 0.88
+          easing: ease_in_out
+        - at_ms: 2400
+          value: 1.0
+          easing: ease_in_out
+        rotation_deg:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 1200
+          value: -4.0
+          easing: ease_in_out
+        - at_ms: 2400
+          value: 0.0
+          easing: ease_in_out
+        opacity:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 1200
+          value: 0.65
+          easing: ease_in_out
+        - at_ms: 2400
+          value: 0.95
+          easing: ease_in_out
+        z:
+        - at_ms: 0
+          value: inherit
+          easing: step
+        - at_ms: 1200
+          value: 55.0
+          easing: step
+        - at_ms: 2400
+          value: 50.0
+          easing: step
+    events: []
+    next: ready
+  ready:
+    type: say
+    speaker: test
+    text: |-
+      按钮已经就绪。请逐个点击可见按钮，观察悬停/按下贴图和计数变化。
+      重叠区域应记录 overlap_high；禁用和隐藏按钮不应产生点击。
+      当前累计点击：[var=button_test_clicks]，最近一次：[var=button_test_last]。
+    mode: start
+    speed_cps: null
+    next: feedback
+  feedback:
+    type: say
+    speaker: test
+    text: |-
+      最近一次按钮： [var=button_test_last]；累计点击： [var=button_test_clicks]。
+      如果刚才打开了系统面板，关闭面板后按钮和剧情提示仍应保持在当前场景。
+      再次点击任意可用按钮可重复验证；按“下一步”结束本次测试并写入完成状态。
+    mode: start
+    speed_cps: null
+    next: end
+  end:
+    type: end

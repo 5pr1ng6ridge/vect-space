@@ -9,13 +9,13 @@ use schemars::schema_for;
 use thiserror::Error;
 
 use crate::model::{
-    AssetDefinition, AssetKind, AudioAction, ChapterMapDefinition, CharacterDefinition,
-    ConditionExpression, ContentManifest, DialogueMode, LongTextMode, LongTextPagination,
-    MutationValue, ResolvedAsset, ScalarValue, SceneDefinition, SceneNode, SpriteAction,
-    StoryFlowDefinition, StoryFlowReveal, TimelineChannels, TimelineEasing, TimelineEvent,
-    TimelineTrack, UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition,
-    VariableOperation, VariableScope, VariableType, LONG_TEXT_FONT_SIZE_MAX,
-    LONG_TEXT_FONT_SIZE_MIN,
+    AssetDefinition, AssetKind, AudioAction, ButtonClickAction, ButtonPanel, ButtonPostAction,
+    ButtonTemplate, ChapterMapDefinition, CharacterDefinition, ConditionExpression,
+    ContentManifest, DialogueMode, LongTextMode, LongTextPagination, MutationValue, ResolvedAsset,
+    ScalarValue, SceneDefinition, SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal,
+    TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings,
+    UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation, VariableScope,
+    VariableType, LONG_TEXT_FONT_SIZE_MAX, LONG_TEXT_FONT_SIZE_MIN,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -30,10 +30,12 @@ const MAX_LONG_TEXT_STEPS: usize = 1_024;
 const UI_MOTION_SCHEMA_VERSION: u32 = 1;
 const STORY_FLOW_SCHEMA_VERSION: u32 = 1;
 const CHAPTER_MAP_SCHEMA_VERSION: u32 = 1;
+const BUTTON_SCHEMA_VERSION: u32 = 1;
 const CHAPTER_MAP_MIN_WIDTH: u32 = 1920;
 const CHAPTER_MAP_MIN_HEIGHT: u32 = 1080;
 const CHAPTER_MAP_MAX_SIZE: u32 = 16_380;
 const CHAPTER_MAP_GRID: i32 = 20;
+const MAX_CHAPTER_MAP_HOVER_TEXT_CHARS: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum ContentError {
@@ -57,6 +59,7 @@ pub struct ContentCatalog {
     pub manifest: ContentManifest,
     pub scenes: BTreeMap<String, SceneDefinition>,
     pub ui_motions: BTreeMap<String, UiMotionPreset>,
+    pub buttons: BTreeMap<String, ButtonTemplate>,
     pub story_flow: Option<StoryFlowDefinition>,
     pub chapter_map: Option<ChapterMapDefinition>,
 }
@@ -83,6 +86,8 @@ impl ContentCatalog {
 
         let ui_motions = load_ui_motions(&root, &manifest.ui_motions)?;
         validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
+        let buttons = load_buttons(&root, &manifest.buttons)?;
+        validate_all_button_assets(&buttons, &manifest.assets)?;
 
         let mut scenes = BTreeMap::new();
         for scene_path in &manifest.scenes {
@@ -116,6 +121,7 @@ impl ContentCatalog {
             &manifest.variables,
             &manifest.characters,
             &ui_motions,
+            &buttons,
         )?;
         let story_flow = load_story_flow(
             &root,
@@ -137,6 +143,7 @@ impl ContentCatalog {
             manifest,
             scenes,
             ui_motions,
+            buttons,
             story_flow,
             chapter_map,
         })
@@ -214,6 +221,30 @@ impl ContentCatalog {
         chapter_map: Option<ChapterMapDefinition>,
         asset_overrides: &BTreeMap<String, PathBuf>,
     ) -> Result<Self, ContentError> {
+        Self::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
+            root,
+            manifest,
+            scenes,
+            ui_motion_files,
+            story_flow,
+            chapter_map,
+            asset_overrides,
+            None,
+        )
+    }
+
+    /// Editor variant that validates unsaved button template documents from
+    /// memory while keeping the same trusted asset overlay rules.
+    pub fn from_documents_with_chapter_map_and_asset_overrides_and_buttons(
+        root: PathBuf,
+        manifest: ContentManifest,
+        scenes: BTreeMap<String, SceneDefinition>,
+        ui_motion_files: BTreeMap<String, UiMotionPreset>,
+        story_flow: Option<StoryFlowDefinition>,
+        chapter_map: Option<ChapterMapDefinition>,
+        asset_overrides: &BTreeMap<String, PathBuf>,
+        button_files: Option<BTreeMap<String, ButtonTemplate>>,
+    ) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
         if manifest.schema_version != CONTENT_SCHEMA_VERSION {
             return Err(ContentError::Validation(format!(
@@ -231,6 +262,17 @@ impl ContentCatalog {
         validate_default_font(&manifest)?;
         let ui_motions = validate_ui_motion_files(&manifest.ui_motions, &ui_motion_files)?;
         validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
+        let buttons = if let Some(button_files) = button_files {
+            validate_button_files(&manifest.buttons, &button_files)?
+        } else if manifest.buttons.is_empty() {
+            BTreeMap::new()
+        } else {
+            // Existing callers predate button documents. Load them from the
+            // trusted project root; the editor uses the extended constructor
+            // below when it has unsaved button drafts in memory.
+            load_buttons(&root, &manifest.buttons)?
+        };
+        validate_all_button_assets(&buttons, &manifest.assets)?;
 
         for (scene_id, scene) in &scenes {
             if scene.schema_version != CONTENT_SCHEMA_VERSION {
@@ -259,6 +301,7 @@ impl ContentCatalog {
             &manifest.variables,
             &manifest.characters,
             &ui_motions,
+            &buttons,
         )?;
         if manifest.story_flow.is_some() != story_flow.is_some() {
             return Err(ContentError::Validation(
@@ -283,6 +326,7 @@ impl ContentCatalog {
             manifest,
             scenes,
             ui_motions,
+            buttons,
             story_flow,
             chapter_map,
         })
@@ -360,6 +404,10 @@ impl ContentCatalog {
             &target.join("ui-motion.schema.json"),
             &schema_for!(UiMotionPreset),
         )?;
+        write_schema(
+            &target.join("button.schema.json"),
+            &schema_for!(ButtonTemplate),
+        )?;
         Ok(())
     }
 }
@@ -398,6 +446,101 @@ fn load_ui_motions(
         files.insert(path.clone(), read_yaml(&full_path)?);
     }
     validate_ui_motion_files(paths, &files)
+}
+
+fn load_buttons(
+    root: &Path,
+    paths: &[String],
+) -> Result<BTreeMap<String, ButtonTemplate>, ContentError> {
+    let mut files = BTreeMap::new();
+    for path in paths {
+        let relative = validate_relative_path(path)?;
+        let full_path = canonical_file_within(root, &root.join(relative))?;
+        files.insert(path.clone(), read_yaml(&full_path)?);
+    }
+    validate_button_files(paths, &files)
+}
+
+fn validate_button_files(
+    paths: &[String],
+    files: &BTreeMap<String, ButtonTemplate>,
+) -> Result<BTreeMap<String, ButtonTemplate>, ContentError> {
+    let expected = paths.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = files.keys().cloned().collect::<BTreeSet<_>>();
+    if expected != actual {
+        return Err(ContentError::Validation(
+            "按钮模板文件集合与 manifest 不一致".to_owned(),
+        ));
+    }
+    let mut result = BTreeMap::new();
+    for (path, template) in files {
+        validate_relative_path(path)?;
+        validate_button_template(template)?;
+        if result
+            .insert(template.id.clone(), template.clone())
+            .is_some()
+        {
+            return Err(ContentError::Validation(format!(
+                "按钮模板 ID 重复: {}",
+                template.id
+            )));
+        }
+    }
+    Ok(result)
+}
+
+fn validate_button_template(template: &ButtonTemplate) -> Result<(), ContentError> {
+    if template.schema_version != BUTTON_SCHEMA_VERSION {
+        return Err(ContentError::Validation(format!(
+            "按钮模板 {} 使用了不支持的 schema_version {}",
+            template.id, template.schema_version
+        )));
+    }
+    validate_identifier("button template id", &template.id)?;
+    if !template.width.is_finite()
+        || !template.height.is_finite()
+        || template.width <= 0.0
+        || template.height <= 0.0
+    {
+        return Err(ContentError::Validation(format!(
+            "按钮模板 {} 的默认尺寸必须是有限正数",
+            template.id
+        )));
+    }
+    // The same visual asset can be used in all three states.  Asset kind and
+    // existence are checked when scene references are validated.
+    for (state, animation) in [
+        ("normal", &template.animations.normal),
+        ("hover", &template.animations.hover),
+        ("pressed", &template.animations.pressed),
+    ] {
+        if let Some(animation) = animation {
+            if animation.duration_ms == 0 || animation.duration_ms > MAX_TIMELINE_DURATION_MS {
+                return Err(ContentError::Validation(format!(
+                    "按钮模板 {} 的 {state} 动画时长无效",
+                    template.id
+                )));
+            }
+            let mut count = 0;
+            validate_timeline_channels(
+                &animation.channels,
+                &[
+                    "offset_x",
+                    "offset_y",
+                    "scale_x",
+                    "scale_y",
+                    "rotation_deg",
+                    "opacity",
+                ],
+                animation.duration_ms,
+                "button_animation",
+                &template.id,
+                &mut count,
+                false,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn load_story_flow(
@@ -516,6 +659,23 @@ fn validate_chapter_map(
         validate_display_name(&hotspot.title).map_err(|message| {
             ContentError::Validation(format!("章节热点 {} 标题无效: {message}", hotspot.id))
         })?;
+        if let Some(text) = &hotspot.hover_text {
+            if text.chars().count() > MAX_CHAPTER_MAP_HOVER_TEXT_CHARS {
+                return Err(ContentError::Validation(format!(
+                    "章节热点 {} 的 hover 文案不能超过 {} 个字符",
+                    hotspot.id, MAX_CHAPTER_MAP_HOVER_TEXT_CHARS
+                )));
+            }
+            if text
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+            {
+                return Err(ContentError::Validation(format!(
+                    "章节热点 {} 的 hover 文案包含非法控制字符",
+                    hotspot.id
+                )));
+            }
+        }
         if let Some(asset) = &hotspot.asset {
             validate_map_asset(asset, assets, AssetKind::Gui, "章节热点")
                 .or_else(|_| validate_map_asset(asset, assets, AssetKind::Sprite, "章节热点"))?;
@@ -909,6 +1069,9 @@ fn validate_manifest_paths(manifest: &ContentManifest) -> Result<(), ContentErro
     for path in &manifest.ui_motions {
         register("ui_motion", path)?;
     }
+    for path in &manifest.buttons {
+        register("button", path)?;
+    }
     if let Some(path) = &manifest.story_flow {
         register("story_flow", path)?;
     }
@@ -997,6 +1160,7 @@ fn validate_scenes(
     variables: &BTreeMap<String, VariableDefinition>,
     characters: &BTreeMap<String, CharacterDefinition>,
     ui_motions: &BTreeMap<String, UiMotionPreset>,
+    buttons: &BTreeMap<String, ButtonTemplate>,
 ) -> Result<(), ContentError> {
     #[derive(Clone)]
     struct LongTextPresentation {
@@ -1456,6 +1620,128 @@ fn validate_scenes(
                     }
                     require_node(scene, next, scene_id, node_id)?;
                 }
+                SceneNode::ButtonCreate {
+                    instance_id,
+                    template,
+                    x,
+                    y,
+                    width,
+                    height,
+                    rotation_deg,
+                    scale_x,
+                    scale_y,
+                    opacity,
+                    z: _,
+                    visible: _,
+                    enabled: _,
+                    action,
+                    next,
+                } => {
+                    validate_identifier("button instance id", instance_id)?;
+                    let definition = buttons.get(template).ok_or_else(|| {
+                        ContentError::Validation(format!(
+                            "{scene_id}/{node_id} 引用了未知按钮模板 {template}"
+                        ))
+                    })?;
+                    for (label, value) in [("x", *x), ("y", *y), ("rotation_deg", *rotation_deg)] {
+                        if value.is_some_and(|value| !value.is_finite()) {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                &format!("按钮 {label} 必须是有限数"),
+                            );
+                        }
+                    }
+                    for (label, value) in [("width", *width), ("height", *height)] {
+                        if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                &format!("按钮 {label} 必须是有限正数"),
+                            );
+                        }
+                    }
+                    for (label, value) in [("scale_x", *scale_x), ("scale_y", *scale_y)] {
+                        if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                &format!("按钮 {label} 必须是有限正数"),
+                            );
+                        }
+                    }
+                    if opacity
+                        .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+                    {
+                        return node_error(scene_id, node_id, "按钮 opacity 必须在 0 到 1 之间");
+                    }
+                    validate_button_assets(definition, assets, scene_id, node_id)?;
+                    validate_button_action(action, variables, scenes, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::ButtonUpdate {
+                    instance_id,
+                    template,
+                    x,
+                    y,
+                    width,
+                    height,
+                    rotation_deg,
+                    scale_x,
+                    scale_y,
+                    opacity,
+                    z: _,
+                    visible: _,
+                    enabled: _,
+                    action,
+                    next,
+                } => {
+                    validate_identifier("button instance id", instance_id)?;
+                    if let Some(template) = template {
+                        let definition = buttons.get(template).ok_or_else(|| {
+                            ContentError::Validation(format!(
+                                "{scene_id}/{node_id} 引用了未知按钮模板 {template}"
+                            ))
+                        })?;
+                        validate_button_assets(definition, assets, scene_id, node_id)?;
+                    }
+                    for (label, value) in [("x", *x), ("y", *y), ("rotation_deg", *rotation_deg)] {
+                        if value.is_some_and(|value| !value.is_finite()) {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                &format!("按钮 {label} 必须是有限数"),
+                            );
+                        }
+                    }
+                    for (label, value) in [
+                        ("width", *width),
+                        ("height", *height),
+                        ("scale_x", *scale_x),
+                        ("scale_y", *scale_y),
+                    ] {
+                        if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                &format!("按钮 {label} 必须是有限正数"),
+                            );
+                        }
+                    }
+                    if opacity
+                        .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+                    {
+                        return node_error(scene_id, node_id, "按钮 opacity 必须在 0 到 1 之间");
+                    }
+                    if let Some(action) = action {
+                        validate_button_action(action, variables, scenes, scene_id, node_id)?;
+                    }
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::ButtonRemove { instance_id, next } => {
+                    validate_identifier("button instance id", instance_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
                 SceneNode::Timeline {
                     duration_ms,
                     await_completion,
@@ -1464,6 +1750,24 @@ fn validate_scenes(
                     events,
                     next,
                 } => {
+                    for track in tracks {
+                        if let TimelineTrack::Button { instance_id, .. } = track {
+                            let declared = scene.nodes.values().any(|candidate| {
+                                matches!(
+                                    candidate,
+                                    SceneNode::ButtonCreate { instance_id: created, .. }
+                                        if created == instance_id
+                                )
+                            });
+                            if !declared {
+                                return node_error(
+                                    scene_id,
+                                    node_id,
+                                    &format!("时间线引用了未创建的按钮实例 {instance_id}"),
+                                );
+                            }
+                        }
+                    }
                     validate_timeline(
                         *duration_ms,
                         *await_completion,
@@ -1544,6 +1848,30 @@ fn validate_timeline(
                     return node_error(scene_id, node_id, "时间线只能包含一条镜头轨");
                 }
                 (channels, &["x", "y", "zoom", "rotation_deg"], true)
+            }
+            TimelineTrack::Button {
+                instance_id,
+                channels,
+            } => {
+                validate_identifier("timeline button id", instance_id)?;
+                if !track_ids.insert(format!("button:{instance_id}")) {
+                    return node_error(scene_id, node_id, "同一按钮不能出现多条时间线轨道");
+                }
+                (
+                    channels,
+                    &[
+                        "x",
+                        "y",
+                        "width",
+                        "height",
+                        "scale_x",
+                        "scale_y",
+                        "rotation_deg",
+                        "opacity",
+                        "z",
+                    ],
+                    true,
+                )
             }
             TimelineTrack::Video {
                 asset,
@@ -1933,6 +2261,98 @@ fn require_asset(
     })?;
     if definition.kind != expected {
         return node_error(scene_id, node_id, &format!("素材 {id} 类型不正确"));
+    }
+    Ok(())
+}
+
+fn validate_button_assets(
+    template: &ButtonTemplate,
+    assets: &BTreeMap<String, AssetDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    for asset in [&template.normal, &template.hover, &template.pressed]
+        .into_iter()
+        .flatten()
+    {
+        let definition = assets.get(asset).ok_or_else(|| {
+            ContentError::Validation(format!(
+                "{scene_id}/{node_id} 的按钮模板 {} 引用了未知素材 {asset}",
+                template.id
+            ))
+        })?;
+        if !matches!(definition.kind, AssetKind::Gui | AssetKind::Sprite) {
+            return node_error(scene_id, node_id, "按钮贴图必须是 gui 或 sprite 素材");
+        }
+    }
+    Ok(())
+}
+
+fn validate_all_button_assets(
+    buttons: &BTreeMap<String, ButtonTemplate>,
+    assets: &BTreeMap<String, AssetDefinition>,
+) -> Result<(), ContentError> {
+    for template in buttons.values() {
+        for asset in [&template.normal, &template.hover, &template.pressed]
+            .into_iter()
+            .flatten()
+        {
+            let definition = assets.get(asset).ok_or_else(|| {
+                ContentError::Validation(format!("按钮模板 {} 引用了未知素材 {asset}", template.id))
+            })?;
+            if !matches!(definition.kind, AssetKind::Gui | AssetKind::Sprite) {
+                return Err(ContentError::Validation(format!(
+                    "按钮模板 {} 的贴图必须是 gui 或 sprite 素材",
+                    template.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_button_action(
+    action: &ButtonClickAction,
+    variables: &BTreeMap<String, VariableDefinition>,
+    scenes: &BTreeMap<String, SceneDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    if action.sets.len() > 64 {
+        return node_error(scene_id, node_id, "按钮点击变量修改不能超过 64 条");
+    }
+    for set in &action.sets {
+        validate_identifier("variable", &set.variable)?;
+        let definition = variables.get(&set.variable).ok_or_else(|| {
+            ContentError::Validation(format!(
+                "{scene_id}/{node_id}: 按钮点击引用了未声明变量 {}",
+                set.variable
+            ))
+        })?;
+        validate_mutation(
+            set.op,
+            set.value.as_ref(),
+            definition.value_type,
+            variables,
+            scene_id,
+            node_id,
+        )?;
+    }
+    if let Some(ButtonPostAction::Jump { scene, target }) = &action.next {
+        let destination = scene.as_deref().unwrap_or(scene_id);
+        let destination_scene = scenes.get(destination).ok_or_else(|| {
+            ContentError::Validation(format!(
+                "{scene_id}/{node_id}: 按钮跳转到未知场景 {destination}"
+            ))
+        })?;
+        if !destination_scene.nodes.contains_key(target) {
+            return node_error(scene_id, node_id, "按钮 jump 目标节点不存在");
+        }
+    }
+    if let Some(ButtonPostAction::OpenPanel { panel }) = &action.next {
+        let _ = match panel {
+            ButtonPanel::Saves | ButtonPanel::Settings | ButtonPanel::History => panel,
+        };
     }
     Ok(())
 }
@@ -2371,6 +2791,25 @@ mod tests {
     }
 
     #[test]
+    fn bundled_demo_registers_all_button_template_modes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../game");
+        let catalog = ContentCatalog::from_root(root).expect("bundled demo must be valid");
+        assert_eq!(catalog.buttons.len(), 3);
+        assert_eq!(
+            catalog.buttons["demo.transparent"].normal, None,
+            "transparent template keeps an empty hit area",
+        );
+        assert_eq!(
+            catalog.buttons["demo.separate"].asset_mode,
+            crate::model::ButtonAssetMode::Separate
+        );
+        assert_eq!(
+            catalog.buttons["demo.overlay"].asset_mode,
+            crate::model::ButtonAssetMode::Overlay
+        );
+    }
+
+    #[test]
     fn managed_document_paths_are_case_insensitive_and_cannot_target_metadata() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
         let catalog = ContentCatalog::from_root(root).unwrap();
@@ -2404,6 +2843,7 @@ mod tests {
                 id: "entry".to_owned(),
                 scene_id: "prologue".to_owned(),
                 title: "入口".to_owned(),
+                hover_text: None,
                 x: 240,
                 y: 460,
                 width: 280,
@@ -2421,6 +2861,24 @@ mod tests {
             &catalog.manifest.variables,
         )
         .is_ok());
+
+        map.hotspots[0].hover_text = Some("x".repeat(MAX_CHAPTER_MAP_HOVER_TEXT_CHARS + 1));
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_err());
+        map.hotspots[0].hover_text = Some("入口\u{0007}".to_owned());
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_err());
+        map.hotspots[0].hover_text = None;
 
         map.width = 1930;
         assert!(validate_chapter_map(
@@ -2508,6 +2966,7 @@ mod tests {
             "story-flow.schema.json",
             "chapter-map.schema.json",
             "ui-motion.schema.json",
+            "button.schema.json",
         ] {
             assert_eq!(
                 fs::read(generated.path().join(name)).unwrap(),
@@ -2736,6 +3195,7 @@ mod tests {
                 &catalog.manifest.variables,
                 &catalog.manifest.characters,
                 &catalog.ui_motions,
+                &catalog.buttons,
             )
         };
 

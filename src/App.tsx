@@ -19,6 +19,7 @@ import {
 } from "./components/LongTextPanel";
 import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
+import { ButtonLayer } from "./components/ButtonLayer";
 import { StoryFlowPage } from "./components/StoryFlowPage";
 import { ChapterMapPage } from "./components/ChapterMapPage";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
@@ -235,6 +236,13 @@ export default function App(): ReactElement {
   const applyUpdate = useCallback((next: RuntimeUpdate): void => {
     activeSessionId.current = requireSessionId(next.session_id);
     setUpdate(next);
+    const panelCue = next.cues.find(
+      (
+        cue,
+      ): cue is Extract<PresentationCue, { type: "button_system_action" }> =>
+        cue.type === "button_system_action",
+    );
+    if (panelCue !== undefined) setPanel(panelCue.panel);
   }, []);
 
   const runStoryCommand = useCallback(
@@ -520,6 +528,29 @@ export default function App(): ReactElement {
       engineApi.choose(choiceId, snapshot.revision, activeSessionId.current),
     );
   };
+
+  const clickButton = useCallback(
+    (instanceId: string): void => {
+      const snapshot = update?.snapshot;
+      if (
+        snapshot === undefined ||
+        phaseRef.current !== "playing" ||
+        panel !== "none" ||
+        busyRef.current ||
+        update?.requires_ack
+      ) {
+        return;
+      }
+      void runStoryCommand(() =>
+        engineApi.clickButton(
+          instanceId,
+          snapshot.revision,
+          activeSessionId.current,
+        ),
+      );
+    },
+    [panel, runStoryCommand, update],
+  );
 
   const saveManual = async (slot: string): Promise<void> => {
     if (busyRef.current) {
@@ -1055,7 +1086,11 @@ export default function App(): ReactElement {
   const revealAnimation =
     effectiveTextSettings?.animation ?? settings.text_reveal_animation;
   const runtimeLocked = update?.requires_ack ?? false;
-  const activeTimelineCue = update?.cues.find(
+  const timelineCue = update?.cues.find(
+    (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
+      cue.type === "timeline",
+  );
+  const runtimeTimelineCue = update?.cues.find(
     (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
       cue.type === "timeline" && cue.gate === "runtime",
   );
@@ -1084,9 +1119,9 @@ export default function App(): ReactElement {
       settings.skip_mode,
       update.snapshot.prompt,
     ) &&
-    (activeTimelineCue === undefined ||
+    (runtimeTimelineCue === undefined ||
       settings.skip_mode === "all" ||
-      (settings.skip_mode === "read_only" && activeTimelineCue.is_seen));
+      (settings.skip_mode === "read_only" && runtimeTimelineCue.is_seen));
   const autoSlot = saveSlots.find((slot) => slot.slot === "auto");
   const handleTypingChange = useCallback(
     (typing: boolean, cps: number): void => {
@@ -1309,6 +1344,18 @@ export default function App(): ReactElement {
           uiMotionHost={uiMotionHost}
           visible={phase === "playing"}
         />
+
+        {phase === "playing" && update !== null && (
+          <ButtonLayer
+            assets={assets}
+            disabled={panel !== "none" || busy || runtimeLocked}
+            onClick={clickButton}
+            paused={panel !== "none" || phase !== "playing" || pageHidden}
+            playbackRate={fastForwardActive ? 8 : 1}
+            snapshot={update.snapshot}
+            timeline={timelineCue ?? null}
+          />
+        )}
 
         {phase === "booting" && (
           <div className="boot-screen">

@@ -1,0 +1,27 @@
+schema_version: 1
+id: demo.separate
+width: 240.0
+height: 80.0
+asset_mode: separate
+fit: contain
+normal: gui.name_box
+hover: gui.dialogue_box
+pressed: gui.scratch_paper
+animations:
+  hover:
+    duration_ms: 180
+    channels:
+      scale_x:
+      - at_ms: 0
+        value: 1.0
+        easing: ease_out
+      - at_ms: 180
+        value: 1.05
+        easing: linear
+      scale_y:
+      - at_ms: 0
+        value: 1.0
+        easing: ease_out
+      - at_ms: 180
+        value: 1.05
+        easing: linear

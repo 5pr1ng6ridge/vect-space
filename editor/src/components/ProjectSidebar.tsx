@@ -43,6 +43,10 @@ interface ProjectSidebarProps {
   onCreateUiMotion(): void;
   onEditUiMotion(id: string): void;
   onDeleteUiMotion(id: string): void;
+  onCreateButtonTemplate(): void;
+  onEditButtonTemplate(id: string): void;
+  onDuplicateButtonTemplate(id: string): void;
+  onDeleteButtonTemplate(id: string): void;
   onNavigate(
     sceneId: string | null,
     nodeId: string | null,
@@ -79,6 +83,10 @@ export function ProjectSidebar({
   onCreateUiMotion,
   onEditUiMotion,
   onDeleteUiMotion,
+  onCreateButtonTemplate,
+  onEditButtonTemplate,
+  onDuplicateButtonTemplate,
+  onDeleteButtonTemplate,
   onNavigate,
   onTabChange,
 }: ProjectSidebarProps): ReactElement {
@@ -170,6 +178,10 @@ export function ProjectSidebar({
           onCreateUiMotion={onCreateUiMotion}
           onEditUiMotion={onEditUiMotion}
           onDeleteUiMotion={onDeleteUiMotion}
+          onCreateButtonTemplate={onCreateButtonTemplate}
+          onEditButtonTemplate={onEditButtonTemplate}
+          onDuplicateButtonTemplate={onDuplicateButtonTemplate}
+          onDeleteButtonTemplate={onDeleteButtonTemplate}
           project={project}
         />
       )}
@@ -1043,6 +1055,10 @@ function ProjectPanel({
   onCreateUiMotion,
   onEditUiMotion,
   onDeleteUiMotion,
+  onCreateButtonTemplate,
+  onEditButtonTemplate,
+  onDuplicateButtonTemplate,
+  onDeleteButtonTemplate,
   project,
 }: {
   manifest: ContentManifest;
@@ -1058,6 +1074,10 @@ function ProjectPanel({
   onCreateUiMotion(): void;
   onEditUiMotion(id: string): void;
   onDeleteUiMotion(id: string): void;
+  onCreateButtonTemplate(): void;
+  onEditButtonTemplate(id: string): void;
+  onDuplicateButtonTemplate(id: string): void;
+  onDeleteButtonTemplate(id: string): void;
   project: EditorProject;
 }): ReactElement {
   const [dialog, setDialog] = useState<{
@@ -1184,6 +1204,64 @@ function ProjectPanel({
           ))}
           {project.ui_motions.length === 0 && (
             <small>还没有预设。创建后可在 UI 节点中复用。</small>
+          )}
+        </div>
+      </section>
+      <section className="variable-settings button-template-settings">
+        <header>
+          <strong>按钮模板</strong>
+          <button onClick={onCreateButtonTemplate} type="button">
+            ＋
+          </button>
+        </header>
+        <p className="field-note">
+          剧情节点可创建多个实例；模板被引用或贴图仍被使用时不能删除。
+        </p>
+        <div className="ui-motion-list">
+          {(project.buttons ?? []).map(({ definition, path }) => (
+            <article className="variable-card" key={definition.id}>
+              <header>
+                <span>
+                  <code>{definition.id}</code>
+                  <small>
+                    {definition.width} × {definition.height} ·{" "}
+                    {definition.asset_mode}
+                  </small>
+                </span>
+                <div>
+                  <button
+                    onClick={() => onEditButtonTemplate(definition.id)}
+                    title="打开按钮模板工作区"
+                    type="button"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    onClick={() => onDuplicateButtonTemplate(definition.id)}
+                    title="复制按钮模板"
+                    type="button"
+                  >
+                    复制
+                  </button>
+                  <button
+                    className="danger-text"
+                    onClick={() => onDeleteButtonTemplate(definition.id)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              </header>
+              <small>{path}</small>
+              <div className="button-template-slots">
+                <span>正常：{definition.normal ?? "无"}</span>
+                <span>悬停：{definition.hover ?? "沿用/无"}</span>
+                <span>按下：{definition.pressed ?? "沿用/无"}</span>
+              </div>
+            </article>
+          ))}
+          {(project.buttons ?? []).length === 0 && (
+            <small>还没有按钮模板。创建后可在按钮节点中复用。</small>
           )}
         </div>
       </section>

@@ -64,6 +64,47 @@ input:focus-visible {
   visibility: hidden;
 }
 
+.button-layer {
+  position: absolute;
+  inset: 0;
+  /* Story buttons sit above dialogue/choice content, while toolbar and
+     system panels remain able to block them when they overlap. */
+  z-index: 19;
+  pointer-events: none;
+}
+
+.scene-button {
+  position: absolute;
+  display: block;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  transform-origin: center;
+}
+
+.scene-button:disabled {
+  cursor: default;
+}
+
+.scene-button-image {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
+.scene-button-visual {
+  pointer-events: none;
+}
+
 .boot-screen,
 .title-screen,
 .modal-backdrop {
@@ -289,6 +330,7 @@ button:disabled {
   display: grid;
   place-items: center;
   gap: 8px;
+  overflow: visible;
   padding: 16px;
   border-radius: 4px;
   background-color: rgb(18 48 65 / 90%);
@@ -299,19 +341,6 @@ button:disabled {
   font-size: 24px;
   text-shadow: 0 2px 8px #000;
   user-select: none;
-}
-
-.chapter-map-hotspot.is-completed:hover,
-.chapter-map-hotspot.is-completed:focus-visible {
-  border-color: #9ee7ff;
-  box-shadow: 0 0 28px rgb(117 200 231 / 34%);
-}
-
-.chapter-map-hotspot.is-completed.is-selected {
-  border-color: #9ee7ff;
-  box-shadow:
-    0 0 0 3px rgb(158 231 255 / 24%),
-    0 0 28px rgb(117 200 231 / 34%);
 }
 
 .chapter-map-hotspot.is-locked {
@@ -325,33 +354,34 @@ button:disabled {
   font-size: 13px;
 }
 
-.chapter-map-hotspot-detail {
+.chapter-map-hover-card {
   position: absolute;
-  z-index: 8;
-  bottom: 72px;
+  z-index: 12;
+  top: calc(100% + 18px);
   left: 50%;
-  display: flex;
-  min-width: 320px;
-  padding: 16px 18px;
-  border: 1px solid rgb(158 231 255 / 40%);
-  background: rgb(6 18 29 / 94%);
-  box-shadow: 0 18px 50px rgb(0 0 0 / 45%);
-  align-items: center;
-  gap: 12px;
+  display: block;
+  min-width: min(320px, calc(100vw - 32px));
+  max-width: min(480px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 2px solid #fff;
+  color: #fff;
+  background: #000;
+  box-shadow: none;
+  font-size: 17px;
+  line-height: 1.45;
+  text-align: left;
   transform: translateX(-50%);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
 }
 
-.chapter-map-hotspot-detail strong {
-  flex: 1;
-  font-size: 20px;
-  font-weight: 400;
+.chapter-map-hover-card::before {
+  display: none;
 }
 
-.chapter-map-hotspot-detail button {
-  padding: 7px 14px;
-  border: 1px solid rgb(158 231 255 / 38%);
-  color: #ecfaff;
-  background: rgb(6 18 29 / 88%);
+.chapter-map-hover-card::after {
+  display: none;
 }
 
 .chapter-map-hint {

@@ -18,6 +18,7 @@ import type {
 import {
   clampMapCenter,
   mapDragExceededThreshold,
+  resolveChapterMapHoverText,
   sortMapObjects,
   sortMapLayer,
 } from "@vectspace/presentation-core/chapter-map";
@@ -63,9 +64,8 @@ export function ChapterMapPage({
       VIEWPORT_HEIGHT,
     ),
   }));
-  const [selectedHotspotId, setSelectedHotspotId] = useState<string | null>(
-    null,
-  );
+  const [hoveredHotspotId, setHoveredHotspotId] = useState<string | null>(null);
+  const [focusedHotspotId, setFocusedHotspotId] = useState<string | null>(null);
   const drag = useRef<{
     pointerId: number;
     start: Point;
@@ -81,14 +81,15 @@ export function ChapterMapPage({
 
   useLayoutEffect(() => {
     // A refreshed map/assets snapshot replaces the rendered hotspot DOM. Do
-    // not carry a detail selection or an in-flight gesture across that
-    // replacement; otherwise the old hotspot can keep its focus/selection
-    // state while its artwork is being swapped out.
+    // not carry hover/focus or an in-flight gesture across that replacement;
+    // otherwise the old hotspot can keep its interaction state while its
+    // artwork is being swapped out.
     if (
       contentRef.current.map !== map ||
       contentRef.current.assets !== assets
     ) {
-      setSelectedHotspotId(null);
+      setHoveredHotspotId(null);
+      setFocusedHotspotId(null);
       drag.current = null;
       suppressClick.current = false;
       contentRef.current = { map, assets };
@@ -109,12 +110,11 @@ export function ChapterMapPage({
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      if (selectedHotspotId !== null) setSelectedHotspotId(null);
-      else onClose();
+      onClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, selectedHotspotId]);
+  }, [onClose]);
 
   useEffect(() => {
     const cancel = (): void => {
@@ -259,10 +259,6 @@ export function ChapterMapPage({
             transform: `translate3d(${offset.x}px, ${offset.y}px, 0)`,
             width: `${map.width}px`,
           }}
-          onClick={(event) => {
-            if (event.target === event.currentTarget)
-              setSelectedHotspotId(null);
-          }}
         >
           {map.background !== null &&
             map.background !== undefined &&
@@ -301,12 +297,23 @@ export function ChapterMapPage({
             const hotspot = item;
             const image =
               hotspot.asset === null ? undefined : assets[hotspot.asset];
+            const hoverText = resolveChapterMapHoverText(
+              hotspot.title,
+              hotspot.hover_text,
+            );
+            const isHovering =
+              hoveredHotspotId === hotspot.id ||
+              focusedHotspotId === hotspot.id;
             return (
               <button
                 aria-label={`${hotspot.title}${hotspot.completed ? "，可重演" : "，尚未完成"}`}
-                className={`chapter-map-hotspot${image === undefined ? "" : " has-artwork"}${hotspot.completed ? " is-completed" : " is-locked"}${selectedHotspotId === hotspot.id ? " is-selected" : ""}`}
+                className={`chapter-map-hotspot${image === undefined ? "" : " has-artwork"}${hotspot.completed ? " is-completed" : " is-locked"}`}
                 disabled={!hotspot.completed}
+                onBlur={() => setFocusedHotspotId(null)}
+                onFocus={() => setFocusedHotspotId(hotspot.id)}
+                onPointerEnter={() => setHoveredHotspotId(hotspot.id)}
                 onPointerDown={(event) => event.stopPropagation()}
+                onPointerLeave={() => setHoveredHotspotId(null)}
                 key={`${hotspot.id}:${hotspot.asset ?? ""}:${image ?? ""}`}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -314,10 +321,7 @@ export function ChapterMapPage({
                     suppressClick.current = false;
                     return;
                   }
-                  if (hotspot.completed)
-                    setSelectedHotspotId((current) =>
-                      current === hotspot.id ? null : hotspot.id,
-                    );
+                  if (hotspot.completed) onReplay(hotspot.scene_id);
                 }}
                 data-hotspot-id={hotspot.id}
                 style={{
@@ -337,39 +341,22 @@ export function ChapterMapPage({
                     <small>{hotspot.completed ? "重演" : "未完成"}</small>
                   </>
                 )}
+                {hoverText !== null && isHovering && (
+                  <span
+                    className="chapter-map-hover-card"
+                    id={`chapter-map-hover-${hotspot.id}`}
+                    role="tooltip"
+                  >
+                    {hoverText}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
       </div>
-      {selectedHotspotId !== null &&
-        (() => {
-          const selected = map.hotspots.find(
-            (hotspot) => hotspot.id === selectedHotspotId,
-          );
-          if (selected === undefined || !selected.completed) return null;
-          return (
-            <div
-              aria-label={`${selected.title}章节操作`}
-              className="chapter-map-hotspot-detail"
-              role="dialog"
-            >
-              <strong>{selected.title}</strong>
-              <button onClick={() => onReplay(selected.scene_id)} type="button">
-                重演
-              </button>
-              <button
-                aria-label="关闭章节详情"
-                onClick={() => setSelectedHotspotId(null)}
-                type="button"
-              >
-                关闭
-              </button>
-            </div>
-          );
-        })()}
       <p className="chapter-map-hint">
-        拖动背景查看房间，滚轮平移；已完成章节可重演
+        拖动背景查看房间，滚轮平移；悬停查看说明，单击已完成章节进入
       </p>
     </div>
   );

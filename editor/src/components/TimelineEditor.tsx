@@ -59,6 +59,17 @@ const CHANNELS: Record<TimelineTrack["type"], string[]> = {
   camera: ["x", "y", "zoom", "rotation_deg"],
   video: ["x", "y", "width", "height", "opacity", "z", "volume"],
   bgm: ["volume"],
+  button: [
+    "x",
+    "y",
+    "width",
+    "height",
+    "scale_x",
+    "scale_y",
+    "rotation_deg",
+    "opacity",
+    "z",
+  ],
 };
 const DEFAULTS: Record<string, number> = {
   x: 0,
@@ -241,7 +252,13 @@ export function TimelineEditor({
               audio_enabled: true,
               channels: {},
             }
-          : { type: trackType, channels: {} };
+          : trackType === "button"
+            ? {
+                type: "button",
+                instance_id: `button_${draft.tracks.length + 1}`,
+                channels: {},
+              }
+            : { type: trackType, channels: {} };
     commit({ ...draft, tracks: [...draft.tracks, track] });
   };
   const selectedFrame = findSelectedFrame(draft, selected);
@@ -662,6 +679,7 @@ export function TimelineEditor({
             <option value="camera">镜头轨</option>
             <option value="video">视频轨</option>
             <option value="bgm">BGM 音量轨</option>
+            <option value="button">按钮轨</option>
           </select>
           <button onClick={addTrack} type="button">
             ＋轨道
@@ -776,7 +794,12 @@ export function TimelineEditor({
           <div className="timeline-track" key={`${track.type}-${trackIndex}`}>
             <div className="timeline-track-head">
               <strong>
-                {track.type} {track.type === "sprite" ? track.sprite_id : ""}
+                {track.type}{" "}
+                {track.type === "sprite"
+                  ? track.sprite_id
+                  : track.type === "button"
+                    ? track.instance_id
+                    : ""}
               </strong>
               {(track.type === "sprite" || track.type === "video") && (
                 <select

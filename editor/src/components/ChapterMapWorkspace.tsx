@@ -20,6 +20,7 @@ import { assetUrl } from "../api";
 import {
   clampMapCenter,
   containMapRect,
+  resolveChapterMapHoverText,
   snapMap,
   sortMapObjects,
   sortMapLayer,
@@ -155,6 +156,7 @@ export function ChapterMapWorkspace({
           ? { kind: "decoration", id: selectionId }
           : null,
   );
+  const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [showGrid, setShowGrid] = useState(true);
@@ -312,11 +314,16 @@ export function ChapterMapWorkspace({
   useEffect(() => {
     const previous = previousObjectAssetTokens.current;
     previousObjectAssetTokens.current = objectAssetTokens;
+    const changedKeys = [...objectAssetTokens.keys()].filter(
+      (key) =>
+        previous.has(key) && previous.get(key) !== objectAssetTokens.get(key),
+    );
+    if (changedKeys.length === 0) return;
+
+    setHoveredObjectId(null);
     if (selection === null) return;
     const key = `${selection.kind}:${selection.id}`;
-    const before = previous.get(key);
-    const after = objectAssetTokens.get(key);
-    if (before === undefined || after === undefined || before === after) return;
+    if (!changedKeys.includes(key)) return;
 
     // Replacing artwork replaces the visual object under the pointer. Drop
     // the old interaction state so its selection outline/hover state cannot
@@ -430,6 +437,14 @@ export function ChapterMapWorkspace({
     raw: string,
   ): { ok: true; value: unknown } | { ok: false; message: string } => {
     if (key === "selected.title") return { ok: true, value: raw };
+    if (key === "selected.hover_text") {
+      if (Array.from(raw).length > 256)
+        return { ok: false, message: "Hover 文案不能超过 256 个字符。" };
+      if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(raw)) {
+        return { ok: false, message: "Hover 文案不能包含非法控制字符。" };
+      }
+      return { ok: true, value: raw };
+    }
     if (key.startsWith("override.")) {
       const id = key.slice("override.".length);
       const definition = manifest.variables[id];
@@ -499,6 +514,12 @@ export function ChapterMapWorkspace({
               : next.decorations
             ).find((candidate) => candidate.id === selection.id);
       if (item !== undefined && "title" in item) item.title = value;
+    } else if (key === "selected.hover_text" && typeof value === "string") {
+      const item =
+        selection?.kind === "hotspot"
+          ? next.hotspots.find((candidate) => candidate.id === selection.id)
+          : undefined;
+      if (item !== undefined) item.hover_text = value;
     } else if (key.startsWith("selected.")) {
       const property = key.slice("selected.".length);
       const item =
@@ -587,6 +608,7 @@ export function ChapterMapWorkspace({
       height: 160,
       z: 10,
       asset: null,
+      hover_text: null,
       reveal: { mode: "completed" as const },
       variable_overrides: {},
     };
@@ -955,6 +977,11 @@ export function ChapterMapWorkspace({
     return item;
   };
 
+  const selectedDisplay =
+    selection !== null && selectedObject !== null
+      ? displayedObject(selection.kind, selectedObject.id, selectedObject)
+      : null;
+
   const viewCenterX = viewDrag?.x ?? map.view_x;
   const viewCenterY = viewDrag?.y ?? map.view_y;
   const viewFrame = {
@@ -1239,17 +1266,28 @@ export function ChapterMapWorkspace({
                     : item.asset === null || item.asset === undefined
                       ? undefined
                       : assets.find((asset) => asset.id === item.asset);
+                const hotspot = kind === "hotspot" ? item : null;
+                const hoverText =
+                  hotspot === null
+                    ? null
+                    : resolveChapterMapHoverText(
+                        hotspot.title,
+                        hotspot.hover_text,
+                      );
+                const isHovered = hoveredObjectId === item.id;
                 return (
                   <div
-                    className={`map-editor-object ${kind}${source === undefined ? "" : " has-artwork"}${active ? " selected" : ""}`}
+                    className={`map-editor-object ${kind}${source === undefined ? "" : " has-artwork"}${active ? " selected" : ""}${isHovered ? " is-hovered" : ""}`}
                     key={`${kind}:${item.id}:${item.asset ?? ""}:${source?.absolute_path ?? ""}`}
                     onClick={(event) => {
                       event.stopPropagation();
                       setSelection({ kind, id: item.id });
                     }}
+                    onPointerEnter={() => setHoveredObjectId(item.id)}
                     onPointerDown={(event) =>
                       pointerDown(event, kind, item.id, item.x, item.y)
                     }
+                    onPointerLeave={() => setHoveredObjectId(null)}
                     style={{
                       backgroundImage:
                         source === undefined
@@ -1272,17 +1310,38 @@ export function ChapterMapWorkspace({
                           <small>{item.scene_id}</small>
                         </>
                       ))}
-                    {active && (
-                      <ResizeHandles
-                        id={item.id}
-                        item={shown}
-                        kind={kind}
-                        onResize={pointerDownResize}
-                      />
+                    {kind === "hotspot" && hoverText !== null && isHovered && (
+                      <span
+                        className="map-hover-card"
+                        id={`map-hover-${item.id}`}
+                        role="tooltip"
+                      >
+                        {hoverText}
+                      </span>
                     )}
                   </div>
                 );
               })}
+              {selection !== null &&
+                selectedObject !== null &&
+                !hiddenIds.has(selection.id) && (
+                  <div
+                    className="map-resize-overlay"
+                    style={{
+                      height: selectedDisplay?.height,
+                      left: selectedDisplay?.x,
+                      top: selectedDisplay?.y,
+                      width: selectedDisplay?.width,
+                    }}
+                  >
+                    <ResizeHandles
+                      id={selectedObject.id}
+                      item={selectedDisplay ?? selectedObject}
+                      kind={selection.kind}
+                      onResize={pointerDownResize}
+                    />
+                  </div>
+                )}
             </div>
           </div>
         </div>
@@ -1446,6 +1505,35 @@ export function ChapterMapWorkspace({
                       }
                     />
                   </label>
+                  <label>
+                    Hover 文案
+                    <textarea
+                      onBlur={() =>
+                        commitDraftValue("selected.hover_text", () => true)
+                      }
+                      placeholder="未配置时使用标题；输入空白可隐藏文字框"
+                      rows={3}
+                      value={draftValue(
+                        "selected.hover_text",
+                        (
+                          selectedObject as ChapterMapDefinition["hotspots"][number]
+                        ).hover_text ?? "",
+                      )}
+                      onChange={(event) =>
+                        setDraftValue(
+                          "selected.hover_text",
+                          event.currentTarget.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <button
+                    className="map-hover-reset"
+                    onClick={() => updateSelected({ hover_text: null })}
+                    type="button"
+                  >
+                    恢复使用标题
+                  </button>
                   <label>
                     揭示策略
                     <select

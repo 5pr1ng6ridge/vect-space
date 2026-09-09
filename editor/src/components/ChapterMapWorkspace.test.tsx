@@ -30,6 +30,7 @@ const MAP: ChapterMapDefinition = {
       id: "chapter-a",
       scene_id: "scene-a",
       title: "章节 A",
+      hover_text: "章节 A 的说明",
       x: 240,
       y: 360,
       width: 280,
@@ -134,6 +135,8 @@ describe("ChapterMapWorkspace pointer interactions", () => {
     fireEvent.click(object);
 
     expect(object).toHaveClass("selected");
+    expect(object.querySelector(".map-resize-handle")).toBeNull();
+    expect(container.querySelector(".map-resize-overlay")).toBeInTheDocument();
     expect(stage.style.transform).toBe("translate(0px, 0px)");
     expect(onChange).toHaveBeenCalled();
   });
@@ -180,5 +183,25 @@ describe("ChapterMapWorkspace pointer interactions", () => {
     expect(
       result.container.querySelector(".map-editor-object.selected"),
     ).toBeNull();
+  });
+
+  it("previews and edits a hotspot hover text", () => {
+    const onChange = vi.fn();
+    const { container } = renderWorkspace(MAP, onChange);
+    const object = container.querySelector(".map-editor-object") as HTMLElement;
+
+    fireEvent.pointerEnter(object);
+    expect(container.querySelector(".map-hover-card")).toHaveTextContent(
+      "章节 A 的说明",
+    );
+
+    fireEvent.click(object);
+    const textarea = container.querySelector(
+      ".map-inspector textarea",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "新的 hover 说明" } });
+
+    const latest = onChange.mock.lastCall?.[0] as ChapterMapDefinition;
+    expect(latest.hotspots[0].hover_text).toBe("新的 hover 说明");
   });
 });

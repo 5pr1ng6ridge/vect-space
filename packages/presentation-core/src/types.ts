@@ -25,6 +25,73 @@ export interface SpriteSnapshot {
   z: number;
 }
 
+export type ButtonAssetMode = "separate" | "overlay";
+export type ButtonAssetFit = "contain" | "cover" | "stretch";
+export type ButtonState = "normal" | "hover" | "pressed";
+export type ButtonPanel = "saves" | "settings" | "history";
+
+export interface ButtonAnimation {
+  duration_ms: number;
+  channels: TimelineChannels;
+}
+
+export interface ButtonAnimations {
+  normal?: ButtonAnimation | null;
+  hover?: ButtonAnimation | null;
+  pressed?: ButtonAnimation | null;
+}
+
+export interface ButtonSnapshot {
+  id: string;
+  template: string;
+  asset_mode: ButtonAssetMode;
+  fit: ButtonAssetFit;
+  normal?: string | null;
+  hover?: string | null;
+  pressed?: string | null;
+  animations: ButtonAnimations;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation_deg: number;
+  scale_x: number;
+  scale_y: number;
+  opacity: number;
+  z: number;
+  visible: boolean;
+  enabled: boolean;
+  action: ButtonClickAction;
+}
+
+export interface ButtonTimelineBase {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation_deg: number;
+  scale_x: number;
+  scale_y: number;
+  opacity: number;
+  z: number;
+}
+
+export interface ButtonSetAction {
+  variable: string;
+  op: "assign" | "add" | "sub" | "mul" | "mod" | "append" | "toggle";
+  value?: boolean | number | bigint | string | { variable: string } | null;
+}
+
+export type ButtonPostAction =
+  | { type: "advance" }
+  | { type: "jump"; scene?: string | null; target: string }
+  | { type: "open_panel"; panel: ButtonPanel };
+
+export interface ButtonClickAction {
+  sets: ButtonSetAction[];
+  next?: ButtonPostAction | null;
+}
+
 export interface CameraSnapshot {
   x: number;
   y: number;
@@ -35,6 +102,7 @@ export interface CameraSnapshot {
 export interface WorldSnapshot {
   background: string | null;
   sprites: Record<string, SpriteSnapshot>;
+  buttons?: Record<string, ButtonSnapshot>;
   camera: CameraSnapshot;
   dialogue_ui_visible: boolean;
   ui_motion_bindings: UiMotionBindings;
@@ -215,6 +283,7 @@ export type TimelineTrack =
       channels: TimelineChannels;
     }
   | { type: "camera"; channels: TimelineChannels }
+  | { type: "button"; instance_id: string; channels: TimelineChannels }
   | {
       type: "video";
       asset: string;
@@ -297,6 +366,10 @@ export type PresentationCue = CueBase &
         motion: UiMotionPreset;
       }
     | {
+        type: "button_system_action";
+        panel: ButtonPanel;
+      }
+    | {
         type: "play_sfx";
         asset: string;
         volume: number;
@@ -317,6 +390,7 @@ export type PresentationCue = CueBase &
         duration_ms: number;
         skippable: boolean;
         is_seen: boolean;
+        button_bases?: Record<string, ButtonTimelineBase>;
         tracks: TimelineTrack[];
         events: TimelineEvent[];
       }
@@ -357,6 +431,7 @@ export interface ChapterMapHotspotSnapshot {
   id: string;
   scene_id: string;
   title: string;
+  hover_text: string | null;
   x: number;
   y: number;
   width: number;

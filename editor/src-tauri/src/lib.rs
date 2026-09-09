@@ -19,9 +19,9 @@ use ttf_parser::Face;
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AssetKind, ChapterMapDefinition, ChoiceSnapshot, ContentManifest, ResolvedAsset,
-        SceneDefinition, SceneNode, StoryFlowDefinition, StoryLocation, TimelineEvent,
-        TimelineTrack, UiMotionPreset, VariableMap,
+        AssetKind, ButtonTemplate, ChapterMapDefinition, ChoiceSnapshot, ContentManifest,
+        ResolvedAsset, SceneDefinition, SceneNode, StoryFlowDefinition, StoryLocation,
+        TimelineEvent, TimelineTrack, UiMotionPreset, VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
@@ -141,6 +141,7 @@ struct EditorProject {
     manifest: ContentManifest,
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
+    buttons: Vec<EditorButtonFile>,
     story_flow: Option<EditorStoryFlowFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
@@ -155,6 +156,7 @@ struct EditorProjectView<'a> {
     manifest: &'a ContentManifest,
     scenes: &'a [EditorSceneFile],
     ui_motions: &'a [EditorUiMotionFile],
+    buttons: &'a [EditorButtonFile],
     story_flow: &'a Option<EditorStoryFlowFile>,
     chapter_map: &'a Option<EditorChapterMapFile>,
     layout: &'a EditorLayout,
@@ -173,6 +175,7 @@ impl Serialize for EditorProject {
             manifest: &self.manifest,
             scenes: &self.scenes,
             ui_motions: &self.ui_motions,
+            buttons: &self.buttons,
             story_flow: &self.story_flow,
             chapter_map: &self.chapter_map,
             layout: &self.layout,
@@ -208,6 +211,13 @@ struct EditorSceneFile {
 struct EditorUiMotionFile {
     path: String,
     definition: UiMotionPreset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditorButtonFile {
+    path: String,
+    definition: ButtonTemplate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,19 +312,9 @@ struct BuildNodePreviewRequest {
     project: SaveProjectRequest,
     target: StoryLocation,
     #[serde(default)]
-    origin: PreviewOrigin,
-    #[serde(default)]
     variable_overrides: WireVariableMap,
     #[serde(default)]
     choices: Vec<PreviewChoiceDecision>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PreviewOrigin {
-    #[default]
-    StoryEntry,
-    SceneEntry,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,8 +337,6 @@ enum BuildNodePreviewResult {
     Unreachable {
         message: String,
         trace: Vec<StoryLocation>,
-        #[serde(default)]
-        can_retry_from_scene_entry: bool,
     },
 }
 
@@ -371,6 +369,7 @@ struct SaveProjectRequest {
     manifest: ContentManifest,
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
+    buttons: Vec<EditorButtonFile>,
     story_flow: Option<EditorStoryFlowFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
@@ -384,6 +383,8 @@ struct SaveProjectRequestRaw {
     manifest: ContentManifest,
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
+    #[serde(default)]
+    buttons: Vec<EditorButtonFile>,
     story_flow: Option<EditorStoryFlowFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
@@ -405,6 +406,7 @@ impl<'de> Deserialize<'de> for SaveProjectRequest {
             manifest: raw.manifest,
             scenes: raw.scenes,
             ui_motions: raw.ui_motions,
+            buttons: raw.buttons,
             story_flow: raw.story_flow,
             chapter_map: raw.chapter_map,
             layout: raw.layout,
@@ -924,22 +926,26 @@ fn save_project(
             .map_err(validation_command_error)?;
         let ui_motions = validate_ui_motion_file_set(&request.manifest, &request.ui_motions)
             .map_err(validation_command_error)?;
-        let candidate = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides(
-            session.root.clone(),
-            request.manifest.clone(),
-            scenes,
-            ui_motions,
-            request
-                .story_flow
-                .as_ref()
-                .map(|file| file.definition.clone()),
-            request
-                .chapter_map
-                .as_ref()
-                .map(|file| file.definition.clone()),
-            &asset_overrides,
-        )
-        .map_err(validation_command_error)?;
+        let buttons = validate_button_file_set(&request.manifest, &request.buttons)
+            .map_err(validation_command_error)?;
+        let candidate =
+            ContentCatalog::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
+                session.root.clone(),
+                request.manifest.clone(),
+                scenes,
+                ui_motions,
+                request
+                    .story_flow
+                    .as_ref()
+                    .map(|file| file.definition.clone()),
+                request
+                    .chapter_map
+                    .as_ref()
+                    .map(|file| file.definition.clone()),
+                &asset_overrides,
+                Some(buttons),
+            )
+            .map_err(validation_command_error)?;
 
         let all_writes =
             serialize_project(&session.root, &request).map_err(validation_command_error)?;
@@ -1129,22 +1135,26 @@ fn validate_project(
         .map_err(validation_command_error)?;
     let ui_motions = validate_ui_motion_file_set(&request.manifest, &request.ui_motions)
         .map_err(validation_command_error)?;
-    let candidate = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides(
-        session.root.clone(),
-        request.manifest,
-        scenes,
-        ui_motions,
-        request
-            .story_flow
-            .as_ref()
-            .map(|file| file.definition.clone()),
-        request
-            .chapter_map
-            .as_ref()
-            .map(|file| file.definition.clone()),
-        &asset_overrides,
-    )
-    .map_err(validation_command_error)?;
+    let buttons = validate_button_file_set(&request.manifest, &request.buttons)
+        .map_err(validation_command_error)?;
+    let candidate =
+        ContentCatalog::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
+            session.root.clone(),
+            request.manifest,
+            scenes,
+            ui_motions,
+            request
+                .story_flow
+                .as_ref()
+                .map(|file| file.definition.clone()),
+            request
+                .chapter_map
+                .as_ref()
+                .map(|file| file.definition.clone()),
+            &asset_overrides,
+            Some(buttons),
+        )
+        .map_err(validation_command_error)?;
     Ok(analyze_catalog(&candidate))
 }
 
@@ -1878,7 +1888,9 @@ fn build_node_preview_impl(
     let ui_motions =
         validate_ui_motion_file_set(&request.project.manifest, &request.project.ui_motions)
             .map_err(validation_command_error)?;
-    let catalog = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides(
+    let buttons = validate_button_file_set(&request.project.manifest, &request.project.buttons)
+        .map_err(validation_command_error)?;
+    let catalog = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
         session.root.clone(),
         request.project.manifest.clone(),
         scenes,
@@ -1894,11 +1906,16 @@ fn build_node_preview_impl(
             .as_ref()
             .map(|file| file.definition.clone()),
         &asset_overrides,
+        Some(buttons),
     )
     .map_err(validation_command_error)?;
+    // Preview metadata used to be collected from the story entry and can
+    // therefore contain stale decisions from earlier Scenes. A node preview
+    // owns only the path from its own Scene entry to the target.
     let decisions = request
         .choices
         .iter()
+        .filter(|choice| choice.scene_id == request.target.scene_id)
         .map(|choice| CorePreviewChoiceDecision {
             scene_id: choice.scene_id.clone(),
             node_id: choice.node_id.clone(),
@@ -1910,15 +1927,12 @@ fn build_node_preview_impl(
         variable_map_from_wire(request.variable_overrides).map_err(validation_command_error)?;
     let mut runtime = RuntimeEngine::with_preview_overrides(&catalog, &variable_overrides)
         .map_err(validation_command_error)?;
-    let preview = match request.origin {
-        PreviewOrigin::StoryEntry => runtime.preview_to(&catalog, &request.target, &decisions),
-        PreviewOrigin::SceneEntry => runtime.preview_to_from_scene_entry(
-            &catalog,
-            &request.target.scene_id,
-            &request.target,
-            &decisions,
-        ),
-    };
+    let preview = runtime.preview_to_from_scene_entry(
+        &catalog,
+        &request.target.scene_id,
+        &request.target,
+        &decisions,
+    );
     match preview {
         Ok(PreviewRunResult::NeedsChoice {
             location,
@@ -1966,16 +1980,11 @@ fn build_node_preview_impl(
             })
         }
         Ok(PreviewRunResult::Unreachable { message, trace }) => {
-            Ok(BuildNodePreviewResult::Unreachable {
-                message,
-                trace,
-                can_retry_from_scene_entry: matches!(request.origin, PreviewOrigin::StoryEntry),
-            })
+            Ok(BuildNodePreviewResult::Unreachable { message, trace })
         }
         Err(error) => Ok(BuildNodePreviewResult::Unreachable {
             message: error.to_string(),
             trace: Vec::new(),
-            can_retry_from_scene_entry: matches!(request.origin, PreviewOrigin::StoryEntry),
         }),
     }
 }
@@ -2011,6 +2020,13 @@ fn project_payload(
     let mut ui_motions = Vec::with_capacity(catalog.manifest.ui_motions.len());
     for path in &catalog.manifest.ui_motions {
         ui_motions.push(EditorUiMotionFile {
+            path: path.clone(),
+            definition: read_yaml(&root.join(path))?,
+        });
+    }
+    let mut buttons = Vec::with_capacity(catalog.manifest.buttons.len());
+    for path in &catalog.manifest.buttons {
+        buttons.push(EditorButtonFile {
             path: path.clone(),
             definition: read_yaml(&root.join(path))?,
         });
@@ -2060,6 +2076,7 @@ fn project_payload(
         manifest: catalog.manifest.clone(),
         scenes,
         ui_motions,
+        buttons,
         story_flow,
         chapter_map,
         layout,
@@ -2114,6 +2131,7 @@ fn project_payload_from_request(
         manifest: request.manifest.clone(),
         scenes: request.scenes.clone(),
         ui_motions: request.ui_motions.clone(),
+        buttons: request.buttons.clone(),
         story_flow: request.story_flow.clone(),
         chapter_map: request.chapter_map.clone(),
         layout,
@@ -2198,11 +2216,40 @@ fn validate_ui_motion_file_set(
     Ok(motions)
 }
 
+fn validate_button_file_set(
+    manifest: &ContentManifest,
+    files: &[EditorButtonFile],
+) -> Result<BTreeMap<String, ButtonTemplate>, String> {
+    if manifest.buttons.len() != files.len() {
+        return Err("manifest 的按钮模板文件列表与编辑器文档不一致".to_owned());
+    }
+    let declared = manifest
+        .buttons
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let provided = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if declared.len() != manifest.buttons.len() || declared != provided {
+        return Err("提交的按钮模板路径与 manifest 不一致".to_owned());
+    }
+    let mut buttons = BTreeMap::new();
+    for file in files {
+        safe_relative_path(&file.path)?;
+        buttons.insert(file.path.clone(), file.definition.clone());
+    }
+    Ok(buttons)
+}
+
 fn serialize_project(
     root: &Path,
     request: &SaveProjectRequest,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
-    let mut writes = Vec::with_capacity(request.scenes.len() + request.ui_motions.len() + 4);
+    let mut writes = Vec::with_capacity(
+        request.scenes.len() + request.ui_motions.len() + request.buttons.len() + 4,
+    );
     writes.push((root.join("manifest.yaml"), yaml_bytes(&request.manifest)?));
     for scene in &request.scenes {
         safe_relative_path(&scene.path)?;
@@ -2211,6 +2258,10 @@ fn serialize_project(
     for motion in &request.ui_motions {
         safe_relative_path(&motion.path)?;
         writes.push((root.join(&motion.path), yaml_bytes(&motion.definition)?));
+    }
+    for button in &request.buttons {
+        safe_relative_path(&button.path)?;
+        writes.push((root.join(&button.path), yaml_bytes(&button.definition)?));
     }
     if let Some(flow) = &request.story_flow {
         safe_relative_path(&flow.path)?;
@@ -2232,6 +2283,7 @@ fn managed_deletions(
 ) -> Vec<PathBuf> {
     let mut previous_paths = previous.scenes.clone();
     previous_paths.extend(previous.ui_motions.iter().cloned());
+    previous_paths.extend(previous.buttons.iter().cloned());
     if let Some(path) = &previous.story_flow {
         previous_paths.push(path.clone());
     }
@@ -2240,6 +2292,7 @@ fn managed_deletions(
     }
     let mut next_paths = next.scenes.clone();
     next_paths.extend(next.ui_motions.iter().cloned());
+    next_paths.extend(next.buttons.iter().cloned());
     if let Some(path) = &next.story_flow {
         next_paths.push(path.clone());
     }
@@ -2284,6 +2337,13 @@ fn document_models(
             serde_json::to_value(definition).map_err(display_error)?,
         );
     }
+    for path in &manifest.buttons {
+        let definition: ButtonTemplate = read_yaml(&root.join(path))?;
+        models.insert(
+            path.replace('\\', "/"),
+            serde_json::to_value(definition).map_err(display_error)?,
+        );
+    }
     if let Some(path) = &manifest.story_flow {
         let definition: StoryFlowDefinition = read_yaml(&root.join(path))?;
         models.insert(
@@ -2320,6 +2380,12 @@ fn document_models_from_request(
         );
     }
     for file in &request.ui_motions {
+        models.insert(
+            file.path.replace('\\', "/"),
+            serde_json::to_value(&file.definition).map_err(display_error)?,
+        );
+    }
+    for file in &request.buttons {
         models.insert(
             file.path.replace('\\', "/"),
             serde_json::to_value(&file.definition).map_err(display_error)?,
@@ -2368,6 +2434,13 @@ fn retain_changed_model_writes(
                     .or_else(|| {
                         request
                             .ui_motions
+                            .iter()
+                            .find(|file| file.path.replace('\\', "/") == key)
+                            .map(|file| serde_json::to_value(&file.definition))
+                    })
+                    .or_else(|| {
+                        request
+                            .buttons
                             .iter()
                             .find(|file| file.path.replace('\\', "/") == key)
                             .map(|file| serde_json::to_value(&file.definition))
@@ -2551,6 +2624,33 @@ fn encode_node_scalars(node: &mut serde_json::Value) {
                         {
                             encode_condition_scalars(condition);
                         }
+                    }
+                }
+            }
+        }
+        Some("button_create") | Some("button_update") => {
+            if let Some(action) = object
+                .get_mut("action")
+                .and_then(|value| value.as_object_mut())
+            {
+                if let Some(sets) = action
+                    .get_mut("sets")
+                    .and_then(|value| value.as_array_mut())
+                {
+                    for set in sets {
+                        let Some(value) =
+                            set.as_object_mut().and_then(|value| value.get_mut("value"))
+                        else {
+                            continue;
+                        };
+                        if value
+                            .as_object()
+                            .is_some_and(|object| object.get("variable").is_some())
+                        {
+                            continue;
+                        }
+                        let raw = std::mem::take(value);
+                        *value = encode_scalar_json(raw, None);
                     }
                 }
             }
@@ -3316,13 +3416,20 @@ fn project_fingerprint_with_hashes(
 ) -> Result<String, std::io::Error> {
     let mut hasher = Sha256::new();
     let mut paths = Vec::with_capacity(
-        manifest.assets.len() + manifest.scenes.len() + manifest.ui_motions.len() + 3,
+        manifest.assets.len()
+            + manifest.scenes.len()
+            + manifest.ui_motions.len()
+            + manifest.buttons.len()
+            + 3,
     );
     paths.push(root.join("manifest.yaml"));
     for path in &manifest.scenes {
         paths.push(root.join(path));
     }
     for path in &manifest.ui_motions {
+        paths.push(root.join(path));
+    }
+    for path in &manifest.buttons {
         paths.push(root.join(path));
     }
     if let Some(path) = &manifest.story_flow {
@@ -3438,6 +3545,14 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
     if let Some(font) = &catalog.manifest.default_font {
         referenced_assets.insert(font.clone());
     }
+    for template in catalog.buttons.values() {
+        for asset in [&template.normal, &template.hover, &template.pressed]
+            .into_iter()
+            .flatten()
+        {
+            referenced_assets.insert(asset.clone());
+        }
+    }
     for implicit in ["gui.dialogue_box", "gui.name_box", "sfx.typing"] {
         if catalog.manifest.assets.contains_key(implicit) {
             referenced_assets.insert(implicit.to_owned());
@@ -3490,7 +3605,10 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::ScreenEffect { next, .. }
         | SceneNode::DialogueUi { next, .. }
         | SceneNode::UiMotionSet { next, .. }
-        | SceneNode::UiMotionPlay { next, .. } => vec![local(next)],
+        | SceneNode::UiMotionPlay { next, .. }
+        | SceneNode::ButtonCreate { next, .. }
+        | SceneNode::ButtonUpdate { next, .. }
+        | SceneNode::ButtonRemove { next, .. } => vec![local(next)],
         SceneNode::Timeline { next, .. } => vec![local(next)],
         SceneNode::Choice { choices } => choices.iter().map(|choice| local(&choice.next)).collect(),
         SceneNode::Condition {
@@ -3546,7 +3664,10 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::Jump { .. }
         | SceneNode::UiMotionSet { .. }
         | SceneNode::Sfx { .. }
-        | SceneNode::LongTextControl { .. } => true,
+        | SceneNode::LongTextControl { .. }
+        | SceneNode::ButtonCreate { .. }
+        | SceneNode::ButtonUpdate { .. }
+        | SceneNode::ButtonRemove { .. } => true,
     }
 }
 
@@ -3641,6 +3762,7 @@ fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
                     }
                     TimelineTrack::Sprite { asset: None, .. }
                     | TimelineTrack::Camera { .. }
+                    | TimelineTrack::Button { .. }
                     | TimelineTrack::Bgm { .. } => {}
                 }
             }
@@ -3800,6 +3922,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("目标节点不存在"));
+    }
+
+    #[test]
+    fn editor_payload_encodes_button_action_integers_losslessly() {
+        let mut node = serde_json::json!({
+            "type": "button_create",
+            "action": {
+                "sets": [{
+                    "variable": "score",
+                    "op": "assign",
+                    "value": i64::MAX
+                }]
+            }
+        });
+        encode_node_scalars(&mut node);
+        assert_eq!(
+            node["action"]["sets"][0]["value"],
+            serde_json::json!({
+                "kind": "integer",
+                "value": i64::MAX.to_string()
+            })
+        );
+
+        let mut reference = serde_json::json!({
+            "type": "button_create",
+            "action": {
+                "sets": [{
+                    "variable": "score",
+                    "op": "assign",
+                    "value": {"variable": "other"}
+                }]
+            }
+        });
+        encode_node_scalars(&mut reference);
+        assert_eq!(
+            reference["action"]["sets"][0]["value"],
+            serde_json::json!({"variable": "other"})
+        );
     }
 
     #[test]

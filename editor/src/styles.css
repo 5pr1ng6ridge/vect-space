@@ -2587,6 +2587,124 @@ code {
   outline: 2px solid #ffd36e;
   background: #fff0ae;
 }
+
+.button-workspace {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr) minmax(190px, 30vh);
+  color: #dcecff;
+  background: #080d15;
+}
+.button-workspace-main {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+.button-preview {
+  position: relative;
+  overflow: hidden;
+  background: #020408;
+}
+.button-preview-design {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1920px;
+  height: 1080px;
+  transform-origin: 0 0;
+  translate: -50% -50%;
+  overflow: hidden;
+}
+.button-preview-background {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgb(255 255 255 / 14%);
+  background: radial-gradient(circle at 50% 40%, #243650, #090f19 65%);
+  font-size: 42px;
+  letter-spacing: 0.16em;
+}
+.button-preview-hit {
+  position: absolute;
+  top: 500px;
+  left: 840px;
+  padding: 0;
+  border: 2px dashed #67d9ff;
+  background: rgb(103 217 255 / 7%);
+  cursor: pointer;
+}
+.button-preview-visual {
+  position: absolute;
+  inset: 0;
+  display: block;
+  transform-origin: center;
+}
+.button-preview-visual img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.button-inspector {
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid #26364d;
+  background: #101722;
+}
+.button-inspector > label,
+.button-inspector .field-grid label {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+.button-state-tabs,
+.button-animation-actions,
+.button-channel-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+.button-state-tabs button.active,
+.button-keyframe-row button.selected {
+  color: #081018;
+  background: #9ee7ff;
+}
+.button-action-editor {
+  margin: 12px 0;
+  padding: 8px;
+  border: 1px solid #2a3e58;
+}
+.button-action-editor > header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.button-action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 5px;
+  margin: 6px 0;
+}
+.button-timeline {
+  overflow: auto;
+  padding: 10px 14px 30px;
+  border-top: 1px solid #26364d;
+  background: #0d1521;
+}
+.button-timeline > input {
+  width: 100%;
+}
+.button-keyframe-row {
+  min-height: 28px;
+}
+.button-keyframe-row button {
+  top: 8px;
+}
 .timeline-channel button.timeline-event-marker {
   border-radius: 50%;
   rotate: 0deg;
@@ -2722,6 +2840,17 @@ code {
   pointer-events: auto;
   cursor: move;
   transform-origin: 50% 100%;
+}
+.timeline-button-preview {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  opacity: 0.72;
+  pointer-events: none;
+  user-select: none;
 }
 .timeline-gizmo.selected {
   z-index: 1000;
@@ -4019,6 +4148,49 @@ body.timeline-resizing {
   border: 2px solid #9ee7ff;
   box-shadow: 0 0 0 2px rgb(158 231 255 / 20%);
 }
+.map-editor-object.is-hovered {
+  overflow: visible;
+}
+.map-resize-overlay {
+  position: absolute;
+  z-index: 1000;
+  pointer-events: none;
+}
+.map-hover-card {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 18px);
+  left: 50%;
+  display: block;
+  min-width: min(320px, 480px);
+  max-width: 480px;
+  padding: 12px 14px !important;
+  border: 2px solid #fff;
+  color: #fff !important;
+  background: #000 !important;
+  box-shadow: none;
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  transform: translateX(-50%);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none !important;
+}
+.map-hover-card::before {
+  display: none;
+}
+.map-hover-card::after {
+  display: none;
+}
+.map-hover-reset {
+  align-self: start;
+  margin: -4px 0 12px;
+  padding: 5px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
 .map-resize-handle {
   position: absolute;
   z-index: 5;
@@ -4028,6 +4200,7 @@ body.timeline-resizing {
   border-radius: 2px;
   background: #9ee7ff;
   pointer-events: auto;
+  touch-action: none;
 }
 .map-resize-nw {
   top: -7px;

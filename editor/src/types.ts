@@ -45,6 +45,48 @@ export interface UiMotionBindings {
   dialogue_show?: string | null;
   dialogue_hide?: string | null;
 }
+
+export type ButtonAssetMode = "separate" | "overlay";
+export type ButtonAssetFit = "contain" | "cover" | "stretch";
+export type ButtonState = "normal" | "hover" | "pressed";
+export interface ButtonAnimation {
+  duration_ms: number;
+  channels: TimelineChannels;
+}
+export interface ButtonAnimations {
+  normal?: ButtonAnimation | null;
+  hover?: ButtonAnimation | null;
+  pressed?: ButtonAnimation | null;
+}
+export interface ButtonTemplate {
+  schema_version: number;
+  id: string;
+  width: number;
+  height: number;
+  asset_mode: ButtonAssetMode;
+  fit: ButtonAssetFit;
+  normal?: string | null;
+  hover?: string | null;
+  pressed?: string | null;
+  animations: ButtonAnimations;
+}
+export interface ButtonFile {
+  path: string;
+  definition: ButtonTemplate;
+}
+export interface ButtonSetAction {
+  variable: string;
+  op?: VariableOperation;
+  value?: MutationValue;
+}
+export type ButtonPostAction =
+  | { type: "advance" }
+  | { type: "jump"; scene?: string | null; target: string }
+  | { type: "open_panel"; panel: "saves" | "settings" | "history" };
+export interface ButtonClickAction {
+  sets: ButtonSetAction[];
+  next?: ButtonPostAction | null;
+}
 export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
 export type NodeType = SceneNode["type"];
 
@@ -92,6 +134,7 @@ export interface ContentManifest {
   assets: Record<string, AssetDefinition>;
   scenes: string[];
   ui_motions: string[];
+  buttons?: string[];
   ui_motion_defaults: UiMotionBindings;
   story_flow?: string | null;
   chapter_map?: string | null;
@@ -111,6 +154,7 @@ export interface ChapterMapHotspot {
   id: string;
   scene_id: string;
   title: string;
+  hover_text?: string | null;
   x: number;
   y: number;
   width: number;
@@ -314,6 +358,7 @@ export type TimelineTrack =
       channels: TimelineChannels;
     }
   | { type: "camera"; channels: TimelineChannels }
+  | { type: "button"; instance_id: string; channels: TimelineChannels }
   | {
       type: "video";
       asset: string;
@@ -385,6 +430,45 @@ export interface UiMotionPlayNode extends NextNode {
   await: boolean;
 }
 
+export interface ButtonCreateNode extends NextNode {
+  type: "button_create";
+  instance_id: string;
+  template: string;
+  x?: number | null;
+  y?: number | null;
+  width?: number | null;
+  height?: number | null;
+  rotation_deg?: number | null;
+  scale_x?: number | null;
+  scale_y?: number | null;
+  opacity?: number | null;
+  z?: number | null;
+  visible: boolean;
+  enabled: boolean;
+  action: ButtonClickAction;
+}
+export interface ButtonUpdateNode extends NextNode {
+  type: "button_update";
+  instance_id: string;
+  template?: string | null;
+  x?: number | null;
+  y?: number | null;
+  width?: number | null;
+  height?: number | null;
+  rotation_deg?: number | null;
+  scale_x?: number | null;
+  scale_y?: number | null;
+  opacity?: number | null;
+  z?: number | null;
+  visible?: boolean | null;
+  enabled?: boolean | null;
+  action?: ButtonClickAction | null;
+}
+export interface ButtonRemoveNode extends NextNode {
+  type: "button_remove";
+  instance_id: string;
+}
+
 export interface EndNode {
   type: "end";
 }
@@ -409,6 +493,9 @@ export type SceneNode =
   | DialogueUiNode
   | UiMotionSetNode
   | UiMotionPlayNode
+  | ButtonCreateNode
+  | ButtonUpdateNode
+  | ButtonRemoveNode
   | TimelineNode
   | EndNode;
 
@@ -486,6 +573,7 @@ export interface EditorProject {
   manifest: ContentManifest;
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
+  buttons?: ButtonFile[];
   story_flow: StoryFlowFile | null;
   chapter_map?: ChapterMapFile | null;
   layout: EditorLayout;
@@ -498,6 +586,7 @@ export interface SaveProjectRequest {
   manifest: ContentManifest;
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
+  buttons?: ButtonFile[];
   story_flow: StoryFlowFile | null;
   chapter_map: ChapterMapFile | null;
   layout: EditorLayout;
@@ -534,7 +623,6 @@ export interface SpriteSnapshot {
 export interface BuildNodePreviewRequest {
   project: SaveProjectRequest;
   target: StoryLocation;
-  origin?: "story_entry" | "scene_entry";
   variable_overrides: Record<string, ScalarValue>;
   choices: PreviewChoiceDecision[];
 }
@@ -558,7 +646,6 @@ export type BuildNodePreviewResult =
       status: "unreachable";
       message: string;
       trace: StoryLocation[];
-      can_retry_from_scene_entry: boolean;
     };
 
 export interface ImportedAsset {

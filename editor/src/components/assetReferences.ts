@@ -22,6 +22,16 @@ export function findAssetReferences(
         references.push(`${scene.definition.id}/${nodeId}`);
     }
   }
+  for (const file of project.buttons ?? []) {
+    for (const [state, id] of [
+      ["normal", file.definition.normal],
+      ["hover", file.definition.hover],
+      ["pressed", file.definition.pressed],
+    ] as const) {
+      if (id === assetId)
+        references.push(`button-template:${file.definition.id}/${state}`);
+    }
+  }
   const map = project.chapter_map?.definition;
   if (map?.background === assetId) references.push("chapter-map / 背景");
   for (const decoration of map?.decorations ?? []) {
@@ -58,6 +68,9 @@ function nodeReferencesAsset(node: SceneNode, assetId: string): boolean {
           (event) => event.type === "sfx" && event.asset === assetId,
         )
       );
+    case "button_create":
+    case "button_update":
+      return false;
     default:
       return false;
   }

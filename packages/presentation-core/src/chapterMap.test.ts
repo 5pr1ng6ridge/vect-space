@@ -5,6 +5,7 @@ import {
   containMapRect,
   hitTestMapHotspots,
   mapDragExceededThreshold,
+  resolveChapterMapHoverText,
   snapMap,
   sortMapObjects,
 } from "./chapterMap";
@@ -66,5 +67,14 @@ describe("chapter-map geometry", () => {
         point,
       )?.id,
     ).toBe("b");
+  });
+
+  it("resolves legacy, custom, and explicitly hidden hover text", () => {
+    expect(resolveChapterMapHoverText("章节标题", undefined)).toBe("章节标题");
+    expect(resolveChapterMapHoverText("章节标题", null)).toBe("章节标题");
+    expect(resolveChapterMapHoverText("章节标题", "自定义说明")).toBe(
+      "自定义说明",
+    );
+    expect(resolveChapterMapHoverText("章节标题", " \n\t ")).toBeNull();
   });
 });

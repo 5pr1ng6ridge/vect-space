@@ -115,7 +115,9 @@ export function snapTimelineTime(
 }
 
 function timelineTrackIdentity(track: TimelineTrack): string {
-  return track.type === "sprite" ? `sprite:${track.sprite_id}` : track.type;
+  if (track.type === "sprite") return `sprite:${track.sprite_id}`;
+  if (track.type === "button") return `button:${track.instance_id}`;
+  return track.type;
 }
 
 function timelineTrackChannels(type: TimelineTrack["type"]): string[] {
@@ -133,6 +135,18 @@ function timelineTrackChannels(type: TimelineTrack["type"]): string[] {
       ];
     case "camera":
       return ["x", "y", "zoom", "rotation_deg"];
+    case "button":
+      return [
+        "x",
+        "y",
+        "width",
+        "height",
+        "scale_x",
+        "scale_y",
+        "rotation_deg",
+        "opacity",
+        "z",
+      ];
     case "video":
       return ["x", "y", "width", "height", "opacity", "z", "volume"];
     case "bgm":

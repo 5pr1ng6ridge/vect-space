@@ -26,6 +26,7 @@ const MAP: ChapterMapSnapshot = {
       id: "a",
       scene_id: "scene_a",
       title: "章节 A",
+      hover_text: "章节 A 说明",
       x: 100,
       y: 100,
       width: 300,
@@ -38,6 +39,7 @@ const MAP: ChapterMapSnapshot = {
       id: "b",
       scene_id: "scene_b",
       title: "章节 B",
+      hover_text: "章节 B 说明",
       x: 100,
       y: 100,
       width: 300,
@@ -50,6 +52,7 @@ const MAP: ChapterMapSnapshot = {
       id: "locked",
       scene_id: "locked_scene",
       title: "未完成章节",
+      hover_text: null,
       x: 500,
       y: 100,
       width: 300,
@@ -100,9 +103,9 @@ describe("ChapterMapPage", () => {
     expect(artworkHotspot).toBeEmptyDOMElement();
 
     fireEvent.click(artworkHotspot);
-    expect(artworkHotspot).toHaveClass("is-selected");
-    fireEvent.click(screen.getByRole("button", { name: "重演" }));
     expect(onReplay).toHaveBeenCalledWith("scene_b");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(artworkHotspot).not.toHaveClass("is-selected");
   });
 
   it("pans from the room background and reports a clamped session center", () => {
@@ -142,14 +145,15 @@ describe("ChapterMapPage", () => {
     expect(onViewChange).toHaveBeenLastCalledWith({ x: 3040, y: 1620 });
   });
 
-  it("keeps a hotspot gesture out of room panning and still selects it", () => {
+  it("keeps a hotspot gesture out of room panning and replays it on click", () => {
     const onViewChange = vi.fn();
+    const onReplay = vi.fn();
     render(
       <ChapterMapPage
         assets={{ "gui.backdrop": "backdrop.png" }}
         map={MAP}
         onClose={() => undefined}
-        onReplay={() => undefined}
+        onReplay={onReplay}
         onViewChange={onViewChange}
       />,
     );
@@ -178,13 +182,11 @@ describe("ChapterMapPage", () => {
     fireEvent.pointerUp(viewport, { pointerId: 7 });
     fireEvent.click(hotspot);
 
-    expect(
-      screen.getByRole("dialog", { name: "章节 B章节操作" }),
-    ).toBeVisible();
+    expect(onReplay).toHaveBeenCalledWith("scene_b");
     expect(onViewChange).not.toHaveBeenCalled();
   });
 
-  it("clears the old hotspot selection when map artwork is refreshed", () => {
+  it("shows custom hover text and clears it when map artwork is refreshed", () => {
     const { rerender } = render(
       <ChapterMapPage
         assets={{ "gui.chapter_b": "chapter-b.png" }}
@@ -194,8 +196,8 @@ describe("ChapterMapPage", () => {
       />,
     );
     const hotspot = screen.getByRole("button", { name: "章节 B，可重演" });
-    fireEvent.click(hotspot);
-    expect(screen.getByRole("dialog")).toBeVisible();
+    fireEvent.pointerEnter(hotspot);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("章节 B 说明");
 
     rerender(
       <ChapterMapPage
@@ -206,9 +208,36 @@ describe("ChapterMapPage", () => {
       />,
     );
 
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(
-      screen.getByRole("button", { name: "章节 B，可重演" }),
-    ).not.toHaveClass("is-selected");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("falls back to the title and hides an explicitly empty hover card", () => {
+    const map = {
+      ...MAP,
+      hotspots: MAP.hotspots.map((hotspot) =>
+        hotspot.id === "a"
+          ? { ...hotspot, hover_text: null }
+          : hotspot.id === "b"
+            ? { ...hotspot, hover_text: "" }
+            : hotspot,
+      ),
+    };
+    render(
+      <ChapterMapPage
+        assets={{ "gui.chapter_b": "chapter-b.png" }}
+        map={map}
+        onClose={() => undefined}
+        onReplay={() => undefined}
+      />,
+    );
+    const titleFallback = screen.getByRole("button", {
+      name: "章节 A，可重演",
+    });
+    fireEvent.pointerEnter(titleFallback);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("章节 A");
+    fireEvent.pointerLeave(titleFallback);
+    const hiddenCard = screen.getByRole("button", { name: "章节 B，可重演" });
+    fireEvent.pointerEnter(hiddenCard);
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 });

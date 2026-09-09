@@ -39,6 +39,9 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "dialogue_ui", label: "对话框", group: "画面" },
   { type: "ui_motion_set", label: "设置 UI 动效", group: "画面" },
   { type: "ui_motion_play", label: "播放 UI 动效", group: "画面" },
+  { type: "button_create", label: "创建按钮", group: "交互" },
+  { type: "button_update", label: "更新按钮", group: "交互" },
+  { type: "button_remove", label: "移除按钮", group: "交互" },
   { type: "bgm", label: "BGM", group: "声音" },
   { type: "sfx", label: "音效", group: "声音" },
   { type: "wait", label: "等待", group: "流程" },
@@ -168,6 +171,12 @@ export function summarizeNode(node: SceneNode): string {
       return `${node.slot} = ${node.motion ?? "关闭"}`;
     case "ui_motion_play":
       return node.motion || "未选择动效";
+    case "button_create":
+      return `创建 ${node.instance_id} · ${node.template}`;
+    case "button_update":
+      return `更新 ${node.instance_id}`;
+    case "button_remove":
+      return `移除 ${node.instance_id}`;
     case "timeline":
       return `${node.duration_ms} ms · ${node.tracks.length} 轨 · ${node.events.length} 事件`;
     case "end":
@@ -345,6 +354,46 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         await: false,
         next: fallback,
       };
+    case "button_create":
+      return {
+        type,
+        instance_id: "button_1",
+        template: "button.default",
+        x: 860,
+        y: 900,
+        width: 200,
+        height: 80,
+        rotation_deg: 0,
+        scale_x: 1,
+        scale_y: 1,
+        opacity: 1,
+        z: 10,
+        visible: true,
+        enabled: true,
+        action: { sets: [], next: null },
+        next: fallback,
+      };
+    case "button_update":
+      return {
+        type,
+        instance_id: "button_1",
+        template: null,
+        x: null,
+        y: null,
+        width: null,
+        height: null,
+        rotation_deg: null,
+        scale_x: null,
+        scale_y: null,
+        opacity: null,
+        z: null,
+        visible: null,
+        enabled: null,
+        action: null,
+        next: fallback,
+      };
+    case "button_remove":
+      return { type, instance_id: "button_1", next: fallback };
     case "timeline":
       return {
         type,
@@ -1440,6 +1489,7 @@ export function projectRequest(
     manifest: project.manifest,
     scenes: project.scenes,
     ui_motions: project.ui_motions,
+    buttons: project.buttons ?? [],
     story_flow: project.story_flow,
     chapter_map: project.chapter_map ?? null,
     layout: project.layout,

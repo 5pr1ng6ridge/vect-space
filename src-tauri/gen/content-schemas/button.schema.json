@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ButtonTemplate",
+  "type": "object",
+  "properties": {
+    "animations": {
+      "$ref": "#/$defs/ButtonAnimations",
+      "default": {}
+    },
+    "asset_mode": {
+      "$ref": "#/$defs/ButtonAssetMode",
+      "default": "separate"
+    },
+    "fit": {
+      "$ref": "#/$defs/ButtonAssetFit",
+      "default": "stretch"
+    },
+    "height": {
+      "type": "number",
+      "format": "float",
+      "default": 80.0
+    },
+    "hover": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "normal": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pressed": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "width": {
+      "type": "number",
+      "format": "float",
+      "default": 200.0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id"
+  ],
+  "$defs": {
+    "ButtonAnimation": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TimelineKeyframe"
+            }
+          },
+          "default": {}
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 160,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ButtonAnimations": {
+      "type": "object",
+      "properties": {
+        "hover": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ButtonAnimation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "normal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ButtonAnimation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ButtonAnimation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ButtonAssetFit": {
+      "type": "string",
+      "enum": [
+        "contain",
+        "cover",
+        "stretch"
+      ]
+    },
+    "ButtonAssetMode": {
+      "type": "string",
+      "enum": [
+        "separate",
+        "overlay"
+      ]
+    },
+    "TimelineEasing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TimelineEasingPreset"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cubic_bezier": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 4,
+              "minItems": 4
+            }
+          },
+          "required": [
+            "cubic_bezier"
+          ]
+        }
+      ]
+    },
+    "TimelineEasingPreset": {
+      "type": "string",
+      "enum": [
+        "step",
+        "linear",
+        "ease_in",
+        "ease_out",
+        "ease_in_out"
+      ]
+    },
+    "TimelineKeyframe": {
+      "type": "object",
+      "properties": {
+        "at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "easing": {
+          "$ref": "#/$defs/TimelineEasing",
+          "default": "linear"
+        },
+        "value": {
+          "$ref": "#/$defs/TimelineKeyframeValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at_ms",
+        "value"
+      ]
+    },
+    "TimelineKeyframeKeyword": {
+      "type": "string",
+      "enum": [
+        "inherit"
+      ]
+    },
+    "TimelineKeyframeValue": {
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "float"
+        },
+        {
+          "$ref": "#/$defs/TimelineKeyframeKeyword"
+        }
+      ]
+    }
+  }
+}

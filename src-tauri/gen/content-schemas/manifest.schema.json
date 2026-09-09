@@ -9,6 +9,14 @@
         "$ref": "#/$defs/AssetDefinition"
       }
     },
+    "buttons": {
+      "description": "Optional reusable button template documents.  Empty keeps legacy\nprojects fully compatible.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "chapter_map": {
       "description": "Optional author-authored room map used as the chapter selector.  The\nlegacy story flow remains available for projects that have not yet\nmoved to a map.",
       "type": [

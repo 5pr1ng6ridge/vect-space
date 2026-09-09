@@ -332,6 +332,10 @@ export class PresentationController {
       case "ui_motion":
         await this.#runUiMotion(cue.motion, cue.duration_ms, signal);
         break;
+      case "button_system_action":
+        // The React shell opens the requested system panel when it receives
+        // the authoritative RuntimeUpdate. There is no visual work for Pixi.
+        break;
       case "timeline":
         return this.#runTimeline(cue, assets, signal);
       default:

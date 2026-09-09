@@ -12,6 +12,8 @@ import type {
   UiMotionPreset,
   ValueOperand,
   VariableType,
+  TimelineKeyframe,
+  ButtonClickAction,
 } from "./types";
 
 const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
@@ -109,6 +111,147 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
         ),
       );
     }
+  }
+
+  const buttonFiles = project.buttons ?? [];
+  const buttonIds = new Set<string>();
+  const declaredButtonPaths = new Set(project.manifest.buttons ?? []);
+  for (const file of buttonFiles) {
+    const template = file.definition;
+    if (!declaredButtonPaths.has(file.path)) {
+      diagnostics.push(
+        error("undeclared_button", `按钮模板文件未登记：${file.path}`),
+      );
+    }
+    if (template.schema_version !== 1 || !ID_PATTERN.test(template.id)) {
+      diagnostics.push(
+        error("invalid_button", `按钮模板定义无效：${template.id}`),
+      );
+    }
+    if (buttonIds.has(template.id)) {
+      diagnostics.push(
+        error("duplicate_button", `按钮模板 ID 重复：${template.id}`),
+      );
+    }
+    buttonIds.add(template.id);
+    if (
+      !Number.isFinite(template.width) ||
+      template.width <= 0 ||
+      !Number.isFinite(template.height) ||
+      template.height <= 0
+    ) {
+      diagnostics.push(
+        error("invalid_button_size", `按钮模板 ${template.id} 尺寸必须为正数`),
+      );
+    }
+    for (const [slot, assetId] of [
+      ["normal", template.normal],
+      ["hover", template.hover],
+      ["pressed", template.pressed],
+    ] as const) {
+      if (assetId == null) continue;
+      const asset = project.manifest.assets[assetId];
+      if (
+        asset === undefined ||
+        (asset.kind !== "gui" && asset.kind !== "sprite")
+      ) {
+        diagnostics.push(
+          error(
+            "invalid_button_asset",
+            `按钮模板 ${template.id} 的${slot}素材无效：${assetId}`,
+          ),
+        );
+      }
+    }
+    for (const state of ["normal", "hover", "pressed"] as const) {
+      const animation = template.animations[state];
+      if (animation == null) continue;
+      if (
+        !Number.isInteger(animation.duration_ms) ||
+        animation.duration_ms < 1 ||
+        animation.duration_ms > 1_800_000
+      ) {
+        diagnostics.push(
+          error(
+            "invalid_button_animation",
+            `按钮模板 ${template.id}/${state} 动画时长无效`,
+          ),
+        );
+      }
+      for (const [channel, frames] of Object.entries(animation.channels)) {
+        const keyframes: TimelineKeyframe[] = frames;
+        if (
+          !(
+            [
+              "offset_x",
+              "offset_y",
+              "scale_x",
+              "scale_y",
+              "rotation_deg",
+              "opacity",
+            ] as string[]
+          ).includes(channel)
+        ) {
+          diagnostics.push(
+            error(
+              "invalid_button_channel",
+              `按钮模板 ${template.id} 不支持 ${channel} 通道`,
+            ),
+          );
+        }
+        let previous = -1;
+        for (const frame of keyframes) {
+          if (
+            frame.value === "inherit" ||
+            typeof frame.value !== "number" ||
+            !Number.isFinite(frame.value) ||
+            !Number.isInteger(frame.at_ms) ||
+            frame.at_ms < 0 ||
+            frame.at_ms <= previous ||
+            frame.at_ms > animation.duration_ms
+          ) {
+            diagnostics.push(
+              error(
+                "invalid_button_keyframe",
+                `按钮模板 ${template.id}/${state}/${channel} 关键帧无效`,
+              ),
+            );
+          }
+          if (
+            channel === "opacity" &&
+            typeof frame.value === "number" &&
+            (frame.value < 0 || frame.value > 1)
+          )
+            diagnostics.push(
+              error(
+                "invalid_button_range",
+                `按钮模板 ${template.id} 透明度必须在 0–1`,
+              ),
+            );
+          if (
+            (channel === "scale_x" || channel === "scale_y") &&
+            typeof frame.value === "number" &&
+            frame.value <= 0
+          )
+            diagnostics.push(
+              error(
+                "invalid_button_range",
+                `按钮模板 ${template.id} 缩放必须大于 0`,
+              ),
+            );
+          previous = frame.at_ms;
+        }
+      }
+    }
+  }
+  for (const path of declaredButtonPaths) {
+    if (!buttonFiles.some((file) => file.path === path))
+      diagnostics.push(
+        error(
+          "missing_button",
+          `manifest 声明了按钮模板，但编辑器文档不存在：${path}`,
+        ),
+      );
   }
 
   const seenScenes = new Set<string>();
@@ -237,6 +380,23 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
         );
       }
       validateNode(project, scene.id, nodeId, node, diagnostics);
+      if (
+        (node.type === "button_update" || node.type === "button_remove") &&
+        !Object.values(scene.nodes).some(
+          (candidate) =>
+            candidate.type === "button_create" &&
+            candidate.instance_id === node.instance_id,
+        )
+      ) {
+        diagnostics.push(
+          error(
+            "unknown_button_instance",
+            `按钮实例不存在：${node.instance_id}`,
+            scene.id,
+            nodeId,
+          ),
+        );
+      }
       if (node.type === "long_text" && node.mode === "continue") {
         const document = node.document ?? nodeId;
         if (
@@ -310,6 +470,10 @@ function validateManagedDocumentPaths(
     ...project.manifest.scenes.map((path): [string, string] => ["scene", path]),
     ...project.manifest.ui_motions.map((path): [string, string] => [
       "ui_motion",
+      path,
+    ]),
+    ...(project.manifest.buttons ?? []).map((path): [string, string] => [
+      "button",
       path,
     ]),
   ];
@@ -980,6 +1144,32 @@ function validateNode(
         issue("unknown_ui_motion", `未知 UI 动效：${node.motion}`);
       if (node.duration_ms !== null) checkDuration(node.duration_ms);
       break;
+    case "button_create":
+      if (!ID_PATTERN.test(node.instance_id))
+        issue("invalid_button_instance", "按钮实例 ID 非法");
+      if (
+        !project.buttons?.some((file) => file.definition.id === node.template)
+      )
+        issue("unknown_button_template", `未知按钮模板：${node.template}`);
+      validateButtonLayout(node, issue);
+      validateButtonAction(project, node.action, sceneId, issue);
+      break;
+    case "button_update":
+      if (!ID_PATTERN.test(node.instance_id))
+        issue("invalid_button_instance", "按钮实例 ID 非法");
+      if (
+        node.template != null &&
+        !project.buttons?.some((file) => file.definition.id === node.template)
+      )
+        issue("unknown_button_template", `未知按钮模板：${node.template}`);
+      validateButtonLayout(node, issue);
+      if (node.action != null)
+        validateButtonAction(project, node.action, sceneId, issue);
+      break;
+    case "button_remove":
+      if (!ID_PATTERN.test(node.instance_id))
+        issue("invalid_button_instance", "按钮实例 ID 非法");
+      break;
     case "timeline": {
       if (
         !Number.isInteger(node.duration_ms) ||
@@ -1001,9 +1191,16 @@ function validateNode(
       let keyframes = 0;
       let videos = 0;
       const trackIds = new Set<string>();
+      const sceneDefinition = project.scenes.find(
+        (file) => file.definition.id === sceneId,
+      )?.definition;
       for (const track of node.tracks) {
         const trackId =
-          track.type === "sprite" ? `sprite:${track.sprite_id}` : track.type;
+          track.type === "sprite"
+            ? `sprite:${track.sprite_id}`
+            : track.type === "button"
+              ? `button:${track.instance_id}`
+              : track.type;
         if (trackIds.has(trackId))
           issue("duplicate_timeline_track", `重复时间线轨道：${trackId}`);
         trackIds.add(trackId);
@@ -1021,6 +1218,22 @@ function validateNode(
           }
         } else if (track.type === "sprite")
           checkAsset(track.asset, "sprite", false);
+        else if (
+          track.type === "button" &&
+          !(
+            sceneDefinition !== undefined &&
+            Object.values(sceneDefinition.nodes).some(
+              (candidate) =>
+                candidate.type === "button_create" &&
+                candidate.instance_id === track.instance_id,
+            )
+          )
+        ) {
+          issue(
+            "unknown_button_instance",
+            `时间线引用了未创建的按钮实例：${track.instance_id}`,
+          );
+        }
         const allowed = timelineChannels(track);
         for (const [channel, frames] of Object.entries(track.channels)) {
           if (!allowed.includes(channel))
@@ -1141,6 +1354,90 @@ function validateNode(
   }
 }
 
+function validateButtonLayout(
+  node: Extract<SceneNode, { type: "button_create" | "button_update" }>,
+  issue: (code: string, message: string) => void,
+): void {
+  const fields: [string, number | null | undefined][] = [
+    ["x", node.x],
+    ["y", node.y],
+    ["width", node.width],
+    ["height", node.height],
+    ["rotation_deg", node.rotation_deg],
+    ["scale_x", node.scale_x],
+    ["scale_y", node.scale_y],
+    ["opacity", node.opacity],
+    ["z", node.z],
+  ];
+  for (const [field, value] of fields) {
+    if (value != null && !Number.isFinite(value))
+      issue("invalid_button_layout", `${field} 必须是有限数`);
+  }
+  if (node.width != null && node.width <= 0)
+    issue("invalid_button_layout", "按钮宽度必须为正数");
+  if (node.height != null && node.height <= 0)
+    issue("invalid_button_layout", "按钮高度必须为正数");
+  if (node.scale_x != null && node.scale_x <= 0)
+    issue("invalid_button_layout", "横向缩放必须为正数");
+  if (node.scale_y != null && node.scale_y <= 0)
+    issue("invalid_button_layout", "纵向缩放必须为正数");
+  if (node.opacity != null && (node.opacity < 0 || node.opacity > 1))
+    issue("invalid_button_layout", "透明度必须在 0–1 之间");
+}
+
+function validateButtonAction(
+  project: EditorProject,
+  action: ButtonClickAction,
+  sceneId: string,
+  issue: (code: string, message: string) => void,
+): void {
+  if (action.sets.length > 64)
+    issue("too_many_button_sets", "按钮变量修改超过 64 条");
+  for (const set of action.sets) {
+    if (
+      !ID_PATTERN.test(set.variable) ||
+      project.manifest.variables[set.variable] === undefined
+    ) {
+      issue("unknown_button_variable", `按钮引用了未知变量：${set.variable}`);
+      continue;
+    }
+    const pseudo = {
+      type: "set" as const,
+      variable: set.variable,
+      op: set.op ?? "assign",
+      value: set.value,
+      next: "",
+    };
+    validateMutation(project, pseudo, issue);
+  }
+  if (action.next?.type === "jump") {
+    if (!ID_PATTERN.test(action.next.target))
+      issue("invalid_button_target", "按钮跳转目标 ID 非法");
+    if (action.next.scene != null && !ID_PATTERN.test(action.next.scene))
+      issue("invalid_button_target", "按钮跳转场景 ID 非法");
+    const destinationId = action.next.scene ?? sceneId;
+    const destination = project.scenes.find(
+      (file) => file.definition.id === destinationId,
+    )?.definition;
+    if (destination === undefined) {
+      issue(
+        "unknown_button_target_scene",
+        `按钮跳转场景不存在：${destinationId}`,
+      );
+    } else if (
+      !Object.prototype.hasOwnProperty.call(
+        destination.nodes,
+        action.next.target,
+      )
+    ) {
+      issue(
+        "unknown_button_target",
+        `按钮跳转目标节点不存在：${destinationId}/${action.next.target}`,
+      );
+    }
+  }
+}
+
 function timelineChannels(track: TimelineTrack): string[] {
   switch (track.type) {
     case "sprite":
@@ -1156,6 +1453,18 @@ function timelineChannels(track: TimelineTrack): string[] {
       ];
     case "camera":
       return ["x", "y", "zoom", "rotation_deg"];
+    case "button":
+      return [
+        "x",
+        "y",
+        "width",
+        "height",
+        "scale_x",
+        "scale_y",
+        "rotation_deg",
+        "opacity",
+        "z",
+      ];
     case "video":
       return ["x", "y", "width", "height", "opacity", "z", "volume"];
     case "bgm":

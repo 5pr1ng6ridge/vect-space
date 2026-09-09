@@ -44,7 +44,6 @@ const buildNodePreview = (request: BuildNodePreviewRequest) =>
     request: {
       project: encodeProjectRequest(request.project),
       target: request.target,
-      origin: request.origin ?? "story_entry",
       choices: request.choices,
       variable_overrides: Object.fromEntries(
         Object.entries(request.variable_overrides).map(([id, value]) => [
@@ -242,6 +241,24 @@ function encodeNode(
     for (const choice of node.choices) {
       if (choice.visible_if !== undefined) encodeCondition(choice.visible_if);
       if (choice.enabled_if !== undefined) encodeCondition(choice.enabled_if);
+    }
+  }
+  if (
+    (node.type === "button_create" || node.type === "button_update") &&
+    node.action !== undefined &&
+    node.action !== null
+  ) {
+    for (const set of node.action.sets) {
+      if (
+        set.value !== undefined &&
+        !(
+          typeof set.value === "object" &&
+          set.value !== null &&
+          "variable" in set.value
+        )
+      ) {
+        set.value = encodeScalar(set.value) as unknown as typeof set.value;
+      }
     }
   }
 }

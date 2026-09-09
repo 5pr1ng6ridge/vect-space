@@ -15,6 +15,14 @@ variables:
     scope: save
     type: integer
     default: 0
+  button_test_clicks:
+    scope: save
+    type: integer
+    default: 0
+  button_test_last:
+    scope: save
+    type: string
+    default: ""
 characters:
   test:
     display_name: 测试角色
@@ -61,12 +69,17 @@ scenes:
 - scenes/prologue.yaml
 - scenes/test_scene.yaml
 - scenes/sandbox.yaml
+- scenes/button_test.yaml
 - scenes/ui_motion_regression.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml
 - ui/motions/dialogue_emphasis.yaml
 - ui/motions/dialogue_regression_matrix.yaml
+buttons:
+- ui/buttons/demo_transparent.yaml
+- ui/buttons/demo_separate.yaml
+- ui/buttons/demo_overlay.yaml
 ui_motion_defaults:
   dialogue_show: ui.dialogue.slide_in
   dialogue_hide: ui.dialogue.slide_out

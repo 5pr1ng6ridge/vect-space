@@ -1,0 +1,20 @@
+schema_version: 1
+id: demo.overlay
+width: 240.0
+height: 80.0
+asset_mode: overlay
+fit: cover
+normal: gui.scratch_paper
+hover: gui.name_box
+pressed: gui.dialogue_box
+animations:
+  pressed:
+    duration_ms: 120
+    channels:
+      offset_y:
+      - at_ms: 0
+        value: 0.0
+        easing: linear
+      - at_ms: 120
+        value: 4.0
+        easing: ease_out

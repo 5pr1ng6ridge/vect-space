@@ -17,6 +17,19 @@ export interface MapRect extends MapPoint {
   height: number;
 }
 
+/**
+ * Resolve the text shown in a chapter-map hotspot's hover card.  An omitted
+ * value preserves the legacy title-based behavior, while an explicitly empty
+ * value lets authors hide the card.
+ */
+export function resolveChapterMapHoverText(
+  title: string,
+  hoverText: string | null | undefined,
+): string | null {
+  if (hoverText === null || hoverText === undefined) return title;
+  return hoverText.trim().length === 0 ? null : hoverText;
+}
+
 export interface ChapterMapObject<T extends MapLayerObject = MapLayerObject> {
   kind: "decoration" | "hotspot";
   item: T;

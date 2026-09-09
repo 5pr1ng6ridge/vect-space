@@ -114,6 +114,12 @@
           "format": "uint32",
           "minimum": 0
         },
+        "hover_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },

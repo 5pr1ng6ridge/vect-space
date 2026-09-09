@@ -234,14 +234,15 @@ hide_notes:
 The runtime includes the fixed viewport, validated Schema v2 content, Pixi
 presentation and timeline cues, video tracks, KaTeX dialogue, BGM/SFX buses,
 automatic playback, three Ctrl fast-forward policies, forced playback sections,
-profile-level read tracking, a profile-wide 500-entry dialogue history, three manual slots
-plus autosave, and a read-only revealed story-flow page.
+profile-level read tracking, a Scene-local 500-entry dialogue history, three
+manual slots plus autosave, and a read-only revealed story-flow page.
 
-Dialogue history is profile-scoped: each resolved Say is retained across Scene
-transitions, new games, slot loads, and application restarts, with the oldest
-entries trimmed after 500 records. Content-version changes clear history while
-preserving profile variables. Isolated editor previews and Scene replays use an
-in-memory history and never alter the player's profile.
+Each Scene is a complete runtime boundary. Crossing into another Scene resets
+its BGM, background, sprites, buttons, camera/effects, dialogue and long-text
+pages, playback/UI state, save-scoped variables, and dialogue history. Profile
+variables plus read/seen/completion metadata remain global progression data.
+Editor previews always start from the current Scene entry and only replay prior
+choices in that Scene; a preview path that leaves the Scene is unreachable.
 
 The independent `sandbox` Scene is always revealed in Story Flow but is not
 connected to the player route. It is the editor Scene Entry and Rust

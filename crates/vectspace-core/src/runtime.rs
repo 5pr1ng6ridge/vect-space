@@ -3,7 +3,8 @@
 use crate::{
     content::ContentCatalog,
     model::{
-        AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
+        AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, ButtonClickAction,
+        ButtonPostAction, ButtonSnapshot, ButtonTemplate, CameraSnapshot,
         ChapterMapDecorationSnapshot, ChapterMapHotspotSnapshot, ChapterMapSnapshot,
         ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueHistoryEntry,
         DialogueMode, DialoguePageSnapshot, LongTextControlAction, LongTextExit, LongTextMode,
@@ -72,6 +73,8 @@ pub enum RuntimeError {
     ChoiceNotAllowed,
     #[error("选项不可用或不存在: {0}")]
     UnknownChoice(String),
+    #[error("按钮不可用或不存在: {0}")]
+    UnknownButton(String),
     #[error("内容运行错误: {0}")]
     Content(String),
     #[error("连续即时节点超过安全上限，可能存在无交互死循环")]
@@ -283,6 +286,12 @@ impl RuntimeEngine {
                 None => self.start_new_game(content)?,
             };
             for _ in 0..MAX_IMMEDIATE_NODES {
+                if origin_scene.is_some() && self.snapshot.location.scene_id != target.scene_id {
+                    return Err(RuntimeError::Content(format!(
+                        "当前 Scene 内无法到达预览目标 {}/{}：路径已离开 {}",
+                        target.scene_id, target.node_id, target.scene_id
+                    )));
+                }
                 if trace.last() != Some(&self.snapshot.location) {
                     trace.push(self.snapshot.location.clone());
                     last_trace.clone_from(&trace);
@@ -460,6 +469,7 @@ impl RuntimeEngine {
             .unwrap_or(previous_revision);
         self.started = true;
         self.pending_runtime_update = None;
+        self.dialogue_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -492,6 +502,7 @@ impl RuntimeEngine {
         };
         self.started = true;
         self.pending_runtime_update = None;
+        self.dialogue_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -678,6 +689,94 @@ impl RuntimeEngine {
         Ok(self.finish_update(cues, true))
     }
 
+    /// Activate a scene button. The hit test is intentionally performed by
+    /// the host UI, while this method remains the authoritative gate for
+    /// visibility, enabled state, revision and click effects.
+    pub fn click_button(
+        &mut self,
+        content: &ContentCatalog,
+        instance_id: &str,
+        expected_revision: u64,
+    ) -> Result<RuntimeUpdate, RuntimeError> {
+        self.ensure_interactive(expected_revision)?;
+        let button = self
+            .snapshot
+            .world
+            .buttons
+            .get(instance_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::UnknownButton(instance_id.to_owned()))?;
+        // A transparent button is still an intentional hit area.  Visibility
+        // and enabled are the explicit interaction gates; visual opacity is
+        // independent so designers can use invisible click regions.
+        if !button.visible || !button.enabled {
+            return Err(RuntimeError::UnknownButton(instance_id.to_owned()));
+        }
+        for set in &button.action.sets {
+            let definition = content
+                .manifest
+                .variables
+                .get(&set.variable)
+                .ok_or_else(|| RuntimeError::Content(format!("未声明变量 {}", set.variable)))?;
+            let current = self.variable_value(content, &set.variable)?.clone();
+            let operand = set
+                .value
+                .as_ref()
+                .map(|value| self.resolve_mutation_value(content, value))
+                .transpose()?;
+            let value = apply_variable_operation(set.op, definition.value_type, current, operand)
+                .map_err(RuntimeError::Content)?;
+            match definition.scope {
+                VariableScope::Save => {
+                    self.snapshot.variables.insert(set.variable.clone(), value);
+                }
+                VariableScope::Profile => {
+                    self.profile_variables.insert(set.variable.clone(), value);
+                }
+            }
+        }
+
+        match button.action.next {
+            Some(ButtonPostAction::Advance) => {
+                self.advance(content, self.snapshot.revision, AdvanceSource::Manual)
+            }
+            Some(ButtonPostAction::Jump { scene, target }) => {
+                let previous_scene = self.snapshot.location.scene_id.clone();
+                let destination_scene = scene.unwrap_or(previous_scene.clone());
+                let crosses_scene = destination_scene != previous_scene;
+                self.snapshot.location.scene_id = destination_scene;
+                self.snapshot.location.node_id = target;
+                self.snapshot.prompt = PromptSnapshot::None;
+                let mut cues = Vec::new();
+                if crosses_scene {
+                    self.completed_scenes.insert(previous_scene);
+                    self.leave_scene(content)?;
+                    cues.push(self.cue(
+                        CueGate::Runtime,
+                        PresentationCueKind::ClearScene {
+                            duration_ms: 0,
+                            easing: crate::model::Easing::Linear,
+                        },
+                    ));
+                    // Match a regular cross-scene Jump: finish the old
+                    // presentation first, then evaluate the destination on
+                    // the acknowledgement boundary.
+                    return Ok(self.finish_update(cues, true));
+                }
+                cues.extend(self.run_until_boundary(content)?);
+                Ok(self.finish_update(cues, true))
+            }
+            Some(ButtonPostAction::OpenPanel { panel }) => {
+                let cue = self.cue(
+                    CueGate::None,
+                    PresentationCueKind::ButtonSystemAction { panel },
+                );
+                Ok(self.finish_update(vec![cue], true))
+            }
+            None => Ok(self.finish_update(Vec::new(), true)),
+        }
+    }
+
     pub fn presentation_complete(
         &mut self,
         content: &ContentCatalog,
@@ -734,8 +833,7 @@ impl RuntimeEngine {
         &self.dialogue_history
     }
 
-    /// Clear profile-level history for an explicit user action. Ordinary scene
-    /// transitions, new games and slot loads intentionally retain it.
+    /// Clear the current Scene's dialogue history for an explicit user action.
     pub fn clear_dialogue_history(&mut self) {
         self.dialogue_history.clear();
     }
@@ -812,6 +910,7 @@ impl RuntimeEngine {
                     id: hotspot.id.clone(),
                     scene_id: hotspot.scene_id.clone(),
                     title: hotspot.title.clone(),
+                    hover_text: hotspot.hover_text.clone(),
                     x: hotspot.x,
                     y: hotspot.y,
                     width: hotspot.width,
@@ -907,6 +1006,7 @@ impl RuntimeEngine {
         self.snapshot = snapshot;
         self.started = true;
         self.pending_runtime_update = None;
+        self.dialogue_history.clear();
         Ok(self.update_without_cues())
     }
 
@@ -1424,7 +1524,7 @@ impl RuntimeEngine {
                     // background or sprite cue.
                     if crosses_scene {
                         self.completed_scenes.insert(scene_id.clone());
-                        self.leave_scene();
+                        self.leave_scene(content)?;
                         cues.push(self.cue(
                             CueGate::Runtime,
                             PresentationCueKind::ClearScene {
@@ -1606,6 +1706,143 @@ impl RuntimeEngine {
                         return Ok(cues);
                     }
                 }
+                SceneNode::ButtonCreate {
+                    instance_id,
+                    template,
+                    x,
+                    y,
+                    width,
+                    height,
+                    rotation_deg,
+                    scale_x,
+                    scale_y,
+                    opacity,
+                    z,
+                    visible,
+                    enabled,
+                    action,
+                    next,
+                } => {
+                    let definition = content
+                        .buttons
+                        .get(&template)
+                        .ok_or_else(|| RuntimeError::Content(format!("未知按钮模板 {template}")))?;
+                    if self.snapshot.world.buttons.contains_key(&instance_id) {
+                        return Err(RuntimeError::Content(format!(
+                            "按钮实例 ID 重复: {instance_id}"
+                        )));
+                    }
+                    self.snapshot.world.buttons.insert(
+                        instance_id.clone(),
+                        make_button_snapshot(
+                            instance_id,
+                            &template,
+                            definition,
+                            x,
+                            y,
+                            width,
+                            height,
+                            rotation_deg,
+                            scale_x,
+                            scale_y,
+                            opacity,
+                            z,
+                            visible,
+                            enabled,
+                            action,
+                        ),
+                    );
+                    self.snapshot.location.node_id = next;
+                }
+                SceneNode::ButtonUpdate {
+                    instance_id,
+                    template,
+                    x,
+                    y,
+                    width,
+                    height,
+                    rotation_deg,
+                    scale_x,
+                    scale_y,
+                    opacity,
+                    z,
+                    visible,
+                    enabled,
+                    action,
+                    next,
+                } => {
+                    let current = self
+                        .snapshot
+                        .world
+                        .buttons
+                        .get_mut(&instance_id)
+                        .ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "按钮实例不存在，无法更新: {instance_id}"
+                            ))
+                        })?;
+                    if let Some(template) = template {
+                        let definition = content.buttons.get(&template).ok_or_else(|| {
+                            RuntimeError::Content(format!("未知按钮模板 {template}"))
+                        })?;
+                        current.template = template;
+                        current.asset_mode = definition.asset_mode;
+                        current.fit = definition.fit;
+                        current.normal = definition.normal.clone();
+                        current.hover = definition.hover.clone();
+                        current.pressed = definition.pressed.clone();
+                        current.animations = definition.animations.clone();
+                    }
+                    if let Some(value) = x {
+                        current.x = value;
+                    }
+                    if let Some(value) = y {
+                        current.y = value;
+                    }
+                    if let Some(value) = width {
+                        current.width = value;
+                    }
+                    if let Some(value) = height {
+                        current.height = value;
+                    }
+                    if let Some(value) = rotation_deg {
+                        current.rotation_deg = value;
+                    }
+                    if let Some(value) = scale_x {
+                        current.scale_x = value;
+                    }
+                    if let Some(value) = scale_y {
+                        current.scale_y = value;
+                    }
+                    if let Some(value) = opacity {
+                        current.opacity = value;
+                    }
+                    if let Some(value) = z {
+                        current.z = value;
+                    }
+                    if let Some(value) = visible {
+                        current.visible = value;
+                    }
+                    if let Some(value) = enabled {
+                        current.enabled = value;
+                    }
+                    if let Some(value) = action {
+                        current.action = value;
+                    }
+                    self.snapshot.location.node_id = next;
+                }
+                SceneNode::ButtonRemove { instance_id, next } => {
+                    self.snapshot
+                        .world
+                        .buttons
+                        .remove(&instance_id)
+                        .ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "按钮实例不存在，无法移除: {instance_id}"
+                            ))
+                        })?;
+                    self.snapshot.location.node_id = next;
+                }
                 SceneNode::Timeline {
                     duration_ms,
                     await_completion,
@@ -1614,6 +1851,37 @@ impl RuntimeEngine {
                     events,
                     next,
                 } => {
+                    let button_bases = self
+                        .snapshot
+                        .world
+                        .buttons
+                        .iter()
+                        .filter(|(id, _)| {
+                            tracks.iter().any(|track| {
+                                matches!(
+                                    track,
+                                    TimelineTrack::Button { instance_id, .. }
+                                        if instance_id == *id
+                                )
+                            })
+                        })
+                        .map(|(id, button)| {
+                            (
+                                id.clone(),
+                                crate::model::ButtonTimelineBase {
+                                    x: button.x,
+                                    y: button.y,
+                                    width: button.width,
+                                    height: button.height,
+                                    rotation_deg: button.rotation_deg,
+                                    scale_x: button.scale_x,
+                                    scale_y: button.scale_y,
+                                    opacity: button.opacity,
+                                    z: button.z,
+                                },
+                            )
+                        })
+                        .collect();
                     apply_timeline_final_state(&mut self.snapshot, &tracks).map_err(|message| {
                         RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
                     })?;
@@ -1627,6 +1895,7 @@ impl RuntimeEngine {
                             duration_ms,
                             skippable,
                             is_seen,
+                            button_bases,
                             tracks,
                             events,
                         },
@@ -1804,20 +2073,37 @@ impl RuntimeEngine {
         }
     }
 
-    /// Reset only scene-owned visual state. BGM, dialogue UI visibility and UI
-    /// motion bindings are global presentation concerns and intentionally
-    /// survive a scene transition.
+    /// Reset the visual portion of a scene. This is also used by an explicit
+    /// `clear` node, which must not reset the rest of the scene's state.
     fn clear_scene_visual_state(&mut self) {
         self.snapshot.world.background = None;
         self.snapshot.world.sprites.clear();
+        self.snapshot.world.buttons.clear();
         self.snapshot.world.camera = CameraSnapshot::default();
         self.snapshot.world.persistent_effects.clear();
         self.snapshot.dialogue_page = None;
         self.snapshot.long_text_page = None;
     }
 
-    fn leave_scene(&mut self) {
-        self.clear_scene_visual_state();
+    /// A Scene is a complete runtime ownership boundary. Nothing authored by
+    /// the previous Scene is allowed to become an implicit input to the next
+    /// one: presentation state, BGM, playback policy, dialogue history, and
+    /// save-scoped variables all return to their declared defaults. Profile
+    /// variables and read/seen/completion metadata live outside a Scene and
+    /// deliberately remain available for global progression.
+    fn leave_scene(&mut self, content: &ContentCatalog) -> Result<(), RuntimeError> {
+        self.snapshot.variables = defaults_for_scope(content, VariableScope::Save)?;
+        self.snapshot.world = WorldSnapshot {
+            ui_motion_bindings: content.manifest.ui_motion_defaults.clone(),
+            ..WorldSnapshot::default()
+        };
+        self.snapshot.audio = AudioSnapshot::default();
+        self.snapshot.playback = PlaybackSnapshot::default();
+        self.snapshot.dialogue_page = None;
+        self.snapshot.long_text_page = None;
+        self.snapshot.prompt = PromptSnapshot::None;
+        self.dialogue_history.clear();
+        Ok(())
     }
 
     fn finish_update(&mut self, cues: Vec<PresentationCue>, bump_revision: bool) -> RuntimeUpdate {
@@ -1980,6 +2266,9 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::DialogueUi { next, .. }
         | SceneNode::UiMotionSet { next, .. }
         | SceneNode::UiMotionPlay { next, .. }
+        | SceneNode::ButtonCreate { next, .. }
+        | SceneNode::ButtonUpdate { next, .. }
+        | SceneNode::ButtonRemove { next, .. }
         | SceneNode::Timeline { next, .. } => Some(local(next)),
         SceneNode::Jump { scene, target } => Some(StoryLocation {
             scene_id: scene.clone().unwrap_or_else(|| scene_id.to_owned()),
@@ -2140,6 +2429,61 @@ fn apply_timeline_final_state(
                 }
                 if let Some(value) = final_channel(channels, "rotation_deg") {
                     snapshot.world.camera.rotation_deg = value;
+                }
+            }
+            TimelineTrack::Button {
+                instance_id,
+                channels,
+            } => {
+                if has_inherited_channel(channels)
+                    && !snapshot.world.buttons.contains_key(instance_id)
+                {
+                    return Err(format!(
+                        "按钮 {instance_id} 使用 inherit，但进入时间线时该实例不存在"
+                    ));
+                }
+                let button = snapshot
+                    .world
+                    .buttons
+                    .get_mut(instance_id)
+                    .ok_or_else(|| format!("按钮 {instance_id} 未创建，无法应用时间线"))?;
+                if let Some(value) = final_channel(channels, "x") {
+                    button.x = value;
+                }
+                if let Some(value) = final_channel(channels, "y") {
+                    button.y = value;
+                }
+                if let Some(value) = final_channel(channels, "width") {
+                    button.width = value;
+                }
+                if let Some(value) = final_channel(channels, "height") {
+                    button.height = value;
+                }
+                if let Some(value) = final_channel(channels, "scale_x") {
+                    button.scale_x = value;
+                }
+                if let Some(value) = final_channel(channels, "scale_y") {
+                    button.scale_y = value;
+                }
+                if let Some(value) = final_channel(channels, "rotation_deg") {
+                    button.rotation_deg = value;
+                }
+                if let Some(value) = final_channel(channels, "opacity") {
+                    button.opacity = value;
+                }
+                if let Some(value) = final_channel(channels, "z") {
+                    button.z = value.round() as i32;
+                }
+                if !button.width.is_finite()
+                    || !button.height.is_finite()
+                    || button.width <= 0.0
+                    || button.height <= 0.0
+                    || !button.scale_x.is_finite()
+                    || !button.scale_y.is_finite()
+                    || button.scale_x <= 0.0
+                    || button.scale_y <= 0.0
+                {
+                    return Err(format!("按钮 {instance_id} 的最终尺寸或缩放无效"));
                 }
             }
             TimelineTrack::Bgm { channels } => {
@@ -2374,6 +2718,48 @@ fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, Runtime
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn make_button_snapshot(
+    instance_id: String,
+    template_id: &str,
+    template: &ButtonTemplate,
+    x: Option<f32>,
+    y: Option<f32>,
+    width: Option<f32>,
+    height: Option<f32>,
+    rotation_deg: Option<f32>,
+    scale_x: Option<f32>,
+    scale_y: Option<f32>,
+    opacity: Option<f32>,
+    z: Option<i32>,
+    visible: bool,
+    enabled: bool,
+    action: ButtonClickAction,
+) -> ButtonSnapshot {
+    ButtonSnapshot {
+        id: instance_id,
+        template: template_id.to_owned(),
+        asset_mode: template.asset_mode,
+        fit: template.fit,
+        normal: template.normal.clone(),
+        hover: template.hover.clone(),
+        pressed: template.pressed.clone(),
+        animations: template.animations.clone(),
+        x: x.unwrap_or(0.0),
+        y: y.unwrap_or(0.0),
+        width: width.unwrap_or(template.width),
+        height: height.unwrap_or(template.height),
+        rotation_deg: rotation_deg.unwrap_or(0.0),
+        scale_x: scale_x.unwrap_or(1.0),
+        scale_y: scale_y.unwrap_or(1.0),
+        opacity: opacity.unwrap_or(1.0),
+        z: z.unwrap_or(0),
+        visible,
+        enabled,
+        action,
+    }
+}
+
 fn hydrate_legacy_dialogue_page(snapshot: &mut RuntimeSnapshot) {
     if snapshot.dialogue_page.is_some() {
         return;
@@ -2415,6 +2801,44 @@ fn validate_snapshot(
         if !content.ui_motions.contains_key(motion) {
             return Err(RuntimeError::InvalidSnapshot(format!(
                 "UI 动效绑定引用了未知动效 {motion}"
+            )));
+        }
+    }
+    for (id, button) in &snapshot.world.buttons {
+        if id != &button.id {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "按钮实例索引与 ID 不一致: {id}"
+            )));
+        }
+        let template = content.buttons.get(&button.template).ok_or_else(|| {
+            RuntimeError::InvalidSnapshot(format!("按钮引用了未知模板 {}", button.template))
+        })?;
+        if !button.x.is_finite()
+            || !button.y.is_finite()
+            || !button.width.is_finite()
+            || !button.height.is_finite()
+            || button.width <= 0.0
+            || button.height <= 0.0
+            || !button.scale_x.is_finite()
+            || !button.scale_y.is_finite()
+            || button.scale_x <= 0.0
+            || button.scale_y <= 0.0
+            || !button.opacity.is_finite()
+            || !(0.0..=1.0).contains(&button.opacity)
+        {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "按钮实例 {id} 的布局或透明度无效"
+            )));
+        }
+        if button.asset_mode != template.asset_mode
+            || button.fit != template.fit
+            || button.animations != template.animations
+            || button.normal != template.normal
+            || button.hover != template.hover
+            || button.pressed != template.pressed
+        {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "按钮实例 {id} 的模板视觉数据不一致"
             )));
         }
     }
@@ -2693,7 +3117,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::model::{ChapterMapDefinition, ChapterMapHotspot, LiteralOperand, VariableOperand};
+    use crate::model::{
+        ButtonAssetFit, ButtonAssetMode, ButtonClickAction, ButtonPostAction, ButtonTemplate,
+        ChapterMapDefinition, ChapterMapHotspot, LiteralOperand, SceneDefinition, VariableOperand,
+        VariableOperation,
+    };
 
     #[derive(serde::Deserialize)]
     struct TimelineConformanceSample {
@@ -2732,6 +3160,7 @@ mod tests {
                     id: "hidden".to_owned(),
                     scene_id: "prologue".to_owned(),
                     title: "隐藏章节".to_owned(),
+                    hover_text: Some("完成后说明".to_owned()),
                     x: 200,
                     y: 400,
                     width: 280,
@@ -2745,6 +3174,7 @@ mod tests {
                     id: "always".to_owned(),
                     scene_id: "test_scene".to_owned(),
                     title: "始终显示".to_owned(),
+                    hover_text: Some("始终章节的说明".to_owned()),
                     x: 600,
                     y: 400,
                     width: 280,
@@ -2770,6 +3200,131 @@ mod tests {
             Some(map),
         )
         .expect("fixture map should be valid")
+    }
+
+    #[test]
+    fn transparent_button_click_applies_action_and_cross_scene_jump_clears_instances() {
+        let mut content = catalog();
+        content.buttons.insert(
+            "test.transparent".to_owned(),
+            ButtonTemplate {
+                schema_version: 1,
+                id: "test.transparent".to_owned(),
+                width: 200.0,
+                height: 80.0,
+                asset_mode: ButtonAssetMode::Separate,
+                fit: ButtonAssetFit::Stretch,
+                normal: None,
+                hover: None,
+                pressed: None,
+                animations: Default::default(),
+            },
+        );
+        content.scenes.insert(
+            "button_destination".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "button_destination".to_owned(),
+                entry: "done".to_owned(),
+                nodes: BTreeMap::from([("done".to_owned(), SceneNode::End)]),
+            },
+        );
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "button_a".to_owned();
+        scene.nodes = BTreeMap::from([
+            (
+                "button_a".to_owned(),
+                SceneNode::ButtonCreate {
+                    instance_id: "transparent".to_owned(),
+                    template: "test.transparent".to_owned(),
+                    x: Some(10.0),
+                    y: Some(20.0),
+                    width: Some(200.0),
+                    height: Some(80.0),
+                    rotation_deg: None,
+                    scale_x: None,
+                    scale_y: None,
+                    opacity: Some(0.0),
+                    z: Some(3),
+                    visible: true,
+                    enabled: true,
+                    action: ButtonClickAction {
+                        sets: vec![crate::model::ButtonSetAction {
+                            variable: "score".to_owned(),
+                            op: VariableOperation::Add,
+                            value: Some(crate::model::MutationValue::Literal(
+                                ScalarValue::Integer(1),
+                            )),
+                        }],
+                        next: None,
+                    },
+                    next: "button_b".to_owned(),
+                },
+            ),
+            (
+                "button_b".to_owned(),
+                SceneNode::ButtonCreate {
+                    instance_id: "jump".to_owned(),
+                    template: "test.transparent".to_owned(),
+                    x: None,
+                    y: None,
+                    width: None,
+                    height: None,
+                    rotation_deg: None,
+                    scale_x: None,
+                    scale_y: None,
+                    opacity: None,
+                    z: Some(4),
+                    visible: true,
+                    enabled: true,
+                    action: ButtonClickAction {
+                        sets: Vec::new(),
+                        next: Some(ButtonPostAction::Jump {
+                            scene: Some("button_destination".to_owned()),
+                            target: "done".to_owned(),
+                        }),
+                    },
+                    next: "end".to_owned(),
+                },
+            ),
+            ("end".to_owned(), SceneNode::End),
+        ]);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let started = runtime.start_new_game(&content).unwrap();
+        assert_eq!(started.snapshot.world.buttons.len(), 2);
+        assert_eq!(started.snapshot.world.buttons["transparent"].opacity, 0.0);
+
+        let clicked = runtime
+            .click_button(&content, "transparent", started.snapshot.revision)
+            .unwrap();
+        assert_eq!(clicked.snapshot.variables["score"], ScalarValue::Integer(1));
+        assert!(matches!(
+            runtime
+                .click_button(&content, "transparent", started.snapshot.revision)
+                .unwrap_err(),
+            RuntimeError::StaleRevision { .. }
+        ));
+
+        let jumped = runtime
+            .click_button(&content, "jump", clicked.snapshot.revision)
+            .unwrap();
+        assert_eq!(jumped.snapshot.location.scene_id, "button_destination");
+        assert_eq!(jumped.snapshot.location.node_id, "done");
+        assert!(jumped.snapshot.world.buttons.is_empty());
+        assert_eq!(jumped.snapshot.variables["score"], ScalarValue::Integer(0));
+        assert!(matches!(
+            jumped.cues.first().map(|cue| &cue.kind),
+            Some(PresentationCueKind::ClearScene { .. })
+        ));
+        assert!(jumped.requires_ack);
+        let destination = runtime
+            .presentation_complete(&content, jumped.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(matches!(
+            destination.snapshot.prompt,
+            PromptSnapshot::End { .. }
+        ));
     }
 
     #[test]
@@ -2841,11 +3396,15 @@ mod tests {
 
     #[test]
     fn chapter_map_filters_hidden_hotspots_and_reports_completion() {
-        let content = catalog_with_chapter_map();
+        let mut content = catalog_with_chapter_map();
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         let map = runtime.chapter_map(&content).unwrap().unwrap();
         assert_eq!(map.hotspots.len(), 1);
         assert_eq!(map.hotspots[0].scene_id, "test_scene");
+        assert_eq!(
+            map.hotspots[0].hover_text.as_deref(),
+            Some("始终章节的说明")
+        );
         runtime.completed_scenes.insert("prologue".to_owned());
         let map = runtime.chapter_map(&content).unwrap().unwrap();
         assert_eq!(map.hotspots.len(), 2);
@@ -2853,6 +3412,23 @@ mod tests {
             .hotspots
             .iter()
             .any(|item| item.completed && item.scene_id == "prologue"));
+        assert_eq!(
+            map.hotspots
+                .iter()
+                .find(|item| item.scene_id == "prologue")
+                .and_then(|item| item.hover_text.as_deref()),
+            Some("完成后说明")
+        );
+        content.chapter_map.as_mut().expect("chapter map").hotspots[1].hover_text =
+            Some(String::new());
+        let map = runtime.chapter_map(&content).unwrap().unwrap();
+        assert_eq!(
+            map.hotspots
+                .iter()
+                .find(|item| item.scene_id == "test_scene")
+                .and_then(|item| item.hover_text.as_deref()),
+            Some("")
+        );
     }
 
     #[test]
@@ -3024,11 +3600,27 @@ mod tests {
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         let source_update = runtime.start_new_game(&content).unwrap();
         assert!(source_update.snapshot.world.sprites.contains_key("alice"));
+        runtime
+            .snapshot
+            .variables
+            .insert("score".to_owned(), ScalarValue::Integer(42));
+        runtime.snapshot.audio.bgm = Some(LoopingAudioSnapshot {
+            asset: "bgm.test1".to_owned(),
+            volume: 0.5,
+            start_ms: 250,
+            loop_start_ms: None,
+            loop_end_ms: None,
+        });
+        runtime.snapshot.playback = PlaybackSnapshot {
+            auto: PlaybackAutoMode::Forced,
+            ctrl_fast_forward: CtrlFastForwardMode::Block,
+        };
+        runtime.snapshot.world.dialogue_ui_visible = false;
         let update = runtime
             .advance(
                 &content,
                 source_update.snapshot.revision,
-                AdvanceSource::Manual,
+                AdvanceSource::ForcedAuto,
             )
             .unwrap();
 
@@ -3042,8 +3634,11 @@ mod tests {
         );
         assert_eq!(update.snapshot.world.background, None);
         assert!(update.snapshot.world.sprites.is_empty());
-        // History is profile-scoped and survives crossing into another scene.
-        assert_eq!(runtime.dialogue_history().len(), 1);
+        assert!(update.snapshot.audio.bgm.is_none());
+        assert_eq!(update.snapshot.playback, PlaybackSnapshot::default());
+        assert!(update.snapshot.world.dialogue_ui_visible);
+        assert_eq!(update.snapshot.variables["score"], ScalarValue::Integer(0));
+        assert!(runtime.dialogue_history().is_empty());
         assert!(matches!(
             update.cues.as_slice(),
             [PresentationCue {
@@ -3155,6 +3750,70 @@ mod tests {
             .cues
             .iter()
             .any(|cue| matches!(cue.kind, PresentationCueKind::Timeline { .. })));
+    }
+
+    #[test]
+    fn editor_scene_preview_needs_only_choices_from_that_scene() {
+        let content = catalog();
+        let target = StoryLocation {
+            scene_id: "test_scene".to_owned(),
+            node_id: "move_jelly_copy".to_owned(),
+        };
+        let decisions = [PreviewChoiceDecision {
+            scene_id: "test_scene".to_owned(),
+            node_id: "choice_background_start".to_owned(),
+            visit: 1,
+            choice_id: "option_1".to_owned(),
+        }];
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let PreviewRunResult::Ready { snapshot, trace } = runtime
+            .preview_to_from_scene_entry(&content, "test_scene", &target, &decisions)
+            .unwrap()
+        else {
+            panic!("the Scene-local choice should reach the target");
+        };
+        assert_eq!(snapshot.location, target);
+        assert!(trace
+            .iter()
+            .all(|location| location.scene_id == "test_scene"));
+    }
+
+    #[test]
+    fn editor_scene_preview_does_not_follow_cross_scene_paths() {
+        let mut content = catalog();
+        content.scenes.insert(
+            "preview_boundary".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "preview_boundary".to_owned(),
+                entry: "leave".to_owned(),
+                nodes: BTreeMap::from([
+                    (
+                        "leave".to_owned(),
+                        SceneNode::Jump {
+                            scene: Some("prologue".to_owned()),
+                            target: "establish".to_owned(),
+                        },
+                    ),
+                    ("target".to_owned(), SceneNode::End),
+                ]),
+            },
+        );
+        let target = StoryLocation {
+            scene_id: "preview_boundary".to_owned(),
+            node_id: "target".to_owned(),
+        };
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_boundary", &target, &[])
+            .unwrap();
+        let PreviewRunResult::Unreachable { message, trace } = result else {
+            panic!("a Scene preview must stop at its ownership boundary");
+        };
+        assert!(message.contains("路径已离开"));
+        assert!(trace
+            .iter()
+            .all(|location| location.scene_id == "preview_boundary"));
     }
 
     fn test_timeline_ease(value: f32, easing: &crate::model::TimelineEasing) -> f32 {
@@ -4128,9 +4787,7 @@ mod tests {
             .unwrap();
         assert!(matches!(ending.snapshot.prompt, PromptSnapshot::End { .. }));
         assert!(runtime.completed_scenes.contains("test_scene"));
-        // Crossing into test_scene keeps the global profile history.  The
-        // destination has not emitted a Say yet, so the existing entries stay.
-        assert!(!runtime.dialogue_history().is_empty());
+        assert!(runtime.dialogue_history().is_empty());
     }
 
     fn interactive_dialogue(content: &ContentCatalog) -> RuntimeEngine {
@@ -4696,14 +5353,16 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_history_survives_scene_changes_and_new_game() {
+    fn new_game_clears_scene_dialogue_history() {
         let content = catalog();
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         runtime.snapshot.location.node_id = "introduction".to_owned();
         runtime.run_until_boundary(&content).unwrap();
         assert_eq!(runtime.dialogue_history().len(), 1);
-        let first = runtime.dialogue_history()[0].clone();
-        assert_eq!(first.prompt_id, "prologue/introduction");
+        assert_eq!(
+            runtime.dialogue_history()[0].prompt_id,
+            "prologue/introduction"
+        );
 
         let before = runtime.story_flow(&content).unwrap().unwrap();
         assert!(before
@@ -4719,8 +5378,7 @@ mod tests {
             .any(|node| node.scene_id == "prologue" && node.completed));
 
         runtime.start_new_game(&content).unwrap();
-        assert_eq!(runtime.dialogue_history().len(), 1);
-        assert_eq!(runtime.dialogue_history()[0], first);
+        assert!(runtime.dialogue_history().is_empty());
         assert!(runtime.completed_scenes.contains("prologue"));
     }
 }

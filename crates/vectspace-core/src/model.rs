@@ -17,8 +17,8 @@ pub struct ProfileState {
     pub seen_presentations: BTreeSet<String>,
     #[serde(default)]
     pub completed_scenes: BTreeSet<String>,
-    /// Global dialogue history.  It is profile data rather than a snapshot
-    /// field, so it survives new games, slot loads and application restarts.
+    /// Persisted storage for the active Scene's dialogue history. The runtime
+    /// clears it whenever a new Scene/session becomes the owner.
     #[serde(default)]
     pub dialogue_history: Vec<DialogueHistoryEntry>,
 }
@@ -179,6 +179,10 @@ pub struct ContentManifest {
     pub scenes: Vec<String>,
     #[serde(default)]
     pub ui_motions: Vec<String>,
+    /// Optional reusable button template documents.  Empty keeps legacy
+    /// projects fully compatible.
+    #[serde(default)]
+    pub buttons: Vec<String>,
     #[serde(default)]
     pub ui_motion_defaults: UiMotionBindings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,6 +192,197 @@ pub struct ContentManifest {
     /// moved to a map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_map: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonAssetMode {
+    #[default]
+    Separate,
+    Overlay,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonAssetFit {
+    Contain,
+    Cover,
+    #[default]
+    Stretch,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonState {
+    #[default]
+    Normal,
+    Hover,
+    Pressed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonAnimation {
+    #[serde(default = "default_button_animation_duration")]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub channels: TimelineChannels,
+}
+
+fn default_button_animation_duration() -> u64 {
+    160
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonAnimations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<ButtonAnimation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover: Option<ButtonAnimation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressed: Option<ButtonAnimation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonTemplate {
+    pub schema_version: u32,
+    pub id: String,
+    #[serde(default = "default_button_width")]
+    pub width: f32,
+    #[serde(default = "default_button_height")]
+    pub height: f32,
+    #[serde(default)]
+    pub asset_mode: ButtonAssetMode,
+    #[serde(default)]
+    pub fit: ButtonAssetFit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressed: Option<String>,
+    #[serde(default)]
+    pub animations: ButtonAnimations,
+}
+
+fn default_button_width() -> f32 {
+    200.0
+}
+
+fn default_button_height() -> f32 {
+    80.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonSetAction {
+    pub variable: String,
+    #[serde(default)]
+    pub op: VariableOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<MutationValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ButtonPostAction {
+    Advance,
+    Jump {
+        #[serde(default)]
+        scene: Option<String>,
+        target: String,
+    },
+    OpenPanel {
+        panel: ButtonPanel,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonPanel {
+    Saves,
+    Settings,
+    History,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonClickAction {
+    #[serde(default)]
+    pub sets: Vec<ButtonSetAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<ButtonPostAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonSnapshot {
+    pub id: String,
+    pub template: String,
+    #[serde(default)]
+    pub asset_mode: ButtonAssetMode,
+    #[serde(default)]
+    pub fit: ButtonAssetFit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressed: Option<String>,
+    #[serde(default)]
+    pub animations: ButtonAnimations,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub rotation_deg: f32,
+    #[serde(default = "default_button_scale")]
+    pub scale_x: f32,
+    #[serde(default = "default_button_scale")]
+    pub scale_y: f32,
+    #[serde(default = "default_button_opacity")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub z: i32,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: ButtonClickAction,
+}
+
+/// Numeric button transform captured at a timeline boundary.  Keeping the
+/// base separate from the full snapshot avoids copying click actions into a
+/// presentation cue and gives the renderer exactly the values it evaluates.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonTimelineBase {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub rotation_deg: f32,
+    #[serde(default = "default_button_scale")]
+    pub scale_x: f32,
+    #[serde(default = "default_button_scale")]
+    pub scale_y: f32,
+    #[serde(default = "default_button_opacity")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub z: i32,
+}
+
+fn default_button_scale() -> f32 {
+    1.0
+}
+
+fn default_button_opacity() -> f32 {
+    1.0
 }
 
 /// A room-sized chapter selector.  Coordinates are design pixels and are
@@ -232,6 +427,8 @@ pub struct ChapterMapHotspot {
     pub id: String,
     pub scene_id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover_text: Option<String>,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -292,6 +489,7 @@ pub struct ChapterMapHotspotSnapshot {
     pub id: String,
     pub scene_id: String,
     pub title: String,
+    pub hover_text: Option<String>,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -648,6 +846,69 @@ pub enum SceneNode {
         await_completion: bool,
         next: String,
     },
+    ButtonCreate {
+        instance_id: String,
+        template: String,
+        #[serde(default)]
+        x: Option<f32>,
+        #[serde(default)]
+        y: Option<f32>,
+        #[serde(default)]
+        width: Option<f32>,
+        #[serde(default)]
+        height: Option<f32>,
+        #[serde(default)]
+        rotation_deg: Option<f32>,
+        #[serde(default)]
+        scale_x: Option<f32>,
+        #[serde(default)]
+        scale_y: Option<f32>,
+        #[serde(default)]
+        opacity: Option<f32>,
+        #[serde(default)]
+        z: Option<i32>,
+        #[serde(default = "default_true")]
+        visible: bool,
+        #[serde(default = "default_true")]
+        enabled: bool,
+        #[serde(default)]
+        action: ButtonClickAction,
+        next: String,
+    },
+    ButtonUpdate {
+        instance_id: String,
+        #[serde(default)]
+        template: Option<String>,
+        #[serde(default)]
+        x: Option<f32>,
+        #[serde(default)]
+        y: Option<f32>,
+        #[serde(default)]
+        width: Option<f32>,
+        #[serde(default)]
+        height: Option<f32>,
+        #[serde(default)]
+        rotation_deg: Option<f32>,
+        #[serde(default)]
+        scale_x: Option<f32>,
+        #[serde(default)]
+        scale_y: Option<f32>,
+        #[serde(default)]
+        opacity: Option<f32>,
+        #[serde(default)]
+        z: Option<i32>,
+        #[serde(default)]
+        visible: Option<bool>,
+        #[serde(default)]
+        enabled: Option<bool>,
+        #[serde(default)]
+        action: Option<ButtonClickAction>,
+        next: String,
+    },
+    ButtonRemove {
+        instance_id: String,
+        next: String,
+    },
     End,
 }
 
@@ -959,6 +1220,11 @@ pub enum TimelineTrack {
         #[serde(default)]
         channels: TimelineChannels,
     },
+    Button {
+        instance_id: String,
+        #[serde(default)]
+        channels: TimelineChannels,
+    },
     Video {
         asset: String,
         #[serde(default)]
@@ -1118,6 +1384,8 @@ pub struct StoryLocation {
 pub struct WorldSnapshot {
     pub background: Option<String>,
     pub sprites: BTreeMap<String, SpriteSnapshot>,
+    #[serde(default)]
+    pub buttons: BTreeMap<String, ButtonSnapshot>,
     pub camera: CameraSnapshot,
     pub dialogue_ui_visible: bool,
     #[serde(default)]
@@ -1130,6 +1398,7 @@ impl Default for WorldSnapshot {
         Self {
             background: None,
             sprites: BTreeMap::new(),
+            buttons: BTreeMap::new(),
             camera: CameraSnapshot::default(),
             dialogue_ui_visible: true,
             ui_motion_bindings: UiMotionBindings::default(),
@@ -1324,6 +1593,9 @@ pub enum PresentationCueKind {
         duration_ms: u64,
         motion: UiMotionPreset,
     },
+    ButtonSystemAction {
+        panel: ButtonPanel,
+    },
     PlaySfx {
         asset: String,
         volume: f32,
@@ -1341,6 +1613,13 @@ pub enum PresentationCueKind {
         duration_ms: u64,
         skippable: bool,
         is_seen: bool,
+        /// Button transforms immediately before this timeline starts.  The
+        /// runtime commits the final transform to the snapshot before it
+        /// emits the cue, so the host needs this base to evaluate `inherit`
+        /// keyframes on the first frame when a button was created earlier in
+        /// the same immediate node chain.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        button_bases: BTreeMap<String, ButtonTimelineBase>,
         tracks: Vec<TimelineTrack>,
         events: Vec<TimelineEvent>,
     },

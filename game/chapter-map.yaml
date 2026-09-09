@@ -49,6 +49,19 @@ hotspots:
   reveal:
     mode: always
   variable_overrides: {}
+- id: button-test
+  scene_id: button_test
+  title: 按钮控件回归测试
+  hover_text: 覆盖透明点击区、三态素材、层级、禁用状态和时间线动画。
+  x: 1400
+  "y": 700
+  width: 300
+  height: 180
+  z: 2
+  asset: gui.name_box
+  reveal:
+    mode: always
+  variable_overrides: {}
 - id: ui-motion-regression
   scene_id: ui_motion_regression
   title: UI 动效回归测试

@@ -103,6 +103,16 @@ export const engineApi = {
       expectedRevision,
       expectedSessionId,
     }),
+  clickButton: (
+    instanceId: string,
+    expectedRevision: WireU64,
+    expectedSessionId: WireU64,
+  ) =>
+    command<RuntimeUpdate>("click_button", {
+      instanceId,
+      expectedRevision,
+      expectedSessionId,
+    }),
   presentationComplete: (
     updateId: WireU64,
     outcome: PresentationOutcome,

@@ -28,7 +28,7 @@ export const DESIGN_HEIGHT = 1080;
 
 export interface PreviewObjectFrame {
   id: string;
-  kind: "sprite" | "video";
+  kind: "sprite" | "video" | "button";
   x: number;
   y: number;
   width: number;
@@ -505,6 +505,7 @@ export class SceneSurface {
     const objects: PreviewObjectFrame[] = [];
     const represented = new Set<string>();
     const startSprites = this.#start?.world.sprites ?? {};
+    const startButtons = this.#start?.world.buttons ?? {};
     const evaluated =
       this.#cue === null
         ? null
@@ -512,6 +513,7 @@ export class SceneSurface {
             { duration_ms: this.#cue.duration_ms, tracks: this.#cue.tracks },
             {
               sprites: startSprites,
+              buttons: startButtons,
               camera: this.#cameraStart,
               bgm_volume: this.#bgmStartVolume,
             },
@@ -571,6 +573,46 @@ export class SceneSurface {
             asset: track.asset,
           });
         }
+      }
+      const buttonIds = new Set([
+        ...Object.keys(startButtons),
+        ...this.#cue.tracks
+          .filter(
+            (track): track is Extract<TimelineTrack, { type: "button" }> =>
+              track.type === "button",
+          )
+          .map((track) => track.instance_id),
+      ]);
+      for (const id of buttonIds) {
+        const base = startButtons[id];
+        const state = evaluated?.buttons.find((button) => button.id === id);
+        if (state === undefined && base === undefined) continue;
+        const fallback = base ?? {
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 80,
+          scale_x: 1,
+          scale_y: 1,
+          rotation_deg: 0,
+          opacity: 1,
+          z: 0,
+        };
+        objects.push({
+          id,
+          kind: "button",
+          x: state?.x ?? fallback.x,
+          y: state?.y ?? fallback.y,
+          width: state?.width ?? fallback.width,
+          height: state?.height ?? fallback.height,
+          scale: 1,
+          scale_x: state?.scale_x ?? fallback.scale_x,
+          scale_y: state?.scale_y ?? fallback.scale_y,
+          rotation_deg: state?.rotation_deg ?? fallback.rotation_deg,
+          opacity: state?.opacity ?? fallback.opacity,
+          z: state?.z ?? fallback.z,
+          asset: base?.normal ?? "",
+        });
       }
     }
     for (const [id, state] of Object.entries(startSprites)) {
@@ -897,6 +939,7 @@ export class SceneSurface {
       { duration_ms: this.#cue.duration_ms, tracks: this.#cue.tracks },
       {
         sprites: this.#start?.world.sprites ?? {},
+        buttons: this.#start?.world.buttons ?? {},
         camera: this.#cameraStart,
         bgm_volume: this.#bgmStartVolume,
       },

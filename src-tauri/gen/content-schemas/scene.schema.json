@@ -43,6 +43,121 @@
         "cross_fade"
       ]
     },
+    "ButtonClickAction": {
+      "type": "object",
+      "properties": {
+        "next": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ButtonPostAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ButtonSetAction"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ButtonPanel": {
+      "type": "string",
+      "enum": [
+        "saves",
+        "settings",
+        "history"
+      ]
+    },
+    "ButtonPostAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "advance"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scene": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "target": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "jump"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "panel": {
+              "$ref": "#/$defs/ButtonPanel"
+            },
+            "type": {
+              "type": "string",
+              "const": "open_panel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "panel"
+          ]
+        }
+      ]
+    },
+    "ButtonSetAction": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "$ref": "#/$defs/VariableOperation",
+          "default": "assign"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MutationValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variable": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "variable"
+      ]
+    },
     "ChoiceDefinition": {
       "type": "object",
       "properties": {
@@ -1236,6 +1351,263 @@
         {
           "type": "object",
           "properties": {
+            "action": {
+              "$ref": "#/$defs/ButtonClickAction",
+              "default": {
+                "sets": []
+              }
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "height": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "instance_id": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "opacity": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "rotation_deg": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "scale_x": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "scale_y": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "template": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "button_create"
+            },
+            "visible": {
+              "type": "boolean",
+              "default": true
+            },
+            "width": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "x": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "y": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "z": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instance_id",
+            "template",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ButtonClickAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "default": null
+            },
+            "height": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "instance_id": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "opacity": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "rotation_deg": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "scale_x": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "scale_y": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "template": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "button_update"
+            },
+            "visible": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "default": null
+            },
+            "width": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "x": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "y": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float",
+              "default": null
+            },
+            "z": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instance_id",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "instance_id": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "button_remove"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instance_id",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "type": {
               "type": "string",
               "const": "end"
@@ -1475,6 +1847,33 @@
           "additionalProperties": false,
           "required": [
             "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "channels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/TimelineKeyframe"
+                }
+              },
+              "default": {}
+            },
+            "instance_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "button"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "instance_id"
           ]
         },
         {

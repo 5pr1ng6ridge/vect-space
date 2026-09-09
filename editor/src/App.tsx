@@ -475,6 +475,11 @@ const UiMotionWorkspace = lazy(() =>
     default: module.UiMotionWorkspace,
   })),
 );
+const ButtonWorkspace = lazy(() =>
+  import("./components/ButtonWorkspace").then((module) => ({
+    default: module.ButtonWorkspace,
+  })),
+);
 
 function WorkspaceFallback(): ReactElement {
   return <main className="workspace-loading">正在载入工作区…</main>;
@@ -580,6 +585,8 @@ export function App(): ReactElement {
   } | null>(null);
   const [uiMotionTarget, setUiMotionTarget] = useState<string | null>(null);
   const [uiMotionDialog, setUiMotionDialog] = useState<string | null>(null);
+  const [buttonTarget, setButtonTarget] = useState<string | null>(null);
+  const [buttonDialog, setButtonDialog] = useState<string | null>(null);
   const [flowWorkspace, setFlowWorkspace] = useState(false);
   const [flowSelectionId, setFlowSelectionId] = useState<string | null>(null);
   const [mapWorkspace, setMapWorkspace] = useState(false);
@@ -873,6 +880,8 @@ export function App(): ReactElement {
       setTimelineTarget(null);
       setLongTextTarget(null);
       setUiMotionTarget(null);
+      setButtonTarget(null);
+      setButtonDialog(null);
       setFlowWorkspace(false);
       setFlowSelectionId(null);
       setMapWorkspace(false);
@@ -2193,8 +2202,122 @@ export function App(): ReactElement {
     if (uiMotionTarget === id) setUiMotionTarget(null);
   };
 
+  const openCreateButton = (): void => {
+    if (!flushBeforeNavigation()) return;
+    setButtonDialog("button.default");
+  };
+
+  const createButtonTemplate = (rawId: string): boolean => {
+    const id = rawId.trim();
+    const buttons = project.buttons ?? [];
+    if (
+      !id ||
+      !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
+      buttons.some((file) => file.definition.id === id)
+    ) {
+      setError("按钮模板 ID 非法或已经存在。");
+      return false;
+    }
+    const path = `ui/buttons/${id.replaceAll(".", "_")}.yaml`;
+    if (buttons.some((file) => file.path === path)) {
+      setError(`按钮模板文件路径 ${path} 已经存在。`);
+      return false;
+    }
+    commit((draft) => {
+      draft.manifest.buttons ??= [];
+      draft.manifest.buttons.push(path);
+      draft.buttons ??= [];
+      draft.buttons.push({
+        path,
+        definition: {
+          schema_version: 1,
+          id,
+          width: 200,
+          height: 80,
+          asset_mode: "separate",
+          fit: "stretch",
+          normal: null,
+          hover: null,
+          pressed: null,
+          animations: {},
+        },
+      });
+    });
+    setButtonTarget(id);
+    return true;
+  };
+
+  const deleteButtonTemplate = (id: string): void => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const references: string[] = [];
+    for (const scene of currentProject.scenes) {
+      for (const [nodeId, node] of Object.entries(scene.definition.nodes)) {
+        if (
+          (node.type === "button_create" || node.type === "button_update") &&
+          node.template === id
+        ) {
+          references.push(`${scene.definition.id}/${nodeId}`);
+        }
+      }
+    }
+    if (references.length > 0) {
+      setError(
+        `按钮模板 ${id} 仍被 ${references.length} 处剧情引用（${references
+          .slice(0, 8)
+          .join("、")}${references.length > 8 ? "…" : ""}），不能删除。`,
+      );
+      return;
+    }
+    const file = (currentProject.buttons ?? []).find(
+      (candidate) => candidate.definition.id === id,
+    );
+    if (file === undefined) return;
+    if (
+      !window.confirm(
+        `从项目清单移除按钮模板 ${id}？磁盘上的 YAML 文件会保留。`,
+      )
+    )
+      return;
+    commit((draft) => {
+      draft.buttons = (draft.buttons ?? []).filter(
+        (candidate) => candidate.definition.id !== id,
+      );
+      draft.manifest.buttons = (draft.manifest.buttons ?? []).filter(
+        (path) => path !== file.path,
+      );
+    });
+    if (buttonTarget === id) setButtonTarget(null);
+  };
+
+  const duplicateButtonTemplate = (id: string): void => {
+    const source = (project.buttons ?? []).find(
+      (candidate) => candidate.definition.id === id,
+    );
+    if (source === undefined) return;
+    const used = new Set(
+      (project.buttons ?? []).map((file) => file.definition.id),
+    );
+    let index = 2;
+    let nextId = `${id}_copy`;
+    while (used.has(nextId)) nextId = `${id}_copy_${index++}`;
+    const path = `ui/buttons/${nextId.replaceAll(".", "_")}.yaml`;
+    commit((draft) => {
+      draft.manifest.buttons ??= [];
+      draft.manifest.buttons.push(path);
+      draft.buttons ??= [];
+      draft.buttons.push({
+        path,
+        definition: { ...structuredClone(source.definition), id: nextId },
+      });
+    });
+    setButtonTarget(nextId);
+  };
+
   const uiMotionFile = project.ui_motions.find(
     (file) => file.definition.id === uiMotionTarget,
+  );
+  const buttonFile = (project.buttons ?? []).find(
+    (file) => file.definition.id === buttonTarget,
   );
   const longTextScene = findScene(project, longTextTarget?.sceneId ?? "");
   const longTextNode =
@@ -2352,6 +2475,43 @@ export function App(): ReactElement {
           redoAvailable={future.length > 0}
         />
       </Suspense>
+    );
+  }
+  if (buttonTarget !== null && buttonFile !== undefined) {
+    return (
+      <>
+        <Suspense fallback={<WorkspaceFallback />}>
+          <ButtonWorkspace
+            assets={project.assets}
+            dirty={dirty}
+            file={buttonFile}
+            onBack={() => {
+              if (flushBeforeNavigation()) setButtonTarget(null);
+            }}
+            onChange={(file) =>
+              commit((draft) => {
+                const index = (draft.buttons ?? []).findIndex(
+                  (candidate) => candidate.definition.id === buttonTarget,
+                );
+                if (index >= 0 && draft.buttons !== undefined)
+                  draft.buttons[index] = file;
+              })
+            }
+            onRedo={redo}
+            onSave={() => void saveProject()}
+            onUndo={undo}
+          />
+        </Suspense>
+        {error !== null && (
+          <div className="error-toast" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              关闭
+            </button>
+          </div>
+        )}
+        {notice !== null && <div className="notice-toast">{notice}</div>}
+      </>
     );
   }
   if (uiMotionTarget !== null && uiMotionFile !== undefined) {
@@ -2530,7 +2690,11 @@ export function App(): ReactElement {
           const references = findAssetReferences(currentProject, id);
           if (references.length > 0) {
             setError(
-              `素材 ${id} 仍被 ${references.length} 处内容引用，不能从清单移除。`,
+              `素材 ${id} 仍被 ${references.length} 处内容引用（${references
+                .slice(0, 8)
+                .join(
+                  "、",
+                )}${references.length > 8 ? "…" : ""}），不能从清单移除。`,
             );
             return false;
           }
@@ -2660,6 +2824,13 @@ export function App(): ReactElement {
           setUiMotionTarget(motionId);
         }}
         onDeleteUiMotion={deleteUiMotion}
+        onCreateButtonTemplate={openCreateButton}
+        onEditButtonTemplate={(buttonId) => {
+          if (!flushBeforeNavigation()) return;
+          setButtonTarget(buttonId);
+        }}
+        onDuplicateButtonTemplate={duplicateButtonTemplate}
+        onDeleteButtonTemplate={deleteButtonTemplate}
         onSelectScene={(sceneId) => {
           if (!flushBeforeNavigation()) return;
           setActiveSceneId(sceneId);
@@ -2845,6 +3016,8 @@ export function App(): ReactElement {
             setUiMotionTarget(null);
             setLongTextTarget({ sceneId: activeSceneId, nodeId });
           }}
+          buttons={project.buttons ?? []}
+          scenes={project.scenes.map((file) => file.definition)}
           uiMotions={project.ui_motions}
           onRename={(previousId, nextId) => {
             if (
@@ -2912,6 +3085,15 @@ export function App(): ReactElement {
           }}
         />
       )}
+      {buttonDialog !== null && (
+        <ButtonEntryDialog
+          initialValue={buttonDialog}
+          onCancel={() => setButtonDialog(null)}
+          onSubmit={(value) => {
+            if (createButtonTemplate(value)) setButtonDialog(null);
+          }}
+        />
+      )}
       {mapConversionPending && (
         <div
           aria-label="转换旧流程"
@@ -2970,6 +3152,7 @@ function contentDocumentFingerprint(project: EditorProject): string {
       manifest: project.manifest,
       scenes: project.scenes,
       ui_motions: project.ui_motions,
+      buttons: project.buttons ?? [],
       story_flow: project.story_flow,
       chapter_map: project.chapter_map,
     },
@@ -3030,6 +3213,68 @@ function UiMotionEntryDialog({
         />
         <small className="muted">
           只能使用 ASCII 字母、数字、点、下划线或连字符。
+        </small>
+        <div className="editor-dialog-actions">
+          <button onClick={onCancel} type="button">
+            取消
+          </button>
+          <button className="primary-button" type="submit">
+            创建
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ButtonEntryDialog({
+  initialValue,
+  onSubmit,
+  onCancel,
+}: {
+  initialValue: string;
+  onSubmit(value: string): void;
+  onCancel(): void;
+}): ReactElement {
+  const [value, setValue] = useState(initialValue);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+  return (
+    <div
+      aria-label="创建按钮模板"
+      className="editor-dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+      role="presentation"
+    >
+      <form
+        aria-modal="true"
+        className="editor-dialog"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit(value);
+        }}
+        role="dialog"
+      >
+        <h3>新按钮模板 ID</h3>
+        <input
+          ref={inputRef}
+          aria-label="按钮模板 ID"
+          onChange={(event) => setValue(event.currentTarget.value)}
+          value={value}
+        />
+        <small className="muted">
+          默认尺寸 200 × 80；可在模板工作区配置三态素材和动画。
         </small>
         <div className="editor-dialog-actions">
           <button onClick={onCancel} type="button">

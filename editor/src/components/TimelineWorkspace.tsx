@@ -93,6 +93,7 @@ export function TimelineWorkspace({
   const [snap, setSnap] = useState(50);
   const [newTrackType, setNewTrackType] =
     useState<TimelineTrack["type"]>("sprite");
+  const [newButtonInstanceId, setNewButtonInstanceId] = useState("");
   const [tool, setTool] = useState<Tool>("select");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedKeyframe, setSelectedKeyframe] =
@@ -137,8 +138,27 @@ export function TimelineWorkspace({
   const nodeRef = useRef(localNode);
   const playheadRef = useRef(playhead);
   const playbackStartRef = useRef(playbackStart);
-  const settings = previewSettings ?? DEFAULT_PREVIEW_SETTINGS;
+  const settings = useMemo(() => {
+    const saved = previewSettings ?? DEFAULT_PREVIEW_SETTINGS;
+    return {
+      ...saved,
+      choices: saved.choices.filter((choice) => choice.scene_id === sceneId),
+    };
+  }, [previewSettings, sceneId]);
   const targetKey = `${sceneId}:${nodeId}`;
+  const buttonInstanceIds = useMemo(() => {
+    const ids = new Set<string>();
+    const scene = project.scenes.find((file) => file.definition.id === sceneId);
+    for (const candidate of Object.values(scene?.definition.nodes ?? {})) {
+      if (candidate.type === "button_create") ids.add(candidate.instance_id);
+    }
+    return [...ids].sort();
+  }, [project.scenes, sceneId]);
+  const selectedButtonInstanceId = buttonInstanceIds.includes(
+    newButtonInstanceId,
+  )
+    ? newButtonInstanceId
+    : (buttonInstanceIds[0] ?? "");
 
   const handlePreviewFrame = useCallback((next: TimelinePreviewFrame): void => {
     // The Pixi preview owns the running clock. Mirror every emitted frame so
@@ -458,6 +478,7 @@ export function TimelineWorkspace({
       let trackIndex = next.tracks.findIndex(
         (track) =>
           (track.type === "sprite" && track.sprite_id === object.id) ||
+          (track.type === "button" && track.instance_id === object.id) ||
           (track.type === "video" && `video:${track.asset}` === object.id),
       );
       if (trackIndex < 0 && object.kind === "sprite") {
@@ -470,20 +491,40 @@ export function TimelineWorkspace({
         });
         trackIndex = next.tracks.length - 1;
       }
+      if (trackIndex < 0 && object.kind === "button") {
+        next.tracks.push({
+          type: "button",
+          instance_id: object.id,
+          channels: {},
+        });
+        trackIndex = next.tracks.length - 1;
+      }
       if (trackIndex < 0) return;
       const channels =
         object.kind === "video"
           ? ["x", "y", "width", "height", "opacity", "z"]
-          : [
-              "x",
-              "y",
-              "scale",
-              "scale_x",
-              "scale_y",
-              "rotation_deg",
-              "opacity",
-              "z",
-            ];
+          : object.kind === "button"
+            ? [
+                "x",
+                "y",
+                "width",
+                "height",
+                "scale_x",
+                "scale_y",
+                "rotation_deg",
+                "opacity",
+                "z",
+              ]
+            : [
+                "x",
+                "y",
+                "scale",
+                "scale_x",
+                "scale_y",
+                "rotation_deg",
+                "opacity",
+                "z",
+              ];
       for (const channel of channels) {
         const value = transform[channel as keyof PreviewObjectFrame];
         if (typeof value === "number")
@@ -539,7 +580,12 @@ export function TimelineWorkspace({
                       width: Math.max(16, initial.width + dx),
                       height: Math.max(16, initial.height + dy),
                     }
-                  : { scale: Math.max(0.05, initial.scale + dy / 450) };
+                  : object.kind === "button"
+                    ? {
+                        scale_x: Math.max(0.05, initial.scale_x + dy / 450),
+                        scale_y: Math.max(0.05, initial.scale_y + dy / 450),
+                      }
+                    : { scale: Math.max(0.05, initial.scale + dy / 450) };
       surfaceRef.current?.setObjectOverride(object.id, transform);
       setFrame((current) =>
         current === null
@@ -600,7 +646,12 @@ export function TimelineWorkspace({
                     : { scale_y: finalObject.scale_y }
                   : object.kind === "video"
                     ? { width: finalObject.width, height: finalObject.height }
-                    : { scale: finalObject.scale };
+                    : object.kind === "button"
+                      ? {
+                          scale_x: finalObject.scale_x,
+                          scale_y: finalObject.scale_y,
+                        }
+                      : { scale: finalObject.scale };
         writeObjectTransform(finalObject, transform);
       }
     };
@@ -674,6 +725,22 @@ export function TimelineWorkspace({
 
   const addTrack = (): void => {
     const current = nodeRef.current;
+    if (newTrackType === "button" && selectedButtonInstanceId === "") {
+      onError("当前场景没有可添加到时间线的按钮实例。");
+      return;
+    }
+    if (
+      newTrackType === "button" &&
+      selectedButtonInstanceId !== "" &&
+      current.tracks.some(
+        (track) =>
+          track.type === "button" &&
+          track.instance_id === selectedButtonInstanceId,
+      )
+    ) {
+      onError("同一时间线中不能重复添加同一按钮实例轨道。");
+      return;
+    }
     const spriteAsset =
       assets.find((asset) => asset.kind === "sprite")?.id ?? "";
     const videoAsset = assets.find((asset) => asset.kind === "video")?.id ?? "";
@@ -697,7 +764,13 @@ export function TimelineWorkspace({
               audio_enabled: true,
               channels: {},
             }
-          : { type: newTrackType, channels: {} };
+          : newTrackType === "button"
+            ? {
+                type: "button",
+                instance_id: selectedButtonInstanceId || "button_1",
+                channels: {},
+              }
+            : { type: newTrackType, channels: {} };
     commitNode({ ...current, tracks: [...current.tracks, track] });
   };
 
@@ -1066,6 +1139,20 @@ export function TimelineWorkspace({
                   }
                   style={gizmoStyle(object, frame?.camera)}
                 >
+                  {object.kind === "button" && object.asset !== "" && (
+                    <img
+                      alt=""
+                      className="timeline-button-preview"
+                      src={(() => {
+                        const asset = assets.find(
+                          (candidate) => candidate.id === object.asset,
+                        );
+                        return asset === undefined
+                          ? undefined
+                          : assetUrl(asset.absolute_path);
+                      })()}
+                    />
+                  )}
                   <span>{object.id}</span>
                   {selectedId === object.id && (
                     <>
@@ -1093,7 +1180,8 @@ export function TimelineWorkspace({
                         }
                         type="button"
                       />
-                      {object.kind === "sprite" && (
+                      {(object.kind === "sprite" ||
+                        object.kind === "button") && (
                         <button
                           aria-label="旋转素材"
                           className="timeline-gizmo-rotate"
@@ -1166,7 +1254,27 @@ export function TimelineWorkspace({
               <option value="camera">镜头轨</option>
               <option value="video">视频轨</option>
               <option value="bgm">BGM 轨</option>
+              <option value="button">按钮轨</option>
             </select>
+            {newTrackType === "button" && (
+              <select
+                aria-label="按钮实例"
+                disabled={buttonInstanceIds.length === 0}
+                onChange={(event) =>
+                  setNewButtonInstanceId(event.currentTarget.value)
+                }
+                value={selectedButtonInstanceId}
+              >
+                {buttonInstanceIds.length === 0 && (
+                  <option value="">暂无按钮实例</option>
+                )}
+                {buttonInstanceIds.map((instanceId) => (
+                  <option key={instanceId} value={instanceId}>
+                    {instanceId}
+                  </option>
+                ))}
+              </select>
+            )}
             <button onClick={addTrack} type="button">
               ＋轨道
             </button>
@@ -1235,7 +1343,13 @@ export function TimelineWorkspace({
                 onClick={() => setSelectedId(object.id)}
                 type="button"
               >
-                <span>{object.kind === "video" ? "VID" : "SPR"}</span>
+                <span>
+                  {object.kind === "video"
+                    ? "VID"
+                    : object.kind === "button"
+                      ? "BTN"
+                      : "SPR"}
+                </span>
                 {object.id}
                 <small>z {Math.round(object.z)}</small>
               </button>
@@ -1274,24 +1388,97 @@ export function TimelineWorkspace({
                   value={selectedObject.y}
                 />
               </label>
-              {selectedObject.kind === "sprite" ? (
+              {selectedObject.kind === "video" ? (
                 <>
                   <label>
-                    Scale
+                    Width
                     <input
+                      min="16"
                       onChange={(event) =>
                         editObjectChannel(
                           selectedObject,
-                          "scale",
-                          Number(event.currentTarget.value),
+                          "width",
+                          Math.max(16, Number(event.currentTarget.value)),
                         )
                       }
-                      min="0.01"
-                      step="0.01"
+                      step="1"
                       type="number"
-                      value={selectedObject.scale}
+                      value={selectedObject.width}
                     />
                   </label>
+                  <label>
+                    Height
+                    <input
+                      min="16"
+                      onChange={(event) =>
+                        editObjectChannel(
+                          selectedObject,
+                          "height",
+                          Math.max(16, Number(event.currentTarget.value)),
+                        )
+                      }
+                      step="1"
+                      type="number"
+                      value={selectedObject.height}
+                    />
+                  </label>
+                </>
+              ) : (
+                <>
+                  {selectedObject.kind === "sprite" && (
+                    <label>
+                      Scale
+                      <input
+                        onChange={(event) =>
+                          editObjectChannel(
+                            selectedObject,
+                            "scale",
+                            Number(event.currentTarget.value),
+                          )
+                        }
+                        min="0.01"
+                        step="0.01"
+                        type="number"
+                        value={selectedObject.scale}
+                      />
+                    </label>
+                  )}
+                  {selectedObject.kind === "button" && (
+                    <>
+                      <label>
+                        Width
+                        <input
+                          min="1"
+                          onChange={(event) =>
+                            editObjectChannel(
+                              selectedObject,
+                              "width",
+                              Math.max(1, Number(event.currentTarget.value)),
+                            )
+                          }
+                          step="1"
+                          type="number"
+                          value={selectedObject.width}
+                        />
+                      </label>
+                      <label>
+                        Height
+                        <input
+                          min="1"
+                          onChange={(event) =>
+                            editObjectChannel(
+                              selectedObject,
+                              "height",
+                              Math.max(1, Number(event.currentTarget.value)),
+                            )
+                          }
+                          step="1"
+                          type="number"
+                          value={selectedObject.height}
+                        />
+                      </label>
+                    </>
+                  )}
                   <label>
                     Scale X
                     <input
@@ -1337,41 +1524,6 @@ export function TimelineWorkspace({
                       step="0.1"
                       type="number"
                       value={selectedObject.rotation_deg}
-                    />
-                  </label>
-                </>
-              ) : (
-                <>
-                  <label>
-                    Width
-                    <input
-                      min="16"
-                      onChange={(event) =>
-                        editObjectChannel(
-                          selectedObject,
-                          "width",
-                          Math.max(16, Number(event.currentTarget.value)),
-                        )
-                      }
-                      step="1"
-                      type="number"
-                      value={selectedObject.width}
-                    />
-                  </label>
-                  <label>
-                    Height
-                    <input
-                      min="16"
-                      onChange={(event) =>
-                        editObjectChannel(
-                          selectedObject,
-                          "height",
-                          Math.max(16, Number(event.currentTarget.value)),
-                        )
-                      }
-                      step="1"
-                      type="number"
-                      value={selectedObject.height}
                     />
                   </label>
                 </>
@@ -1753,11 +1905,23 @@ function gizmoStyle(
   object: PreviewObjectFrame,
   camera: TimelinePreviewFrame["camera"] | undefined,
 ): React.CSSProperties {
-  const projected = projectPoint(object.x, object.y, camera);
-  const zoom = camera?.zoom ?? 1;
-  const width = Math.max(40, object.width * zoom);
-  const height = Math.max(56, object.height * zoom);
-  const rotation = (camera?.rotation_deg ?? 0) + object.rotation_deg;
+  // Buttons live in the DOM overlay in the game, above the camera-transformed
+  // Pixi world. Keep their editor gizmos in design coordinates as well.
+  const projected =
+    object.kind === "button"
+      ? { x: object.x, y: object.y }
+      : projectPoint(object.x, object.y, camera);
+  const zoom = object.kind === "button" ? 1 : (camera?.zoom ?? 1);
+  // Sprite dimensions already include their evaluated scale in
+  // SceneSurface.#spriteDimensions. Button dimensions are layout values, so
+  // their outer scale channels must be applied here.
+  const scaleX = object.kind === "button" ? object.scale_x : 1;
+  const scaleY = object.kind === "button" ? object.scale_y : 1;
+  const width = Math.max(40, object.width * scaleX * zoom);
+  const height = Math.max(56, object.height * scaleY * zoom);
+  const rotation =
+    (object.kind === "button" ? 0 : (camera?.rotation_deg ?? 0)) +
+    object.rotation_deg;
   return {
     left: `${(projected.x / DESIGN_WIDTH) * 100}%`,
     top: `${(projected.y / DESIGN_HEIGHT) * 100}%`,
@@ -1767,6 +1931,7 @@ function gizmoStyle(
       object.kind === "sprite"
         ? `translate(-50%, -100%) rotate(${rotation}deg)`
         : `rotate(${rotation}deg)`,
+    transformOrigin: object.kind === "sprite" ? "50% 100%" : "50% 50%",
   };
 }
 
