@@ -1,0 +1,144 @@
+schema_version: 1
+id: ui.dialogue.regression_matrix
+duration_ms: 720
+tracks:
+- target: dialogue_root
+  channels:
+    offset_y:
+    - at_ms: 0
+      value: 36.0
+      easing: ease_out
+    - at_ms: 240
+      value: -8.0
+      easing: ease_in_out
+    - at_ms: 720
+      value: 0.0
+      easing: linear
+    opacity:
+    - at_ms: 0
+      value: 0.0
+      easing: ease_out
+    - at_ms: 260
+      value: 1.0
+      easing: ease_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear
+    scale_x:
+    - at_ms: 0
+      value: 0.96
+      easing: ease_out
+    - at_ms: 360
+      value: 1.015
+      easing: ease_in_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear
+    scale_y:
+    - at_ms: 0
+      value: 0.96
+      easing: ease_out
+    - at_ms: 360
+      value: 1.015
+      easing: ease_in_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear
+- target: dialogue_frame
+  channels:
+    offset_y:
+    - at_ms: 0
+      value: 18.0
+      easing: ease_out
+    - at_ms: 360
+      value: -3.0
+      easing: ease_in_out
+    - at_ms: 720
+      value: 0.0
+      easing: linear
+    opacity:
+    - at_ms: 0
+      value: 0.35
+      easing: ease_out
+    - at_ms: 300
+      value: 1.0
+      easing: ease_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear
+- target: dialogue_nameplate
+  channels:
+    offset_x:
+    - at_ms: 0
+      value: -42.0
+      easing: ease_out
+    - at_ms: 300
+      value: 5.0
+      easing: ease_in_out
+    - at_ms: 720
+      value: 0.0
+      easing: linear
+    rotation_deg:
+    - at_ms: 0
+      value: -3.0
+      easing: ease_out
+    - at_ms: 360
+      value: 1.0
+      easing: ease_in_out
+    - at_ms: 720
+      value: 0.0
+      easing: linear
+- target: dialogue_text
+  channels:
+    offset_x:
+    - at_ms: 0
+      value: 24.0
+      easing: ease_out
+    - at_ms: 280
+      value: -4.0
+      easing: ease_in_out
+    - at_ms: 720
+      value: 0.0
+      easing: linear
+    opacity:
+    - at_ms: 0
+      value: 0.2
+      easing: ease_out
+    - at_ms: 320
+      value: 1.0
+      easing: ease_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear
+- target: dialogue_advance_indicator
+  channels:
+    scale_x:
+    - at_ms: 0
+      value: 0.7
+      easing: ease_out
+    - at_ms: 360
+      value: 1.18
+      easing: ease_in_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear
+    scale_y:
+    - at_ms: 0
+      value: 0.7
+      easing: ease_out
+    - at_ms: 360
+      value: 1.18
+      easing: ease_in_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear
+    opacity:
+    - at_ms: 0
+      value: 0.0
+      easing: ease_out
+    - at_ms: 360
+      value: 1.0
+      easing: ease_out
+    - at_ms: 720
+      value: 1.0
+      easing: linear

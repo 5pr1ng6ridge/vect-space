@@ -1,0 +1,83 @@
+schema_version: 2
+id: ui_motion_regression
+entry: background
+nodes:
+  background:
+    type: background
+    background: bg.vector_space
+    transition: cut
+    duration_ms: 0
+    easing: linear
+    await: true
+    next: hide_initial
+  hide_initial:
+    type: dialogue_ui
+    visible: false
+    motion: ui.dialogue.slide_out
+    duration_ms: 220
+    await: true
+    next: bind_show_matrix
+  bind_show_matrix:
+    type: ui_motion_set
+    slot: dialogue_show
+    motion: ui.dialogue.regression_matrix
+    next: show_matrix
+  show_matrix:
+    type: dialogue_ui
+    visible: true
+    motion: null
+    await: false
+    next: intro
+  intro:
+    type: say
+    speaker: test
+    text: |-
+      UI 动效回归测试开始。入场绑定会同时驱动对话根节点、边框、姓名牌、正文和继续指示器。
+      观察它们是否从偏移/透明状态平滑回到标准位置；结束后不应残留缩放、旋转或透明度。
+    mode: start
+    speed_cps: 72.0
+    next: play_matrix
+  play_matrix:
+    type: ui_motion_play
+    motion: ui.dialogue.regression_matrix
+    duration_ms: 720
+    await: false
+    next: matrix_checkpoint
+  matrix_checkpoint:
+    type: say
+    speaker: test
+    text: |-
+      这是独立播放回归。矩阵动效应再次覆盖五个目标，且正文和姓名牌不应互相带动布局。
+      如果动效结束后对话框可继续点击、位置稳定，说明本轮播放通过。
+    mode: start
+    speed_cps: 72.0
+    next: emphasis
+  emphasis:
+    type: ui_motion_play
+    motion: ui.dialogue.emphasis
+    duration_ms: 180
+    await: true
+    next: hide_then_show
+  hide_then_show:
+    type: dialogue_ui
+    visible: false
+    motion: null
+    await: false
+    next: show_again
+  show_again:
+    type: dialogue_ui
+    visible: true
+    motion: null
+    await: false
+    next: final_checkpoint
+  final_checkpoint:
+    type: say
+    speaker: test
+    text: |-
+      最后一轮连续执行默认 hide → show：slide_out 应完整收尾，regression_matrix 应重新从干净状态入场。
+      若没有闪烁、卡住或残留偏移，本场景通过；下一步结束回归测试。
+    mode: start
+    speed_cps: 72.0
+    next: end
+  end:
+    type: end

@@ -49,3 +49,16 @@ hotspots:
   reveal:
     mode: always
   variable_overrides: {}
+- id: ui-motion-regression
+  scene_id: ui_motion_regression
+  title: UI 动效回归测试
+  hover_text: 覆盖对话框入场、独立播放、五类 UI 目标和连续 hide/show 的状态复位。
+  x: 800
+  "y": 700
+  width: 300
+  height: 180
+  z: 2
+  asset: gui.name_box
+  reveal:
+    mode: always
+  variable_overrides: {}

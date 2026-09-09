@@ -2,6 +2,10 @@ schema_version: 2
 id: prologue
 entry: establish
 nodes:
+  JUMP_UIMOTIONTEST:
+    type: jump
+    scene: ui_motion_regression
+    target: background
   JUMPSANDBOX:
     type: jump
     scene: sandbox
@@ -512,6 +516,9 @@ nodes:
     - id: SANDBOX
       label: SANDBOX
       next: JUMPSANDBOX
+    - id: UIMOTIONTEST
+      label: UI 动效回归测试
+      next: JUMP_UIMOTIONTEST
   say:
     type: bgm
     action: start

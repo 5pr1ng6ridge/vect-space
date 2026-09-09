@@ -61,10 +61,12 @@ scenes:
 - scenes/prologue.yaml
 - scenes/test_scene.yaml
 - scenes/sandbox.yaml
+- scenes/ui_motion_regression.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml
 - ui/motions/dialogue_emphasis.yaml
+- ui/motions/dialogue_regression_matrix.yaml
 ui_motion_defaults:
   dialogue_show: ui.dialogue.slide_in
   dialogue_hide: ui.dialogue.slide_out
