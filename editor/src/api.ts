@@ -1,13 +1,14 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
-  AssetKind,
   EditorDiagnostic,
   EditorProject,
   ImportedAsset,
+  ImportAssetRequest,
   BuildNodePreviewRequest,
   BuildNodePreviewResult,
   SaveProjectRequest,
   SaveProjectResult,
+  AssetInspection,
 } from "./types";
 import type { ScalarValue, VariableType } from "./types";
 import type { WireScalarValue } from "../../shared/generated/WireScalarValue";
@@ -55,6 +56,10 @@ const buildNodePreview = (request: BuildNodePreviewRequest) =>
   }).then((value) => decodeWireValue(value) as BuildNodePreviewResult);
 
 export const editorApi = {
+  pickProjectDirectory: (): Promise<string | null> =>
+    command<string | null>("pick_project_directory"),
+  pickAssetFiles: (): Promise<string[]> =>
+    command<string[]>("pick_asset_files"),
   openProject: async (root: string): Promise<EditorProject> =>
     decodeEditorProject(await command<unknown>("open_project", { root })),
   saveProject: async (
@@ -70,9 +75,13 @@ export const editorApi = {
     command<EditorDiagnostic[]>("validate_project", {
       request: encodeProjectRequest(request),
     }),
-  importAsset: (id: string, kind: AssetKind, sourcePath: string) =>
-    command<ImportedAsset>("import_asset", {
-      request: { id, kind, source_path: sourcePath },
+  stageAssetImports: (
+    requests: ImportAssetRequest[],
+  ): Promise<ImportedAsset[]> =>
+    command<ImportedAsset[]>("stage_asset_imports", { request: { requests } }),
+  inspectAssetImports: (sourcePaths: string[]): Promise<AssetInspection[]> =>
+    command<AssetInspection[]>("inspect_asset_imports", {
+      request: { source_paths: sourcePaths },
     }),
   buildNodePreview,
 };
@@ -184,10 +193,22 @@ function encodeProjectScalars(request: SaveProjectRequest): void {
   for (const scene of request.scenes) {
     for (const node of Object.values(scene.definition.nodes)) encodeNode(node);
   }
-  if (request.story_flow !== null) {
+  if (request.story_flow !== null && request.story_flow !== undefined) {
     for (const node of Object.values(request.story_flow.definition.nodes)) {
       if (node.reveal?.mode === "condition")
         encodeCondition(node.reveal.condition);
+    }
+  }
+  if (request.chapter_map !== null && request.chapter_map !== undefined) {
+    for (const hotspot of request.chapter_map.definition.hotspots) {
+      for (const [id, value] of Object.entries(hotspot.variable_overrides)) {
+        hotspot.variable_overrides[id] = encodeScalar(
+          value,
+          request.manifest.variables[id]?.type,
+        ) as unknown as ScalarValue;
+      }
+      if (hotspot.reveal?.mode === "condition")
+        encodeCondition(hotspot.reveal.condition);
     }
   }
   for (const settings of Object.values(

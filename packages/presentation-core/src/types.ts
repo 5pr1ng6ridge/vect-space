@@ -6,6 +6,7 @@ export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
 export type SkipMode = "disabled" | "read_only" | "all";
 export type TextRevealAnimation = "line_sweep" | "typewriter" | "drop_fade";
 export type PresentationOutcome = "completed" | "skipped" | "failed";
+export type SessionMode = WireSessionMode;
 
 export interface StoryLocation {
   scene_id: string;
@@ -165,9 +166,17 @@ export type PromptSnapshot =
   EmptyPrompt | DialoguePrompt | LongTextPrompt | ChoicePrompt | EndPrompt;
 
 export interface RuntimeSnapshot {
+  /** Host session generation; absent only in old editor fixtures. */
+  session_id?: WireU64;
+  mode?: SessionMode;
   revision: WireU64;
   location: StoryLocation;
-  variables: Record<string, WireScalarValue>;
+  /** Runtime variables are decoded to the editor/game domain at the IPC
+   * boundary.  Keeping them as tagged wire objects here would make a
+   * consumer accidentally compare `{ kind: "integer", ... }` with a scalar
+   * and would force every presentation component to know about transport
+   * details. */
+  variables: Record<string, ScalarValue>;
   world: WorldSnapshot;
   audio: AudioSnapshot;
   playback: PlaybackSnapshot;
@@ -314,18 +323,57 @@ export type PresentationCue = CueBase &
   );
 
 export interface RuntimeUpdate {
+  /** Host session generation; absent only in old editor fixtures. */
+  session_id?: WireU64;
+  mode?: SessionMode;
   update_id: WireU64;
   snapshot: RuntimeSnapshot;
   cues: PresentationCue[];
   requires_ack: boolean;
 }
 
+export type ScalarValue = boolean | bigint | number | string;
+
 export interface BootstrapPayload {
   update: RuntimeUpdate;
   asset_ids: string[];
   content_version: string;
   story_flow_available: boolean;
+  chapter_map_available?: boolean;
   default_font?: string | null;
+}
+
+export interface ChapterMapDecorationSnapshot {
+  id: string;
+  asset: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  z: number;
+}
+
+export interface ChapterMapHotspotSnapshot {
+  id: string;
+  scene_id: string;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  z: number;
+  asset: string | null;
+  completed: boolean;
+}
+
+export interface ChapterMapSnapshot {
+  width: number;
+  height: number;
+  view_x: number;
+  view_y: number;
+  background: string | null;
+  decorations: ChapterMapDecorationSnapshot[];
+  hotspots: ChapterMapHotspotSnapshot[];
 }
 
 export interface DialogueHistoryEntry {
@@ -384,5 +432,5 @@ export interface Settings {
   text_reveal_animation: TextRevealAnimation;
   skip_mode: SkipMode;
 }
-import type { WireScalarValue } from "../../../shared/generated/WireScalarValue";
+import type { WireSessionMode } from "../../../shared/generated/WireSessionMode";
 import type { WireU64 } from "../../../shared/generated/WireU64";

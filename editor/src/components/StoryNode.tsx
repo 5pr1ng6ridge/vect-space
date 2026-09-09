@@ -58,9 +58,10 @@ export const StoryNodeCard = memo(function StoryNodeCard({
   const awaited = "await" in data.node && data.node.await;
   return (
     <article
-      className={`story-node story-node-${data.node.type}${selected ? " is-selected" : ""}`}
+      className={`story-node nopan story-node-${data.node.type}${selected ? " is-selected" : ""}`}
       data-allow-context-menu="true"
       onClick={() => data.onSelect(data.nodeId)}
+      onPointerDown={() => data.onSelect(data.nodeId)}
       onDoubleClick={() => {
         if (data.node.type === "timeline" || data.node.type === "long_text")
           data.onOpen(data.nodeId);

@@ -12,6 +12,7 @@ import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type {
   AssetUrlMap,
   PresentationOutcome,
+  RuntimeSnapshot,
   RuntimeUpdate,
   Settings,
 } from "../engine/types";
@@ -20,6 +21,9 @@ export interface SceneCanvasHandle {
   captureThumbnail(): string | null;
   unlockAudio(): Promise<void>;
   skipCurrentPresentation(): boolean;
+  cancelCurrentPresentation(): void;
+  applySnapshotImmediately(snapshot: RuntimeSnapshot): Promise<void>;
+  isPresentationCurrent(updateId: string): boolean;
 }
 
 interface SceneCanvasProps {
@@ -175,7 +179,12 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
           }
         })
         .finally(() => {
-          if (active) {
+          // Cancelling a controller aborts animations but intentionally lets
+          // their promises settle.  Guard the callback with the controller's
+          // generation as well as the React effect lifetime, otherwise a
+          // title/replay transition could acknowledge an old RuntimeUpdate
+          // after the host has already switched sessions.
+          if (active && controller.isPresentationCurrent(update.update_id)) {
             onSettled(update, outcome);
           }
         });
@@ -199,8 +208,15 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
         unlockAudio: () => controller?.unlockAudio() ?? Promise.resolve(),
         skipCurrentPresentation: () =>
           controller?.skipCurrentPresentation() ?? false,
+        cancelCurrentPresentation: () =>
+          controller?.cancelCurrentPresentation(),
+        applySnapshotImmediately: (snapshot) =>
+          controller?.applySnapshotImmediately(snapshot, assets) ??
+          Promise.resolve(),
+        isPresentationCurrent: (updateId) =>
+          controller?.isPresentationCurrent(updateId) ?? false,
       }),
-      [controller],
+      [assets, controller],
     );
 
     return (

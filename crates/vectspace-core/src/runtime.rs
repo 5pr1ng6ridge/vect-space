@@ -4,6 +4,7 @@ use crate::{
     content::ContentCatalog,
     model::{
         AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, CameraSnapshot,
+        ChapterMapDecorationSnapshot, ChapterMapHotspotSnapshot, ChapterMapSnapshot,
         ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueHistoryEntry,
         DialogueMode, DialoguePageSnapshot, LongTextControlAction, LongTextExit, LongTextMode,
         LongTextPageSnapshot, LongTextStepSnapshot, LoopingAudioSnapshot, MutationValue,
@@ -90,6 +91,12 @@ pub struct RuntimeEngine {
     started: bool,
     next_update_id: u64,
     next_cue_id: u64,
+    /// Optional revision namespace used by an isolated host session (for
+    /// example Scene replay).  Keeping the namespace in the revision and
+    /// update/cue counters means a late acknowledgement from an old session
+    /// cannot accidentally match a newly-created main runtime update.
+    session_revision_override: Option<u64>,
+    initial_save_overrides: VariableMap,
     pending_runtime_update: Option<PendingPresentation>,
     preview_target: Option<StoryLocation>,
     preview_skip_target_once: bool,
@@ -113,6 +120,7 @@ impl RuntimeEngine {
                 read_dialogues: Default::default(),
                 seen_presentations: Default::default(),
                 completed_scenes: Default::default(),
+                dialogue_history: Default::default(),
             },
         )
     }
@@ -128,11 +136,13 @@ impl RuntimeEngine {
             profile_variables: profile.variables,
             read_dialogues: profile.read_dialogues,
             seen_presentations: profile.seen_presentations,
-            dialogue_history: Vec::new(),
+            dialogue_history: profile.dialogue_history,
             completed_scenes: profile.completed_scenes,
             started: false,
             next_update_id: 1,
             next_cue_id: 1,
+            session_revision_override: None,
+            initial_save_overrides: VariableMap::new(),
             pending_runtime_update: None,
             preview_target: None,
             preview_skip_target_once: false,
@@ -146,7 +156,31 @@ impl RuntimeEngine {
         content: &ContentCatalog,
         overrides: &VariableMap,
     ) -> Result<Self, RuntimeError> {
-        let mut runtime = Self::new(content)?;
+        Self::with_profile_overrides(
+            content,
+            ProfileState {
+                variables: profile_defaults(content)?,
+                read_content_version: content.manifest.content_version.clone(),
+                read_dialogues: Default::default(),
+                seen_presentations: Default::default(),
+                completed_scenes: Default::default(),
+                dialogue_history: Default::default(),
+            },
+            overrides,
+        )
+    }
+
+    /// Build an isolated runtime from a profile clone and apply author
+    /// supplied overrides.  Save-scope values are written to the fresh
+    /// snapshot; profile-scope values are written to the cloned profile.  No
+    /// caller-owned state is mutated, which is what scene replay and editor
+    /// previews need.
+    pub fn with_profile_overrides(
+        content: &ContentCatalog,
+        profile: ProfileState,
+        overrides: &VariableMap,
+    ) -> Result<Self, RuntimeError> {
+        let mut runtime = Self::with_profile(content, profile)?;
         for (id, value) in overrides {
             let definition = content
                 .manifest
@@ -156,6 +190,9 @@ impl RuntimeEngine {
             let value = normalize_value(value.clone(), definition.value_type)?;
             match definition.scope {
                 VariableScope::Save => {
+                    runtime
+                        .initial_save_overrides
+                        .insert(id.clone(), value.clone());
                     runtime.snapshot.variables.insert(id.clone(), value);
                 }
                 VariableScope::Profile => {
@@ -164,6 +201,42 @@ impl RuntimeEngine {
             }
         }
         Ok(runtime)
+    }
+
+    /// Replay uses author defaults, retaining only the player's read/seen flags.
+    pub fn with_replay_overrides(
+        content: &ContentCatalog,
+        profile: ProfileState,
+        overrides: &VariableMap,
+    ) -> Result<Self, RuntimeError> {
+        Self::with_profile_overrides(
+            content,
+            ProfileState {
+                variables: profile_defaults(content)?,
+                read_content_version: content.manifest.content_version.clone(),
+                read_dialogues: profile.read_dialogues,
+                seen_presentations: profile.seen_presentations,
+                completed_scenes: Default::default(),
+                // Replay is isolated: retain read/seen flags for skip
+                // behaviour, but never expose or mutate global history.
+                dialogue_history: Default::default(),
+            },
+            overrides,
+        )
+    }
+
+    /// Put this runtime in a host-chosen ID namespace before starting a
+    /// temporary session.  The revision override is consumed by the next
+    /// `start_new_game`/`start_scene_preview` reset; update and cue counters
+    /// remain in that namespace for the rest of the session.
+    ///
+    /// This is deliberately not part of the content or save format.  It only
+    /// protects the IPC boundary from stale async work when a replay is
+    /// closed while a cue is still settling.
+    pub fn prepare_session_ids(&mut self, revision: u64, update_id: u64, cue_id: u64) {
+        self.session_revision_override = Some(revision);
+        self.next_update_id = update_id.max(1);
+        self.next_cue_id = cue_id.max(1);
     }
 
     /// Replay the story from its entry until immediately before `target`.
@@ -357,6 +430,7 @@ impl RuntimeEngine {
             asset_ids: content.asset_ids(),
             content_version: content.manifest.content_version.clone(),
             story_flow_available: content.story_flow.is_some(),
+            chapter_map_available: content.chapter_map.is_some(),
             default_font: content.manifest.default_font.clone().or_else(|| {
                 content
                     .manifest
@@ -377,10 +451,15 @@ impl RuntimeEngine {
     ) -> Result<RuntimeUpdate, RuntimeError> {
         let previous_revision = self.snapshot.revision;
         self.snapshot = initial_snapshot(content)?;
-        self.snapshot.revision = previous_revision;
+        self.snapshot
+            .variables
+            .append(&mut self.initial_save_overrides);
+        self.snapshot.revision = self
+            .session_revision_override
+            .take()
+            .unwrap_or(previous_revision);
         self.started = true;
         self.pending_runtime_update = None;
-        self.dialogue_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -400,14 +479,19 @@ impl RuntimeEngine {
             .clone();
         let previous_revision = self.snapshot.revision;
         self.snapshot = initial_snapshot(content)?;
-        self.snapshot.revision = previous_revision;
+        self.snapshot
+            .variables
+            .append(&mut self.initial_save_overrides);
+        self.snapshot.revision = self
+            .session_revision_override
+            .take()
+            .unwrap_or(previous_revision);
         self.snapshot.location = StoryLocation {
             scene_id: scene_id.to_owned(),
             node_id: entry,
         };
         self.started = true;
         self.pending_runtime_update = None;
-        self.dialogue_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -642,6 +726,7 @@ impl RuntimeEngine {
             read_dialogues: self.read_dialogues.clone(),
             seen_presentations: self.seen_presentations.clone(),
             completed_scenes: self.completed_scenes.clone(),
+            dialogue_history: self.dialogue_history.clone(),
         }
     }
 
@@ -649,7 +734,8 @@ impl RuntimeEngine {
         &self.dialogue_history
     }
 
-    /// History is session-scoped presentation state and is never persisted.
+    /// Clear profile-level history for an explicit user action. Ordinary scene
+    /// transitions, new games and slot loads intentionally retain it.
     pub fn clear_dialogue_history(&mut self) {
         self.dialogue_history.clear();
     }
@@ -701,10 +787,102 @@ impl RuntimeEngine {
         Ok(Some(StoryFlowSnapshot { nodes, edges }))
     }
 
+    /// Return only the revealed part of the chapter room.  The content map is
+    /// authored independently from story jumps; profile conditions are
+    /// evaluated here so hidden chapters never reach the WebView.
+    pub fn chapter_map(
+        &self,
+        content: &ContentCatalog,
+    ) -> Result<Option<ChapterMapSnapshot>, RuntimeError> {
+        let Some(map) = &content.chapter_map else {
+            return Ok(None);
+        };
+        let mut hotspots = Vec::new();
+        for hotspot in &map.hotspots {
+            let completed = self.completed_scenes.contains(&hotspot.scene_id);
+            let visible = match &hotspot.reveal {
+                StoryFlowReveal::Completed => completed,
+                StoryFlowReveal::Always => true,
+                StoryFlowReveal::Condition { condition } => {
+                    self.evaluate_condition(content, condition)?
+                }
+            };
+            if visible {
+                hotspots.push(ChapterMapHotspotSnapshot {
+                    id: hotspot.id.clone(),
+                    scene_id: hotspot.scene_id.clone(),
+                    title: hotspot.title.clone(),
+                    x: hotspot.x,
+                    y: hotspot.y,
+                    width: hotspot.width,
+                    height: hotspot.height,
+                    z: hotspot.z,
+                    asset: hotspot.asset.clone(),
+                    completed,
+                });
+            }
+        }
+        Ok(Some(ChapterMapSnapshot {
+            width: map.width,
+            height: map.height,
+            view_x: map.view_x,
+            view_y: map.view_y,
+            background: map.background.clone(),
+            decorations: map
+                .decorations
+                .iter()
+                .map(|decoration| ChapterMapDecorationSnapshot {
+                    id: decoration.id.clone(),
+                    asset: decoration.asset.clone(),
+                    x: decoration.x,
+                    y: decoration.y,
+                    width: decoration.width,
+                    height: decoration.height,
+                    z: decoration.z,
+                })
+                .collect(),
+            hotspots,
+        }))
+    }
+
     pub fn pending_runtime_update(&self) -> Option<u64> {
         self.pending_runtime_update
             .as_ref()
             .map(|pending| pending.update_id)
+    }
+
+    /// End an isolated replay at a scene boundary without evaluating the
+    /// destination scene.  A cross-scene jump emits a clear-scene runtime cue
+    /// first; once that cue is acknowledged the host uses this method instead
+    /// of allowing the normal story loop to enter the next scene.
+    pub fn finish_replay_boundary(
+        &mut self,
+        update_id: u64,
+    ) -> Result<RuntimeUpdate, RuntimeError> {
+        let expected =
+            self.pending_runtime_update
+                .take()
+                .ok_or(RuntimeError::InvalidAcknowledgement {
+                    expected: 0,
+                    actual: update_id,
+                })?;
+        if expected.update_id != update_id {
+            self.pending_runtime_update = Some(expected.clone());
+            return Err(RuntimeError::InvalidAcknowledgement {
+                expected: expected.update_id,
+                actual: update_id,
+            });
+        }
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        self.snapshot.dialogue_page = None;
+        self.snapshot.long_text_page = None;
+        self.snapshot.prompt = PromptSnapshot::End {
+            prompt_id: format!(
+                "replay/{}/{}",
+                self.snapshot.location.scene_id, self.snapshot.location.node_id
+            ),
+        };
+        Ok(self.finish_update(Vec::new(), true))
     }
 
     pub fn load_snapshot(
@@ -729,7 +907,6 @@ impl RuntimeEngine {
         self.snapshot = snapshot;
         self.started = true;
         self.pending_runtime_update = None;
-        self.dialogue_history.clear();
         Ok(self.update_without_cues())
     }
 
@@ -1641,7 +1818,6 @@ impl RuntimeEngine {
 
     fn leave_scene(&mut self) {
         self.clear_scene_visual_state();
-        self.dialogue_history.clear();
     }
 
     fn finish_update(&mut self, cues: Vec<PresentationCue>, bump_revision: bool) -> RuntimeUpdate {
@@ -2517,7 +2693,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::model::{LiteralOperand, VariableOperand};
+    use crate::model::{ChapterMapDefinition, ChapterMapHotspot, LiteralOperand, VariableOperand};
 
     #[derive(serde::Deserialize)]
     struct TimelineConformanceSample {
@@ -2532,6 +2708,151 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game"),
         )
         .expect("demo content must be valid")
+    }
+
+    fn catalog_with_chapter_map() -> ContentCatalog {
+        let base = catalog();
+        let root = base
+            .assets_root()
+            .parent()
+            .expect("fixture assets parent")
+            .to_path_buf();
+        let mut manifest = base.manifest.clone();
+        manifest.chapter_map = Some("chapter-map.yaml".to_owned());
+        let map = ChapterMapDefinition {
+            schema_version: 1,
+            width: 1920,
+            height: 1080,
+            view_x: 960,
+            view_y: 540,
+            background: None,
+            decorations: Vec::new(),
+            hotspots: vec![
+                ChapterMapHotspot {
+                    id: "hidden".to_owned(),
+                    scene_id: "prologue".to_owned(),
+                    title: "隐藏章节".to_owned(),
+                    x: 200,
+                    y: 400,
+                    width: 280,
+                    height: 160,
+                    z: 1,
+                    asset: None,
+                    reveal: StoryFlowReveal::Completed,
+                    variable_overrides: VariableMap::new(),
+                },
+                ChapterMapHotspot {
+                    id: "always".to_owned(),
+                    scene_id: "test_scene".to_owned(),
+                    title: "始终显示".to_owned(),
+                    x: 600,
+                    y: 400,
+                    width: 280,
+                    height: 160,
+                    z: 1,
+                    asset: None,
+                    reveal: StoryFlowReveal::Always,
+                    variable_overrides: VariableMap::new(),
+                },
+            ],
+        };
+        ContentCatalog::from_documents_with_chapter_map(
+            root,
+            manifest,
+            base.scenes.clone(),
+            base.manifest
+                .ui_motions
+                .iter()
+                .cloned()
+                .zip(base.ui_motions.values().cloned())
+                .collect(),
+            base.story_flow.clone(),
+            Some(map),
+        )
+        .expect("fixture map should be valid")
+    }
+
+    #[test]
+    fn replay_entry_uses_author_defaults_and_overrides_before_interpolation() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        let mut say = scene
+            .nodes
+            .values()
+            .find(|node| matches!(node, SceneNode::Say { .. }))
+            .unwrap()
+            .clone();
+        if let SceneNode::Say { text, next, .. } = &mut say {
+            *text = "[var=score]/[var=route]/[var=ending_seen]".to_owned();
+            *next = "done".to_owned();
+        }
+        scene.entry = "line".to_owned();
+        scene.nodes = BTreeMap::from([
+            ("line".to_owned(), say),
+            ("done".to_owned(), SceneNode::End),
+        ]);
+        let mut profile = RuntimeEngine::new(&content)
+            .unwrap()
+            .profile_state(&content);
+        profile
+            .variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        profile.read_dialogues.insert("prologue/line".to_owned());
+        profile
+            .seen_presentations
+            .insert("prologue/movie".to_owned());
+        profile.completed_scenes.insert("prologue".to_owned());
+        let overrides = BTreeMap::from([
+            ("score".to_owned(), ScalarValue::Integer(i64::MAX)),
+            ("route".to_owned(), ScalarValue::Text("author".to_owned())),
+        ]);
+        for scene_origin in [false, true] {
+            let mut replay =
+                RuntimeEngine::with_replay_overrides(&content, profile.clone(), &overrides)
+                    .unwrap();
+            let update = if scene_origin {
+                replay.start_scene_preview(&content, "prologue").unwrap()
+            } else {
+                replay.start_new_game(&content).unwrap()
+            };
+            let PromptSnapshot::Dialogue { text, is_read, .. } = update.snapshot.prompt else {
+                panic!("expected dialogue")
+            };
+            assert_eq!(text, "9223372036854775807/author/false");
+            assert!(is_read);
+            assert!(replay.seen_presentations.contains("prologue/movie"));
+            assert!(replay.completed_scenes.is_empty());
+            assert_eq!(profile.variables["ending_seen"], ScalarValue::Boolean(true));
+            assert_eq!(
+                replay.start_new_game(&content).unwrap().snapshot.variables["score"],
+                ScalarValue::Integer(0)
+            );
+        }
+        let mut explicit = overrides;
+        explicit.insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        let mut replay =
+            RuntimeEngine::with_replay_overrides(&content, profile, &explicit).unwrap();
+        let update = replay.start_scene_preview(&content, "prologue").unwrap();
+        let PromptSnapshot::Dialogue { text, .. } = update.snapshot.prompt else {
+            panic!("expected dialogue")
+        };
+        assert_eq!(text, "9223372036854775807/author/true");
+    }
+
+    #[test]
+    fn chapter_map_filters_hidden_hotspots_and_reports_completion() {
+        let content = catalog_with_chapter_map();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let map = runtime.chapter_map(&content).unwrap().unwrap();
+        assert_eq!(map.hotspots.len(), 1);
+        assert_eq!(map.hotspots[0].scene_id, "test_scene");
+        runtime.completed_scenes.insert("prologue".to_owned());
+        let map = runtime.chapter_map(&content).unwrap().unwrap();
+        assert_eq!(map.hotspots.len(), 2);
+        assert!(map
+            .hotspots
+            .iter()
+            .any(|item| item.completed && item.scene_id == "prologue"));
     }
 
     #[test]
@@ -2721,7 +3042,8 @@ mod tests {
         );
         assert_eq!(update.snapshot.world.background, None);
         assert!(update.snapshot.world.sprites.is_empty());
-        assert!(runtime.dialogue_history().is_empty());
+        // History is profile-scoped and survives crossing into another scene.
+        assert_eq!(runtime.dialogue_history().len(), 1);
         assert!(matches!(
             update.cues.as_slice(),
             [PresentationCue {
@@ -3806,8 +4128,9 @@ mod tests {
             .unwrap();
         assert!(matches!(ending.snapshot.prompt, PromptSnapshot::End { .. }));
         assert!(runtime.completed_scenes.contains("test_scene"));
-        // Crossing into test_scene starts a fresh scene-local history.
-        assert!(runtime.dialogue_history().is_empty());
+        // Crossing into test_scene keeps the global profile history.  The
+        // destination has not emitted a Say yet, so the existing entries stay.
+        assert!(!runtime.dialogue_history().is_empty());
     }
 
     fn interactive_dialogue(content: &ContentCatalog) -> RuntimeEngine {
@@ -4373,7 +4696,7 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_history_is_scene_local_and_resets_on_new_game() {
+    fn dialogue_history_survives_scene_changes_and_new_game() {
         let content = catalog();
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         runtime.snapshot.location.node_id = "introduction".to_owned();
@@ -4396,7 +4719,8 @@ mod tests {
             .any(|node| node.scene_id == "prologue" && node.completed));
 
         runtime.start_new_game(&content).unwrap();
-        assert!(runtime.dialogue_history().is_empty());
+        assert_eq!(runtime.dialogue_history().len(), 1);
+        assert_eq!(runtime.dialogue_history()[0], first);
         assert!(runtime.completed_scenes.contains("prologue"));
     }
 }

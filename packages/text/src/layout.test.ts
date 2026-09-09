@@ -5,6 +5,7 @@ import {
   normalizeTextContentHeight,
   normalizeTextUnitBox,
   paginateTextLayouts,
+  resolveTextPageWindow,
 } from "./layout";
 
 describe("text measurement normalization", () => {
@@ -42,6 +43,22 @@ describe("text measurement normalization", () => {
 });
 
 describe("paginateTextLayouts", () => {
+  it("keeps only the visible pages and two viewports of overscan mounted", () => {
+    const pages = [
+      { height: 100 },
+      { height: 100 },
+      { height: 100 },
+      { height: 100 },
+    ];
+    expect(resolveTextPageWindow(pages, [0, 100, 200, 300], 200, 100)).toEqual({
+      start: 0,
+      end: 4,
+    });
+    expect(
+      resolveTextPageWindow(pages, [0, 100, 200, 300], 300, 100, 50),
+    ).toEqual({ start: 2, end: 4 });
+  });
+
   it("splits one measured item only at visual-row boundaries", () => {
     const pages = paginateTextLayouts(
       [

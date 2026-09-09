@@ -17,8 +17,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-saphyr = "1"
 sha2 = "0.10"
+# Host-side inspection keeps corrupt or renamed media out of the project
+# without invoking external command-line tools.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+symphonia = { version = "0.5", features = ["aac", "flac", "mp3", "ogg", "vorbis", "wav"] }
+mp4parse = "0.17"
+ttf-parser = "0.25"
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-dialog = "2"
+rfd = "0.16"
 thiserror = "2"
 vectspace-core.workspace = true
 vectspace-protocol.workspace = true

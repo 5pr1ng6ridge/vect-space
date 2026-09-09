@@ -1,9 +1,9 @@
-import { open } from "@tauri-apps/plugin-dialog";
-import { useMemo, useRef, useState, type ReactElement } from "react";
-import { assetUrl } from "../api";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { assetUrl, editorApi } from "../api";
 import { isCanonicalIntegerText } from "../scalars";
 import { useAssetFont } from "../useAssetFont";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
+import { findAssetReferences } from "./assetReferences";
 import type {
   AssetKind,
   CharacterDefinition,
@@ -11,6 +11,8 @@ import type {
   EditorAsset,
   EditorDiagnostic,
   EditorProject,
+  AssetInspection,
+  AssetMetadata,
   ScalarValue,
   VariableDefinition,
   VariableType,
@@ -22,19 +24,21 @@ interface ProjectSidebarProps {
   activeSceneId: string;
   diagnostics: EditorDiagnostic[];
   onSelectScene(sceneId: string): void;
-  onAddScene(id: string): void;
-  onRenameScene(previousId: string, nextId: string): void;
+  onAddScene(id: string): boolean;
+  onRenameScene(previousId: string, nextId: string): boolean;
   onDeleteScene(sceneId: string): void;
   onManifestChange(manifest: ContentManifest): void;
-  onImportAsset(id: string, kind: AssetKind, sourcePath: string): Promise<void>;
-  onRemoveAsset(id: string): void;
-  onAddVariable(id: string, definition: VariableDefinition): void;
+  onImportAssets(items: ImportDraft[]): Promise<void>;
+  onRemoveAsset(id: string): boolean;
+  onSelectAsset?(id: string): void;
+  selectedAssetId?: string | null;
+  onAddVariable(id: string, definition: VariableDefinition): boolean;
   onChangeVariable(id: string, definition: VariableDefinition): void;
-  onRenameVariable(previousId: string, nextId: string): void;
+  onRenameVariable(previousId: string, nextId: string): boolean;
   onDeleteVariable(id: string): void;
-  onAddCharacter(id: string, definition: CharacterDefinition): void;
+  onAddCharacter(id: string, definition: CharacterDefinition): boolean;
   onChangeCharacter(id: string, definition: CharacterDefinition): void;
-  onRenameCharacter(previousId: string, nextId: string): void;
+  onRenameCharacter(previousId: string, nextId: string): boolean;
   onDeleteCharacter(id: string): void;
   onCreateUiMotion(): void;
   onEditUiMotion(id: string): void;
@@ -42,7 +46,7 @@ interface ProjectSidebarProps {
   onNavigate(
     sceneId: string | null,
     nodeId: string | null,
-    workspace?: "story" | "flow",
+    workspace?: "story" | "flow" | "map",
     flowElementId?: string | null,
   ): void;
   onTabChange?(tab: SidebarTab): void;
@@ -60,8 +64,10 @@ export function ProjectSidebar({
   onRenameScene,
   onDeleteScene,
   onManifestChange,
-  onImportAsset,
+  onImportAssets,
   onRemoveAsset,
+  onSelectAsset,
+  selectedAssetId,
   onAddVariable,
   onChangeVariable,
   onRenameVariable,
@@ -125,6 +131,11 @@ export function ProjectSidebar({
           )}
         </button>
       </div>
+      <ProjectSearch
+        onNavigate={onNavigate}
+        onSelectAsset={onSelectAsset}
+        project={project}
+      />
       {tab === "scenes" && (
         <ScenesPanel
           activeSceneId={activeSceneId}
@@ -138,10 +149,10 @@ export function ProjectSidebar({
       )}
       {tab === "assets" && (
         <AssetsPanel
-          assets={project.assets}
-          manifest={project.manifest}
-          onImportAsset={onImportAsset}
+          project={project}
+          onImportAssets={onImportAssets}
           onRemoveAsset={onRemoveAsset}
+          selectedAssetId={selectedAssetId}
         />
       )}
       {tab === "project" && (
@@ -169,6 +180,106 @@ export function ProjectSidebar({
   );
 }
 
+function ProjectSearch({
+  project,
+  onNavigate,
+  onSelectAsset,
+}: {
+  project: EditorProject;
+  onNavigate(
+    sceneId: string | null,
+    nodeId: string | null,
+    workspace?: "story" | "flow" | "map",
+    flowElementId?: string | null,
+  ): void;
+  onSelectAsset?(id: string): void;
+}): ReactElement {
+  const [query, setQuery] = useState("");
+  const results = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (needle.length < 2)
+      return [] as {
+        label: string;
+        detail: string;
+        sceneId: string | null;
+        nodeId: string | null;
+        assetId?: string;
+      }[];
+    const output: {
+      label: string;
+      detail: string;
+      sceneId: string | null;
+      nodeId: string | null;
+      assetId?: string;
+    }[] = [];
+    for (const file of project.scenes) {
+      for (const [nodeId, node] of Object.entries(file.definition.nodes)) {
+        const speaker = node.type === "say" ? (node.speaker ?? "旁白") : "";
+        const searchable =
+          `${file.definition.id} ${nodeId} ${speaker} ${JSON.stringify(node)}`.toLowerCase();
+        if (searchable.includes(needle))
+          output.push({
+            label: `${file.definition.id} / ${nodeId}`,
+            detail:
+              node.type === "say"
+                ? `${speaker}：${node.text.slice(0, 80)}`
+                : node.type,
+            sceneId: file.definition.id,
+            nodeId,
+          });
+        if (output.length >= 40) break;
+      }
+      if (output.length >= 40) break;
+    }
+    if (output.length < 40) {
+      for (const asset of project.assets) {
+        if (`${asset.id} ${asset.path}`.toLowerCase().includes(needle))
+          output.push({
+            label: asset.id,
+            detail: asset.path,
+            sceneId: null,
+            nodeId: null,
+            assetId: asset.id,
+          });
+      }
+    }
+    return output;
+  }, [project.assets, project.scenes, query]);
+  return (
+    <div className="project-search">
+      <input
+        aria-label="搜索项目"
+        onChange={(event) => setQuery(event.currentTarget.value)}
+        placeholder="搜索节点、正文、素材…"
+        value={query}
+      />
+      {query.trim().length >= 2 && (
+        <div className="project-search-results">
+          {results.length === 0 ? (
+            <small className="muted">没有匹配结果</small>
+          ) : (
+            results.map((result) => (
+              <button
+                key={`${result.sceneId ?? "asset"}:${result.nodeId ?? result.label}`}
+                onClick={() => {
+                  if (result.sceneId !== null)
+                    onNavigate(result.sceneId, result.nodeId);
+                  else if (result.assetId !== undefined)
+                    onSelectAsset?.(result.assetId);
+                }}
+                type="button"
+              >
+                <strong>{result.label}</strong>
+                <small>{result.detail}</small>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScenesPanel({
   activeSceneId,
   diagnostics,
@@ -180,13 +291,19 @@ function ScenesPanel({
 }: {
   activeSceneId: string;
   diagnostics: EditorDiagnostic[];
-  onAddScene(id: string): void;
+  onAddScene(id: string): boolean;
   onDeleteScene(sceneId: string): void;
-  onRenameScene(previousId: string, nextId: string): void;
+  onRenameScene(previousId: string, nextId: string): boolean;
   onSelectScene(sceneId: string): void;
   project: EditorProject;
 }): ReactElement {
   const [query, setQuery] = useState("");
+  const [dialog, setDialog] = useState<{
+    title: string;
+    value: string;
+    mode: "add" | "rename";
+    previous?: string;
+  } | null>(null);
   const scenes = project.scenes.filter((file) =>
     file.definition.id.toLowerCase().includes(query.trim().toLowerCase()),
   );
@@ -202,8 +319,7 @@ function ScenesPanel({
         <button
           aria-label="添加场景"
           onClick={() => {
-            const id = window.prompt("新场景 ID", "new_scene")?.trim();
-            if (id) onAddScene(id);
+            setDialog({ title: "新场景 ID", value: "new_scene", mode: "add" });
           }}
           type="button"
         >
@@ -238,9 +354,12 @@ function ScenesPanel({
                 <button
                   aria-label="重命名场景"
                   onClick={() => {
-                    const next = window.prompt("新的场景 ID", scene.id)?.trim();
-                    if (next && next !== scene.id)
-                      onRenameScene(scene.id, next);
+                    setDialog({
+                      title: "新的场景 ID",
+                      value: scene.id,
+                      mode: "rename",
+                      previous: scene.id,
+                    });
                   }}
                   type="button"
                 >
@@ -258,64 +377,211 @@ function ScenesPanel({
           );
         })}
       </div>
+      {dialog !== null && (
+        <TextEntryDialog
+          initialValue={dialog.value}
+          onCancel={() => setDialog(null)}
+          onSubmit={(value) => {
+            const accepted =
+              dialog.mode === "add"
+                ? onAddScene(value)
+                : dialog.previous !== undefined && value !== dialog.previous
+                  ? onRenameScene(dialog.previous, value)
+                  : true;
+            if (accepted) setDialog(null);
+            return accepted;
+          }}
+          title={dialog.title}
+        />
+      )}
     </div>
   );
 }
 
 function AssetsPanel({
-  assets,
-  manifest,
-  onImportAsset,
+  project,
+  onImportAssets,
   onRemoveAsset,
+  selectedAssetId,
 }: {
-  assets: EditorAsset[];
-  manifest: ContentManifest;
-  onImportAsset(id: string, kind: AssetKind, sourcePath: string): Promise<void>;
-  onRemoveAsset(id: string): void;
+  project: EditorProject;
+  onImportAssets(items: ImportDraft[]): Promise<void>;
+  onRemoveAsset(id: string): boolean;
+  selectedAssetId?: string | null;
 }): ReactElement {
+  const { assets, manifest } = project;
   const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
   const [selected, setSelected] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [importQueue, setImportQueue] = useState<ImportDraft[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const references = useMemo(
+    () =>
+      new Map(
+        assets.map((asset) => [
+          asset.id,
+          findAssetReferences(project, asset.id),
+        ]),
+      ),
+    [assets, project],
+  );
   const shown = useMemo(
     () =>
-      assets.filter((asset) =>
-        asset.id.toLowerCase().includes(query.toLowerCase()),
+      assets.filter(
+        (asset) =>
+          (kindFilter === "all" || asset.kind === kindFilter) &&
+          asset.id.toLowerCase().includes(query.toLowerCase()),
       ),
-    [assets, query],
+    [assets, kindFilter, query],
   );
   const selectedAsset = assets.find((asset) => asset.id === selected);
-  const handleImport = async (): Promise<void> => {
-    const picked = await open({
-      multiple: false,
-      directory: false,
-      title: "选择素材文件",
-    });
-    if (typeof picked !== "string") return;
-    const id = window.prompt("素材逻辑 ID", "asset.new")?.trim();
-    if (!id) return;
-    const kind = window.prompt(
-      "素材类型：background / sprite / gui / bgm / sfx / video / font",
-      "background",
-    ) as AssetKind | null;
+  useEffect(() => {
     if (
-      !kind ||
-      !["background", "sprite", "gui", "bgm", "sfx", "video", "font"].includes(
-        kind,
+      selectedAssetId !== null &&
+      selectedAssetId !== undefined &&
+      assets.some((asset) => asset.id === selectedAssetId)
+    ) {
+      // Search results can target an asset while the panel is mounted but
+      // hidden behind another sidebar tab.  Keep the detail view in sync when
+      // the caller explicitly requests that asset.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSelected(selectedAssetId);
+    }
+  }, [assets, selectedAssetId]);
+  const queuePaths = async (paths: string[]): Promise<void> => {
+    if (paths.length === 0) return;
+    setImportError(null);
+    setInspecting(true);
+    try {
+      const inspections = await editorApi.inspectAssetImports(paths);
+      const reserved = [...assets];
+      const drafts = paths.map((sourcePath, index) => {
+        const inspection = inspections[index];
+        const fileName =
+          inspection?.source_name ??
+          sourcePath.split(/[\\/]/).at(-1) ??
+          "asset";
+        const stem = fileName.replace(/\.[^.]+$/, "");
+        const suggested = inspection?.suggested_kind as
+          AssetKind | null | undefined;
+        const kind = suggested ?? inferAssetKind(fileName);
+        const id = uniqueAssetId(stem, kind, reserved);
+        reserved.push({
+          id,
+          kind,
+          path: "",
+          absolute_path: "",
+        });
+        const inspectionError = inspection?.diagnostics
+          .filter((diagnostic) => diagnostic.severity === "error")
+          .map((diagnostic) => diagnostic.message)
+          .join("；");
+        return {
+          sourcePath,
+          fileName,
+          id,
+          kind,
+          inspectionId: inspection?.inspection_id,
+          inspection,
+          error: inspectionError || undefined,
+        };
+      });
+      setImportQueue(drafts);
+    } catch (reason) {
+      setImportError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInspecting(false);
+    }
+  };
+  const handleImport = async (): Promise<void> => {
+    try {
+      const paths = await editorApi.pickAssetFiles();
+      void queuePaths(paths);
+    } catch (reason) {
+      setImportError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const updateImport = (index: number, update: Partial<ImportDraft>): void => {
+    setImportQueue((current) =>
+      current === null
+        ? null
+        : current.map((item, candidate) =>
+            candidate === index
+              ? { ...item, ...update, error: undefined }
+              : item,
+          ),
+    );
+  };
+  const submitImport = async (): Promise<void> => {
+    if (importQueue === null) return;
+    setImportError(null);
+    const ids = new Map<string, number[]>();
+    const paths = new Map<string, number[]>();
+    for (const [index, item] of importQueue.entries()) {
+      const idKey = item.id;
+      ids.set(idKey, [...(ids.get(idKey) ?? []), index]);
+      const pathKey =
+        `${assetFolder(item.kind)}/${item.fileName}`.toLowerCase();
+      paths.set(pathKey, [...(paths.get(pathKey) ?? []), index]);
+    }
+    const nextQueue = importQueue.map((item) => {
+      const errors: string[] = [];
+      if (!/^[A-Za-z0-9._-]{1,128}$/.test(item.id))
+        errors.push("ID 只能包含字母、数字、点、下划线或连字符");
+      if (!/^[^\\/:*?"<>|]{1,200}$/.test(item.fileName))
+        errors.push("文件名不是安全的单个文件名");
+      if (item.id in manifest.assets) errors.push("ID 已存在");
+      if ((ids.get(item.id)?.length ?? 0) > 1) errors.push("清单中 ID 重复");
+      const destination = `${assetFolder(item.kind)}/${item.fileName}`;
+      if ((paths.get(destination.toLowerCase())?.length ?? 0) > 1)
+        errors.push("目标路径重复");
+      if (!supportedImportExtension(item.kind, item.fileName))
+        errors.push("文件扩展名与素材类型不匹配");
+      return {
+        ...item,
+        error: errors.length > 0 ? errors.join("；") : undefined,
+      };
+    });
+    setImportQueue(nextQueue);
+    if (
+      nextQueue.some(
+        (item) => item.error !== undefined || item.inspectionId === undefined,
       )
     ) {
-      window.alert("素材类型无效");
+      setImportError("请先修正清单中标出的错误。");
       return;
     }
     setImporting(true);
     try {
-      await onImportAsset(id, kind, picked);
-      setSelected(id);
+      // Use the validated snapshot we just built rather than the render's
+      // stale queue.  React may batch a last inspector edit with this click;
+      // the validated values are the ones that must cross the IPC boundary.
+      await onImportAssets(nextQueue);
+      setSelected(nextQueue.at(-1)?.id ?? null);
+      setImportQueue(null);
+    } catch (reason) {
+      setImportError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setImporting(false);
     }
   };
   return (
-    <div className="sidebar-body asset-sidebar">
+    <div
+      className="sidebar-body asset-sidebar"
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.preventDefault();
+        const paths = Array.from(event.dataTransfer.files)
+          .map((file) => (file as File & { path?: string }).path)
+          .filter(
+            (path): path is string =>
+              typeof path === "string" && path.length > 0,
+          );
+        void queuePaths(paths);
+      }}
+    >
       <div className="sidebar-search-row">
         <input
           aria-label="搜索素材"
@@ -323,16 +589,33 @@ function AssetsPanel({
           placeholder="搜索素材…"
           value={query}
         />
+        <select
+          aria-label="素材类型筛选"
+          onChange={(event) =>
+            setKindFilter(event.currentTarget.value as AssetKind | "all")
+          }
+          value={kindFilter}
+        >
+          <option value="all">全部</option>
+          {ASSET_KINDS.map((kind) => (
+            <option key={kind} value={kind}>
+              {kind}
+            </option>
+          ))}
+        </select>
         <button
-          disabled={importing}
+          disabled={importing || inspecting}
           onClick={() => void handleImport()}
           title="导入素材"
           type="button"
         >
-          ＋
+          {inspecting ? "检查中…" : "＋"}
         </button>
       </div>
       <div className="asset-list">
+        {assets.length === 0 && (
+          <p className="muted">将文件拖到这里，或点击 ＋ 批量导入</p>
+        )}
         {shown.map((asset) => (
           <button
             className={selected === asset.id ? "active" : ""}
@@ -345,7 +628,12 @@ function AssetsPanel({
             </span>
             <span>
               <strong>{asset.id}</strong>
-              <small>{manifest.assets[asset.id]?.path ?? asset.path}</small>
+              <small>
+                {manifest.assets[asset.id]?.path ?? asset.path} ·{" "}
+                {formatAssetSize(asset.size_bytes)} ·{" "}
+                {formatAssetMetadata(asset.metadata)} ·{" "}
+                {references.get(asset.id)?.length ?? 0} 处引用
+              </small>
             </span>
           </button>
         ))}
@@ -355,12 +643,26 @@ function AssetsPanel({
           <AssetPreview asset={selectedAsset} />
           <strong>{selectedAsset.id}</strong>
           <code>{selectedAsset.path}</code>
+          <small>
+            大小：{formatAssetSize(selectedAsset.size_bytes)} ·{" "}
+            {formatAssetMetadata(selectedAsset.metadata)} · 引用：
+            {references.get(selectedAsset.id)?.length ?? 0} 处
+          </small>
+          {(references.get(selectedAsset.id)?.length ?? 0) > 0 && (
+            <details className="asset-references">
+              <summary>使用位置</summary>
+              <ul>
+                {references.get(selectedAsset.id)?.map((location) => (
+                  <li key={location}>{location}</li>
+                ))}
+              </ul>
+            </details>
+          )}
           <button
             className="danger-button"
             onClick={() => {
               if (window.confirm("从 manifest 移除此素材？磁盘文件会保留。")) {
-                onRemoveAsset(selectedAsset.id);
-                setSelected(null);
+                if (onRemoveAsset(selectedAsset.id)) setSelected(null);
               }
             }}
             type="button"
@@ -369,8 +671,338 @@ function AssetsPanel({
           </button>
         </div>
       )}
+      {importQueue !== null && (
+        <div
+          className="asset-import-dialog"
+          role="dialog"
+          aria-label="导入素材"
+        >
+          <header>
+            <strong>导入素材 ({importQueue.length})</strong>
+            <button onClick={() => setImportQueue(null)} type="button">
+              取消
+            </button>
+          </header>
+          <p>
+            确认逻辑 ID、类型和文件名后一次导入。保存项目才会写入 manifest。
+          </p>
+          {importError !== null && (
+            <p className="inline-error" role="alert">
+              {importError}
+            </p>
+          )}
+          <div className="asset-import-list">
+            {importQueue.map((item, index) => (
+              <div
+                className="asset-import-row"
+                key={`${item.sourcePath}-${index}`}
+              >
+                <small title={item.sourcePath}>
+                  {item.sourcePath.split(/[\\/]/).at(-1)}
+                </small>
+                {item.error !== undefined && (
+                  <small className="inline-error">{item.error}</small>
+                )}
+                {item.error === undefined && item.inspection !== undefined && (
+                  <small className="asset-inspection-meta">
+                    {item.inspection.detected_format} ·{" "}
+                    {formatInspectionSize(item.inspection.size_bytes)}
+                  </small>
+                )}
+                <input
+                  aria-label={`${item.fileName} 逻辑 ID`}
+                  onChange={(event) =>
+                    updateImport(index, {
+                      id: event.currentTarget.value.trim(),
+                    })
+                  }
+                  value={item.id}
+                />
+                <select
+                  aria-label={`${item.fileName} 类型`}
+                  onChange={(event) =>
+                    updateImport(index, {
+                      kind: event.currentTarget.value as AssetKind,
+                    })
+                  }
+                  value={item.kind}
+                >
+                  {ASSET_KINDS.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {kind}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  aria-label={`${item.fileName} 文件名`}
+                  onChange={(event) =>
+                    updateImport(index, { fileName: event.currentTarget.value })
+                  }
+                  value={item.fileName}
+                />
+                <button
+                  aria-label={`移除 ${item.fileName}`}
+                  onClick={() =>
+                    setImportQueue(
+                      (current) =>
+                        current?.filter(
+                          (_, candidate) => candidate !== index,
+                        ) ?? null,
+                    )
+                  }
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            className="primary-action"
+            disabled={importing || importQueue.length === 0}
+            onClick={() => void submitImport()}
+            type="button"
+          >
+            {importing ? "导入中…" : "导入清单"}
+          </button>
+        </div>
+      )}
     </div>
   );
+}
+
+const ASSET_KINDS: AssetKind[] = [
+  "background",
+  "sprite",
+  "gui",
+  "bgm",
+  "sfx",
+  "video",
+  "font",
+];
+export interface ImportDraft {
+  sourcePath: string;
+  id: string;
+  kind: AssetKind;
+  fileName: string;
+  inspectionId?: string;
+  inspection?: AssetInspection;
+  error?: string;
+}
+
+function TextEntryDialog({
+  title,
+  initialValue,
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  initialValue: string;
+  onSubmit(value: string): boolean;
+  onCancel(): void;
+}): ReactElement {
+  const [value, setValue] = useState(initialValue);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+  const submit = (): void => {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      setError("输入不能为空。");
+      return;
+    }
+    const accepted = onSubmit(trimmed);
+    if (!accepted) setError("输入未通过校验，请修正后重试。");
+    else setError(null);
+  };
+  return (
+    <div
+      className="editor-dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <form
+        className="editor-dialog"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          submit();
+        }}
+      >
+        <h3>{title}</h3>
+        <input
+          ref={inputRef}
+          onChange={(event) => {
+            setValue(event.currentTarget.value);
+            setError(null);
+          }}
+          value={value}
+        />
+        {error !== null && <p className="inline-error">{error}</p>}
+        <div className="editor-dialog-actions">
+          <button onClick={onCancel} type="button">
+            取消
+          </button>
+          <button className="primary-button" type="submit">
+            确定
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function inferAssetKind(fileName: string): AssetKind {
+  const extension = fileName.split(".").at(-1)?.toLowerCase() ?? "";
+  if (["ttf", "otf"].includes(extension)) return "font";
+  // The runtime currently guarantees MP4/H.264 playback.  Do not classify
+  // WebM/MOV as video only to make the later staged-import validation fail.
+  if (extension === "mp4") return "video";
+  if (["ogg", "wav", "mp3", "flac"].includes(extension)) return "sfx";
+  return "background";
+}
+
+function assetFolder(kind: AssetKind): string {
+  switch (kind) {
+    case "background":
+      return "backgrounds";
+    case "sprite":
+      return "sprites";
+    case "gui":
+      return "gui";
+    case "bgm":
+    case "sfx":
+      return "audio";
+    case "video":
+      return "videos";
+    case "font":
+      return "fonts";
+  }
+}
+
+function supportedImportExtension(kind: AssetKind, fileName: string): boolean {
+  const extension = fileName.split(".").at(-1)?.toLowerCase() ?? "";
+  const allowed: Record<AssetKind, string[]> = {
+    background: ["png", "jpg", "jpeg", "webp"],
+    sprite: ["png", "jpg", "jpeg", "webp"],
+    gui: ["png", "jpg", "jpeg", "webp"],
+    bgm: ["ogg", "wav", "mp3", "flac"],
+    sfx: ["ogg", "wav", "mp3", "flac"],
+    video: ["mp4"],
+    font: ["ttf", "otf"],
+  };
+  return allowed[kind].includes(extension);
+}
+
+function formatAssetSize(size: string | number | bigint | undefined): string {
+  if (size === undefined) return "大小未知";
+  try {
+    const bytes =
+      typeof size === "string"
+        ? BigInt(size)
+        : typeof size === "bigint"
+          ? size
+          : Number.isFinite(size) && size >= 0
+            ? BigInt(Math.trunc(size))
+            : null;
+    if (bytes === null || bytes < 0n) return "大小未知";
+    if (bytes < 1024n) return `${bytes} B`;
+    if (bytes < 1024n * 1024n)
+      return `${(Number(bytes) / 1024).toFixed(1)} KiB`;
+    return `${(Number(bytes) / (1024 * 1024)).toFixed(1)} MiB`;
+  } catch {
+    return "大小未知";
+  }
+}
+
+function formatInspectionSize(size: string): string {
+  try {
+    const bytes = BigInt(size);
+    if (bytes < 1024n) return `${bytes} B`;
+    if (bytes < 1024n * 1024n)
+      return `${(Number(bytes) / 1024).toFixed(1)} KiB`;
+    return `${(Number(bytes) / (1024 * 1024)).toFixed(1)} MiB`;
+  } catch {
+    return "大小未知";
+  }
+}
+
+function formatAssetMetadata(
+  metadata: AssetMetadata | null | undefined,
+): string {
+  if (metadata === null || metadata === undefined) return "规格未知";
+  const dimensions =
+    metadata.width !== null &&
+    metadata.width !== undefined &&
+    metadata.height !== null &&
+    metadata.height !== undefined
+      ? `${metadata.width}×${metadata.height}px`
+      : null;
+  const duration =
+    metadata.duration_ms !== null && metadata.duration_ms !== undefined
+      ? `${formatDurationMs(metadata.duration_ms)}s`
+      : null;
+  const audio =
+    metadata.sample_rate !== null && metadata.sample_rate !== undefined
+      ? `${metadata.sample_rate}Hz${metadata.channels === null || metadata.channels === undefined ? "" : `/${metadata.channels}ch`}`
+      : null;
+  const font = metadata.font_family ?? null;
+  return (
+    [dimensions, duration, audio, font].filter(Boolean).join(" · ") ||
+    "规格未知"
+  );
+}
+
+function formatDurationMs(value: bigint | number | string): string {
+  if (typeof value === "string") {
+    if (!/^(?:0|[1-9][0-9]*)$/.test(value)) return "?";
+    try {
+      return formatDurationMs(BigInt(value));
+    } catch {
+      return "?";
+    }
+  }
+  if (typeof value === "bigint") {
+    if (value < 0n) return "?";
+    const seconds = value / 1000n;
+    const hundredths = (value % 1000n) / 10n;
+    return `${seconds.toString()}.${hundredths.toString().padStart(2, "0")}`;
+  }
+  return Number.isFinite(value) && value >= 0 ? (value / 1000).toFixed(2) : "?";
+}
+
+function uniqueAssetId(
+  stem: string,
+  kind: AssetKind,
+  assets: EditorAsset[],
+): string {
+  const prefix =
+    kind === "background"
+      ? "bg"
+      : kind === "sprite"
+        ? "sprite"
+        : kind === "gui"
+          ? "gui"
+          : kind;
+  const base = `${prefix}.${
+    stem
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "_")
+      .replace(/^\.+|\.+$/g, "") || "new"
+  }`;
+  const used = new Set(assets.map((asset) => asset.id));
+  if (!used.has(base)) return base;
+  for (let index = 2; ; index += 1) {
+    const candidate = `${base}_${index}`;
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 function AssetPreview({ asset }: { asset: EditorAsset }): ReactElement {
@@ -415,19 +1047,26 @@ function ProjectPanel({
 }: {
   manifest: ContentManifest;
   onChange(manifest: ContentManifest): void;
-  onAddVariable(id: string, definition: VariableDefinition): void;
+  onAddVariable(id: string, definition: VariableDefinition): boolean;
   onChangeVariable(id: string, definition: VariableDefinition): void;
   onDeleteVariable(id: string): void;
-  onRenameVariable(previousId: string, nextId: string): void;
-  onAddCharacter(id: string, definition: CharacterDefinition): void;
+  onRenameVariable(previousId: string, nextId: string): boolean;
+  onAddCharacter(id: string, definition: CharacterDefinition): boolean;
   onChangeCharacter(id: string, definition: CharacterDefinition): void;
   onDeleteCharacter(id: string): void;
-  onRenameCharacter(previousId: string, nextId: string): void;
+  onRenameCharacter(previousId: string, nextId: string): boolean;
   onCreateUiMotion(): void;
   onEditUiMotion(id: string): void;
   onDeleteUiMotion(id: string): void;
   project: EditorProject;
 }): ReactElement {
+  const [dialog, setDialog] = useState<{
+    title: string;
+    value: string;
+    kind:
+      "character_add" | "character_rename" | "variable_add" | "variable_rename";
+    previous?: string;
+  } | null>(null);
   return (
     <div className="sidebar-body project-settings">
       <label>
@@ -553,12 +1192,10 @@ function ProjectPanel({
           <strong>角色</strong>
           <button
             onClick={() => {
-              const id = window.prompt("新角色 ID", "new_character")?.trim();
-              if (!id || manifest.characters[id] !== undefined) return;
-              onAddCharacter(id, {
-                display_name: "新角色",
-                name_color: "#1D2948",
-                text_color: "#17213A",
+              setDialog({
+                title: "新角色 ID",
+                value: "new_character",
+                kind: "character_add",
               });
             }}
             type="button"
@@ -573,8 +1210,12 @@ function ProjectPanel({
               <div>
                 <button
                   onClick={() => {
-                    const next = window.prompt("新的角色 ID", id)?.trim();
-                    if (next && next !== id) onRenameCharacter(id, next);
+                    setDialog({
+                      title: "新的角色 ID",
+                      value: id,
+                      kind: "character_rename",
+                      previous: id,
+                    });
                   }}
                   type="button"
                 >
@@ -621,12 +1262,10 @@ function ProjectPanel({
           <strong>剧情变量</strong>
           <button
             onClick={() => {
-              const id = window.prompt("新变量 ID", "new_variable")?.trim();
-              if (!id || manifest.variables[id] !== undefined) return;
-              onAddVariable(id, {
-                scope: "save",
-                type: "boolean",
-                default: false,
+              setDialog({
+                title: "新变量 ID",
+                value: "new_variable",
+                kind: "variable_add",
               });
             }}
             type="button"
@@ -641,8 +1280,12 @@ function ProjectPanel({
               <div>
                 <button
                   onClick={() => {
-                    const next = window.prompt("新的变量 ID", id)?.trim();
-                    if (next && next !== id) onRenameVariable(id, next);
+                    setDialog({
+                      title: "新的变量 ID",
+                      value: id,
+                      kind: "variable_rename",
+                      previous: id,
+                    });
                   }}
                   type="button"
                 >
@@ -719,6 +1362,47 @@ function ProjectPanel({
         </div>
       </dl>
       <code className="project-root">{project.root}</code>
+      {dialog !== null && (
+        <TextEntryDialog
+          initialValue={dialog.value}
+          onCancel={() => setDialog(null)}
+          onSubmit={(value) => {
+            let accepted = true;
+            if (dialog.kind === "character_add") {
+              if (manifest.characters[value] === undefined) {
+                accepted = onAddCharacter(value, {
+                  display_name: "新角色",
+                  name_color: "#1D2948",
+                  text_color: "#17213A",
+                });
+              } else {
+                accepted = false;
+              }
+            } else if (dialog.kind === "character_rename") {
+              if (dialog.previous !== undefined && value !== dialog.previous)
+                accepted = onRenameCharacter(dialog.previous, value);
+            } else if (dialog.kind === "variable_add") {
+              if (manifest.variables[value] === undefined) {
+                accepted = onAddVariable(value, {
+                  scope: "save",
+                  type: "boolean",
+                  default: false,
+                });
+              } else {
+                accepted = false;
+              }
+            } else if (
+              dialog.previous !== undefined &&
+              value !== dialog.previous
+            ) {
+              accepted = onRenameVariable(dialog.previous, value);
+            }
+            if (accepted) setDialog(null);
+            return accepted;
+          }}
+          title={dialog.title}
+        />
+      )}
     </div>
   );
 }

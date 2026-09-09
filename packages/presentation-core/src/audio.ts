@@ -335,13 +335,25 @@ export class AudioManager {
     await this.transitionBgm(deferred.target, 0, deferred.assets, signal);
   }
 
-  destroy(): void {
+  /**
+   * Stop all media owned by the current presentation session while keeping
+   * the AudioContext and decoded buffer cache reusable for the next scene.
+   * This is intentionally different from `destroy()`: title/replay
+   * boundaries should be cheap, but must not leave a fading BGM, typing loop,
+   * SFX voice, or deferred transition alive behind the new page.
+   */
+  resetSession(): void {
     this.#invalidateBgmTransition();
     this.#typingGeneration += 1;
     this.#stopTypingSfx();
     for (const voice of [...this.#activeSfx]) this.#stopVoice(voice);
     if (this.#currentBgm !== null) this.#destroyBgm(this.#currentBgm);
     this.#currentBgm = null;
+    this.#deferredBgm = null;
+  }
+
+  destroy(): void {
+    this.resetSession();
     if (this.#context !== null) void this.#context.close();
     this.#context = null;
     this.#buffers.clear();

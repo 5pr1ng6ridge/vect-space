@@ -1,6 +1,13 @@
 export type AssetKind =
   "background" | "sprite" | "gui" | "bgm" | "sfx" | "font" | "video";
 
+import type { WireAssetInspection } from "../../shared/generated/WireAssetInspection";
+import type { WireAssetMetadata } from "../../shared/generated/WireAssetMetadata";
+
+/** Host-verified metadata returned before an import is staged. */
+export type AssetInspection = WireAssetInspection;
+export type AssetMetadata = WireAssetMetadata;
+
 /** Integer values use bigint when they do not fit in a safe JS number. */
 export type ScalarValue = boolean | number | bigint | string;
 export type VariableScope = "save" | "profile";
@@ -87,6 +94,45 @@ export interface ContentManifest {
   ui_motions: string[];
   ui_motion_defaults: UiMotionBindings;
   story_flow?: string | null;
+  chapter_map?: string | null;
+}
+
+export type ChapterMapReveal = StoryFlowReveal;
+export interface ChapterMapDecoration {
+  id: string;
+  asset: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  z: number;
+}
+export interface ChapterMapHotspot {
+  id: string;
+  scene_id: string;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  z: number;
+  asset?: string | null;
+  reveal?: ChapterMapReveal;
+  variable_overrides: Record<string, ScalarValue>;
+}
+export interface ChapterMapDefinition {
+  schema_version: number;
+  width: number;
+  height: number;
+  view_x: number;
+  view_y: number;
+  background?: string | null;
+  decorations: ChapterMapDecoration[];
+  hotspots: ChapterMapHotspot[];
+}
+export interface ChapterMapFile {
+  path: string;
+  definition: ChapterMapDefinition;
 }
 
 export type StoryFlowReveal =
@@ -417,6 +463,10 @@ export interface EditorAsset {
   kind: AssetKind;
   path: string;
   absolute_path: string;
+  /** WireU64 string; formatting may safely down-convert for display only. */
+  size_bytes?: string;
+  /** Host-inspected media metadata; old projects may omit it. */
+  metadata?: AssetMetadata | null;
 }
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
@@ -427,7 +477,7 @@ export interface EditorDiagnostic {
   message: string;
   scene_id: string | null;
   node_id: string | null;
-  workspace?: "story" | "flow";
+  workspace?: "story" | "flow" | "map";
   flow_element_id?: string | null;
 }
 
@@ -437,6 +487,7 @@ export interface EditorProject {
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
   story_flow: StoryFlowFile | null;
+  chapter_map?: ChapterMapFile | null;
   layout: EditorLayout;
   assets: EditorAsset[];
   diagnostics: EditorDiagnostic[];
@@ -448,8 +499,11 @@ export interface SaveProjectRequest {
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
   story_flow: StoryFlowFile | null;
+  chapter_map: ChapterMapFile | null;
   layout: EditorLayout;
   expected_fingerprint: string;
+  /** Opaque host-issued handles for binaries staged by the import dialog. */
+  import_tokens?: string[];
 }
 
 export interface SaveProjectResult {
@@ -512,6 +566,17 @@ export interface ImportedAsset {
   kind: AssetKind;
   path: string;
   absolute_path: string;
+  size_bytes: string;
+  token?: string | null;
+  /** Existing formal file reused by this new logical registration. */
+  reused_from?: string | null;
+}
+
+export interface ImportAssetRequest {
+  id: string;
+  kind: AssetKind;
+  file_name?: string;
+  inspection_id?: string;
 }
 import type {
   RuntimeSnapshot,

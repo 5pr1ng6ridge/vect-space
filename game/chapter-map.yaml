@@ -1,0 +1,51 @@
+schema_version: 1
+width: 1920
+height: 1080
+view_x: 960
+view_y: 540
+background: bg.vector_space
+decorations:
+- id: jelly-guide
+  asset: sprite.jelly
+  x: 40
+  "y": 760
+  width: 180
+  height: 260
+  z: 1
+hotspots:
+- id: prologue
+  scene_id: prologue
+  title: 序章
+  x: 220
+  "y": 420
+  width: 300
+  height: 180
+  z: 2
+  asset: gui.name_box
+  reveal:
+    mode: completed
+  variable_overrides: {}
+- id: test-scene
+  scene_id: test_scene
+  title: 测试场景
+  x: 800
+  "y": 420
+  width: 300
+  height: 180
+  z: 2
+  asset: gui.name_box
+  reveal:
+    mode: always
+  variable_overrides: {}
+- id: sandbox
+  scene_id: sandbox
+  title: 功能实验室
+  x: 1400
+  "y": 420
+  width: 300
+  height: 180
+  z: 2
+  asset: gui.name_box
+  reveal:
+    mode: always
+  variable_overrides: {}

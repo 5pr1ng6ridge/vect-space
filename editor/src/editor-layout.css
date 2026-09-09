@@ -1,0 +1,356 @@
+/* Editor chrome: keep authoring layout separate from preview/content styles. */
+.editor-shell {
+  --line: #2b303a;
+  --line-soft: #222730;
+  --panel: #15181e;
+  --panel-2: #1b1f27;
+  --muted: #9aa4b5;
+  --chrome-height: 64px;
+  --status-height: 30px;
+  grid-template-columns:
+    min(var(--left-sidebar-width), 24vw) minmax(0, 1fr)
+    min(var(--right-sidebar-width), 30vw);
+  grid-template-rows: var(--chrome-height) minmax(0, 1fr) var(--status-height);
+  background: #101217;
+  font-size: 12px;
+}
+
+.app-toolbar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 24px;
+  padding: 0 20px;
+  background: #171a21;
+}
+
+.toolbar-brand > span {
+  width: 34px;
+  height: 34px;
+  background: #21352f;
+  border-color: #35594d;
+}
+
+.toolbar-project {
+  justify-content: flex-start;
+  overflow: hidden;
+}
+.toolbar-project strong,
+.toolbar-project small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toolbar-project small {
+  border-left: 1px solid var(--line);
+  padding-left: 12px;
+}
+.toolbar-actions {
+  gap: 5px;
+}
+.toolbar-actions button {
+  padding: 0 11px;
+  background: transparent;
+  border-color: transparent;
+}
+.toolbar-actions .primary-button {
+  margin-left: 6px;
+  background: #68d7bb;
+  border-color: #68d7bb;
+  color: #102b23;
+  font-weight: 700;
+}
+.toolbar-actions .primary-button:hover:not(:disabled) {
+  background: #8ae5cd;
+  color: #102b23;
+}
+
+.project-sidebar {
+  min-width: 0;
+}
+.sidebar-tabs {
+  flex: 0 0 52px;
+  padding: 8px 10px;
+  gap: 3px;
+}
+.sidebar-tabs button {
+  border: 0;
+  border-radius: 6px;
+  font-weight: 600;
+}
+.sidebar-tabs button.active {
+  background: #263b35;
+  color: #9be8d4;
+}
+.project-search {
+  padding: 14px 14px 4px;
+}
+.project-search > input {
+  font-size: 11px;
+  height: 34px;
+}
+.sidebar-body {
+  padding: 12px 14px;
+}
+.scene-row {
+  margin-bottom: 5px;
+}
+.scene-row.active {
+  background: #20332e;
+  border-color: #35554b;
+  box-shadow: inset 3px 0 #68d7bb;
+}
+.scene-main {
+  min-height: 60px;
+}
+.scene-main strong {
+  white-space: nowrap;
+}
+.scene-row:focus-within .scene-row-actions {
+  display: flex;
+}
+
+.workspace {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.workspace-toolbar {
+  position: relative;
+  top: auto;
+  left: auto;
+  flex: 0 0 52px;
+  width: 100%;
+  height: auto;
+  padding: 8px 12px;
+  gap: 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: #15181e;
+  box-shadow: none;
+  overflow-x: auto;
+}
+.workspace-toolbar select,
+.workspace-toolbar > button {
+  flex-shrink: 0;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1d222b;
+}
+.workspace-toolbar select {
+  width: 138px;
+  margin-left: auto;
+}
+.workspace-toolbar > button {
+  white-space: nowrap;
+}
+.view-switch {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 3px;
+  border: 0;
+  background: #0e1116;
+}
+.view-switch button {
+  border: 0;
+  border-radius: 4px;
+  color: var(--muted);
+}
+.view-switch button + button {
+  border-left: 0;
+}
+.view-switch button.active {
+  background: #2a3935;
+  color: #a3ebd8;
+}
+.workspace > .graph-shell {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+}
+.workspace > .script-view {
+  flex: 1;
+  height: auto;
+  overflow: hidden;
+}
+.graph-toolbar {
+  padding: 5px;
+  height: auto;
+  max-width: calc(100% - 24px);
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #171b23;
+}
+.graph-toolbar button {
+  border-color: transparent;
+}
+.story-node {
+  box-shadow: 0 5px 18px rgb(0 0 0 / 18%);
+}
+.inspector-header {
+  min-height: 74px;
+  background: #191d24;
+}
+.inspector-header h2 {
+  font-size: 16px;
+}
+.inspector-section {
+  padding: 18px;
+}
+.field {
+  gap: 7px;
+  margin-bottom: 16px;
+}
+.field-label {
+  font-size: 11px;
+  color: #b8c1d0;
+}
+.editor-shell input,
+.editor-shell textarea,
+.editor-shell select {
+  background-color: #101319;
+}
+.editor-shell :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.editor-shell * {
+  scrollbar-width: thin;
+  scrollbar-color: #3b4351 transparent;
+}
+
+.resize-handle-left,
+.resize-handle-right {
+  top: var(--chrome-height);
+  bottom: var(--status-height);
+  width: 6px;
+}
+.resize-handle-left {
+  left: calc(min(var(--left-sidebar-width), 24vw) - 3px);
+}
+.resize-handle-right {
+  right: calc(min(var(--right-sidebar-width), 30vw) - 3px);
+}
+.editor-statusbar {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  padding: 0 16px;
+  border-top: 1px solid var(--line);
+  background: #171a21;
+  color: var(--muted);
+  font-size: 10px;
+}
+.editor-statusbar > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.editor-statusbar .status-saved {
+  color: #8bd4bd;
+  flex-shrink: 0;
+}
+.editor-statusbar .status-unsaved {
+  color: var(--warning);
+  flex-shrink: 0;
+}
+.status-help {
+  margin-left: auto;
+}
+.editor-statusbar button {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.editor-shell.panels-hidden {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+.panels-hidden > .project-sidebar,
+.panels-hidden > .inspector,
+.panels-hidden > .resize-handle {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .app-toolbar {
+    padding: 0 12px;
+    gap: 14px;
+  }
+  .toolbar-brand div {
+    display: none;
+  }
+  .toolbar-project small {
+    display: none;
+  }
+  .toolbar-actions button {
+    padding: 0 8px;
+  }
+  .sidebar-body {
+    padding: 10px;
+  }
+  .inspector-section {
+    padding: 14px;
+  }
+  .status-help {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .editor-shell {
+    --chrome-height: 98px;
+    grid-template-columns: min(var(--left-sidebar-width), 32vw) minmax(0, 1fr) 0;
+    grid-template-rows:
+      var(--chrome-height) minmax(0, 1fr) minmax(120px, 30%)
+      var(--status-height);
+  }
+  .app-toolbar {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0 12px;
+    padding: 8px 12px;
+  }
+  .toolbar-actions {
+    grid-column: 1 / -1;
+    overflow-x: auto;
+  }
+  .toolbar-actions button {
+    flex-shrink: 0;
+  }
+  .editor-shell > .inspector {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+  .editor-statusbar {
+    grid-row: 4;
+  }
+  .editor-shell.panels-hidden {
+    grid-template-rows: var(--chrome-height) minmax(0, 1fr) var(--status-height);
+  }
+  .panels-hidden .editor-statusbar {
+    grid-row: 3;
+  }
+  .editor-shell > .resize-handle-right {
+    display: none;
+  }
+  .resize-handle-left {
+    left: calc(min(var(--left-sidebar-width), 32vw) - 3px);
+    bottom: calc(30% + var(--status-height));
+  }
+  .sidebar-tabs {
+    padding: 6px 3px;
+    gap: 0;
+  }
+  .workspace-toolbar {
+    gap: 4px;
+    padding: 8px;
+  }
+}

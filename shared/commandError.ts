@@ -7,6 +7,7 @@ import type {
 const ERROR_CODES: readonly WireCommandErrorCode[] = [
   "validation",
   "stale_project",
+  "stale_session",
   "io",
   "asset",
   "preview_unreachable",

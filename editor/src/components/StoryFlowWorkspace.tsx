@@ -10,6 +10,7 @@ import {
   type Connection,
   type Edge,
   type Node,
+  type NodeMouseHandler,
 } from "@xyflow/react";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { ConditionEditor } from "./NodeInspector";
@@ -132,8 +133,9 @@ export function StoryFlowWorkspace({
           ),
         },
         style: { width: WIDTH, height: HEIGHT },
+        selected: selected?.kind === "node" && selected.id === id,
       })),
-    [flow.nodes],
+    [flow.nodes, selected],
   );
   const edges = useMemo<Edge[]>(
     () =>
@@ -215,6 +217,12 @@ export function StoryFlowWorkspace({
       ],
     });
   };
+  const selectNode: NodeMouseHandler = (event, node): void => {
+    // Claim the gesture as soon as React Flow recognizes a node. This keeps a
+    // small pointer movement from being interpreted as a pane pan.
+    event.stopPropagation();
+    setSelected({ kind: "node", id: node.id });
+  };
   return (
     <div className="flow-workspace">
       <header className="timeline-topbar">
@@ -279,7 +287,8 @@ export function StoryFlowWorkspace({
               connectionLineType={ConnectionLineType.Straight}
               onInit={setInstance}
               onConnect={connect}
-              onNodeClick={(_, node) =>
+              onNodeClick={selectNode}
+              onNodeDragStart={(_, node) =>
                 setSelected({ kind: "node", id: node.id })
               }
               onEdgeClick={(_, edge) =>

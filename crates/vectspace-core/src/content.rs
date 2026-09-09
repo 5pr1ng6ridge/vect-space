@@ -9,12 +9,13 @@ use schemars::schema_for;
 use thiserror::Error;
 
 use crate::model::{
-    AssetDefinition, AssetKind, AudioAction, CharacterDefinition, ConditionExpression,
-    ContentManifest, DialogueMode, LongTextMode, LongTextPagination, MutationValue, ResolvedAsset,
-    ScalarValue, SceneDefinition, SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal,
-    TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings,
-    UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation, VariableScope,
-    VariableType, LONG_TEXT_FONT_SIZE_MAX, LONG_TEXT_FONT_SIZE_MIN,
+    AssetDefinition, AssetKind, AudioAction, ChapterMapDefinition, CharacterDefinition,
+    ConditionExpression, ContentManifest, DialogueMode, LongTextMode, LongTextPagination,
+    MutationValue, ResolvedAsset, ScalarValue, SceneDefinition, SceneNode, SpriteAction,
+    StoryFlowDefinition, StoryFlowReveal, TimelineChannels, TimelineEasing, TimelineEvent,
+    TimelineTrack, UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition,
+    VariableOperation, VariableScope, VariableType, LONG_TEXT_FONT_SIZE_MAX,
+    LONG_TEXT_FONT_SIZE_MIN,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -28,6 +29,11 @@ const MAX_TIMELINE_EVENTS: usize = 2_048;
 const MAX_LONG_TEXT_STEPS: usize = 1_024;
 const UI_MOTION_SCHEMA_VERSION: u32 = 1;
 const STORY_FLOW_SCHEMA_VERSION: u32 = 1;
+const CHAPTER_MAP_SCHEMA_VERSION: u32 = 1;
+const CHAPTER_MAP_MIN_WIDTH: u32 = 1920;
+const CHAPTER_MAP_MIN_HEIGHT: u32 = 1080;
+const CHAPTER_MAP_MAX_SIZE: u32 = 16_380;
+const CHAPTER_MAP_GRID: i32 = 20;
 
 #[derive(Debug, Error)]
 pub enum ContentError {
@@ -45,10 +51,14 @@ pub enum ContentError {
 #[derive(Debug)]
 pub struct ContentCatalog {
     assets_root: PathBuf,
+    /// Trusted host supplied paths for assets that only exist in an editor
+    /// import staging directory.  This never comes from the WebView.
+    asset_overrides: BTreeMap<String, PathBuf>,
     pub manifest: ContentManifest,
     pub scenes: BTreeMap<String, SceneDefinition>,
     pub ui_motions: BTreeMap<String, UiMotionPreset>,
     pub story_flow: Option<StoryFlowDefinition>,
+    pub chapter_map: Option<ChapterMapDefinition>,
 }
 
 impl ContentCatalog {
@@ -62,12 +72,13 @@ impl ContentCatalog {
                 manifest.schema_version
             )));
         }
+        validate_manifest_paths(&manifest)?;
         validate_identifier("entry_scene", &manifest.entry_scene)?;
         validate_variable_definitions(&manifest.variables)?;
         validate_character_definitions(&manifest.characters)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
-        validate_assets(&assets_root, &manifest.assets)?;
+        validate_assets(&assets_root, &manifest.assets, &BTreeMap::new())?;
         validate_default_font(&manifest)?;
 
         let ui_motions = load_ui_motions(&root, &manifest.ui_motions)?;
@@ -112,13 +123,22 @@ impl ContentCatalog {
             &scenes,
             &manifest.variables,
         )?;
+        let chapter_map = load_chapter_map(
+            &root,
+            manifest.chapter_map.as_deref(),
+            &scenes,
+            &manifest.assets,
+            &manifest.variables,
+        )?;
 
         Ok(Self {
             assets_root,
+            asset_overrides: BTreeMap::new(),
             manifest,
             scenes,
             ui_motions,
             story_flow,
+            chapter_map,
         })
     }
 
@@ -134,6 +154,66 @@ impl ContentCatalog {
         ui_motion_files: BTreeMap<String, UiMotionPreset>,
         story_flow: Option<StoryFlowDefinition>,
     ) -> Result<Self, ContentError> {
+        // Keep the original helper useful for callers that have not yet
+        // started modelling the optional room map.  When the manifest
+        // references one, resolve the current on-disk document rather than
+        // silently dropping it (which would make an otherwise valid
+        // in-memory candidate fail the manifest/document consistency check).
+        let chapter_map = if manifest.chapter_map.is_some() {
+            load_chapter_map(
+                &root,
+                manifest.chapter_map.as_deref(),
+                &scenes,
+                &manifest.assets,
+                &manifest.variables,
+            )?
+        } else {
+            None
+        };
+        Self::from_documents_with_chapter_map(
+            root,
+            manifest,
+            scenes,
+            ui_motion_files,
+            story_flow,
+            chapter_map,
+        )
+    }
+
+    /// In-memory project construction with an optional room map.  The
+    /// compatibility wrapper above keeps existing editor/test callers that do
+    /// not model the map source compatible.
+    pub fn from_documents_with_chapter_map(
+        root: PathBuf,
+        manifest: ContentManifest,
+        scenes: BTreeMap<String, SceneDefinition>,
+        ui_motion_files: BTreeMap<String, UiMotionPreset>,
+        story_flow: Option<StoryFlowDefinition>,
+        chapter_map: Option<ChapterMapDefinition>,
+    ) -> Result<Self, ContentError> {
+        Self::from_documents_with_chapter_map_and_asset_overrides(
+            root,
+            manifest,
+            scenes,
+            ui_motion_files,
+            story_flow,
+            chapter_map,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Builds an in-memory catalog while allowing trusted host code to supply
+    /// paths for newly staged assets.  The paths are only used for validation
+    /// and resolution; they are never accepted from the WebView directly.
+    pub fn from_documents_with_chapter_map_and_asset_overrides(
+        root: PathBuf,
+        manifest: ContentManifest,
+        scenes: BTreeMap<String, SceneDefinition>,
+        ui_motion_files: BTreeMap<String, UiMotionPreset>,
+        story_flow: Option<StoryFlowDefinition>,
+        chapter_map: Option<ChapterMapDefinition>,
+        asset_overrides: &BTreeMap<String, PathBuf>,
+    ) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
         if manifest.schema_version != CONTENT_SCHEMA_VERSION {
             return Err(ContentError::Validation(format!(
@@ -141,12 +221,13 @@ impl ContentCatalog {
                 manifest.schema_version
             )));
         }
+        validate_manifest_paths(&manifest)?;
         validate_identifier("entry_scene", &manifest.entry_scene)?;
         validate_variable_definitions(&manifest.variables)?;
         validate_character_definitions(&manifest.characters)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
-        validate_assets(&assets_root, &manifest.assets)?;
+        validate_assets(&assets_root, &manifest.assets, asset_overrides)?;
         validate_default_font(&manifest)?;
         let ui_motions = validate_ui_motion_files(&manifest.ui_motions, &ui_motion_files)?;
         validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
@@ -187,18 +268,37 @@ impl ContentCatalog {
         if let Some(flow) = &story_flow {
             validate_story_flow(flow, &scenes, &manifest.variables)?;
         }
+        if manifest.chapter_map.is_some() != chapter_map.is_some() {
+            return Err(ContentError::Validation(
+                "manifest 的 chapter_map 与编辑器文档不一致".to_owned(),
+            ));
+        }
+        if let Some(map) = &chapter_map {
+            validate_chapter_map(map, &scenes, &manifest.assets, &manifest.variables)?;
+        }
 
         Ok(Self {
             assets_root,
+            asset_overrides: asset_overrides.clone(),
             manifest,
             scenes,
             ui_motions,
             story_flow,
+            chapter_map,
         })
     }
 
     pub fn assets_root(&self) -> &Path {
         &self.assets_root
+    }
+
+    /// Drop trusted editor-only asset overrides after an authoring transaction
+    /// has published the staged files into the project's formal `assets/`
+    /// tree.  The catalog has already been fully validated at this point, so
+    /// rebasing the resolver is infallible and does not need to touch disk.
+    pub fn into_published(mut self) -> Self {
+        self.asset_overrides.clear();
+        self
     }
 
     pub fn scene(&self, id: &str) -> Result<&SceneDefinition, ContentError> {
@@ -222,7 +322,10 @@ impl ContentCatalog {
                 ContentError::Validation(format!("素材未登记或素材 ID 未知: {id}"))
             })?;
             let relative = validate_relative_path(&definition.path)?;
-            let path = canonical_file_within(&self.assets_root, &self.assets_root.join(relative))?;
+            let path = match self.asset_overrides.get(id) {
+                Some(override_path) => canonical_staged_asset(override_path)?,
+                None => canonical_file_within(&self.assets_root, &self.assets_root.join(relative))?,
+            };
             resolved.push(ResolvedAsset {
                 id: id.clone(),
                 kind: definition.kind,
@@ -244,6 +347,10 @@ impl ContentCatalog {
         write_schema(
             &target.join("story-flow.schema.json"),
             &schema_for!(StoryFlowDefinition),
+        )?;
+        write_schema(
+            &target.join("chapter-map.schema.json"),
+            &schema_for!(ChapterMapDefinition),
         )?;
         write_schema(
             &target.join("scene.schema.json"),
@@ -305,6 +412,210 @@ fn load_story_flow(
     let flow: StoryFlowDefinition = read_yaml(&full_path)?;
     validate_story_flow(&flow, scenes, variables)?;
     Ok(Some(flow))
+}
+
+fn load_chapter_map(
+    root: &Path,
+    path: Option<&str>,
+    scenes: &BTreeMap<String, SceneDefinition>,
+    assets: &BTreeMap<String, AssetDefinition>,
+    variables: &BTreeMap<String, VariableDefinition>,
+) -> Result<Option<ChapterMapDefinition>, ContentError> {
+    let Some(path) = path else { return Ok(None) };
+    let relative = validate_relative_path(path)?;
+    let full_path = canonical_file_within(root, &root.join(relative))?;
+    let map: ChapterMapDefinition = read_yaml(&full_path)?;
+    validate_chapter_map(&map, scenes, assets, variables)?;
+    Ok(Some(map))
+}
+
+fn validate_chapter_map(
+    map: &ChapterMapDefinition,
+    scenes: &BTreeMap<String, SceneDefinition>,
+    assets: &BTreeMap<String, AssetDefinition>,
+    variables: &BTreeMap<String, VariableDefinition>,
+) -> Result<(), ContentError> {
+    if map.schema_version != CHAPTER_MAP_SCHEMA_VERSION {
+        return Err(ContentError::Validation(format!(
+            "不支持 chapter map schema_version {}",
+            map.schema_version
+        )));
+    }
+    if !(CHAPTER_MAP_MIN_WIDTH..=CHAPTER_MAP_MAX_SIZE).contains(&map.width)
+        || !(CHAPTER_MAP_MIN_HEIGHT..=CHAPTER_MAP_MAX_SIZE).contains(&map.height)
+    {
+        return Err(ContentError::Validation(format!(
+            "地图尺寸宽度必须在 {CHAPTER_MAP_MIN_WIDTH} 到 {CHAPTER_MAP_MAX_SIZE} 之间，高度必须在 {CHAPTER_MAP_MIN_HEIGHT} 到 {CHAPTER_MAP_MAX_SIZE} 之间"
+        )));
+    }
+    if !map.width.is_multiple_of(CHAPTER_MAP_GRID as u32)
+        || !map.height.is_multiple_of(CHAPTER_MAP_GRID as u32)
+    {
+        return Err(ContentError::Validation(
+            "地图宽高必须吸附到 20px 网格".to_owned(),
+        ));
+    }
+    let valid_view_x = valid_map_view_center(map.view_x, map.width, 1920);
+    let valid_view_y = valid_map_view_center(map.view_y, map.height, 1080);
+    if !valid_view_x || !valid_view_y {
+        return Err(ContentError::Validation(
+            "地图初始视图中心超出 1920×1080 视口边界".to_owned(),
+        ));
+    }
+    if map.view_x.rem_euclid(CHAPTER_MAP_GRID) != 0 || map.view_y.rem_euclid(CHAPTER_MAP_GRID) != 0
+    {
+        return Err(ContentError::Validation(
+            "地图初始视图中心必须吸附到 20px 网格".to_owned(),
+        ));
+    }
+    if let Some(background) = &map.background {
+        validate_map_asset(background, assets, AssetKind::Background, "地图背景")?;
+    }
+    let mut ids = BTreeSet::new();
+    for decoration in &map.decorations {
+        validate_identifier("地图装饰 ID", &decoration.id)?;
+        if !ids.insert(&decoration.id) {
+            return Err(ContentError::Validation(format!(
+                "地图对象 ID 重复: {}",
+                decoration.id
+            )));
+        }
+        validate_map_asset(&decoration.asset, assets, AssetKind::Gui, "地图装饰").or_else(
+            |_| validate_map_asset(&decoration.asset, assets, AssetKind::Sprite, "地图装饰"),
+        )?;
+        validate_map_rect(
+            decoration.x,
+            decoration.y,
+            decoration.width,
+            decoration.height,
+            map,
+            &decoration.id,
+        )?;
+    }
+    let mut scenes_in_map = BTreeSet::new();
+    for hotspot in &map.hotspots {
+        validate_identifier("章节热点 ID", &hotspot.id)?;
+        if !ids.insert(&hotspot.id) {
+            return Err(ContentError::Validation(format!(
+                "地图对象 ID 重复: {}",
+                hotspot.id
+            )));
+        }
+        if !scenes.contains_key(&hotspot.scene_id) {
+            return Err(ContentError::Validation(format!(
+                "章节热点 {} 引用了未知 Scene {}",
+                hotspot.id, hotspot.scene_id
+            )));
+        }
+        if !scenes_in_map.insert(&hotspot.scene_id) {
+            return Err(ContentError::Validation(format!(
+                "Scene {} 在地图中有多个章节热点",
+                hotspot.scene_id
+            )));
+        }
+        validate_display_name(&hotspot.title).map_err(|message| {
+            ContentError::Validation(format!("章节热点 {} 标题无效: {message}", hotspot.id))
+        })?;
+        if let Some(asset) = &hotspot.asset {
+            validate_map_asset(asset, assets, AssetKind::Gui, "章节热点")
+                .or_else(|_| validate_map_asset(asset, assets, AssetKind::Sprite, "章节热点"))?;
+        }
+        validate_map_rect(
+            hotspot.x,
+            hotspot.y,
+            hotspot.width,
+            hotspot.height,
+            map,
+            &hotspot.id,
+        )?;
+        if let StoryFlowReveal::Condition { condition } = &hotspot.reveal {
+            validate_condition(condition, variables, "chapter_map", &hotspot.id)?;
+            validate_profile_only_condition(condition, variables, &hotspot.id)?;
+        }
+        for (id, value) in &hotspot.variable_overrides {
+            let definition = variables.get(id).ok_or_else(|| {
+                ContentError::Validation(format!("章节热点 {} 覆盖了未声明变量 {}", hotspot.id, id))
+            })?;
+            validate_value_for_type(value, definition.value_type).map_err(|message| {
+                ContentError::Validation(format!(
+                    "章节热点 {} 的变量 {} 无效: {message}",
+                    hotspot.id, id
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// A map's initial view is a viewport center, not an arbitrary point in the
+/// room.  Keeping this check in the content validator prevents a hand-edited
+/// map from opening with part of the 1920×1080 game viewport outside the room.
+fn valid_map_view_center(value: i32, room_size: u32, viewport_size: u32) -> bool {
+    if value < 0 {
+        return false;
+    }
+    let value = value as u32;
+    if room_size <= viewport_size {
+        return value == room_size / 2;
+    }
+    let half = viewport_size / 2;
+    value >= half && value <= room_size.saturating_sub(half)
+}
+
+fn validate_map_asset(
+    id: &str,
+    assets: &BTreeMap<String, AssetDefinition>,
+    kind: AssetKind,
+    label: &str,
+) -> Result<(), ContentError> {
+    let definition = assets
+        .get(id)
+        .ok_or_else(|| ContentError::Validation(format!("{label}引用了未知素材 {id}")))?;
+    if definition.kind != kind {
+        return Err(ContentError::Validation(format!(
+            "{label}素材 {id} 必须是 {kind:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_map_rect(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    map: &ChapterMapDefinition,
+    id: &str,
+) -> Result<(), ContentError> {
+    if x < 0
+        || y < 0
+        || width == 0
+        || height == 0
+        || x % CHAPTER_MAP_GRID != 0
+        || y % CHAPTER_MAP_GRID != 0
+        || !width.is_multiple_of(CHAPTER_MAP_GRID as u32)
+        || !height.is_multiple_of(CHAPTER_MAP_GRID as u32)
+    {
+        return Err(ContentError::Validation(format!(
+            "地图对象 {id} 的位置和尺寸必须是正数并吸附到 20px 网格"
+        )));
+    }
+    let Some(right) = (x as u32).checked_add(width) else {
+        return Err(ContentError::Validation(format!(
+            "地图对象 {id} 超出房间边界"
+        )));
+    };
+    let Some(bottom) = (y as u32).checked_add(height) else {
+        return Err(ContentError::Validation(format!(
+            "地图对象 {id} 超出房间边界"
+        )));
+    };
+    if right > map.width || bottom > map.height {
+        return Err(ContentError::Validation(format!(
+            "地图对象 {id} 超出房间边界"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_story_flow(
@@ -541,6 +852,7 @@ fn validate_ui_motion_reference(
 fn validate_assets(
     assets_root: &Path,
     assets: &BTreeMap<String, AssetDefinition>,
+    asset_overrides: &BTreeMap<String, PathBuf>,
 ) -> Result<(), ContentError> {
     if assets.is_empty() {
         return Err(ContentError::Validation("素材表不能为空".to_owned()));
@@ -548,7 +860,10 @@ fn validate_assets(
     for (id, definition) in assets {
         validate_identifier("asset id", id)?;
         let relative = validate_relative_path(&definition.path)?;
-        let asset_path = canonical_file_within(assets_root, &assets_root.join(relative))?;
+        let asset_path = match asset_overrides.get(id) {
+            Some(override_path) => canonical_staged_asset(override_path)?,
+            None => canonical_file_within(assets_root, &assets_root.join(relative))?,
+        };
         reject_git_lfs_pointer(id, &asset_path)?;
         if definition.kind == AssetKind::Video
             && Path::new(&definition.path)
@@ -560,6 +875,45 @@ fn validate_assets(
                 "视频素材 {id} 必须使用 .mp4（H.264/AAC）"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Validate the complete set of content document paths before any of them is
+/// loaded or written.  Windows resolves paths case-insensitively, so a
+/// case-only rename such as `scenes/Intro.yaml` → `scenes/intro.yaml` must not
+/// be treated as two independent files by the journal.  Content documents
+/// are also kept out of the managed asset and editor-metadata trees to prevent
+/// an authoring request from overwriting a binary or layout file.
+fn validate_manifest_paths(manifest: &ContentManifest) -> Result<(), ContentError> {
+    let mut seen = BTreeMap::<String, String>::new();
+    let mut register = |label: &str, path: &str| -> Result<(), ContentError> {
+        let relative = validate_relative_path(path)?;
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let key = normalized.to_lowercase();
+        if key == "manifest.yaml" || key.starts_with("assets/") || key.starts_with(".vectspace/") {
+            return Err(ContentError::Validation(format!(
+                "{label} 路径不能覆盖受管制文件: {path}"
+            )));
+        }
+        if let Some(previous) = seen.insert(key, label.to_owned()) {
+            return Err(ContentError::Validation(format!(
+                "内容文件路径与 {previous} 冲突: {path}"
+            )));
+        }
+        Ok(())
+    };
+    for path in &manifest.scenes {
+        register("scene", path)?;
+    }
+    for path in &manifest.ui_motions {
+        register("ui_motion", path)?;
+    }
+    if let Some(path) = &manifest.story_flow {
+        register("story_flow", path)?;
+    }
+    if let Some(path) = &manifest.chapter_map {
+        register("chapter_map", path)?;
     }
     Ok(())
 }
@@ -1979,6 +2333,20 @@ fn canonical_file_within(root: &Path, path: &Path) -> Result<PathBuf, ContentErr
     Ok(canonical)
 }
 
+fn canonical_staged_asset(path: &Path) -> Result<PathBuf, ContentError> {
+    let canonical = fs::canonicalize(path).map_err(|source| ContentError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !canonical.is_file() {
+        return Err(ContentError::Validation(format!(
+            "暂存素材不是文件: {}",
+            path.display()
+        )));
+    }
+    Ok(canonical)
+}
+
 fn node_error<T>(scene_id: &str, node_id: &str, message: &str) -> Result<T, ContentError> {
     Err(ContentError::Validation(format!(
         "{scene_id}/{node_id}: {message}"
@@ -1991,8 +2359,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        LiteralOperand, TimelineEasingPreset, TimelineKeyframe, TimelineKeyframeKeyword,
-        TimelineKeyframeValue, VariableOperand,
+        ChapterMapHotspot, LiteralOperand, StoryFlowReveal, TimelineEasingPreset, TimelineKeyframe,
+        TimelineKeyframeKeyword, TimelineKeyframeValue, VariableMap, VariableOperand,
     };
 
     #[test]
@@ -2000,6 +2368,115 @@ mod tests {
         assert!(validate_relative_path("../secret.yaml").is_err());
         assert!(validate_relative_path("assets/../../secret").is_err());
         assert!(validate_relative_path("backgrounds/room.png").is_ok());
+    }
+
+    #[test]
+    fn managed_document_paths_are_case_insensitive_and_cannot_target_metadata() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
+        let catalog = ContentCatalog::from_root(root).unwrap();
+        let mut manifest = catalog.manifest.clone();
+        manifest.scenes = vec![
+            "scenes/intro.yaml".to_owned(),
+            "scenes/INTRO.yaml".to_owned(),
+        ];
+        assert!(validate_manifest_paths(&manifest)
+            .unwrap_err()
+            .to_string()
+            .contains("冲突"));
+
+        manifest.scenes = vec!["assets/scene.yaml".to_owned()];
+        assert!(validate_manifest_paths(&manifest).is_err());
+    }
+
+    #[test]
+    fn chapter_map_grid_and_checked_bounds_reject_invalid_geometry() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
+        let catalog = ContentCatalog::from_root(root).unwrap();
+        let mut map = ChapterMapDefinition {
+            schema_version: CHAPTER_MAP_SCHEMA_VERSION,
+            width: 1920,
+            height: 1080,
+            view_x: 960,
+            view_y: 540,
+            background: None,
+            decorations: Vec::new(),
+            hotspots: vec![ChapterMapHotspot {
+                id: "entry".to_owned(),
+                scene_id: "prologue".to_owned(),
+                title: "入口".to_owned(),
+                x: 240,
+                y: 460,
+                width: 280,
+                height: 160,
+                z: 1,
+                asset: None,
+                reveal: StoryFlowReveal::Completed,
+                variable_overrides: VariableMap::new(),
+            }],
+        };
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_ok());
+
+        map.width = 1930;
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_err());
+
+        map.width = 1920;
+        map.hotspots[0].x = i32::MAX;
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_err());
+
+        map.hotspots[0].x = 240;
+        map.view_x = 0;
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_err());
+        map.view_x = 960;
+        map.width = 3840;
+        map.view_x = 960 - 20;
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_err());
+        map.view_x = 960;
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_ok());
+
+        map.view_x = 951;
+        assert!(validate_chapter_map(
+            &map,
+            &catalog.scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+        )
+        .is_err());
     }
 
     #[test]
@@ -2029,6 +2506,7 @@ mod tests {
             "manifest.schema.json",
             "scene.schema.json",
             "story-flow.schema.json",
+            "chapter-map.schema.json",
             "ui-motion.schema.json",
         ] {
             assert_eq!(

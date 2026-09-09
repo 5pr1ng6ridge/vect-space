@@ -13,6 +13,7 @@
     "./scene-surface": "./src/sceneSurface.ts",
     "./types": "./src/types.ts",
     "./ui-motion": "./src/uiMotion.ts",
+    "./chapter-map": "./src/chapterMap.ts",
     "./virtual-clock": "./src/virtualClock.ts",
     "./browser-guards": "./src/browserGuards.ts"
   },

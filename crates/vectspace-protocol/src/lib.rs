@@ -33,6 +33,14 @@ pub enum WireScalarValue {
 )]
 pub struct WireU64(pub String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireSessionMode.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum WireSessionMode {
+    Story,
+    Replay,
+}
+
 impl Serialize for WireU64 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -67,6 +75,123 @@ impl From<u64> for WireU64 {
 
 pub type WireVariableMap = BTreeMap<String, WireScalarValue>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireAssetKind.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum WireAssetKind {
+    Background,
+    Sprite,
+    Gui,
+    Bgm,
+    Sfx,
+    Video,
+    Font,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireAssetMetadata.ts")]
+pub struct WireAssetMetadata {
+    pub format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Media durations are not bounded by the IPC contract.  Keep them in
+    /// the same canonical decimal wire form as other u64 values so a very
+    /// long container can never be rounded by WebView JSON parsing.
+    pub duration_ms: Option<WireU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_style: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireAssetDiagnostic.ts")]
+pub struct WireAssetDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireAssetReuseCandidate.ts"
+)]
+pub struct WireAssetReuseCandidate {
+    pub id: String,
+    pub kind: WireAssetKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireAssetInspection.ts")]
+pub struct WireAssetInspection {
+    pub inspection_id: String,
+    pub source_name: String,
+    pub detected_format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_kind: Option<WireAssetKind>,
+    pub size_bytes: WireU64,
+    pub sha256: String,
+    pub metadata: WireAssetMetadata,
+    pub reuse_candidates: Vec<WireAssetReuseCandidate>,
+    pub diagnostics: Vec<WireAssetDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireInspectAssetImportsRequest.ts"
+)]
+pub struct WireInspectAssetImportsRequest {
+    pub source_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireImportAssetRequest.ts"
+)]
+pub struct WireImportAssetRequest {
+    pub id: String,
+    pub kind: WireAssetKind,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub inspection_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireStageAssetImportsRequest.ts"
+)]
+pub struct WireStageAssetImportsRequest {
+    #[serde(default)]
+    pub requests: Vec<WireImportAssetRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireImportedAsset.ts")]
+pub struct WireImportedAsset {
+    pub id: String,
+    pub kind: WireAssetKind,
+    pub path: String,
+    pub absolute_path: String,
+    pub size_bytes: WireU64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reused_from: Option<String>,
+}
+
 /// Stable error envelope returned by every Tauri command.  Keeping the code
 /// separate from the localized message lets the UI decide whether to focus
 /// the problems panel, ask the user to reload, or merely show a toast without
@@ -93,6 +218,7 @@ pub struct WireCommandError {
 pub enum WireCommandErrorCode {
     Validation,
     StaleProject,
+    StaleSession,
     Io,
     Asset,
     PreviewUnreachable,
@@ -171,6 +297,8 @@ impl From<RuntimeError> for WireCommandError {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRuntimeSnapshot {
+    pub session_id: WireU64,
+    pub mode: WireSessionMode,
     pub revision: WireU64,
     pub location: StoryLocation,
     pub variables: WireVariableMap,
@@ -186,6 +314,8 @@ pub struct WireRuntimeSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRuntimeUpdate {
+    pub session_id: WireU64,
+    pub mode: WireSessionMode,
     pub update_id: WireU64,
     pub snapshot: WireRuntimeSnapshot,
     #[serde(serialize_with = "serialize_cues")]
@@ -217,6 +347,8 @@ pub struct WireBootstrapPayload {
     pub asset_ids: Vec<String>,
     pub content_version: String,
     pub story_flow_available: bool,
+    #[serde(default)]
+    pub chapter_map_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font: Option<String>,
 }
@@ -256,7 +388,19 @@ impl From<ScalarValue> for WireScalarValue {
 
 impl From<RuntimeSnapshot> for WireRuntimeSnapshot {
     fn from(snapshot: RuntimeSnapshot) -> Self {
+        Self::with_session(snapshot, WireU64::from(0), WireSessionMode::Story)
+    }
+}
+
+impl WireRuntimeSnapshot {
+    pub fn with_session(
+        snapshot: RuntimeSnapshot,
+        session_id: WireU64,
+        mode: WireSessionMode,
+    ) -> Self {
         Self {
+            session_id,
+            mode,
             revision: snapshot.revision.into(),
             location: snapshot.location,
             variables: snapshot
@@ -276,9 +420,17 @@ impl From<RuntimeSnapshot> for WireRuntimeSnapshot {
 
 impl From<RuntimeUpdate> for WireRuntimeUpdate {
     fn from(update: RuntimeUpdate) -> Self {
+        Self::with_session(update, WireU64::from(0), WireSessionMode::Story)
+    }
+}
+
+impl WireRuntimeUpdate {
+    pub fn with_session(update: RuntimeUpdate, session_id: WireU64, mode: WireSessionMode) -> Self {
         Self {
+            session_id: session_id.clone(),
+            mode,
             update_id: update.update_id.into(),
-            snapshot: update.snapshot.into(),
+            snapshot: WireRuntimeSnapshot::with_session(update.snapshot, session_id, mode),
             cues: update.cues,
             requires_ack: update.requires_ack,
         }
@@ -306,6 +458,7 @@ impl From<BootstrapPayload> for WireBootstrapPayload {
             asset_ids: payload.asset_ids,
             content_version: payload.content_version,
             story_flow_available: payload.story_flow_available,
+            chapter_map_available: payload.chapter_map_available,
             default_font: payload.default_font,
         }
     }

@@ -197,6 +197,174 @@ button:disabled {
   font-size: 14px;
 }
 
+.chapter-map-page {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  background: #060b12;
+}
+
+.chapter-map-header {
+  position: absolute;
+  z-index: 4;
+  top: 28px;
+  right: 32px;
+  left: 32px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.chapter-map-header > * {
+  pointer-events: auto;
+}
+
+.chapter-map-header h2 {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 400;
+}
+
+.chapter-map-header button,
+.chapter-map-hotspot {
+  border: 1px solid rgb(158 231 255 / 38%);
+  color: #ecfaff;
+  background: rgb(6 18 29 / 88%);
+  cursor: pointer;
+}
+
+.chapter-map-header button {
+  padding: 10px 18px;
+}
+
+.chapter-map-viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  cursor: grab;
+  background: #03070b;
+  touch-action: none;
+}
+
+.chapter-map-viewport:active {
+  cursor: grabbing;
+}
+
+.chapter-map-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.chapter-map-background {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  user-select: none;
+}
+
+.chapter-map-hotspot.has-artwork {
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.chapter-map-decoration {
+  position: absolute;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+
+.chapter-map-hotspot {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 4px;
+  background-color: rgb(18 48 65 / 90%);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  box-shadow: 0 12px 34px rgb(0 0 0 / 32%);
+  font-size: 24px;
+  text-shadow: 0 2px 8px #000;
+  user-select: none;
+}
+
+.chapter-map-hotspot.is-completed:hover,
+.chapter-map-hotspot.is-completed:focus-visible {
+  border-color: #9ee7ff;
+  box-shadow: 0 0 28px rgb(117 200 231 / 34%);
+}
+
+.chapter-map-hotspot.is-completed.is-selected {
+  border-color: #9ee7ff;
+  box-shadow:
+    0 0 0 3px rgb(158 231 255 / 24%),
+    0 0 28px rgb(117 200 231 / 34%);
+}
+
+.chapter-map-hotspot.is-locked {
+  filter: grayscale(0.8);
+  opacity: 0.46;
+  cursor: default;
+}
+
+.chapter-map-hotspot small {
+  color: #a6c2cf;
+  font-size: 13px;
+}
+
+.chapter-map-hotspot-detail {
+  position: absolute;
+  z-index: 8;
+  bottom: 72px;
+  left: 50%;
+  display: flex;
+  min-width: 320px;
+  padding: 16px 18px;
+  border: 1px solid rgb(158 231 255 / 40%);
+  background: rgb(6 18 29 / 94%);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 45%);
+  align-items: center;
+  gap: 12px;
+  transform: translateX(-50%);
+}
+
+.chapter-map-hotspot-detail strong {
+  flex: 1;
+  font-size: 20px;
+  font-weight: 400;
+}
+
+.chapter-map-hotspot-detail button {
+  padding: 7px 14px;
+  border: 1px solid rgb(158 231 255 / 38%);
+  color: #ecfaff;
+  background: rgb(6 18 29 / 88%);
+}
+
+.chapter-map-hint {
+  position: absolute;
+  z-index: 4;
+  right: 32px;
+  bottom: 24px;
+  margin: 0;
+  color: #91aab6;
+  font-size: 14px;
+  pointer-events: none;
+}
+
 .game-toolbar {
   position: absolute;
   z-index: 20;
@@ -540,11 +708,6 @@ button:disabled {
   width: var(--long-text-width);
   height: var(--long-text-height);
   overflow: hidden;
-  opacity: 0;
-  transition: opacity 100ms linear;
-}
-
-.long-text-viewport.is-ready {
   opacity: 1;
 }
 
@@ -566,6 +729,17 @@ button:disabled {
   background-repeat: repeat-y;
   background-size: 100% var(--long-text-page-height);
   box-shadow: none;
+  opacity: 0;
+}
+
+.long-text-paper.is-entered {
+  opacity: 1;
+  transition: opacity 220ms ease-out;
+}
+
+.long-text-paper.is-immediate {
+  opacity: 1;
+  transition: none;
 }
 
 .long-text-paper.has-paper-art {
@@ -582,6 +756,17 @@ button:disabled {
   font-size: var(--long-text-font-size, 32px);
   line-height: 1.78;
   letter-spacing: 0.035em;
+  opacity: 0;
+}
+
+.long-text-paper-content.is-entered {
+  opacity: 1;
+  transition: opacity 220ms ease-out;
+}
+
+.long-text-paper-content.is-immediate {
+  opacity: 1;
+  transition: none;
 }
 
 /* Fragment coordinates are measured in the paper content box.  Without a
@@ -1095,5 +1280,11 @@ button:disabled {
     mask: none !important;
     animation: none !important;
     opacity: 1 !important;
+  }
+
+  .long-text-paper,
+  .long-text-paper-content {
+    opacity: 1 !important;
+    transition: none !important;
   }
 }

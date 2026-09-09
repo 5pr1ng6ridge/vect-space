@@ -20,7 +20,13 @@ import {
 import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import { StoryFlowPage } from "./components/StoryFlowPage";
+import { ChapterMapPage } from "./components/ChapterMapPage";
 import { engineApi, resolvedAssetsToUrls } from "./engine/api";
+import {
+  requireSessionId,
+  SessionTransitionController,
+  type SessionTransitionToken,
+} from "./engine/session";
 import {
   autoReadingDelay,
   buildVisibleUnitCps,
@@ -43,10 +49,12 @@ import type {
   SaveSlotSummary,
   Settings,
   StoryFlowSnapshot,
+  ChapterMapSnapshot,
   TextRevealAnimation,
 } from "./engine/types";
 import { useViewportMetrics } from "./viewport/viewport";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
+import type { WireU64 } from "../shared/generated/WireU64";
 
 const DEFAULT_SETTINGS: Settings = {
   master_volume: 1,
@@ -58,7 +66,7 @@ const DEFAULT_SETTINGS: Settings = {
   skip_mode: "read_only",
 };
 
-type Phase = "booting" | "title" | "story_flow" | "playing";
+type Phase = "booting" | "title" | "story_flow" | "chapter_map" | "playing";
 type Panel = "none" | "saves" | "settings" | "history";
 
 interface InitialAppState {
@@ -89,6 +97,19 @@ export default function App(): ReactElement {
   const acknowledgedUpdates = useRef(new BoundedLedger<string>(256));
   const autosavedRevisions = useRef(new BoundedLedger<string>(256));
   const heldControlKeys = useRef(new Set<string>());
+  const replayTransitionRef = useRef<Promise<void> | null>(null);
+  const transitionControllerRef = useRef(new SessionTransitionController());
+  const commandOwnerRef = useRef(0);
+  // Reads used by title/map/history pages are not runtime commands and do not
+  // acquire the command lock.  Keep an independent request generation so a
+  // late response cannot switch the page after a session boundary has begun.
+  const pageRequestGenerationRef = useRef(0);
+  // Incremented before every story/replay boundary.  A command that was
+  // already in flight may still resolve, but it must not repopulate a page
+  // belonging to the new boundary.
+  const sessionGenerationRef = useRef(0);
+  // Host identity survives clearing presentation state on title/map screens.
+  const activeSessionId = useRef("0");
 
   const [phase, setPhase] = useState<Phase>("booting");
   const [panel, setPanel] = useState<Panel>("none");
@@ -119,6 +140,16 @@ export default function App(): ReactElement {
   const [history, setHistory] = useState<DialogueHistoryEntry[]>([]);
   const [storyFlow, setStoryFlow] = useState<StoryFlowSnapshot | null>(null);
   const [storyFlowAvailable, setStoryFlowAvailable] = useState(false);
+  const [chapterMap, setChapterMap] = useState<ChapterMapSnapshot | null>(null);
+  const [chapterMapAvailable, setChapterMapAvailable] = useState(false);
+  const [replayMode, setReplayMode] = useState(false);
+  const [replaySceneId, setReplaySceneId] = useState<string | null>(null);
+  // Keep the map camera outside the page component so leaving for a replay
+  // and returning does not unexpectedly jump back to the author's origin.
+  const [chapterMapCenter, setChapterMapCenter] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
 
   useEffect(() => {
     phaseRef.current = phase;
@@ -135,10 +166,13 @@ export default function App(): ReactElement {
         setSettings(loadedSettings);
         setDraftSettings(loadedSettings);
         setSaveSlots(slots);
+        sessionGenerationRef.current += 1;
+        activeSessionId.current = requireSessionId(bootstrap.update.session_id);
         setUpdate(bootstrap.update);
         setContentVersion(bootstrap.content_version);
         setDefaultFontId(bootstrap.default_font ?? null);
         setStoryFlowAvailable(bootstrap.story_flow_available);
+        setChapterMapAvailable(bootstrap.chapter_map_available === true);
         setPhase("title");
       })
       .catch((reason: unknown) => {
@@ -199,27 +233,130 @@ export default function App(): ReactElement {
   }, []);
 
   const applyUpdate = useCallback((next: RuntimeUpdate): void => {
+    activeSessionId.current = requireSessionId(next.session_id);
     setUpdate(next);
   }, []);
 
   const runStoryCommand = useCallback(
-    async (command: () => Promise<RuntimeUpdate>): Promise<void> => {
+    async (
+      command: () => Promise<RuntimeUpdate>,
+      generation = sessionGenerationRef.current,
+      expectedSessionId = activeSessionId.current,
+      allowSessionChange = false,
+      expectedMode?: "story" | "replay",
+    ): Promise<boolean> => {
       if (busyRef.current) {
-        return;
+        return false;
       }
+      const token = transitionControllerRef.current.begin(
+        generation,
+        expectedSessionId,
+      );
+      commandOwnerRef.current = token.id;
       busyRef.current = true;
       setBusy(true);
       setError(null);
       try {
-        applyUpdate(await command());
+        const next = await command();
+        const returnedSessionId = requireSessionId(next.session_id);
+        if (!allowSessionChange && returnedSessionId !== expectedSessionId) {
+          throw new Error("运行时返回了不属于当前会话的响应，请重试。");
+        }
+        if (
+          expectedMode !== undefined &&
+          next.mode !== undefined &&
+          next.mode !== expectedMode
+        ) {
+          throw new Error("运行时返回了不匹配的会话模式，请重试。");
+        }
+        // Boundary commands (new game, load and replay start) are allowed to
+        // rotate the host session id.  Treat that id change as one atomic
+        // commit: the token and generation must still be current, and the
+        // active id must still be the id captured when the command began.
+        if (allowSessionChange) {
+          const current =
+            transitionControllerRef.current.isCurrentGeneration(
+              token,
+              sessionGenerationRef.current,
+            ) && activeSessionId.current === expectedSessionId;
+          if (current) {
+            activeSessionId.current = returnedSessionId;
+            applyUpdate(next);
+          }
+          return current;
+        }
+        const current = transitionControllerRef.current.isCurrent(
+          token,
+          sessionGenerationRef.current,
+          activeSessionId.current,
+        );
+        if (current) applyUpdate(next);
+        return current;
       } catch (reason) {
-        setError(errorMessage(reason));
+        if (
+          transitionControllerRef.current.isCurrent(
+            token,
+            sessionGenerationRef.current,
+            activeSessionId.current,
+          )
+        )
+          setError(errorMessage(reason));
+        return false;
       } finally {
-        busyRef.current = false;
-        setBusy(false);
+        if (commandOwnerRef.current === token.id) {
+          busyRef.current = false;
+          setBusy(false);
+        }
       }
     },
     [applyUpdate],
+  );
+
+  const beginSessionTransition =
+    useCallback((): SessionTransitionToken | null => {
+      if (busyRef.current || replayTransitionRef.current !== null) return null;
+      const token = transitionControllerRef.current.begin(
+        sessionGenerationRef.current,
+        activeSessionId.current,
+      );
+      commandOwnerRef.current = token.id;
+      busyRef.current = true;
+      setBusy(true);
+      setError(null);
+      return token;
+    }, []);
+
+  const stopTransientPlayback = useCallback((): void => {
+    // Session boundaries must not inherit input state from the previous
+    // page.  In particular a Ctrl key can remain logically pressed when a
+    // toolbar click steals focus, and an old typewriter callback can otherwise
+    // restart the loop on the first frame of the new session.
+    heldControlKeys.current.clear();
+    pageRequestGenerationRef.current += 1;
+    setCtrlHeld(false);
+    setNormalAuto(false);
+    setTypingSfxActive(false);
+    setCompletedPromptKey(null);
+  }, []);
+
+  const finishSessionTransition = useCallback(
+    (token: SessionTransitionToken): boolean => {
+      if (
+        !transitionControllerRef.current.isCurrentGeneration(
+          token,
+          sessionGenerationRef.current,
+        )
+      )
+        return false;
+      if (commandOwnerRef.current === token.id) {
+        commandOwnerRef.current = 0;
+        busyRef.current = false;
+        setBusy(false);
+      }
+      replayTransitionRef.current = null;
+      return true;
+    },
+    [],
   );
 
   const handlePresentationSettled = useCallback(
@@ -227,43 +364,134 @@ export default function App(): ReactElement {
       settled: RuntimeUpdate,
       outcome: "completed" | "skipped" | "failed",
     ): void => {
+      if (
+        settled.session_id === undefined ||
+        settled.session_id !== activeSessionId.current ||
+        busyRef.current ||
+        (settled.mode !== undefined &&
+          settled.mode !== (replayMode ? "replay" : "story"))
+      )
+        return;
+      const settledSessionId = settled.session_id;
       if (settled.requires_ack) {
-        if (!acknowledgedUpdates.current.consume(settled.update_id)) {
+        if (!acknowledgedUpdates.current.consume(runtimeUpdateKey(settled))) {
           return;
         }
         void runStoryCommand(() =>
-          engineApi.presentationComplete(settled.update_id, outcome),
+          engineApi.presentationComplete(
+            settled.update_id,
+            outcome,
+            settledSessionId,
+          ),
         );
         return;
       }
+
+      if (replayMode) return;
 
       const prompt = settled.snapshot.prompt;
       const isStable = prompt.kind !== "none" && phaseRef.current === "playing";
       if (
         !isStable ||
-        autosavedRevisions.current.has(settled.snapshot.revision)
+        autosavedRevisions.current.has(runtimeRevisionKey(settled))
       ) {
         return;
       }
-      autosavedRevisions.current.consume(settled.snapshot.revision);
+      autosavedRevisions.current.consume(runtimeRevisionKey(settled));
       const thumbnail = sceneRef.current?.captureThumbnail() ?? null;
       void engineApi
-        .saveSlot("auto", thumbnail)
+        .saveSlot("auto", thumbnail, settledSessionId)
         .then(() => refreshSlots())
         .catch((reason: unknown) => console.error("Autosave failed", reason));
     },
-    [refreshSlots, runStoryCommand],
+    [refreshSlots, replayMode, runStoryCommand],
   );
 
   const startNewGame = (): void => {
-    autosavedRevisions.current.clear();
-    setHistory([]);
-    setNormalAuto(false);
-    setPhase("playing");
-    phaseRef.current = "playing";
-    setPanel("none");
-    void sceneRef.current?.unlockAudio();
-    void runStoryCommand(engineApi.startNewGame);
+    void (async () => {
+      if (replayTransitionRef.current !== null || busyRef.current) return;
+      stopTransientPlayback();
+      // A new game is a hard presentation boundary even when it starts from
+      // the normal story session.  Leaving an old controller alive until the
+      // host response arrives could let a late cue finish/ack or keep media
+      // playing behind the newly created runtime.
+      sceneRef.current?.cancelCurrentPresentation();
+      let expectedSessionId = activeSessionId.current;
+      const generation = ++sessionGenerationRef.current;
+      if (replayMode) {
+        const token = beginSessionTransition();
+        if (token === null) return;
+        const retainedUpdate = update;
+        sceneRef.current?.cancelCurrentPresentation();
+        try {
+          const nextSessionId = requireSessionId(
+            await engineApi.exitSceneReplay(expectedSessionId),
+          );
+          if (
+            !transitionControllerRef.current.isCurrentGeneration(
+              token,
+              generation,
+            )
+          )
+            return;
+          expectedSessionId = nextSessionId;
+          activeSessionId.current = nextSessionId;
+          setUpdate(null);
+          setReplayMode(false);
+          setReplaySceneId(null);
+          if (!finishSessionTransition(token)) return;
+        } catch (reason) {
+          if (
+            transitionControllerRef.current.isCurrentGeneration(
+              token,
+              generation,
+            )
+          ) {
+            if (retainedUpdate !== null) {
+              setUpdate(retainedUpdate);
+              await sceneRef.current?.applySnapshotImmediately(
+                retainedUpdate.snapshot,
+              );
+            }
+            setError(errorMessage(reason));
+            finishSessionTransition(token);
+          }
+          return;
+        }
+      }
+      setReplayMode(false);
+      setReplaySceneId(null);
+      autosavedRevisions.current.clear();
+      setHistory([]);
+      // Do not let the previous scene remain visible while the boundary
+      // command is in flight.  The command response is the only source that
+      // may install the new authoritative update.
+      setUpdate(null);
+      setPhase("playing");
+      phaseRef.current = "playing";
+      setPanel("none");
+      void sceneRef.current?.unlockAudio();
+      const started = await runStoryCommand(
+        () => engineApi.startNewGame(expectedSessionId),
+        generation,
+        expectedSessionId,
+        true,
+        "story",
+      );
+      // A failed boundary command must not leave the title screen in a
+      // half-entered story session. Only the transition that started this
+      // command may restore the page; a newer transition owns the UI.
+      if (
+        !started &&
+        generation === sessionGenerationRef.current &&
+        activeSessionId.current === expectedSessionId
+      ) {
+        setPhase("title");
+        phaseRef.current = "title";
+        setPanel("none");
+        setUpdate(null);
+      }
+    })();
   };
 
   const advance = useCallback(
@@ -276,7 +504,9 @@ export default function App(): ReactElement {
       ) {
         return;
       }
-      void runStoryCommand(() => engineApi.advance(snapshot.revision, source));
+      void runStoryCommand(() =>
+        engineApi.advance(snapshot.revision, source, activeSessionId.current),
+      );
     },
     [runStoryCommand, update],
   );
@@ -286,7 +516,9 @@ export default function App(): ReactElement {
     if (snapshot === undefined || snapshot.prompt.kind !== "choice") {
       return;
     }
-    void runStoryCommand(() => engineApi.choose(choiceId, snapshot.revision));
+    void runStoryCommand(() =>
+      engineApi.choose(choiceId, snapshot.revision, activeSessionId.current),
+    );
   };
 
   const saveManual = async (slot: string): Promise<void> => {
@@ -298,6 +530,7 @@ export default function App(): ReactElement {
       await engineApi.saveSlot(
         slot,
         sceneRef.current?.captureThumbnail() ?? null,
+        activeSessionId.current,
       );
       await refreshSlots();
     } catch (reason) {
@@ -306,14 +539,43 @@ export default function App(): ReactElement {
   };
 
   const load = (slot: string): void => {
+    if (replayMode || busyRef.current || replayTransitionRef.current !== null)
+      return;
+    stopTransientPlayback();
+    // Loading is also a session boundary.  Cancel the old presentation
+    // before clearing its update so delayed cue/media callbacks cannot leak
+    // across the asynchronous host transition.
+    sceneRef.current?.cancelCurrentPresentation();
+    const generation = ++sessionGenerationRef.current;
+    const expectedSessionId = activeSessionId.current;
     autosavedRevisions.current.clear();
     setHistory([]);
-    setNormalAuto(false);
+    // A load is a session boundary.  Clear the old presentation before the
+    // asynchronous command so a failed load cannot show a mixed scene.
+    setUpdate(null);
     setPhase("playing");
     phaseRef.current = "playing";
     setPanel("none");
     void sceneRef.current?.unlockAudio();
-    void runStoryCommand(() => engineApi.loadSlot(slot));
+    void runStoryCommand(
+      () => engineApi.loadSlot(slot, expectedSessionId),
+      generation,
+      expectedSessionId,
+      true,
+      "story",
+    ).then((loaded) => {
+      // Keep the title page when loading fails. The generation/session guard
+      // prevents an older load from undoing a newer boundary transition.
+      if (
+        !loaded &&
+        generation === sessionGenerationRef.current &&
+        activeSessionId.current === expectedSessionId
+      ) {
+        setPhase("title");
+        phaseRef.current = "title";
+        setPanel("none");
+      }
+    });
   };
 
   const persistSettings = async (): Promise<void> => {
@@ -337,30 +599,154 @@ export default function App(): ReactElement {
   };
 
   const returnToTitle = (): void => {
-    setNormalAuto(false);
+    if (busyRef.current) return;
+    stopTransientPlayback();
+    if (replayMode) {
+      if (replayTransitionRef.current !== null) return;
+      const generation = ++sessionGenerationRef.current;
+      const token = beginSessionTransition();
+      if (token === null) return;
+      const retainedUpdate = update;
+      const transition = (async () => {
+        sceneRef.current?.cancelCurrentPresentation();
+        try {
+          const nextSessionId = requireSessionId(
+            await engineApi.exitSceneReplay(activeSessionId.current),
+          );
+          if (
+            !transitionControllerRef.current.isCurrentGeneration(
+              token,
+              generation,
+            )
+          )
+            return;
+          activeSessionId.current = nextSessionId;
+          setUpdate(null);
+          setReplayMode(false);
+          setReplaySceneId(null);
+          setHistory([]);
+          setPanel("none");
+          setPhase("title");
+          phaseRef.current = "title";
+          finishSessionTransition(token);
+        } catch (reason) {
+          if (
+            transitionControllerRef.current.isCurrentGeneration(
+              token,
+              generation,
+            )
+          ) {
+            // The presentation was cancelled before the host call, but the
+            // authoritative update remains visible so the user can retry.
+            if (retainedUpdate !== null) {
+              setUpdate(retainedUpdate);
+              await sceneRef.current?.applySnapshotImmediately(
+                retainedUpdate.snapshot,
+              );
+            }
+            setError(errorMessage(reason));
+            finishSessionTransition(token);
+          }
+        } finally {
+          if (
+            transitionControllerRef.current.isCurrentGeneration(
+              token,
+              generation,
+            )
+          )
+            replayTransitionRef.current = null;
+        }
+      })();
+      replayTransitionRef.current = transition;
+      return;
+    }
+    const generation = ++sessionGenerationRef.current;
+    const token = beginSessionTransition();
+    if (token === null) return;
+    const retainedUpdate = update;
+    setReplayMode(false);
+    setReplaySceneId(null);
+    // Leaving the story must invalidate the active presentation as well as
+    // hiding it.  Otherwise a late cue completion can still ack the runtime
+    // after the title screen is visible (and an audio/video element can keep
+    // running behind the menu).
+    sceneRef.current?.cancelCurrentPresentation();
+    void (async () => {
+      try {
+        const nextSessionId = requireSessionId(
+          await engineApi.invalidateSession(activeSessionId.current),
+        );
+        if (
+          !transitionControllerRef.current.isCurrentGeneration(
+            token,
+            generation,
+          )
+        )
+          return;
+        activeSessionId.current = nextSessionId;
+        setUpdate(null);
+        setPhase("title");
+        phaseRef.current = "title";
+        finishSessionTransition(token);
+      } catch (reason) {
+        if (
+          transitionControllerRef.current.isCurrentGeneration(token, generation)
+        ) {
+          if (retainedUpdate !== null) {
+            setUpdate(retainedUpdate);
+            await sceneRef.current?.applySnapshotImmediately(
+              retainedUpdate.snapshot,
+            );
+          }
+          setError(errorMessage(reason));
+          finishSessionTransition(token);
+        }
+      } finally {
+        // finishSessionTransition owns cleanup.  Do not release a newer
+        // command's busy lock from this old request.
+      }
+    })();
     setHistory([]);
-    void engineApi
-      .clearDialogueHistory()
-      .catch((reason: unknown) => setError(errorMessage(reason)));
     setPanel("none");
-    setPhase("title");
-    phaseRef.current = "title";
   };
 
   const openHistory = (): void => {
+    const requestGeneration = ++pageRequestGenerationRef.current;
+    const requestSessionId = activeSessionId.current;
     void engineApi
       .getDialogueHistory()
       .then((entries) => {
+        if (
+          requestGeneration !== pageRequestGenerationRef.current ||
+          requestSessionId !== activeSessionId.current ||
+          phaseRef.current !== "playing"
+        )
+          return;
         setHistory(entries);
         setPanel("history");
       })
-      .catch((reason: unknown) => setError(errorMessage(reason)));
+      .catch((reason: unknown) => {
+        if (
+          requestGeneration === pageRequestGenerationRef.current &&
+          requestSessionId === activeSessionId.current &&
+          phaseRef.current === "playing"
+        )
+          setError(errorMessage(reason));
+      });
   };
 
   const openStoryFlow = (): void => {
+    const requestGeneration = ++pageRequestGenerationRef.current;
+    const requestSessionId = activeSessionId.current;
     void engineApi
       .getStoryFlow()
       .then((flow) => {
+        if (
+          requestGeneration !== pageRequestGenerationRef.current ||
+          requestSessionId !== activeSessionId.current ||
+          phaseRef.current !== "title"
+        )
+          return;
         if (flow === null) {
           setError("当前内容未配置剧情流程。");
           return;
@@ -371,10 +757,207 @@ export default function App(): ReactElement {
         setPhase("story_flow");
         phaseRef.current = "story_flow";
       })
-      .catch((reason: unknown) => setError(errorMessage(reason)));
+      .catch((reason: unknown) => {
+        if (
+          requestGeneration === pageRequestGenerationRef.current &&
+          requestSessionId === activeSessionId.current &&
+          phaseRef.current === "title"
+        )
+          setError(errorMessage(reason));
+      });
   };
 
+  const openChapterMap = (): void => {
+    const requestGeneration = ++pageRequestGenerationRef.current;
+    const requestSessionId = activeSessionId.current;
+    void engineApi
+      .getChapterMap()
+      .then((map) => {
+        if (
+          requestGeneration !== pageRequestGenerationRef.current ||
+          requestSessionId !== activeSessionId.current ||
+          phaseRef.current !== "title"
+        )
+          return;
+        if (map === null) {
+          setError("当前内容未配置章节地图。");
+          return;
+        }
+        setChapterMap(map);
+        setNormalAuto(false);
+        setPanel("none");
+        setPhase("chapter_map");
+        phaseRef.current = "chapter_map";
+      })
+      .catch((reason: unknown) => {
+        if (
+          requestGeneration === pageRequestGenerationRef.current &&
+          requestSessionId === activeSessionId.current &&
+          phaseRef.current === "title"
+        )
+          setError(errorMessage(reason));
+      });
+  };
+
+  const startSceneReplay = (sceneId: string): void => {
+    if (busyRef.current || replayTransitionRef.current !== null) return;
+    stopTransientPlayback();
+    const generation = ++sessionGenerationRef.current;
+    const expectedSessionId = activeSessionId.current;
+    setError(null);
+    // Do not let the previous story update briefly render behind the replay
+    // while the host constructs its isolated runtime.
+    setUpdate(null);
+    sceneRef.current?.cancelCurrentPresentation();
+    setReplayMode(true);
+    setReplaySceneId(sceneId);
+    setPanel("none");
+    setPhase("playing");
+    phaseRef.current = "playing";
+    // Keep the complete transition (including the map refresh after a failed
+    // replay start) behind one controller-owned token.  Releasing `busy` as
+    // soon as `start_scene_replay` settles used to expose a blank playing
+    // screen for one async turn, during which a second command could race the
+    // map recovery and overwrite the new page.
+    const transition = (async () => {
+      try {
+        const started = await runStoryCommand(
+          () => engineApi.startSceneReplay(sceneId, expectedSessionId),
+          generation,
+          expectedSessionId,
+          true,
+          "replay",
+        );
+        if (generation !== sessionGenerationRef.current || started) return;
+        // Keep a failed replay from leaving the game controls over a stale
+        // main-story snapshot.  The map remains the authoritative place to
+        // retry, and its current camera is preserved in the parent state.
+        const map = await engineApi.getChapterMap();
+        if (generation !== sessionGenerationRef.current) return;
+        setChapterMap(map);
+        setReplayMode(false);
+        setReplaySceneId(null);
+        setPhase("chapter_map");
+        phaseRef.current = "chapter_map";
+      } catch (reason: unknown) {
+        if (generation !== sessionGenerationRef.current) return;
+        setReplayMode(false);
+        setReplaySceneId(null);
+        setPhase("chapter_map");
+        phaseRef.current = "chapter_map";
+        setError(errorMessage(reason));
+      } finally {
+        if (generation === sessionGenerationRef.current)
+          replayTransitionRef.current = null;
+      }
+    })();
+    replayTransitionRef.current = transition;
+  };
+
+  const finishSceneReplay = useCallback((): void => {
+    if (replayTransitionRef.current !== null) return;
+    stopTransientPlayback();
+    const generation = ++sessionGenerationRef.current;
+    const token = beginSessionTransition();
+    if (token === null) return;
+    const retainedUpdate = update;
+    const expectedSessionId = activeSessionId.current;
+    let exitedSessionId: WireU64 | null = null;
+    const transition = (async () => {
+      sceneRef.current?.cancelCurrentPresentation();
+      try {
+        const nextSessionId = requireSessionId(
+          await engineApi.exitSceneReplay(expectedSessionId),
+        );
+        if (
+          !transitionControllerRef.current.isCurrentGeneration(
+            token,
+            generation,
+          )
+        )
+          return;
+        // Keep the replay frame visible until the map has been fetched.  A
+        // failed exit call must leave the exact frame the player was looking
+        // at; a successful host switch followed by a map read failure is a
+        // different case and can fall back to the already loaded map.
+        exitedSessionId = nextSessionId;
+        const map = await engineApi.getChapterMap();
+        if (
+          !transitionControllerRef.current.isCurrentGeneration(
+            token,
+            generation,
+          )
+        )
+          return;
+        activeSessionId.current = nextSessionId;
+        setChapterMap(map);
+        setUpdate(null);
+        setReplayMode(false);
+        setReplaySceneId(null);
+        setPanel("none");
+        setPhase("chapter_map");
+        phaseRef.current = "chapter_map";
+        finishSessionTransition(token);
+      } catch (reason) {
+        if (
+          transitionControllerRef.current.isCurrentGeneration(token, generation)
+        ) {
+          if (exitedSessionId === null) {
+            if (retainedUpdate !== null) {
+              setUpdate(retainedUpdate);
+              await sceneRef.current?.applySnapshotImmediately(
+                retainedUpdate.snapshot,
+              );
+            }
+          } else {
+            // The host is already back in story mode.  Do not leave replay
+            // controls attached to an update that can no longer be acked;
+            // show the existing map and let the user retry the read instead.
+            activeSessionId.current = exitedSessionId;
+            setUpdate(null);
+            setReplayMode(false);
+            setReplaySceneId(null);
+            setPanel("none");
+            setPhase("chapter_map");
+            phaseRef.current = "chapter_map";
+          }
+          setError(errorMessage(reason));
+          finishSessionTransition(token);
+        }
+      } finally {
+        if (
+          transitionControllerRef.current.isCurrentGeneration(token, generation)
+        )
+          replayTransitionRef.current = null;
+      }
+    })();
+    replayTransitionRef.current = transition;
+  }, [
+    beginSessionTransition,
+    finishSessionTransition,
+    stopTransientPlayback,
+    update,
+  ]);
+
+  useEffect(() => {
+    if (!replayMode || replaySceneId === null || update === null) return;
+    const crossed = update.snapshot.location.scene_id !== replaySceneId;
+    const ended = update.snapshot.prompt.kind === "end";
+    if ((crossed || ended) && !update.requires_ack) {
+      const frame = requestAnimationFrame(finishSceneReplay);
+      return () => cancelAnimationFrame(frame);
+    }
+    return undefined;
+  }, [finishSceneReplay, replayMode, replaySceneId, update]);
+
   const closeStoryFlow = (): void => {
+    if (busyRef.current || replayTransitionRef.current !== null) return;
+    setPhase("title");
+    phaseRef.current = "title";
+  };
+
+  const closeChapterMap = (): void => {
+    if (busyRef.current || replayTransitionRef.current !== null) return;
     setPhase("title");
     phaseRef.current = "title";
   };
@@ -695,6 +1278,19 @@ export default function App(): ReactElement {
     return () => window.removeEventListener("keydown", closePanel);
   }, [panel, phase]);
 
+  // Opening any in-game panel is a hard input boundary.  In particular a
+  // Ctrl key that was held while clicking the toolbar must not resume a
+  // fast-forward as soon as the panel closes (the key-up event may have been
+  // delivered to the panel/WebView instead of the game surface).
+  useEffect(() => {
+    if (panel !== "none") {
+      heldControlKeys.current.clear();
+      const frame = requestAnimationFrame(() => setCtrlHeld(false));
+      return () => cancelAnimationFrame(frame);
+    }
+    return undefined;
+  }, [panel]);
+
   return (
     <main className="app-shell">
       <section className="game-viewport" style={viewportStyle}>
@@ -730,11 +1326,7 @@ export default function App(): ReactElement {
                 <MarkupText source="$V=U\oplus W$" />
               </p>
               <div className="title-actions">
-                <button
-                  disabled={update === null || busy}
-                  onClick={startNewGame}
-                  type="button"
-                >
+                <button disabled={busy} onClick={startNewGame} type="button">
                   开始演示
                 </button>
                 <button
@@ -750,13 +1342,19 @@ export default function App(): ReactElement {
                 <button onClick={() => setPanel("settings")} type="button">
                   设置
                 </button>
-                <button
-                  disabled={!storyFlowAvailable}
-                  onClick={openStoryFlow}
-                  type="button"
-                >
-                  剧情流程
-                </button>
+                {chapterMapAvailable ? (
+                  <button onClick={openChapterMap} type="button">
+                    章节地图
+                  </button>
+                ) : (
+                  <button
+                    disabled={!storyFlowAvailable}
+                    onClick={openStoryFlow}
+                    type="button"
+                  >
+                    剧情流程
+                  </button>
+                )}
               </div>
               <small>内容版本 {contentVersion || "未载入"}</small>
             </div>
@@ -765,6 +1363,17 @@ export default function App(): ReactElement {
 
         {phase === "story_flow" && storyFlow !== null && (
           <StoryFlowPage flow={storyFlow} onClose={closeStoryFlow} />
+        )}
+
+        {phase === "chapter_map" && chapterMap !== null && (
+          <ChapterMapPage
+            assets={assets}
+            map={chapterMap}
+            onClose={closeChapterMap}
+            onReplay={startSceneReplay}
+            onViewChange={setChapterMapCenter}
+            sessionCenter={chapterMapCenter}
+          />
         )}
 
         {phase === "playing" && update !== null && (
@@ -782,9 +1391,11 @@ export default function App(): ReactElement {
                     ? "自动：开"
                     : "自动：关"}
               </button>
-              <button onClick={() => setPanel("saves")} type="button">
-                存档 / 读档
-              </button>
+              {!replayMode && (
+                <button onClick={() => setPanel("saves")} type="button">
+                  存档 / 读档
+                </button>
+              )}
               <button onClick={() => setPanel("settings")} type="button">
                 设置
               </button>
@@ -862,9 +1473,12 @@ export default function App(): ReactElement {
 
             {update.snapshot.prompt.kind === "end" && (
               <div className="end-card">
-                <p>演示场景结束</p>
-                <button onClick={returnToTitle} type="button">
-                  返回标题
+                <p>{replayMode ? "章节重演结束" : "演示场景结束"}</p>
+                <button
+                  onClick={replayMode ? finishSceneReplay : returnToTitle}
+                  type="button"
+                >
+                  {replayMode ? "返回章节地图" : "返回标题"}
                 </button>
               </div>
             )}
@@ -875,7 +1489,7 @@ export default function App(): ReactElement {
 
         {panel === "saves" && (
           <SavePanel
-            canSave={phase === "playing" && !runtimeLocked}
+            canSave={phase === "playing" && !runtimeLocked && !replayMode}
             onClose={() => setPanel("none")}
             onLoad={load}
             onSave={(slot) => void saveManual(slot)}
@@ -1263,6 +1877,14 @@ function withStartupTimeout<T>(
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
+}
+
+function runtimeUpdateKey(update: RuntimeUpdate): string {
+  return `${update.session_id ?? "0"}:${update.update_id}`;
+}
+
+function runtimeRevisionKey(update: RuntimeUpdate): string {
+  return `${update.session_id ?? "0"}:${update.snapshot.revision}`;
 }
 
 function formatTimestamp(value: number | null): string {

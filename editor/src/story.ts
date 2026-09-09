@@ -823,6 +823,7 @@ export function insertNode(
   sourceId: string,
   side: InsertSide,
   type: NodeType,
+  portId?: string,
 ): InsertNodeResult {
   const updated = cloneProject(project);
   const file = findScene(updated, sceneId);
@@ -835,17 +836,28 @@ export function insertNode(
   }
 
   const sourcePorts = outputPorts(source);
+  const selectedPort =
+    side === "right"
+      ? portId === undefined
+        ? sourcePorts.length === 1
+          ? sourcePorts[0]
+          : undefined
+        : sourcePorts.find((port) => port.id === portId)
+      : undefined;
   if (side === "right") {
     if (sourcePorts.length === 0) {
       return { ok: false, error: "结束节点没有后续出口，无法在右侧插入。" };
     }
-    if (sourcePorts.length !== 1) {
+    if (sourcePorts.length !== 1 && portId === undefined) {
       return {
         ok: false,
-        error: "该节点有多个分支出口，右侧插入会改变分支语义；请改用左侧插入。",
+        error: "该节点有多个分支出口，请先选择要插入的出口。",
       };
     }
-    const targetScene = sourcePorts[0].targetScene;
+    if (selectedPort === undefined) {
+      return { ok: false, error: `找不到出口 ${portId ?? ""}。` };
+    }
+    const targetScene = selectedPort.targetScene;
     if (targetScene !== null && targetScene !== sceneId) {
       return {
         ok: false,
@@ -855,7 +867,7 @@ export function insertNode(
   }
 
   const originalTarget =
-    side === "right" ? (sourcePorts[0]?.target ?? sourceId) : sourceId;
+    side === "right" ? (selectedPort?.target ?? sourceId) : sourceId;
   const template = defaultNode(type, originalTarget);
   const templatePorts = outputPorts(template);
   if (templatePorts.length === 0 && !(side === "right" && type === "end")) {
@@ -901,9 +913,15 @@ export function insertNode(
       sourceId,
     );
   } else {
+    // `selectedPort` is guaranteed above for a right insertion, including
+    // Choice/Condition branches selected by the script-view outlet picker.
+    const rightPort = selectedPort ?? sourcePorts[0];
+    if (rightPort === undefined) {
+      return { ok: false, error: "节点没有可用的后续出口。" };
+    }
     file.definition.nodes[sourceId] = setPortTarget(
       source,
-      sourcePorts[0].id,
+      rightPort.id,
       nodeId,
     );
     file.definition.nodes[nodeId] =
@@ -1382,6 +1400,11 @@ export function renameScene(
       if (edge.to === previousId) edge.to = nextId;
     }
   }
+  if (updated.chapter_map !== null && updated.chapter_map !== undefined) {
+    for (const hotspot of updated.chapter_map.definition.hotspots) {
+      if (hotspot.scene_id === previousId) hotspot.scene_id = nextId;
+    }
+  }
   const previews = updated.layout.timeline_previews;
   if (previews !== undefined) {
     for (const key of Object.keys(previews)) {
@@ -1409,14 +1432,19 @@ function migratePreviewChoices(
   }
 }
 
-export function projectRequest(project: EditorProject) {
+export function projectRequest(
+  project: EditorProject,
+  importTokens: string[] = [],
+) {
   return {
     manifest: project.manifest,
     scenes: project.scenes,
     ui_motions: project.ui_motions,
     story_flow: project.story_flow,
+    chapter_map: project.chapter_map ?? null,
     layout: project.layout,
     expected_fingerprint: project.fingerprint,
+    import_tokens: importTokens,
   };
 }
 

@@ -105,6 +105,49 @@ export interface TextLayoutPage {
   readonly height: number;
 }
 
+export interface TextPageWindow {
+  /** Inclusive start, exclusive end. */
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Returns the pages that should remain mounted around a design-space scroll
+ * offset. The two-viewport overscan is shared by gameplay and editor so a
+ * page can be prepared before it reaches the actual viewport without making
+ * the whole document part of the DOM.
+ */
+export function resolveTextPageWindow(
+  pages: readonly { height: number }[],
+  pageOffsets: readonly number[],
+  scrollOffset: number,
+  viewportHeight: number,
+  overscan = viewportHeight * 2,
+): TextPageWindow {
+  if (pages.length === 0) return { start: 0, end: 0 };
+  const lower = Math.max(0, scrollOffset - Math.max(0, overscan));
+  const upper =
+    scrollOffset + Math.max(0, viewportHeight) + Math.max(0, overscan);
+
+  let low = 0;
+  let high = pages.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const bottom = (pageOffsets[middle] ?? 0) + (pages[middle]?.height ?? 0);
+    if (bottom < lower) low = middle + 1;
+    else high = middle;
+  }
+  const start = low;
+  low = start;
+  high = pages.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if ((pageOffsets[middle] ?? 0) <= upper) low = middle + 1;
+    else high = middle;
+  }
+  return { start, end: Math.max(start, low) };
+}
+
 /** The game and editor use the same stable separation between story steps. */
 export const TEXT_LAYOUT_STEP_GAP = 28;
 

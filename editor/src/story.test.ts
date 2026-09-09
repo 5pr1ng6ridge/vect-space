@@ -18,6 +18,7 @@ import {
 } from "./story";
 import type { EditorProject } from "./types";
 import { validateLive } from "./validation";
+import { buildScriptChainOptions } from "./components/scriptChains";
 
 function project(): EditorProject {
   return {
@@ -80,6 +81,36 @@ function project(): EditorProject {
 }
 
 describe("story graph mapping", () => {
+  it("indexes authoring chains without repeating branch targets or cycles", () => {
+    const scene = project().scenes[0].definition;
+    scene.nodes.merge = {
+      type: "say",
+      speaker: null,
+      text: "合流",
+      speed_cps: 30,
+      next: "loop",
+    };
+    scene.nodes.loop = {
+      type: "say",
+      speaker: null,
+      text: "循环",
+      speed_cps: 30,
+      next: "loop",
+    };
+    scene.nodes.left = { type: "jump", scene: null, target: "merge" };
+    const options = buildScriptChainOptions(scene);
+    expect(options.map((option) => option.id)).toEqual([
+      "start",
+      "left",
+      "right",
+      "merge",
+    ]);
+    expect(options.find((option) => option.id === "left")?.label).toContain(
+      "start",
+    );
+    expect(options.filter((option) => option.id === "merge")).toHaveLength(1);
+  });
+
   it("splits dialogue at the caret into an explicit append page", () => {
     const scene = project().scenes[0].definition;
     scene.nodes.line = {
@@ -197,6 +228,89 @@ describe("story graph mapping", () => {
           node_id: "continuation",
         }),
       ]),
+    );
+  });
+
+  it("reports case-insensitive document path collisions before save", () => {
+    const invalid = project();
+    invalid.manifest.scenes = ["scenes/main.yaml", "scenes/MAIN.yaml"];
+    expect(validateLive(invalid)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "duplicate_document_path" }),
+      ]),
+    );
+  });
+
+  it("requires the map view center to keep the complete game viewport in bounds", () => {
+    const invalid = project();
+    invalid.manifest.chapter_map = "chapter-map.yaml";
+    invalid.chapter_map = {
+      path: "chapter-map.yaml",
+      definition: {
+        schema_version: 1,
+        width: 1920,
+        height: 1080,
+        view_x: 0,
+        view_y: 540,
+        background: null,
+        decorations: [],
+        hotspots: [],
+      },
+    };
+    expect(validateLive(invalid)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "map_view" })]),
+    );
+  });
+
+  it("requires the map view center to use the 20px grid", () => {
+    const invalid = project();
+    invalid.manifest.chapter_map = "chapter-map.yaml";
+    invalid.chapter_map = {
+      path: "chapter-map.yaml",
+      definition: {
+        schema_version: 1,
+        width: 4000,
+        height: 2000,
+        view_x: 951,
+        view_y: 1000,
+        background: null,
+        decorations: [],
+        hotspots: [],
+      },
+    };
+    expect(validateLive(invalid)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "map_view" })]),
+    );
+  });
+
+  it("rejects map layer values outside the Rust i32 contract", () => {
+    const invalid = project();
+    invalid.manifest.chapter_map = "chapter-map.yaml";
+    invalid.chapter_map = {
+      path: "chapter-map.yaml",
+      definition: {
+        schema_version: 1,
+        width: 1920,
+        height: 1080,
+        view_x: 960,
+        view_y: 540,
+        background: null,
+        decorations: [
+          {
+            id: "decor",
+            asset: "",
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 20,
+            z: 2147483648,
+          },
+        ],
+        hotspots: [],
+      },
+    };
+    expect(validateLive(invalid)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "map_z" })]),
     );
   });
 
@@ -392,6 +506,37 @@ describe("story graph mapping", () => {
     ]);
     const changed = setPortTarget(node, "choice:left", "end");
     expect(changed.type === "choice" && changed.choices[0].next).toBe("end");
+  });
+
+  it("inserts after the explicitly selected choice branch", () => {
+    const source = project();
+    const result = insertNode(
+      source,
+      "main",
+      "start",
+      "right",
+      "say",
+      "choice:right",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const scene = result.project.scenes[0].definition;
+    const choice = scene.nodes.start;
+    expect(choice.type === "choice" && choice.choices[0].next).toBe("left");
+    expect(choice.type === "choice" && choice.choices[1].next).toBe(
+      result.nodeId,
+    );
+    const inserted = scene.nodes[result.nodeId];
+    expect(inserted.type).toBe("say");
+    expect(inserted.type === "say" && inserted.next).toBe("right");
+  });
+
+  it("requires an outlet before inserting into a multi-branch node", () => {
+    const result = insertNode(project(), "main", "start", "right", "say");
+    expect(result).toEqual({
+      ok: false,
+      error: "该节点有多个分支出口，请先选择要插入的出口。",
+    });
   });
 
   it("creates playback nodes with an explicit two-field policy", () => {

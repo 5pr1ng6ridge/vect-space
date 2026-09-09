@@ -128,6 +128,39 @@ export class PresentationController {
     return this.#timelineClock.skip();
   }
 
+  /** Cancels the active presentation without changing the authoritative world. */
+  cancelCurrentPresentation(): void {
+    this.#abort.abort();
+    this.#abort = new AbortController();
+    this.#generation += 1;
+    this.#currentUpdateId = null;
+    this.#currentPromise = null;
+    this.#timelineClock = null;
+    this.#timelineSkippable = false;
+    this.#activeVideo?.pause();
+    this.#activeVideo = null;
+    this.#audio.resetSession();
+    for (const child of this.#backgrounds.removeChildren()) child.destroy();
+    this.#background = null;
+    for (const view of this.#spriteViews.values()) view.destroy();
+    this.#spriteViews.clear();
+    for (const effect of this.#effects.removeChildren()) effect.destroy();
+    this.#camera = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
+    this.#applyCamera();
+    this.#uiMotionHost.reconcileDialogueVisible(false);
+    this.#oneShotLedger.clear();
+    this.#application.render();
+  }
+
+  /** Whether a presentation callback is still allowed to settle its update. */
+  isPresentationCurrent(updateId: string): boolean {
+    return (
+      this.#currentUpdateId === updateId &&
+      this.#currentPromise !== null &&
+      !this.#abort.signal.aborted
+    );
+  }
+
   present(
     update: RuntimeUpdate,
     assets: AssetUrlMap,
@@ -386,6 +419,10 @@ export class PresentationController {
     if (view === undefined || view.label !== targetUrl) {
       view?.destroy();
       view = await this.#makeSprite(target, assets);
+      if (signal.aborted) {
+        view.destroy();
+        return;
+      }
       view.label = targetUrl;
       view.x = target.x;
       view.y = target.y + 48;
@@ -397,9 +434,7 @@ export class PresentationController {
       this.#world.addChild(view);
       this.#spriteViews.set(id, view);
     }
-    if (signal.aborted) {
-      return;
-    }
+    if (signal.aborted) return;
     const start = readSprite(view);
     await this.#animate(
       durationMs,
@@ -582,6 +617,10 @@ export class PresentationController {
           },
           assets,
         );
+        if (signal.aborted) {
+          view.destroy();
+          return "failed";
+        }
         view.label = url;
         this.#world.addChild(view);
         this.#spriteViews.set(track.sprite_id, view);
@@ -599,46 +638,81 @@ export class PresentationController {
     let videoView: Sprite | null = null;
     let videoSource: VideoSource | null = null;
     let buffering = false;
+    // A timeline may be cancelled while its media is still waiting for
+    // metadata/seek.  Those awaits happen before the clock's `finally` block
+    // below is installed, so keep one idempotent cleanup path for every early
+    // return and setup failure as well.  In particular, clearing the active
+    // video reference alone is not enough: the element must release its src
+    // and the Pixi VideoSource must be destroyed or WebView keeps decoding it
+    // after leaving a replay or loading a save.
+    const cleanupVideo = (): void => {
+      if (video !== null) video.pause();
+      if (this.#activeVideo === video) this.#activeVideo = null;
+      if (videoView !== null) {
+        videoView.destroy({ texture: true, textureSource: true });
+        videoView = null;
+        videoSource = null;
+      } else if (videoSource !== null) {
+        videoSource.destroy();
+        videoSource = null;
+      }
+      if (video !== null) {
+        video.removeAttribute("src");
+        video.load();
+        video = null;
+      }
+    };
     const setBuffering = (value: boolean): void => {
       buffering = value;
       this.#timelineClock?.setBuffering(value);
     };
     if (videoTrack !== undefined) {
-      video = document.createElement("video");
-      this.#activeVideo = video;
-      video.preload = "auto";
-      video.crossOrigin = "anonymous";
-      video.playsInline = true;
-      video.autoplay = false;
-      video.loop = false;
-      video.controls = false;
-      video.disablePictureInPicture = true;
-      video.src = requireAssetUrl(assets, videoTrack.asset);
-      video.muted = !videoTrack.audio_enabled;
-      await waitForVideoFrameData(video, signal);
-      if (signal.aborted) return "failed";
-      await seekVideo(video, videoTrack.clip_start_ms / 1_000, signal);
-      if (signal.aborted) return "failed";
-      if (videoTrack.audio_enabled) this.#audio.attachVideo(video, 1);
-      video.addEventListener("waiting", () => setBuffering(true));
-      video.addEventListener("stalled", () => setBuffering(true));
-      video.addEventListener("playing", () => setBuffering(false));
-      video.addEventListener("canplay", () => setBuffering(false));
-      videoSource = new VideoSource({
-        resource: video,
-        autoLoad: false,
-        autoPlay: false,
-        updateFPS: 0,
-      });
-      await videoSource.load();
-      videoSource.autoUpdate = false;
-      videoSource.update();
-      videoView = new Sprite(new Texture({ source: videoSource }));
-      videoView.anchor.set(0, 0);
-      this.#world.addChild(videoView);
-      await startVideoPlayback(video, signal);
-      await waitForPresentedVideoFrame(video, signal);
-      videoSource.update();
+      try {
+        video = document.createElement("video");
+        this.#activeVideo = video;
+        video.preload = "auto";
+        video.crossOrigin = "anonymous";
+        video.playsInline = true;
+        video.autoplay = false;
+        video.loop = false;
+        video.controls = false;
+        video.disablePictureInPicture = true;
+        video.src = requireAssetUrl(assets, videoTrack.asset);
+        video.muted = !videoTrack.audio_enabled;
+        await waitForVideoFrameData(video, signal);
+        if (signal.aborted) {
+          cleanupVideo();
+          return "failed";
+        }
+        await seekVideo(video, videoTrack.clip_start_ms / 1_000, signal);
+        if (signal.aborted) {
+          cleanupVideo();
+          return "failed";
+        }
+        if (videoTrack.audio_enabled) this.#audio.attachVideo(video, 1);
+        video.addEventListener("waiting", () => setBuffering(true));
+        video.addEventListener("stalled", () => setBuffering(true));
+        video.addEventListener("playing", () => setBuffering(false));
+        video.addEventListener("canplay", () => setBuffering(false));
+        videoSource = new VideoSource({
+          resource: video,
+          autoLoad: false,
+          autoPlay: false,
+          updateFPS: 0,
+        });
+        await videoSource.load();
+        videoSource.autoUpdate = false;
+        videoSource.update();
+        videoView = new Sprite(new Texture({ source: videoSource }));
+        videoView.anchor.set(0, 0);
+        this.#world.addChild(videoView);
+        await startVideoPlayback(video, signal);
+        await waitForPresentedVideoFrame(video, signal);
+        if (!signal.aborted) videoSource.update();
+      } catch (error) {
+        cleanupVideo();
+        throw error;
+      }
     }
 
     // Capture every starting value once, after all timeline assets have been
@@ -773,22 +847,12 @@ export class PresentationController {
     try {
       return await clock.run(signal);
     } finally {
-      this.#timelineClock = null;
-      this.#timelineSkippable = false;
-      this.#skipSuppressTimelineEvents = false;
-      if (video !== null) {
-        video.pause();
+      if (this.#timelineClock === clock) {
+        this.#timelineClock = null;
+        this.#timelineSkippable = false;
+        this.#skipSuppressTimelineEvents = false;
       }
-      this.#activeVideo = null;
-      if (videoView !== null) {
-        videoView.destroy({ texture: true, textureSource: true });
-      } else {
-        videoSource?.destroy();
-        if (video !== null) {
-          video.removeAttribute("src");
-          video.load();
-        }
-      }
+      cleanupVideo();
     }
   }
 

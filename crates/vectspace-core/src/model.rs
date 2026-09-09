@@ -17,6 +17,10 @@ pub struct ProfileState {
     pub seen_presentations: BTreeSet<String>,
     #[serde(default)]
     pub completed_scenes: BTreeSet<String>,
+    /// Global dialogue history.  It is profile data rather than a snapshot
+    /// field, so it survives new games, slot loads and application restarts.
+    #[serde(default)]
+    pub dialogue_history: Vec<DialogueHistoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -179,6 +183,122 @@ pub struct ContentManifest {
     pub ui_motion_defaults: UiMotionBindings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub story_flow: Option<String>,
+    /// Optional author-authored room map used as the chapter selector.  The
+    /// legacy story flow remains available for projects that have not yet
+    /// moved to a map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_map: Option<String>,
+}
+
+/// A room-sized chapter selector.  Coordinates are design pixels and are
+/// deliberately kept independent from the story graph so authors can compose
+/// a spatial map without changing story control flow.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChapterMapDefinition {
+    pub schema_version: u32,
+    #[serde(default = "default_chapter_map_width")]
+    pub width: u32,
+    #[serde(default = "default_chapter_map_height")]
+    pub height: u32,
+    #[serde(default = "default_chapter_map_view_x")]
+    pub view_x: i32,
+    #[serde(default = "default_chapter_map_view_y")]
+    pub view_y: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub decorations: Vec<ChapterMapDecoration>,
+    #[serde(default)]
+    pub hotspots: Vec<ChapterMapHotspot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChapterMapDecoration {
+    pub id: String,
+    pub asset: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub z: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChapterMapHotspot {
+    pub id: String,
+    pub scene_id: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub z: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<String>,
+    #[serde(default)]
+    pub reveal: StoryFlowReveal,
+    #[serde(default)]
+    pub variable_overrides: VariableMap,
+}
+
+fn default_chapter_map_width() -> u32 {
+    1920
+}
+
+fn default_chapter_map_height() -> u32 {
+    1080
+}
+
+fn default_chapter_map_view_x() -> i32 {
+    960
+}
+
+fn default_chapter_map_view_y() -> i32 {
+    540
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChapterMapSnapshot {
+    pub width: u32,
+    pub height: u32,
+    pub view_x: i32,
+    pub view_y: i32,
+    pub background: Option<String>,
+    pub decorations: Vec<ChapterMapDecorationSnapshot>,
+    pub hotspots: Vec<ChapterMapHotspotSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChapterMapDecorationSnapshot {
+    pub id: String,
+    pub asset: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub z: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChapterMapHotspotSnapshot {
+    pub id: String,
+    pub scene_id: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub z: i32,
+    pub asset: Option<String>,
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1241,6 +1361,11 @@ pub struct BootstrapPayload {
     pub asset_ids: Vec<String>,
     pub content_version: String,
     pub story_flow_available: bool,
+    /// True when an author-authored chapter map is available.  The field is
+    /// defaulted so older bootstrap payloads can still be decoded by tools
+    /// that predate the room-map milestone.
+    #[serde(default)]
+    pub chapter_map_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_font: Option<String>,
 }

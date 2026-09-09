@@ -9,6 +9,13 @@
         "$ref": "#/$defs/AssetDefinition"
       }
     },
+    "chapter_map": {
+      "description": "Optional author-authored room map used as the chapter selector.  The\nlegacy story flow remains available for projects that have not yet\nmoved to a map.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "characters": {
       "type": "object",
       "additionalProperties": {

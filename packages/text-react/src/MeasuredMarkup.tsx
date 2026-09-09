@@ -15,6 +15,7 @@ import {
 import {
   useCallback,
   useLayoutEffect,
+  memo,
   useMemo,
   useRef,
   type CSSProperties,
@@ -42,7 +43,7 @@ export interface MeasuredMarkupProps {
  * reserve their final geometry, which makes it suitable for gameplay reveal
  * and editor measurement/pagination alike.
  */
-export function MeasuredMarkup({
+export const MeasuredMarkup = memo(function MeasuredMarkup({
   source,
   fontFamily,
   fontSize,
@@ -206,7 +207,7 @@ export function MeasuredMarkup({
       })}
     </div>
   );
-}
+});
 
 function renderUnit(
   unit: MarkupUnit,

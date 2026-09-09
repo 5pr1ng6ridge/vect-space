@@ -1,36 +1,83 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use image::{GenericImageView, ImageReader};
 use serde::{de::DeserializeOwned, Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
+use symphonia::core::{
+    codecs::CODEC_TYPE_NULL, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions,
+    probe::Hint,
+};
 use tauri::{AppHandle, Manager, State};
+use ttf_parser::Face;
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AssetKind, ChoiceSnapshot, ContentManifest, ResolvedAsset, SceneDefinition, SceneNode,
-        StoryFlowDefinition, StoryLocation, TimelineEvent, TimelineTrack, UiMotionPreset,
-        VariableMap,
+        AssetKind, ChapterMapDefinition, ChoiceSnapshot, ContentManifest, ResolvedAsset,
+        SceneDefinition, SceneNode, StoryFlowDefinition, StoryLocation, TimelineEvent,
+        TimelineTrack, UiMotionPreset, VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
     },
 };
 use vectspace_protocol::{
-    variable_map_from_wire, WireCommandError, WireCommandErrorCode, WireRuntimeSnapshot,
-    WireRuntimeUpdate, WireVariableMap,
+    variable_map_from_wire, WireAssetDiagnostic, WireAssetInspection, WireAssetKind,
+    WireAssetMetadata, WireAssetReuseCandidate, WireCommandError, WireCommandErrorCode,
+    WireImportedAsset, WireInspectAssetImportsRequest, WireRuntimeSnapshot, WireRuntimeUpdate,
+    WireStageAssetImportsRequest, WireU64, WireVariableMap,
 };
 
 const LAYOUT_RELATIVE_PATH: &str = ".vectspace/layout-v1.json";
+const MAX_PENDING_ASSET_INSPECTIONS: usize = 512;
+const MAX_FONT_INSPECTION_BYTES: u64 = 64 * 1024 * 1024;
+const HASH_IO_BUFFER_SIZE: usize = 1024 * 1024;
+// Windows' common file dialog loads the user's Explorer shell extensions into
+// the host process. Some real-world extension sets exhaust Rust's default
+// worker-thread stack and terminate the entire editor with STATUS_STACK_OVERFLOW.
+// Keep the picker isolated on a deliberately large stack and never run it on
+// Tauri's IPC worker or WebView event-loop thread.
+const NATIVE_PICKER_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 struct EditorState {
     session: Mutex<Option<ProjectSession>>,
+    /// Asset imports are staged outside the managed content tree until the
+    /// user saves the project.  Keeping the records in the host (rather than
+    /// trusting paths sent back by the WebView) makes an import token
+    /// capability-like and lets us discard abandoned imports on the next
+    /// project open.
+    imports: Mutex<BTreeMap<String, StagedImport>>,
+    inspections: Mutex<BTreeMap<String, InspectedImport>>,
+}
+
+#[derive(Debug, Clone)]
+struct StagedImport {
+    token: String,
+    project_root: PathBuf,
+    id: String,
+    kind: AssetKind,
+    relative_path: String,
+    staged_path: PathBuf,
+    sha256: String,
+    /// A staged record may point at an already managed file with the same
+    /// content.  Such a record is only a new manifest registration; the
+    /// save transaction must never delete or rewrite the shared file.
+    owns_staged_path: bool,
+    reused_from: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct InspectedImport {
+    project_root: PathBuf,
+    source_path: PathBuf,
+    sha256: String,
 }
 
 struct ProjectSession {
@@ -38,6 +85,53 @@ struct ProjectSession {
     catalog: ContentCatalog,
     fingerprint: String,
     document_models: BTreeMap<String, serde_json::Value>,
+}
+
+async fn run_native_picker<T, F>(name: &str, picker: F) -> Result<T, WireCommandError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let thread = std::thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(NATIVE_PICKER_STACK_BYTES)
+        .spawn(picker)
+        .map_err(io_command_error)?;
+    let joined = tauri::async_runtime::spawn_blocking(move || thread.join())
+        .await
+        .map_err(|error| internal_command_error(format!("等待文件选择器失败: {error}")))?;
+    joined.map_err(|_| internal_command_error("文件选择器线程意外终止"))
+}
+
+#[tauri::command]
+async fn pick_project_directory() -> Result<Option<String>, WireCommandError> {
+    run_native_picker("vectspace-project-picker", || {
+        rfd::FileDialog::new()
+            .set_title("选择 VECTSPACE 项目或 game 目录")
+            .pick_folder()
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn pick_asset_files() -> Result<Vec<String>, WireCommandError> {
+    run_native_picker("vectspace-asset-picker", || {
+        rfd::FileDialog::new()
+            .set_title("选择一个或多个素材文件")
+            .add_filter(
+                "VECTSPACE 素材",
+                &[
+                    "png", "jpg", "jpeg", "webp", "wav", "ogg", "mp3", "flac", "mp4", "ttf", "otf",
+                ],
+            )
+            .pick_files()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    })
+    .await
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +142,7 @@ struct EditorProject {
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
     story_flow: Option<EditorStoryFlowFile>,
+    chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     assets: Vec<EditorAsset>,
     diagnostics: Vec<EditorDiagnostic>,
@@ -61,6 +156,7 @@ struct EditorProjectView<'a> {
     scenes: &'a [EditorSceneFile],
     ui_motions: &'a [EditorUiMotionFile],
     story_flow: &'a Option<EditorStoryFlowFile>,
+    chapter_map: &'a Option<EditorChapterMapFile>,
     layout: &'a EditorLayout,
     assets: &'a [EditorAsset],
     diagnostics: &'a [EditorDiagnostic],
@@ -78,6 +174,7 @@ impl Serialize for EditorProject {
             scenes: &self.scenes,
             ui_motions: &self.ui_motions,
             story_flow: &self.story_flow,
+            chapter_map: &self.chapter_map,
             layout: &self.layout,
             assets: &self.assets,
             diagnostics: &self.diagnostics,
@@ -122,11 +219,26 @@ struct EditorStoryFlowFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EditorChapterMapFile {
+    path: String,
+    definition: ChapterMapDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditorAsset {
     id: String,
     kind: AssetKind,
     path: String,
     absolute_path: String,
+    #[serde(default = "default_wire_u64")]
+    size_bytes: WireU64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<WireAssetMetadata>,
+}
+
+fn default_wire_u64() -> WireU64 {
+    WireU64::from(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,8 +372,10 @@ struct SaveProjectRequest {
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
     story_flow: Option<EditorStoryFlowFile>,
+    chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     expected_fingerprint: String,
+    import_tokens: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,8 +385,11 @@ struct SaveProjectRequestRaw {
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
     story_flow: Option<EditorStoryFlowFile>,
+    chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     expected_fingerprint: String,
+    #[serde(default)]
+    import_tokens: Vec<String>,
 }
 
 impl<'de> Deserialize<'de> for SaveProjectRequest {
@@ -289,27 +406,445 @@ impl<'de> Deserialize<'de> for SaveProjectRequest {
             scenes: raw.scenes,
             ui_motions: raw.ui_motions,
             story_flow: raw.story_flow,
+            chapter_map: raw.chapter_map,
             layout: raw.layout,
             expected_fingerprint: raw.expected_fingerprint,
+            import_tokens: raw.import_tokens,
         })
     }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Clone)]
 struct ImportAssetRequest {
     id: String,
     kind: AssetKind,
-    source_path: String,
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    inspection_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ImportedAsset {
-    id: String,
-    kind: AssetKind,
-    path: String,
-    absolute_path: String,
+fn empty_asset_metadata(format: &str) -> WireAssetMetadata {
+    WireAssetMetadata {
+        format: format.to_owned(),
+        width: None,
+        height: None,
+        duration_ms: None,
+        channels: None,
+        sample_rate: None,
+        font_family: None,
+        font_style: None,
+    }
+}
+
+fn wire_asset_kind(kind: AssetKind) -> WireAssetKind {
+    match kind {
+        AssetKind::Background => WireAssetKind::Background,
+        AssetKind::Sprite => WireAssetKind::Sprite,
+        AssetKind::Gui => WireAssetKind::Gui,
+        AssetKind::Bgm => WireAssetKind::Bgm,
+        AssetKind::Sfx => WireAssetKind::Sfx,
+        AssetKind::Video => WireAssetKind::Video,
+        AssetKind::Font => WireAssetKind::Font,
+    }
+}
+
+fn asset_kind_from_wire(kind: WireAssetKind) -> AssetKind {
+    match kind {
+        WireAssetKind::Background => AssetKind::Background,
+        WireAssetKind::Sprite => AssetKind::Sprite,
+        WireAssetKind::Gui => AssetKind::Gui,
+        WireAssetKind::Bgm => AssetKind::Bgm,
+        WireAssetKind::Sfx => AssetKind::Sfx,
+        WireAssetKind::Video => AssetKind::Video,
+        WireAssetKind::Font => AssetKind::Font,
+    }
+}
+
+fn inferred_asset_kind(path: &Path) -> Option<WireAssetKind> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ["png", "jpg", "jpeg", "webp"].contains(&extension.as_str()) {
+        return Some(WireAssetKind::Background);
+    }
+    if ["ogg", "wav", "mp3", "flac"].contains(&extension.as_str()) {
+        return Some(WireAssetKind::Sfx);
+    }
+    if extension == "mp4" {
+        return Some(WireAssetKind::Video);
+    }
+    if ["ttf", "otf"].contains(&extension.as_str()) {
+        return Some(WireAssetKind::Font);
+    }
+    None
+}
+
+fn inspect_media_source(source: &Path) -> Result<WireAssetMetadata, String> {
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // ImageReader and the container parsers validate their own structure, but
+    // a few formats are permissive about the caller-provided extension.  A
+    // cheap signature check keeps a renamed WAV/OGG/MP3/FLAC/MP4 from being
+    // registered under a misleading path and makes the import contract
+    // deterministic on both Windows and the test host.
+    if matches!(extension.as_str(), "ogg" | "wav" | "mp3" | "flac" | "mp4") {
+        validate_media_signature(source, &extension)?;
+    }
+    match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" => {
+            let reader = ImageReader::open(source)
+                .map_err(|error| error.to_string())?
+                .with_guessed_format()
+                .map_err(|error| error.to_string())?;
+            let detected = reader.format();
+            let extension_matches = match (extension.as_str(), detected) {
+                ("png", Some(image::ImageFormat::Png))
+                | ("jpg" | "jpeg", Some(image::ImageFormat::Jpeg))
+                | ("webp", Some(image::ImageFormat::WebP)) => true,
+                // `with_guessed_format` is allowed to return None for a few
+                // valid image readers.  The full decode below is still the
+                // authoritative corruption check in that case.
+                (_, None) => true,
+                _ => false,
+            };
+            if !extension_matches {
+                return Err("文件扩展名与实际图片格式不匹配".to_owned());
+            }
+            let format = detected
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| extension.to_ascii_uppercase());
+            // Decode rather than only reading the header. This catches
+            // truncated images that happen to carry a valid signature.
+            let image = reader.decode().map_err(|error| error.to_string())?;
+            let (width, height) = image.dimensions();
+            let mut metadata = empty_asset_metadata(&format);
+            metadata.width = Some(width);
+            metadata.height = Some(height);
+            Ok(metadata)
+        }
+        "ogg" | "wav" | "mp3" | "flac" => inspect_audio_source(source),
+        "mp4" => inspect_mp4_source(source),
+        "ttf" | "otf" => inspect_font_source(source),
+        _ => Err("不支持的素材扩展名".to_owned()),
+    }
+}
+
+fn validate_media_signature(source: &Path, extension: &str) -> Result<(), String> {
+    let mut file = File::open(source).map_err(|error| error.to_string())?;
+    let mut prefix = [0_u8; 12];
+    let length = file.read(&mut prefix).map_err(|error| error.to_string())?;
+    let bytes = &prefix[..length];
+    let valid = match extension {
+        "ogg" => bytes.starts_with(b"OggS"),
+        "wav" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE",
+        "flac" => bytes.starts_with(b"fLaC"),
+        "mp3" => {
+            bytes.starts_with(b"ID3")
+                || (bytes.len() >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0)
+        }
+        "mp4" => bytes.len() >= 8 && &bytes[4..8] == b"ftyp",
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("文件头与 .{extension} 扩展名不匹配"))
+    }
+}
+
+fn inspect_audio_source(source: &Path) -> Result<WireAssetMetadata, String> {
+    let file = File::open(source).map_err(|error| error.to_string())?;
+    let source_stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = source.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            source_stream,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|error| error.to_string())?;
+    let track = probed
+        .format
+        .tracks()
+        .iter()
+        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| "音频容器中没有有效音轨".to_owned())?;
+    let params = &track.codec_params;
+    let duration_ms = params
+        .time_base
+        .zip(params.n_frames)
+        .and_then(|(time_base, frames)| {
+            let time = time_base.calc_time(frames);
+            let fraction = (time.frac * 1000.0).round();
+            if !fraction.is_finite() || fraction < 0.0 {
+                return None;
+            }
+            time.seconds
+                .checked_mul(1000)
+                .and_then(|value| value.checked_add(fraction as u64))
+        });
+    Ok(WireAssetMetadata {
+        format: source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("audio")
+            .to_ascii_uppercase(),
+        width: None,
+        height: None,
+        duration_ms: duration_ms.map(WireU64::from),
+        channels: params.channels.map(|value| value.count() as u16),
+        sample_rate: params.sample_rate,
+        font_family: None,
+        font_style: None,
+    })
+}
+
+fn inspect_mp4_source(source: &Path) -> Result<WireAssetMetadata, String> {
+    let mut file = File::open(source).map_err(|error| error.to_string())?;
+    let context = mp4parse::read_mp4(&mut file).map_err(|error| error.to_string())?;
+    let track = context
+        .tracks
+        .iter()
+        .find(|track| track.track_type == mp4parse::TrackType::Video)
+        .ok_or_else(|| "MP4 容器中没有视频轨道".to_owned())?;
+    let header = track
+        .tkhd
+        .as_ref()
+        .ok_or_else(|| "MP4 视频轨道缺少尺寸信息".to_owned())?;
+    let width = header.width >> 16;
+    let height = header.height >> 16;
+    if width == 0 || height == 0 {
+        return Err("MP4 视频轨道尺寸无效".to_owned());
+    }
+    let duration_ms = track.duration.as_ref().and_then(|duration| {
+        let timescale = track.timescale.as_ref()?.0;
+        if timescale == 0 {
+            return None;
+        }
+        duration.0.checked_mul(1000).map(|value| value / timescale)
+    });
+    Ok(WireAssetMetadata {
+        format: "MP4".to_owned(),
+        width: Some(width),
+        height: Some(height),
+        duration_ms: duration_ms.map(WireU64::from),
+        channels: None,
+        sample_rate: None,
+        font_family: None,
+        font_style: None,
+    })
+}
+
+fn inspect_font_source(source: &Path) -> Result<WireAssetMetadata, String> {
+    let length = fs::metadata(source)
+        .map_err(|error| error.to_string())?
+        .len();
+    if length > MAX_FONT_INSPECTION_BYTES {
+        return Err(format!(
+            "字体文件过大，检查上限为 {} MiB",
+            MAX_FONT_INSPECTION_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = fs::read(source).map_err(|error| error.to_string())?;
+    let face = Face::parse(&bytes, 0).map_err(|error| format!("字体结构无效: {error:?}"))?;
+    let family = face
+        .names()
+        .into_iter()
+        .find(|name| {
+            name.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                || name.name_id == ttf_parser::name_id::FAMILY
+        })
+        .and_then(|name| name.to_string());
+    let style = face
+        .names()
+        .into_iter()
+        .find(|name| {
+            name.name_id == ttf_parser::name_id::TYPOGRAPHIC_SUBFAMILY
+                || name.name_id == ttf_parser::name_id::SUBFAMILY
+        })
+        .and_then(|name| name.to_string());
+    Ok(WireAssetMetadata {
+        format: source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("font")
+            .to_ascii_uppercase(),
+        width: None,
+        height: None,
+        duration_ms: None,
+        channels: None,
+        sample_rate: None,
+        font_family: family,
+        font_style: style,
+    })
+}
+
+#[tauri::command]
+fn inspect_asset_imports(
+    request: WireInspectAssetImportsRequest,
+    state: State<'_, EditorState>,
+) -> Result<Vec<WireAssetInspection>, WireCommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| internal_command_error("编辑器项目锁已损坏"))?;
+    let session = session_guard
+        .as_ref()
+        .ok_or_else(|| validation_command_error("尚未打开项目"))?;
+    let mut inspections = state
+        .inspections
+        .lock()
+        .map_err(|_| internal_command_error("素材检查锁已损坏"))?;
+    let batch_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut output = Vec::with_capacity(request.source_paths.len());
+    for (index, raw_path) in request.source_paths.iter().enumerate() {
+        let source = fs::canonicalize(raw_path);
+        let inspection_id = format!("inspection-{batch_id}-{index}");
+        let mut diagnostics = Vec::new();
+        let (source_path, metadata, sha256, suggested_kind) = match source {
+            Ok(path) if path.is_file() => match fs::metadata(&path) {
+                Ok(stat) if stat.len() > 0 => match inspect_media_source(&path) {
+                    Ok(metadata) => match hash_file_streaming(&path) {
+                        Ok(hash) => {
+                            let suggested_kind = inferred_asset_kind(&path);
+                            (Some(path), metadata, Some(hash), suggested_kind)
+                        }
+                        Err(error) => {
+                            diagnostics.push(WireAssetDiagnostic {
+                                severity: "error".to_owned(),
+                                code: "io".to_owned(),
+                                message: error.to_string(),
+                            });
+                            (None, empty_asset_metadata("unknown"), None, None)
+                        }
+                    },
+                    Err(error) => {
+                        diagnostics.push(WireAssetDiagnostic {
+                            severity: "error".to_owned(),
+                            code: "invalid_media".to_owned(),
+                            message: error,
+                        });
+                        (None, empty_asset_metadata("unknown"), None, None)
+                    }
+                },
+                Ok(_) => {
+                    diagnostics.push(WireAssetDiagnostic {
+                        severity: "error".to_owned(),
+                        code: "empty_file".to_owned(),
+                        message: "素材文件为空".to_owned(),
+                    });
+                    (None, empty_asset_metadata("unknown"), None, None)
+                }
+                Err(error) => {
+                    diagnostics.push(WireAssetDiagnostic {
+                        severity: "error".to_owned(),
+                        code: "io".to_owned(),
+                        message: error.to_string(),
+                    });
+                    (None, empty_asset_metadata("unknown"), None, None)
+                }
+            },
+            Ok(_) => {
+                diagnostics.push(WireAssetDiagnostic {
+                    severity: "error".to_owned(),
+                    code: "not_file".to_owned(),
+                    message: "选择的路径不是文件".to_owned(),
+                });
+                (None, empty_asset_metadata("unknown"), None, None)
+            }
+            Err(error) => {
+                diagnostics.push(WireAssetDiagnostic {
+                    severity: "error".to_owned(),
+                    code: "io".to_owned(),
+                    message: error.to_string(),
+                });
+                (None, empty_asset_metadata("unknown"), None, None)
+            }
+        };
+        let mut reuse_candidates = Vec::new();
+        if let (Some(path), Some(hash)) = (&source_path, &sha256) {
+            for (id, definition) in &session.catalog.manifest.assets {
+                let absolute = session.catalog.assets_root().join(&definition.path);
+                if hash_file_streaming(&absolute).ok().as_deref() == Some(hash) {
+                    reuse_candidates.push(WireAssetReuseCandidate {
+                        id: id.clone(),
+                        kind: wire_asset_kind(definition.kind),
+                        path: definition.path.clone(),
+                    });
+                }
+            }
+            let _ = path;
+        }
+        let inspection = WireAssetInspection {
+            inspection_id: inspection_id.clone(),
+            source_name: source_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| raw_path.clone()),
+            detected_format: metadata.format.clone(),
+            suggested_kind,
+            size_bytes: WireU64::from(
+                source_path
+                    .as_ref()
+                    .and_then(|path| fs::metadata(path).ok())
+                    .map(|stat| stat.len())
+                    .unwrap_or(0),
+            ),
+            sha256: sha256.clone().unwrap_or_default(),
+            metadata: metadata.clone(),
+            reuse_candidates,
+            diagnostics,
+        };
+        if let (Some(source_path), Some(sha256)) = (source_path, sha256) {
+            if inspection.diagnostics.is_empty() {
+                inspections.insert(
+                    inspection_id.clone(),
+                    InspectedImport {
+                        project_root: session.root.clone(),
+                        source_path,
+                        sha256,
+                    },
+                );
+            }
+        }
+        output.push(inspection);
+    }
+    // Inspection IDs are short-lived capabilities.  Bound the table so a
+    // user repeatedly opening the file picker cannot grow the editor process
+    // forever; the oldest IDs naturally expire and the UI can re-inspect.
+    let project_root = session.root.clone();
+    while inspections
+        .values()
+        .filter(|item| item.project_root == project_root)
+        .count()
+        > MAX_PENDING_ASSET_INSPECTIONS
+    {
+        let Some(oldest) = inspections
+            .iter()
+            .find(|(_, item)| item.project_root == project_root)
+            .map(|(id, _)| id.clone())
+        else {
+            break;
+        };
+        inspections.remove(&oldest);
+    }
+    Ok(output)
 }
 
 #[tauri::command]
@@ -324,6 +859,10 @@ fn open_project(
     app.asset_protocol_scope()
         .allow_directory(catalog.assets_root(), true)
         .map_err(asset_command_error)?;
+    // Only discard staged imports after the new project has loaded and its
+    // asset scope has been accepted.  If the user picked an invalid project,
+    // their current in-memory import session must remain recoverable.
+    clear_staged_imports(&state, &root).map_err(io_command_error)?;
 
     let fingerprint = project_fingerprint(&root, &catalog.manifest).map_err(io_command_error)?;
     let layout = read_layout(&root).map_err(io_command_error)?;
@@ -368,71 +907,208 @@ fn save_project(
         ));
     }
 
-    let scenes = validate_scene_file_set(&request.manifest, &request.scenes)
-        .map_err(validation_command_error)?;
-    let ui_motions = validate_ui_motion_file_set(&request.manifest, &request.ui_motions)
-        .map_err(validation_command_error)?;
-    let candidate = ContentCatalog::from_documents(
-        session.root.clone(),
-        request.manifest.clone(),
-        scenes,
-        ui_motions,
-        request
-            .story_flow
-            .as_ref()
-            .map(|file| file.definition.clone()),
-    )
-    .map_err(validation_command_error)?;
-
-    let all_writes =
-        serialize_project(&session.root, &request).map_err(validation_command_error)?;
-    let next_models = document_models_from_request(&request).map_err(validation_command_error)?;
-    let writes = retain_changed_model_writes(
-        &session.root,
-        &request,
-        all_writes,
-        &session.document_models,
-    )
-    .map_err(validation_command_error)?;
-    let deletes = managed_deletions(&session.root, &session.catalog.manifest, &request.manifest);
-    let changed_paths = writes
-        .iter()
-        .filter_map(|(path, _)| path.strip_prefix(&session.root).ok())
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .collect::<Vec<_>>();
-    let transaction_id = if writes.is_empty() && deletes.is_empty() {
-        None
-    } else {
-        let id = atomic_write_batch_with_deletes(&session.root, &writes, &deletes)
-            .map_err(io_command_error)?;
-        Some(id)
+    let staged = {
+        let imports = state
+            .imports
+            .lock()
+            .map_err(|_| internal_command_error("素材导入锁已损坏"))?;
+        staged_imports_for_request(&imports, &session.root, &request)
+            .map_err(validation_command_error)?
     };
+    validate_staged_imports(&staged).map_err(io_command_error)?;
+    ensure_import_targets_available(&session.root, &staged).map_err(io_command_error)?;
+    let asset_overrides = staged_asset_overrides(&staged);
 
-    let fingerprint =
-        project_fingerprint(&session.root, &request.manifest).map_err(io_command_error)?;
-    let layout = request.layout.clone();
-    let project = project_payload_from_request(
-        &session.root,
-        &candidate,
-        &request,
-        layout,
-        fingerprint.clone(),
-    )
-    .map_err(validation_command_error)?;
-    session.catalog = candidate;
-    session.fingerprint.clone_from(&fingerprint);
-    session.document_models = next_models;
-    Ok(SaveProjectResult {
-        project,
-        changed_paths,
-        deleted_paths: deletes
+    let mut result = (|| -> Result<SaveProjectResult, WireCommandError> {
+        let scenes = validate_scene_file_set(&request.manifest, &request.scenes)
+            .map_err(validation_command_error)?;
+        let ui_motions = validate_ui_motion_file_set(&request.manifest, &request.ui_motions)
+            .map_err(validation_command_error)?;
+        let candidate = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides(
+            session.root.clone(),
+            request.manifest.clone(),
+            scenes,
+            ui_motions,
+            request
+                .story_flow
+                .as_ref()
+                .map(|file| file.definition.clone()),
+            request
+                .chapter_map
+                .as_ref()
+                .map(|file| file.definition.clone()),
+            &asset_overrides,
+        )
+        .map_err(validation_command_error)?;
+
+        let all_writes =
+            serialize_project(&session.root, &request).map_err(validation_command_error)?;
+        // Staged binaries participate in the same journal as the manifest and
+        // scene documents.  Keep them as source paths until the transaction
+        // stages them; this avoids loading a batch of videos/audio into the
+        // editor process memory just to write them back out.
+        let staging_root = session.root.join(".vectspace").join("tmp").join("imports");
+        let mut asset_targets = BTreeSet::new();
+        let mut asset_writes = Vec::new();
+        let mut asset_hashes = BTreeMap::new();
+        let mut published_asset_paths = BTreeMap::new();
+        for item in &staged {
+            let target = session.root.join("assets").join(&item.relative_path);
+            published_asset_paths
+                .entry(item.id.clone())
+                .or_insert_with(|| target.clone());
+            let target_exists =
+                path_exists_case_insensitive(&session.root.join("assets"), &item.relative_path)
+                    .map_err(io_command_error)?;
+            // Usually only the owning token writes a new binary.  If that
+            // token was removed from the manifest before save, a remaining
+            // registration can still refer to its staged bytes; promote that
+            // reference to the one write for this target.  Formal reuse is
+            // never copied because its source already lives in assets/.
+            let needs_copy = item.owns_staged_path
+                || (item.staged_path.starts_with(&staging_root) && !target_exists);
+            if needs_copy && asset_targets.insert(target.clone()) {
+                asset_hashes.insert(target.clone(), item.sha256.clone());
+                asset_writes.push((target, item.staged_path.clone()));
+            }
+        }
+        let next_models =
+            document_models_from_request(&request).map_err(validation_command_error)?;
+        let writes = retain_changed_model_writes(
+            &session.root,
+            &request,
+            all_writes,
+            &session.document_models,
+        )
+        .map_err(validation_command_error)?;
+        let deletes =
+            managed_deletions(&session.root, &session.catalog.manifest, &request.manifest);
+        // Compute every value needed by the response before publication. The
+        // fingerprint uses the bytes that are actually going to be written
+        // (and the inspected hashes of staged binaries), while unchanged files
+        // are read from the still-current project tree. Once the journal is
+        // committed, the command therefore cannot report a failure while the
+        // editor still holds the old fingerprint.
+        let mut expected_hashes = BTreeMap::new();
+        for (path, bytes) in &writes {
+            expected_hashes.insert(path.clone(), hash_bytes(bytes));
+        }
+        expected_hashes.extend(
+            asset_hashes
+                .iter()
+                .map(|(path, hash)| (path.clone(), hash.clone())),
+        );
+        let fingerprint =
+            project_fingerprint_with_hashes(&session.root, &request.manifest, &expected_hashes)
+                .map_err(io_command_error)?;
+        let project = project_payload_from_request(
+            &session.root,
+            &candidate,
+            &request,
+            request.layout.clone(),
+            &published_asset_paths,
+            fingerprint.clone(),
+        )
+        .map_err(validation_command_error)?;
+        let changed_paths = writes
             .iter()
-            .filter_map(|path| path.strip_prefix(&session.root).ok())
+            .filter_map(|(path, _)| path.strip_prefix(&session.root).ok())
             .map(|path| path.to_string_lossy().replace('\\', "/"))
-            .collect(),
-        warnings: Vec::new(),
-        transaction_id,
-    })
+            .chain(
+                asset_writes
+                    .iter()
+                    .filter_map(|(path, _)| path.strip_prefix(&session.root).ok())
+                    .map(|path| path.to_string_lossy().replace('\\', "/")),
+            )
+            .collect::<Vec<_>>();
+        let (transaction_id, warnings) =
+            if writes.is_empty() && asset_writes.is_empty() && deletes.is_empty() {
+                (None, Vec::new())
+            } else {
+                let outcome = atomic_write_batch_with_source_hashes(
+                    &session.root,
+                    &writes,
+                    &asset_writes,
+                    &asset_hashes,
+                    &deletes,
+                )
+                .map_err(io_command_error)?;
+                (Some(outcome.transaction_id), outcome.warnings)
+            };
+
+        // `candidate` was validated against the trusted staging overlay above.
+        // Once publication succeeds its resolver can be rebased to the formal
+        // assets tree without another fallible filesystem read.
+        session.catalog = candidate.into_published();
+        session.fingerprint.clone_from(&fingerprint);
+        session.document_models = next_models;
+        Ok(SaveProjectResult {
+            project,
+            changed_paths,
+            deleted_paths: deletes
+                .iter()
+                .filter_map(|path| path.strip_prefix(&session.root).ok())
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .collect(),
+            warnings,
+            transaction_id,
+        })
+    })();
+
+    if result.is_ok() {
+        // Cleanup is deliberately best-effort.  In particular, a poisoned
+        // import mutex must not turn a successful disk commit into an error
+        // response with a stale editor session.
+        match state.imports.lock() {
+            Ok(mut imports) => {
+                let retained = staged
+                    .iter()
+                    .map(|item| item.token.as_str())
+                    .collect::<BTreeSet<_>>();
+                let stale = imports
+                    .values()
+                    .filter(|item| item.project_root == session.root)
+                    .filter(|item| !retained.contains(item.token.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut cleanup_warnings = Vec::new();
+                let mut cleanup_dirs = BTreeSet::new();
+                for item in staged.iter().chain(stale.iter()) {
+                    imports.remove(&item.token);
+                    if item.owns_staged_path {
+                        if let Some(parent) = item.staged_path.parent() {
+                            // Two logical registrations may deliberately reuse
+                            // one staged binary. Remove its directory once,
+                            // otherwise the second token would produce a
+                            // spurious warning after the first cleaned it up.
+                            cleanup_dirs.insert(parent.to_path_buf());
+                        }
+                    }
+                }
+                for directory in cleanup_dirs {
+                    if let Err(error) = fs::remove_dir_all(&directory) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            cleanup_warnings.push(cleanup_warning(format!(
+                                "导入暂存目录清理失败（{}）：{error}",
+                                directory.display()
+                            )));
+                        }
+                    }
+                }
+                if let Ok(saved) = &mut result {
+                    saved.warnings.extend(cleanup_warnings);
+                }
+            }
+            Err(_) => {
+                if let Ok(saved) = &mut result {
+                    saved.warnings.push(cleanup_warning(
+                        "素材导入锁已损坏，暂存文件将在下次打开项目时清理",
+                    ));
+                }
+            }
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -447,11 +1123,13 @@ fn validate_project(
     let session = guard
         .as_ref()
         .ok_or_else(|| validation_command_error("尚未打开项目"))?;
+    let staged = request_staged_imports(&state, &session.root, &request)?;
+    let asset_overrides = staged_asset_overrides(&staged);
     let scenes = validate_scene_file_set(&request.manifest, &request.scenes)
         .map_err(validation_command_error)?;
     let ui_motions = validate_ui_motion_file_set(&request.manifest, &request.ui_motions)
         .map_err(validation_command_error)?;
-    let candidate = ContentCatalog::from_documents(
+    let candidate = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides(
         session.root.clone(),
         request.manifest,
         scenes,
@@ -460,85 +1138,718 @@ fn validate_project(
             .story_flow
             .as_ref()
             .map(|file| file.definition.clone()),
+        request
+            .chapter_map
+            .as_ref()
+            .map(|file| file.definition.clone()),
+        &asset_overrides,
     )
     .map_err(validation_command_error)?;
     Ok(analyze_catalog(&candidate))
 }
 
+/// Stage a batch of binaries without mutating the managed `assets/` tree.
+/// The returned opaque tokens are the only handles accepted by
+/// `save_project`; the WebView never gets to choose a copy destination.
 #[tauri::command]
-fn import_asset(
-    request: ImportAssetRequest,
+fn stage_asset_imports(
+    request: WireStageAssetImportsRequest,
     app: AppHandle,
     state: State<'_, EditorState>,
-) -> Result<ImportedAsset, WireCommandError> {
-    if !valid_identifier(&request.id) {
-        return Err(WireCommandError::new(
-            WireCommandErrorCode::Validation,
-            "素材 ID 只能包含 ASCII 字母、数字、点、下划线或连字符，长度为 1–128。",
-        ));
+) -> Result<Vec<WireImportedAsset>, WireCommandError> {
+    let requests = request
+        .requests
+        .into_iter()
+        .map(|item| ImportAssetRequest {
+            id: item.id,
+            kind: asset_kind_from_wire(item.kind),
+            file_name: item.file_name,
+            inspection_id: item.inspection_id,
+        })
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return Ok(Vec::new());
     }
-    let guard = state
+    let session_guard = state
         .session
         .lock()
         .map_err(|_| internal_command_error("编辑器项目锁已损坏"))?;
-    let session = guard
+    let session = session_guard
         .as_ref()
         .ok_or_else(|| validation_command_error("尚未打开项目"))?;
-    if session.catalog.manifest.assets.contains_key(&request.id) {
-        return Err(validation_command_error(format!(
-            "素材 ID 已存在: {}",
-            request.id
-        )));
+
+    let mut imports = state
+        .imports
+        .lock()
+        .map_err(|_| internal_command_error("素材导入锁已损坏"))?;
+    let mut inspections = state
+        .inspections
+        .lock()
+        .map_err(|_| internal_command_error("素材检查锁已损坏"))?;
+    let mut ids = session
+        .catalog
+        .manifest
+        .assets
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut paths = session
+        .catalog
+        .manifest
+        .assets
+        .values()
+        .map(|asset| path_reservation_key(&asset.path))
+        .collect::<BTreeSet<_>>();
+    // A second import dialog can be opened before the first one is saved.
+    // Reserve those staged IDs and destinations as well, otherwise two
+    // independent batches could collide at commit time.
+    for staged in imports
+        .values()
+        .filter(|item| item.project_root == session.root)
+    {
+        ids.insert(staged.id.clone());
+        paths.insert(path_reservation_key(&staged.relative_path));
+    }
+    let batch_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut prepared: Vec<StagedImport> = Vec::with_capacity(requests.len());
+    let mut created_staging_dirs = BTreeSet::new();
+
+    let preparation = (|| -> Result<(), WireCommandError> {
+        for (index, item) in requests.iter().enumerate() {
+            if !valid_asset_registration_id(&item.id) {
+                return Err(validation_command_error(format!(
+                    "素材 ID 包含非法字符: {}",
+                    item.id
+                )));
+            }
+            let inspection_id = item
+                .inspection_id
+                .as_ref()
+                .ok_or_else(|| validation_command_error("素材必须先经过检查，再加入导入清单"))?;
+            let inspected = inspections.get(inspection_id).ok_or_else(|| {
+                validation_command_error(format!("素材检查已失效: {inspection_id}"))
+            })?;
+            if inspected.project_root != session.root {
+                return Err(validation_command_error("素材检查属于另一个项目"));
+            }
+            let current_hash =
+                hash_file_streaming(&inspected.source_path).map_err(io_command_error)?;
+            if current_hash != inspected.sha256 {
+                return Err(validation_command_error(
+                    "源素材在检查后发生了变化，请重新检查",
+                ));
+            }
+            let source = inspected.source_path.clone();
+            let (file_name, requested_relative_path) =
+                normalize_import_request_for_source(item, &source)?;
+            validate_import_file_name(item.kind, &file_name, &source)?;
+            if !ids.insert(item.id.clone()) {
+                return Err(validation_command_error(format!(
+                    "素材 ID 已存在或重复: {}",
+                    item.id
+                )));
+            }
+            if !source.is_file() {
+                return Err(validation_command_error("选择的素材不是文件"));
+            }
+            validate_import_extension(item.kind, &source)?;
+            validate_import_source(item.kind, &source).map_err(|message| {
+                validation_command_error(format!(
+                    "素材 {} 内容校验失败：{}",
+                    source.display(),
+                    message
+                ))
+            })?;
+            let sha256 = hash_file_streaming(&source).map_err(io_command_error)?;
+            // Reuse a file already staged in this batch before scanning the
+            // formal catalog. This keeps two logical registrations of the
+            // same upload on one temporary binary and preserves cross-kind
+            // reuse semantics for a shared file.
+            let staged_reusable = prepared
+                .iter()
+                .find(|candidate| candidate.sha256 == sha256)
+                .map(|candidate| {
+                    (
+                        candidate.id.clone(),
+                        candidate.relative_path.clone(),
+                        candidate.staged_path.clone(),
+                    )
+                });
+            let reusable = match staged_reusable {
+                Some(candidate) => Some(candidate),
+                None => {
+                    find_reusable_asset(session, item.kind, &sha256).map_err(io_command_error)?
+                }
+            };
+            let token = format!("import-{batch_id}-{index}");
+            let (relative_path, staged_path, owns_staged_path, reused_from) =
+                if let Some((existing_id, existing_path, existing_absolute)) = reusable {
+                    // Reuse the existing formal or staged file when the bytes
+                    // already exist. A new logical ID may still register the
+                    // same file under another kind (for example a shared OGG
+                    // used as both BGM and SFX).
+                    (existing_path, existing_absolute, false, Some(existing_id))
+                } else {
+                    if !paths.insert(path_reservation_key(&requested_relative_path)) {
+                        return Err(validation_command_error(format!(
+                            "目标素材文件已存在或重复: {requested_relative_path}"
+                        )));
+                    }
+                    let staged_dir = session
+                        .root
+                        .join(".vectspace")
+                        .join("tmp")
+                        .join("imports")
+                        .join(&token);
+                    fs::create_dir_all(&staged_dir).map_err(io_command_error)?;
+                    created_staging_dirs.insert(staged_dir.clone());
+                    let staged_path = staged_dir.join(&file_name);
+                    if let Err(error) = copy_file_streaming(&source, &staged_path) {
+                        let _ = fs::remove_dir_all(&staged_dir);
+                        return Err(io_command_error(error));
+                    }
+                    (requested_relative_path, staged_path, true, None)
+                };
+            if owns_staged_path && fs::metadata(&staged_path).map_err(io_command_error)?.len() == 0
+            {
+                return Err(validation_command_error(format!(
+                    "素材文件为空: {}",
+                    source.display()
+                )));
+            }
+            let staged = StagedImport {
+                token: token.clone(),
+                project_root: session.root.clone(),
+                id: item.id.clone(),
+                kind: item.kind,
+                relative_path: relative_path.clone(),
+                staged_path: staged_path.clone(),
+                sha256,
+                owns_staged_path,
+                reused_from,
+            };
+            prepared.push(staged);
+        }
+        Ok(())
+    })();
+    if let Err(error) = preparation {
+        for directory in created_staging_dirs.iter() {
+            let _ = fs::remove_dir_all(directory);
+        }
+        return Err(error);
     }
 
-    let source = fs::canonicalize(&request.source_path).map_err(io_command_error)?;
-    if !source.is_file() {
-        return Err(validation_command_error("选择的素材不是文件"));
-    }
-    if request.kind == AssetKind::Video
-        && source
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_none_or(|extension| !extension.eq_ignore_ascii_case("mp4"))
+    // All validation and copies above succeeded.  Resolve the final metadata
+    // before publishing any token.  A formal reused file may disappear
+    // between preparation and publication; checking it here prevents a
+    // half-published batch when that happens.
+    let output = match prepared
+        .iter()
+        .map(|staged| {
+            let size_bytes = fs::metadata(&staged.staged_path)
+                .map_err(io_command_error)?
+                .len();
+            Ok(WireImportedAsset {
+                id: staged.id.clone(),
+                kind: wire_asset_kind(staged.kind),
+                path: staged.relative_path.clone(),
+                absolute_path: staged.staged_path.to_string_lossy().into_owned(),
+                size_bytes: WireU64::from(size_bytes),
+                token: Some(staged.token.clone()),
+                reused_from: staged.reused_from.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, WireCommandError>>()
     {
-        return Err(validation_command_error("视频素材必须是 .mp4（H.264/AAC）"));
+        Ok(output) => output,
+        Err(error) => {
+            for directory in created_staging_dirs.iter() {
+                let _ = fs::remove_dir_all(directory);
+            }
+            return Err(error);
+        }
+    };
+
+    // Publish the records as one batch so a partial import can never be
+    // observed by save_project.
+    let mut published = Vec::with_capacity(prepared.len());
+    for staged in &prepared {
+        if staged.owns_staged_path {
+            if let Err(error) = app.asset_protocol_scope().allow_file(&staged.staged_path) {
+                for token in published {
+                    imports.remove(&token);
+                }
+                let mut cleanup_dirs = BTreeSet::new();
+                for candidate in &prepared {
+                    if candidate.owns_staged_path {
+                        if let Some(parent) = candidate.staged_path.parent() {
+                            cleanup_dirs.insert(parent.to_path_buf());
+                        }
+                    }
+                }
+                for directory in cleanup_dirs {
+                    let _ = fs::remove_dir_all(directory);
+                }
+                return Err(asset_command_error(error));
+            }
+        }
+        imports.insert(staged.token.clone(), staged.clone());
+        published.push(staged.token.clone());
     }
-    let file_name = source
-        .file_name()
-        .ok_or_else(|| validation_command_error("无法识别素材文件名"))?
-        .to_owned();
-    let folder = asset_folder(request.kind);
-    let destination_dir = session.root.join("assets").join(folder);
-    fs::create_dir_all(&destination_dir).map_err(io_command_error)?;
-    let destination = destination_dir.join(file_name);
-    if destination.exists() {
+    for item in &requests {
+        if let Some(inspection_id) = &item.inspection_id {
+            inspections.remove(inspection_id);
+        }
+    }
+    Ok(output)
+}
+
+fn normalize_import_request_for_source(
+    request: &ImportAssetRequest,
+    source: &Path,
+) -> Result<(std::ffi::OsString, String), WireCommandError> {
+    let file_name = request
+        .file_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(std::ffi::OsString::from)
+        .or_else(|| source.file_name().map(ToOwned::to_owned))
+        .ok_or_else(|| validation_command_error("无法识别素材文件名"))?;
+    let text = file_name.to_string_lossy();
+    if text.len() > 200
+        || Path::new(&file_name).components().count() != 1
+        || matches!(file_name.to_str(), Some(".") | Some(".."))
+        || text.trim().is_empty()
+        || text.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+        })
+    {
+        return Err(validation_command_error("素材文件名必须是单个安全文件名"));
+    }
+    validate_import_extension(request.kind, Path::new(&file_name))?;
+    let relative_path = format!("{}/{}", asset_folder(request.kind), text.replace('\\', "/"));
+    safe_relative_path(&relative_path).map_err(validation_command_error)?;
+    // Do not reject an existing destination here.  The source hash is needed
+    // first so an identical formal asset can be safely reused; the caller
+    // performs the destination reservation check only for genuinely new
+    // content.
+    Ok((file_name, relative_path))
+}
+
+/// Windows asset paths are case-insensitive.  Keep the reservation check
+/// deterministic on the development hosts too, so importing `A.PNG` after
+/// `a.png` cannot create two manifest entries that resolve to one file when
+/// the project is later opened on Windows.
+fn path_reservation_key(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
+}
+
+/// Keep the staging boundary in lock-step with the core manifest validator.
+/// An import token must never be issued for an ID that could only fail later
+/// during catalog validation; rejecting it here also avoids leaving an
+/// apparently valid, but unusable, staged binary behind after a cancelled
+/// dialog.
+fn valid_asset_registration_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character))
+}
+
+fn path_exists_case_insensitive(root: &Path, relative: &str) -> Result<bool, std::io::Error> {
+    match resolve_case_insensitive(root, relative) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_case_insensitive(root: &Path, relative: &str) -> Result<PathBuf, std::io::Error> {
+    let mut current = root.to_path_buf();
+    for component in Path::new(relative).components() {
+        let Component::Normal(name) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("非法素材相对路径: {relative}"),
+            ));
+        };
+        if !current.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("素材路径不存在: {relative}"),
+            ));
+        }
+        let wanted = name.to_string_lossy().to_lowercase();
+        let mut matching = None;
+        for entry in fs::read_dir(&current)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().to_lowercase() == wanted {
+                matching = Some(entry.path());
+                break;
+            }
+        }
+        let Some(next) = matching else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("素材路径不存在: {relative}"),
+            ));
+        };
+        current = next;
+    }
+    if current.exists() {
+        Ok(current)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("素材路径不存在: {relative}"),
+        ))
+    }
+}
+
+fn validate_import_extension(kind: AssetKind, source: &Path) -> Result<(), WireCommandError> {
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let valid = match kind {
+        AssetKind::Background | AssetKind::Sprite | AssetKind::Gui => {
+            ["png", "jpg", "jpeg", "webp"].contains(&extension.as_str())
+        }
+        AssetKind::Bgm | AssetKind::Sfx => {
+            ["ogg", "wav", "mp3", "flac"].contains(&extension.as_str())
+        }
+        AssetKind::Font => ["ttf", "otf"].contains(&extension.as_str()),
+        AssetKind::Video => extension == "mp4",
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(validation_command_error(format!(
+            "素材扩展名与 {:?} 类型不匹配",
+            kind
+        )))
+    }
+}
+
+/// The manifest path is also part of the media contract.  Checking only the
+/// selected source path would allow a valid PNG to be registered as
+/// `assets/backgrounds/foo.jpg`, which later makes format detection and
+/// browser loading disagree.  JPEG/JPG are the sole aliases we accept.
+fn validate_import_file_name(
+    kind: AssetKind,
+    file_name: &std::ffi::OsStr,
+    source: &Path,
+) -> Result<(), WireCommandError> {
+    let target_extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let source_extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let canonical = |extension: &str| match extension {
+        "jpg" | "jpeg" => "jpeg".to_owned(),
+        other => other.to_owned(),
+    };
+    if canonical(&target_extension) != canonical(&source_extension) {
         return Err(validation_command_error(format!(
-            "目标素材文件已存在: {}",
-            destination.display()
+            "目标文件名扩展名 .{target_extension} 与源素材 .{source_extension} 不一致"
         )));
     }
-    fs::copy(&source, &destination).map_err(io_command_error)?;
-    let canonical = fs::canonicalize(&destination).map_err(io_command_error)?;
-    app.asset_protocol_scope()
-        .allow_file(&canonical)
-        .map_err(asset_command_error)?;
-    let relative = canonical
-        .strip_prefix(
-            session
-                .root
-                .join("assets")
-                .canonicalize()
-                .map_err(io_command_error)?,
-        )
-        .map_err(io_command_error)?
-        .to_string_lossy()
-        .replace('\\', "/");
-    Ok(ImportedAsset {
-        id: request.id,
-        kind: request.kind,
-        path: relative,
-        absolute_path: canonical.to_string_lossy().into_owned(),
-    })
+    validate_import_extension(kind, Path::new(file_name))
+}
+
+/// Validate the container/header before a staged file can be referenced by a
+/// project.  This deliberately stays dependency-free: the WebView remains
+/// responsible for actual playback compatibility, while the host rejects
+/// obvious renamed/corrupt files and never writes them to `assets/`.
+#[cfg(test)]
+fn validate_import_bytes(kind: AssetKind, bytes: &[u8]) -> Result<(), String> {
+    let starts = |signature: &[u8]| bytes.starts_with(signature);
+    let valid = match kind {
+        AssetKind::Background | AssetKind::Sprite | AssetKind::Gui => {
+            starts(b"\x89PNG\r\n\x1a\n")
+                || starts(b"\xff\xd8\xff")
+                || (bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
+        }
+        AssetKind::Bgm | AssetKind::Sfx => {
+            starts(b"OggS")
+                || starts(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WAVE"
+                || starts(b"fLaC")
+                || starts(b"ID3")
+                || (bytes.len() >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0)
+        }
+        AssetKind::Font => starts(b"\x00\x01\x00\x00") || starts(b"OTTO"),
+        AssetKind::Video => bytes.len() >= 12 && &bytes[4..8] == b"ftyp",
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("文件头与 {:?} 类型不匹配", kind))
+    }
+}
+
+/// Fully inspect a source before copying it into the import session.  The
+/// older implementation only checked a sixteen-byte signature, which let
+/// truncated images and malformed media reach the staged tree.  Inspection
+/// now decodes image data and parses the audio/video/font container while
+/// keeping hashing and the eventual copy streaming and bounded.
+fn validate_import_source(kind: AssetKind, source: &Path) -> Result<(), String> {
+    let expected_extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let expected_kind = match expected_extension.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" => {
+            matches!(
+                kind,
+                AssetKind::Background | AssetKind::Sprite | AssetKind::Gui
+            )
+        }
+        "ogg" | "wav" | "mp3" | "flac" => matches!(kind, AssetKind::Bgm | AssetKind::Sfx),
+        "mp4" => matches!(kind, AssetKind::Video),
+        "ttf" | "otf" => matches!(kind, AssetKind::Font),
+        _ => false,
+    };
+    if !expected_kind {
+        return Err(format!("素材扩展名与 {:?} 类型不匹配", kind));
+    }
+    inspect_media_source(source).map(|_| ())
+}
+
+/// Hash a source without loading a complete video/audio file into memory.
+fn hash_file_streaming(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    // Keep the sizeable I/O buffer off the caller's stack.  `open_project`
+    // runs on Tauri's command thread, whose stack is only 1 MiB on Windows.
+    let mut buffer = vec![0_u8; HASH_IO_BUFFER_SIZE];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Copy a staged source in bounded chunks.  The destination is created only
+/// after the source has passed header validation and is never published as a
+/// formal asset until the content transaction commits.
+fn copy_file_streaming(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    copy_and_hash_streaming(source, destination).map(|_| ())
+}
+
+fn copy_and_hash_streaming(source: &Path, destination: &Path) -> Result<String, std::io::Error> {
+    let mut input = File::open(source)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut output = File::create(destination)?;
+    let mut hasher = Sha256::new();
+    // Keep the sizeable I/O buffer off the caller's stack.  This function is
+    // also used by save transactions that may run on a normal command thread.
+    let mut buffer = vec![0_u8; HASH_IO_BUFFER_SIZE];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..read])?;
+        hasher.update(&buffer[..read]);
+    }
+    output.sync_all()?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Find a formal project file with identical bytes.  Prefer the same logical
+/// kind, then fall back to the first stable manifest order so cross-kind
+/// registrations (for example one OGG used as BGM and SFX) are deterministic.
+fn find_reusable_asset(
+    session: &ProjectSession,
+    kind: AssetKind,
+    sha256: &str,
+) -> Result<Option<(String, String, PathBuf)>, std::io::Error> {
+    let mut fallback = None;
+    for (id, definition) in &session.catalog.manifest.assets {
+        let absolute = session.catalog.assets_root().join(&definition.path);
+        if hash_file_streaming(&absolute)?.as_str() != sha256 {
+            continue;
+        }
+        let candidate = (id.clone(), definition.path.clone(), absolute);
+        if definition.kind == kind {
+            return Ok(Some(candidate));
+        }
+        if fallback.is_none() {
+            fallback = Some(candidate);
+        }
+    }
+    Ok(fallback)
+}
+
+fn staged_imports_for_request(
+    imports: &BTreeMap<String, StagedImport>,
+    root: &Path,
+    request: &SaveProjectRequest,
+) -> Result<Vec<StagedImport>, String> {
+    let mut seen = BTreeSet::new();
+    let mut output = Vec::with_capacity(request.import_tokens.len());
+    for token in &request.import_tokens {
+        if !seen.insert(token) {
+            return Err(format!("保存请求包含重复素材导入 token: {token}"));
+        }
+        let staged = imports
+            .get(token)
+            .ok_or_else(|| format!("素材导入 token 已失效: {token}"))?;
+        if staged.project_root != root {
+            return Err("素材导入 token 不属于当前项目".to_owned());
+        }
+        let definition = request
+            .manifest
+            .assets
+            .get(&staged.id)
+            .ok_or_else(|| format!("素材导入 {} 已不在当前 manifest 中", staged.id))?;
+        if definition.kind != staged.kind
+            || definition.path.replace('\\', "/") != staged.relative_path
+        {
+            return Err(format!("素材导入 {} 的类型或目标路径已被修改", staged.id));
+        }
+        output.push(staged.clone());
+    }
+    Ok(output)
+}
+
+fn validate_staged_imports(imports: &[StagedImport]) -> Result<(), std::io::Error> {
+    for item in imports {
+        if hash_file_streaming(&item.staged_path)?.as_str() != item.sha256 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("暂存素材校验失败: {}", item.id),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_import_targets_available(
+    root: &Path,
+    imports: &[StagedImport],
+) -> Result<(), std::io::Error> {
+    let staging_root = root.join(".vectspace").join("tmp").join("imports");
+    for item in imports {
+        // A non-owning token can still point at another token's staged file.
+        // This happens when the first logical registration is removed before
+        // save.  If its target has appeared externally, accept it only when
+        // the bytes are exactly the inspected upload; otherwise fail closed
+        // instead of silently binding the manifest to an unrelated file.
+        let points_at_staging = item.staged_path.starts_with(&staging_root);
+        if !item.owns_staged_path && !points_at_staging {
+            continue;
+        }
+        let target = root.join("assets").join(&item.relative_path);
+        if path_exists_case_insensitive(&root.join("assets"), &item.relative_path)? {
+            if item.owns_staged_path {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("目标素材文件已存在: {}", target.display()),
+                ));
+            }
+            let existing = resolve_case_insensitive(&root.join("assets"), &item.relative_path)?;
+            if hash_file_streaming(&existing)? != item.sha256 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("目标素材文件已存在且内容不同: {}", target.display()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn staged_asset_overrides(imports: &[StagedImport]) -> BTreeMap<String, PathBuf> {
+    imports
+        .iter()
+        .map(|item| (item.id.clone(), item.staged_path.clone()))
+        .collect()
+}
+
+fn request_staged_imports(
+    state: &EditorState,
+    root: &Path,
+    request: &SaveProjectRequest,
+) -> Result<Vec<StagedImport>, WireCommandError> {
+    let staged = {
+        let imports = state
+            .imports
+            .lock()
+            .map_err(|_| internal_command_error("素材导入锁已损坏"))?;
+        staged_imports_for_request(&imports, root, request).map_err(validation_command_error)?
+    };
+    validate_staged_imports(&staged).map_err(io_command_error)?;
+    Ok(staged)
+}
+
+fn clear_staged_imports(state: &EditorState, root: &Path) -> Result<(), std::io::Error> {
+    // A project switch invalidates imports belonging to the project that was
+    // open before the switch.  Do not clear unrelated capability records: a
+    // user can have another editor window open in the same process, and its
+    // staged files must remain usable until that window is closed.
+    let active_root = state
+        .session
+        .lock()
+        .map_err(|_| std::io::Error::other("编辑器项目锁已损坏"))?
+        .as_ref()
+        .map(|session| session.root.clone());
+    let mut imports = state
+        .imports
+        .lock()
+        .map_err(|_| std::io::Error::other("素材导入锁已损坏"))?;
+    let mut roots_to_clean = BTreeSet::new();
+    roots_to_clean.insert(active_root.clone().unwrap_or_else(|| root.to_path_buf()));
+    imports.retain(|_, item| !roots_to_clean.contains(&item.project_root));
+    let mut inspections = state
+        .inspections
+        .lock()
+        .map_err(|_| std::io::Error::other("素材检查锁已损坏"))?;
+    inspections.retain(|_, item| !roots_to_clean.contains(&item.project_root));
+    // Remove only staging directories that are no longer referenced by a
+    // surviving token.  The old implementation deleted the entire
+    // `<project>/.vectspace/tmp/imports` tree, which could invalidate another
+    // editor window's in-memory token (and could also remove a shared staged
+    // file still referenced by a non-owning registration).
+    let retained_directories = imports
+        .values()
+        .filter_map(|item| item.staged_path.parent().map(Path::to_path_buf))
+        .collect::<BTreeSet<_>>();
+    for project_root in roots_to_clean {
+        let imports_root = project_root.join(".vectspace").join("tmp").join("imports");
+        let entries = match fs::read_dir(&imports_root) {
+            Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let path = entry.path();
+            if entry.file_type()?.is_dir() && !retained_directories.contains(&path) {
+                fs::remove_dir_all(path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -560,12 +1871,14 @@ fn build_node_preview_impl(
     let session = guard
         .as_mut()
         .ok_or_else(|| validation_command_error("尚未打开项目"))?;
+    let staged = request_staged_imports(&state, &session.root, &request.project)?;
+    let asset_overrides = staged_asset_overrides(&staged);
     let scenes = validate_scene_file_set(&request.project.manifest, &request.project.scenes)
         .map_err(validation_command_error)?;
     let ui_motions =
         validate_ui_motion_file_set(&request.project.manifest, &request.project.ui_motions)
             .map_err(validation_command_error)?;
-    let catalog = ContentCatalog::from_documents(
+    let catalog = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides(
         session.root.clone(),
         request.project.manifest.clone(),
         scenes,
@@ -575,6 +1888,12 @@ fn build_node_preview_impl(
             .story_flow
             .as_ref()
             .map(|file| file.definition.clone()),
+        request
+            .project
+            .chapter_map
+            .as_ref()
+            .map(|file| file.definition.clone()),
+        &asset_overrides,
     )
     .map_err(validation_command_error)?;
     let decisions = request
@@ -703,6 +2022,13 @@ fn project_payload(
         }),
         None => None,
     };
+    let chapter_map = match &catalog.manifest.chapter_map {
+        Some(path) => Some(EditorChapterMapFile {
+            path: path.clone(),
+            definition: read_yaml(&root.join(path))?,
+        }),
+        None => None,
+    };
 
     let definitions = &catalog.manifest.assets;
     let ids = catalog.asset_ids();
@@ -719,6 +2045,12 @@ fn project_payload(
                 kind: definition.kind,
                 path: definition.path.clone(),
                 absolute_path: asset.absolute_path.clone(),
+                size_bytes: WireU64::from(
+                    fs::metadata(&asset.absolute_path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or_default(),
+                ),
+                metadata: inspect_media_source(Path::new(&asset.absolute_path)).ok(),
             })
         })
         .collect();
@@ -729,6 +2061,7 @@ fn project_payload(
         scenes,
         ui_motions,
         story_flow,
+        chapter_map,
         layout,
         assets,
         diagnostics: analyze_catalog(catalog),
@@ -741,6 +2074,7 @@ fn project_payload_from_request(
     catalog: &ContentCatalog,
     request: &SaveProjectRequest,
     layout: EditorLayout,
+    published_asset_paths: &BTreeMap<String, PathBuf>,
     fingerprint: String,
 ) -> Result<EditorProject, String> {
     let resolved = catalog
@@ -759,7 +2093,19 @@ fn project_payload_from_request(
                 id: id.clone(),
                 kind: definition.kind,
                 path: definition.path.clone(),
-                absolute_path: asset.absolute_path.clone(),
+                // Resolve metadata from the trusted staging path before the
+                // transaction, but return the formal path the newly committed
+                // project will use after staging is cleaned up.
+                absolute_path: published_asset_paths
+                    .get(id)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| asset.absolute_path.clone()),
+                size_bytes: WireU64::from(
+                    fs::metadata(&asset.absolute_path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or_default(),
+                ),
+                metadata: inspect_media_source(Path::new(&asset.absolute_path)).ok(),
             })
         })
         .collect();
@@ -769,6 +2115,7 @@ fn project_payload_from_request(
         scenes: request.scenes.clone(),
         ui_motions: request.ui_motions.clone(),
         story_flow: request.story_flow.clone(),
+        chapter_map: request.chapter_map.clone(),
         layout,
         assets,
         diagnostics: analyze_catalog(catalog),
@@ -855,7 +2202,7 @@ fn serialize_project(
     root: &Path,
     request: &SaveProjectRequest,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
-    let mut writes = Vec::with_capacity(request.scenes.len() + request.ui_motions.len() + 3);
+    let mut writes = Vec::with_capacity(request.scenes.len() + request.ui_motions.len() + 4);
     writes.push((root.join("manifest.yaml"), yaml_bytes(&request.manifest)?));
     for scene in &request.scenes {
         safe_relative_path(&scene.path)?;
@@ -868,6 +2215,10 @@ fn serialize_project(
     if let Some(flow) = &request.story_flow {
         safe_relative_path(&flow.path)?;
         writes.push((root.join(&flow.path), yaml_bytes(&flow.definition)?));
+    }
+    if let Some(map) = &request.chapter_map {
+        safe_relative_path(&map.path)?;
+        writes.push((root.join(&map.path), yaml_bytes(&map.definition)?));
     }
     let layout = serde_json::to_vec_pretty(&request.layout).map_err(display_error)?;
     writes.push((root.join(LAYOUT_RELATIVE_PATH), layout));
@@ -884,14 +2235,24 @@ fn managed_deletions(
     if let Some(path) = &previous.story_flow {
         previous_paths.push(path.clone());
     }
+    if let Some(path) = &previous.chapter_map {
+        previous_paths.push(path.clone());
+    }
     let mut next_paths = next.scenes.clone();
     next_paths.extend(next.ui_motions.iter().cloned());
     if let Some(path) = &next.story_flow {
         next_paths.push(path.clone());
     }
+    if let Some(path) = &next.chapter_map {
+        next_paths.push(path.clone());
+    }
+    let next_keys = next_paths
+        .iter()
+        .map(|path| path_reservation_key(path))
+        .collect::<BTreeSet<_>>();
     previous_paths
         .into_iter()
-        .filter(|path| !next_paths.iter().any(|candidate| candidate == path))
+        .filter(|path| !next_keys.contains(&path_reservation_key(path)))
         .filter_map(|path| {
             safe_relative_path(&path).ok()?;
             Some(root.join(path))
@@ -930,6 +2291,13 @@ fn document_models(
             serde_json::to_value(definition).map_err(display_error)?,
         );
     }
+    if let Some(path) = &manifest.chapter_map {
+        let definition: ChapterMapDefinition = read_yaml(&root.join(path))?;
+        models.insert(
+            path.replace('\\', "/"),
+            serde_json::to_value(definition).map_err(display_error)?,
+        );
+    }
     models.insert(
         LAYOUT_RELATIVE_PATH.to_owned(),
         serde_json::to_value(layout).map_err(display_error)?,
@@ -958,6 +2326,12 @@ fn document_models_from_request(
         );
     }
     if let Some(file) = &request.story_flow {
+        models.insert(
+            file.path.replace('\\', "/"),
+            serde_json::to_value(&file.definition).map_err(display_error)?,
+        );
+    }
+    if let Some(file) = &request.chapter_map {
         models.insert(
             file.path.replace('\\', "/"),
             serde_json::to_value(&file.definition).map_err(display_error)?,
@@ -1001,6 +2375,13 @@ fn retain_changed_model_writes(
                     .or_else(|| {
                         request
                             .story_flow
+                            .as_ref()
+                            .filter(|file| file.path.replace('\\', "/") == key)
+                            .map(|file| serde_json::to_value(&file.definition))
+                    })
+                    .or_else(|| {
+                        request
+                            .chapter_map
                             .as_ref()
                             .filter(|file| file.path.replace('\\', "/") == key)
                             .map(|file| serde_json::to_value(&file.definition))
@@ -1078,6 +2459,38 @@ fn encode_project_scalars(
                         .and_then(|value| value.get_mut("condition"))
                     {
                         encode_condition_scalars(condition);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(chapter_map) = object
+        .get_mut("chapter_map")
+        .and_then(|value| value.as_object_mut())
+        .and_then(|value| value.get_mut("definition"))
+    {
+        if let Some(hotspots) = chapter_map
+            .as_object_mut()
+            .and_then(|value| value.get_mut("hotspots"))
+            .and_then(|value| value.as_array_mut())
+        {
+            for hotspot in hotspots {
+                if let Some(condition) = hotspot
+                    .as_object_mut()
+                    .and_then(|value| value.get_mut("reveal"))
+                    .and_then(|value| value.as_object_mut())
+                    .and_then(|value| value.get_mut("condition"))
+                {
+                    encode_condition_scalars(condition);
+                }
+                if let Some(overrides) = hotspot
+                    .as_object_mut()
+                    .and_then(|value| value.get_mut("variable_overrides"))
+                    .and_then(|value| value.as_object_mut())
+                {
+                    for value in overrides.values_mut() {
+                        let raw = std::mem::take(value);
+                        *value = encode_scalar_json(raw, None);
                     }
                 }
             }
@@ -1315,6 +2728,12 @@ struct TransactionJournal {
     applied: usize,
 }
 
+#[derive(Debug, Default)]
+struct AtomicBatchOutcome {
+    transaction_id: String,
+    warnings: Vec<EditorDiagnostic>,
+}
+
 #[allow(dead_code)]
 fn atomic_write_batch(
     root: &Path,
@@ -1328,8 +2747,36 @@ fn atomic_write_batch_with_deletes(
     writes: &[(PathBuf, Vec<u8>)],
     deletes: &[PathBuf],
 ) -> Result<String, std::io::Error> {
-    if writes.is_empty() && deletes.is_empty() {
-        return Ok(String::new());
+    atomic_write_batch_with_sources(root, writes, &[], deletes)
+        .map(|outcome| outcome.transaction_id)
+}
+
+/// Write small serialized documents and large staged binaries through the
+/// same journal.  Binary sources stay on disk until the transaction stages
+/// them, so importing a large video never requires holding the whole batch in
+/// memory.
+fn atomic_write_batch_with_sources(
+    root: &Path,
+    writes: &[(PathBuf, Vec<u8>)],
+    source_writes: &[(PathBuf, PathBuf)],
+    deletes: &[PathBuf],
+) -> Result<AtomicBatchOutcome, std::io::Error> {
+    atomic_write_batch_with_source_hashes(root, writes, source_writes, &BTreeMap::new(), deletes)
+}
+
+/// Variant used by the editor save path to close the gap between validating a
+/// staged import and copying it.  A user (or antivirus/indexer) can replace a
+/// temporary file between those operations; comparing the streaming copy hash
+/// with the inspected token makes the transaction fail before publication.
+fn atomic_write_batch_with_source_hashes(
+    root: &Path,
+    writes: &[(PathBuf, Vec<u8>)],
+    source_writes: &[(PathBuf, PathBuf)],
+    expected_source_hashes: &BTreeMap<PathBuf, String>,
+    deletes: &[PathBuf],
+) -> Result<AtomicBatchOutcome, std::io::Error> {
+    if writes.is_empty() && source_writes.is_empty() && deletes.is_empty() {
+        return Ok(AtomicBatchOutcome::default());
     }
     let save_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1344,36 +2791,68 @@ fn atomic_write_batch_with_deletes(
         version: TRANSACTION_VERSION,
         transaction_id: save_id.clone(),
         state: TransactionState::Prepared,
-        files: Vec::with_capacity(writes.len()),
+        files: Vec::with_capacity(writes.len() + source_writes.len()),
         applied: 0,
     };
     let operation = (|| -> Result<(), std::io::Error> {
-        for (target, bytes) in writes {
+        enum WriteSource<'a> {
+            Bytes(&'a [u8]),
+            File(&'a Path),
+        }
+        let mut pending = Vec::with_capacity(writes.len() + source_writes.len());
+        pending.extend(
+            writes
+                .iter()
+                .map(|(target, bytes)| (target.as_path(), WriteSource::Bytes(bytes))),
+        );
+        pending.extend(
+            source_writes
+                .iter()
+                .map(|(target, source)| (target.as_path(), WriteSource::File(source))),
+        );
+        for (target, source) in pending {
             let relative = checked_project_relative(root, target)?;
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
             let temporary = temporary_root.join(relative);
             let backup = backup_root.join(relative);
-            if let Some(parent) = temporary.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut file = File::create(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
+            let new_sha256 = match source {
+                WriteSource::Bytes(bytes) => {
+                    if let Some(parent) = temporary.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let mut file = File::create(&temporary)?;
+                    file.write_all(bytes)?;
+                    file.sync_all()?;
+                    hash_bytes(bytes)
+                }
+                WriteSource::File(source) => {
+                    let hash = copy_and_hash_streaming(source, &temporary)?;
+                    if let Some(expected) = expected_source_hashes.get(source) {
+                        if expected != &hash {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("暂存素材在保存期间发生变化: {}", source.display()),
+                            ));
+                        }
+                    }
+                    hash
+                }
+            };
             let existed = target.is_file();
             let old_sha256 = if existed {
                 if let Some(parent) = backup.parent() {
                     fs::create_dir_all(parent)?;
                 }
                 fs::copy(target, &backup)?;
-                Some(hash_bytes(&fs::read(target)?))
+                Some(hash_file_streaming(target)?)
             } else {
                 None
             };
             journal.files.push(TransactionFile {
                 relative_path: relative.to_string_lossy().replace('\\', "/"),
-                new_sha256: Some(hash_bytes(bytes)),
+                new_sha256: Some(new_sha256),
                 old_sha256,
                 existed,
                 delete: false,
@@ -1389,7 +2868,7 @@ fn atomic_write_batch_with_deletes(
                     fs::create_dir_all(parent)?;
                 }
                 fs::copy(target, &backup)?;
-                Some(hash_bytes(&fs::read(target)?))
+                Some(hash_file_streaming(target)?)
             } else {
                 None
             };
@@ -1447,13 +2926,21 @@ fn atomic_write_batch_with_deletes(
         Ok(()) => {
             // The project is already committed at this point.  Cleanup is
             // best-effort; a later open can remove a committed journal.
+            let mut warnings = Vec::new();
             if let Err(error) = fs::remove_dir_all(&temporary_root) {
-                eprintln!("保存事务临时目录清理失败（不影响本次保存）: {error}");
+                warnings.push(cleanup_warning(format!(
+                    "保存事务临时目录清理失败（事务 {save_id}）：{error}"
+                )));
             }
             if let Err(error) = prune_backup_generations(&metadata_root.join("backups"), 10) {
-                eprintln!("保存备份清理失败（不影响本次保存）: {error}");
+                warnings.push(cleanup_warning(format!(
+                    "保存备份清理失败（事务 {save_id}）：{error}"
+                )));
             }
-            Ok(save_id)
+            Ok(AtomicBatchOutcome {
+                transaction_id: save_id,
+                warnings,
+            })
         }
         Err(error) => {
             // Before the Applying marker no project target has been touched.
@@ -1463,7 +2950,7 @@ fn atomic_write_batch_with_deletes(
                 if let Err(rollback) = restore_transaction(root, &backup_root, &journal) {
                     return Err(std::io::Error::new(
                         error.kind(),
-                        format!("保存事务失败: {error}；立即回滚失败: {rollback}"),
+                        format!("保存事务 {save_id} 失败: {error}；立即回滚失败: {rollback}"),
                     ));
                 }
             }
@@ -1475,6 +2962,16 @@ fn atomic_write_batch_with_deletes(
             }
             Err(error)
         }
+    }
+}
+
+fn cleanup_warning(message: impl Into<String>) -> EditorDiagnostic {
+    EditorDiagnostic {
+        severity: DiagnosticSeverity::Warning,
+        code: "cleanup_warning".to_owned(),
+        message: message.into(),
+        scene_id: None,
+        node_id: None,
     }
 }
 
@@ -1569,6 +3066,14 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
+    match hash_file_streaming(path) {
+        Ok(hash) => Ok(Some(hash)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Resume or roll back an interrupted editor save before the catalog is
 /// opened.  Every journal path is validated before touching the filesystem;
 /// no path supplied by a journal can escape its project root.
@@ -1649,26 +3154,53 @@ fn recover_pending_transactions(root: &Path) -> Result<(), std::io::Error> {
             .join(".vectspace")
             .join("backups")
             .join(&journal.transaction_id);
+        // A transaction may be resumed only while every target is still in
+        // one of the states that this journal could have produced: the old
+        // bytes or the new bytes (and, for a deletion, an absent target).
+        // Treating an unrelated hash as recoverable would overwrite a user's
+        // edit made while the application was not running.
         let mut can_finish = true;
+        let mut requires_rollback = false;
         for file in &journal.files {
             let target = project_child(root, &file.relative_path)?;
             let staged = project_child(&transaction_root, &file.relative_path)?;
-            let current_hash = fs::read(&target).ok().map(|bytes| hash_bytes(&bytes));
-            if file.delete {
-                continue;
+            let current_hash = hash_file(&target)?;
+            let old_state = match (&current_hash, file.existed, &file.old_sha256) {
+                (None, false, _) => true,
+                (Some(current), true, Some(old)) => current == old,
+                _ => false,
+            };
+            let new_state = if file.delete {
+                current_hash.is_none()
+            } else {
+                current_hash.as_deref() == file.new_sha256.as_deref()
+            };
+            if !old_state && !new_state {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "保存事务检测到外部修改，无法安全恢复: {} (事务 {})",
+                        file.relative_path, journal.transaction_id
+                    ),
+                ));
             }
-            if current_hash.as_deref() != file.new_sha256.as_deref() && !staged.is_file() {
-                can_finish = false;
-                break;
+            if !new_state {
+                if staged.is_file() {
+                    // The staged bytes are available, so this file can be
+                    // applied on the next pass.
+                } else {
+                    can_finish = false;
+                    requires_rollback = true;
+                }
             }
         }
         if can_finish {
             for file in &journal.files {
                 let target = project_child(root, &file.relative_path)?;
                 let staged = project_child(&transaction_root, &file.relative_path)?;
-                let current_hash = fs::read(&target).ok().map(|bytes| hash_bytes(&bytes));
+                let current_hash = hash_file(&target)?;
                 if file.delete {
-                    if target.exists() {
+                    if current_hash.is_some() {
                         fs::remove_file(target)?;
                     }
                     continue;
@@ -1681,7 +3213,10 @@ fn recover_pending_transactions(root: &Path) -> Result<(), std::io::Error> {
                 }
                 replace_file(&staged, &target)?;
             }
-        } else {
+        } else if requires_rollback {
+            // A missing staged file means we cannot safely finish the new
+            // version.  Roll back only after the state check above proved no
+            // target contains an unrelated external version.
             restore_transaction(root, &backup_root, &journal)?;
         }
         fs::remove_dir_all(&transaction_root)?;
@@ -1694,17 +3229,41 @@ fn restore_transaction(
     backup_root: &Path,
     journal: &TransactionJournal,
 ) -> Result<(), std::io::Error> {
+    // A synchronous write error is not proof that the target still contains
+    // the bytes this transaction expected.  Check every target before
+    // deleting/replacing anything so an external edit made concurrently with
+    // the save is never mistaken for a partially applied transaction.
+    for file in &journal.files {
+        let target = project_child(root, &file.relative_path)?;
+        let current_hash = hash_file(&target)?;
+        let old_state = match (&current_hash, file.existed, &file.old_sha256) {
+            (None, false, _) => true,
+            (Some(current), true, Some(old)) => current == old,
+            _ => false,
+        };
+        let new_state = if file.delete {
+            current_hash.is_none()
+        } else {
+            current_hash.as_deref() == file.new_sha256.as_deref()
+        };
+        if !old_state && !new_state {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("保存事务检测到外部修改，拒绝回滚 {}", file.relative_path),
+            ));
+        }
+    }
     for file in &journal.files {
         let target = project_child(root, &file.relative_path)?;
         let backup = project_child(backup_root, &file.relative_path)?;
         if file.existed {
-            let bytes = fs::read(&backup).map_err(|error| {
+            let backup_hash = hash_file_streaming(&backup).map_err(|error| {
                 std::io::Error::new(
                     error.kind(),
                     format!("保存事务无法从备份恢复 {}: {error}", file.relative_path),
                 )
             })?;
-            if file.old_sha256.as_deref() != Some(hash_bytes(&bytes).as_str()) {
+            if file.old_sha256.as_deref() != Some(backup_hash.as_str()) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("保存事务备份校验失败: {}", file.relative_path),
@@ -1718,7 +3277,7 @@ fn restore_transaction(
             // the journal and original backup intact for the next recovery
             // attempt instead of exposing a partially copied YAML file.
             let temporary = backup.with_extension("restore.tmp");
-            fs::copy(&backup, &temporary)?;
+            copy_file_streaming(&backup, &temporary)?;
             replace_file(&temporary, &target)?;
         } else if target.exists() {
             fs::remove_file(target)?;
@@ -1744,8 +3303,21 @@ fn prune_backup_generations(root: &Path, retain: usize) -> Result<(), std::io::E
 }
 
 fn project_fingerprint(root: &Path, manifest: &ContentManifest) -> Result<String, std::io::Error> {
+    project_fingerprint_with_hashes(root, manifest, &BTreeMap::new())
+}
+
+/// Compute the fingerprint while optionally substituting hashes for files that
+/// are about to be published.  Save requests use this before the journal is
+/// applied, so no fallible read is needed after the transaction commits.
+fn project_fingerprint_with_hashes(
+    root: &Path,
+    manifest: &ContentManifest,
+    expected_hashes: &BTreeMap<PathBuf, String>,
+) -> Result<String, std::io::Error> {
     let mut hasher = Sha256::new();
-    let mut paths = Vec::with_capacity(manifest.scenes.len() + manifest.ui_motions.len() + 3);
+    let mut paths = Vec::with_capacity(
+        manifest.assets.len() + manifest.scenes.len() + manifest.ui_motions.len() + 3,
+    );
     paths.push(root.join("manifest.yaml"));
     for path in &manifest.scenes {
         paths.push(root.join(path));
@@ -1756,18 +3328,49 @@ fn project_fingerprint(root: &Path, manifest: &ContentManifest) -> Result<String
     if let Some(path) = &manifest.story_flow {
         paths.push(root.join(path));
     }
+    if let Some(path) = &manifest.chapter_map {
+        paths.push(root.join(path));
+    }
     paths.push(root.join(LAYOUT_RELATIVE_PATH));
+    // Asset bytes are part of the project fingerprint too.  A changed image,
+    // font or audio file must make a stale editor session fail closed instead
+    // of silently overwriting the user's external change.  Sort by logical
+    // asset ID for deterministic fingerprints and hash in bounded chunks.
+    let mut assets = manifest
+        .assets
+        .iter()
+        .map(|(id, asset)| (id, root.join("assets").join(&asset.path)))
+        .collect::<Vec<_>>();
+    assets.sort_by(|left, right| left.0.cmp(right.0));
+    for (id, path) in assets {
+        hasher.update(b"asset:");
+        hasher.update(id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(path.to_string_lossy().as_bytes());
+        append_expected_or_disk_hash(&mut hasher, &path, expected_hashes)?;
+    }
     for path in paths {
         hasher.update(path.to_string_lossy().as_bytes());
-        match fs::read(&path) {
-            Ok(bytes) => hasher.update(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                hasher.update(b"<missing>")
-            }
-            Err(error) => return Err(error),
-        }
+        append_expected_or_disk_hash(&mut hasher, &path, expected_hashes)?;
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn append_expected_or_disk_hash(
+    hasher: &mut Sha256,
+    path: &Path,
+    expected_hashes: &BTreeMap<PathBuf, String>,
+) -> Result<(), std::io::Error> {
+    if let Some(hash) = expected_hashes.get(path) {
+        hasher.update(hash.as_bytes());
+        return Ok(());
+    }
+    match hash_file_streaming(path) {
+        Ok(hash) => hasher.update(hash.as_bytes()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update(b"<missing>"),
+        Err(error) => return Err(error),
+    }
+    Ok(())
 }
 
 fn safe_relative_path(value: &str) -> Result<(), String> {
@@ -1827,8 +3430,34 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
             collect_node_assets(node, &mut referenced_assets);
         }
     }
+    // Asset usage is not limited to story nodes.  Keep the editor's unused
+    // asset diagnostics in lockstep with the authoritative content model so
+    // a map background, chapter artwork, the shared font, or an implicit UI
+    // asset is not incorrectly reported as unused (and therefore offered for
+    // deletion) just because it lives outside a SceneDefinition.
+    if let Some(font) = &catalog.manifest.default_font {
+        referenced_assets.insert(font.clone());
+    }
+    for implicit in ["gui.dialogue_box", "gui.name_box", "sfx.typing"] {
+        if catalog.manifest.assets.contains_key(implicit) {
+            referenced_assets.insert(implicit.to_owned());
+        }
+    }
+    if let Some(map) = &catalog.chapter_map {
+        if let Some(background) = &map.background {
+            referenced_assets.insert(background.clone());
+        }
+        for decoration in &map.decorations {
+            referenced_assets.insert(decoration.asset.clone());
+        }
+        for hotspot in &map.hotspots {
+            if let Some(asset) = &hotspot.asset {
+                referenced_assets.insert(asset.clone());
+            }
+        }
+    }
     for id in catalog.manifest.assets.keys() {
-        if !referenced_assets.contains(id.as_str()) {
+        if !referenced_assets.contains(id) {
             diagnostics.push(EditorDiagnostic {
                 severity: DiagnosticSeverity::Info,
                 code: "unused_asset".to_owned(),
@@ -1979,7 +3608,7 @@ fn find_immediate_cycles(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
     diagnostics
 }
 
-fn collect_node_assets<'a>(node: &'a SceneNode, output: &mut BTreeSet<&'a str>) {
+fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
     match node {
         SceneNode::Background {
             background: Some(id),
@@ -1992,12 +3621,12 @@ fn collect_node_assets<'a>(node: &'a SceneNode, output: &mut BTreeSet<&'a str>) 
             asset: Some(id), ..
         }
         | SceneNode::Sfx { asset: id, .. } => {
-            output.insert(id);
+            output.insert((*id).to_owned());
         }
         SceneNode::LongText {
             paper: Some(id), ..
         } => {
-            output.insert(id);
+            output.insert(id.clone());
         }
         SceneNode::Timeline { tracks, events, .. } => {
             for track in tracks {
@@ -2005,10 +3634,10 @@ fn collect_node_assets<'a>(node: &'a SceneNode, output: &mut BTreeSet<&'a str>) 
                     TimelineTrack::Sprite {
                         asset: Some(asset), ..
                     } => {
-                        output.insert(asset);
+                        output.insert(asset.clone());
                     }
                     TimelineTrack::Video { asset, .. } => {
-                        output.insert(asset);
+                        output.insert(asset.clone());
                     }
                     TimelineTrack::Sprite { asset: None, .. }
                     | TimelineTrack::Camera { .. }
@@ -2017,7 +3646,7 @@ fn collect_node_assets<'a>(node: &'a SceneNode, output: &mut BTreeSet<&'a str>) 
             }
             for event in events {
                 if let TimelineEvent::Sfx { asset, .. } = event {
-                    output.insert(asset);
+                    output.insert(asset.clone());
                 }
             }
         }
@@ -2034,14 +3663,6 @@ fn asset_folder(kind: AssetKind) -> &'static str {
         AssetKind::Font => "fonts",
         AssetKind::Video => "videos",
     }
-}
-
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
 }
 
 fn display_error(error: impl std::fmt::Display) -> String {
@@ -2095,7 +3716,6 @@ fn disable_browser_features<R: tauri::Runtime>(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(windows)]
             {
@@ -2108,10 +3728,13 @@ pub fn run() {
         })
         .manage(EditorState::default())
         .invoke_handler(tauri::generate_handler![
+            pick_project_directory,
+            pick_asset_files,
             open_project,
             save_project,
             validate_project,
-            import_asset,
+            inspect_asset_imports,
+            stage_asset_imports,
             build_node_preview,
         ])
         .run(tauri::generate_context!())
@@ -2253,6 +3876,54 @@ mod tests {
     }
 
     #[test]
+    fn batch_writer_streams_source_files_into_the_same_transaction() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("staged/video.mp4");
+        let target = directory.path().join("assets/video.mp4");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"staged media bytes").unwrap();
+
+        atomic_write_batch_with_sources(
+            directory.path(),
+            &[(
+                directory.path().join("manifest.yaml"),
+                b"assets: video\n".to_vec(),
+            )],
+            &[(target.clone(), source.clone())],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(target).unwrap(), b"staged media bytes");
+        assert!(
+            source.is_file(),
+            "the import staging file is cleaned by the caller"
+        );
+    }
+
+    #[test]
+    fn batch_writer_rejects_a_staged_source_changed_after_validation() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("staged/video.mp4");
+        let target = directory.path().join("assets/video.mp4");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"actual bytes").unwrap();
+
+        let error = atomic_write_batch_with_source_hashes(
+            directory.path(),
+            &[],
+            &[(target.clone(), source.clone())],
+            &BTreeMap::from([(source.clone(), hash_bytes(b"inspected bytes"))]),
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("暂存素材在保存期间发生变化"));
+        assert!(!target.exists(), "a mismatched source must never publish");
+    }
+
+    #[test]
     fn unchanged_documents_are_excluded_before_atomic_save() {
         let directory = tempdir().unwrap();
         let unchanged = directory.path().join("unchanged.yaml");
@@ -2265,6 +3936,116 @@ mod tests {
             (changed.clone(), b"new".to_vec()),
         ]);
         assert_eq!(writes, vec![(changed, b"new".to_vec())]);
+    }
+
+    #[test]
+    fn staged_import_headers_reject_renamed_or_empty_files() {
+        assert!(validate_import_bytes(AssetKind::Background, b"\x89PNG\r\n\x1a\nminimal").is_ok());
+        assert!(validate_import_bytes(AssetKind::Bgm, b"RIFF0000WAVEfmt ").is_ok());
+        assert!(validate_import_bytes(AssetKind::Font, b"\x00\x01\x00\x00font").is_ok());
+        assert!(validate_import_bytes(AssetKind::Video, b"\x00\x00\x00\x18ftypisom").is_ok());
+        assert!(validate_import_bytes(AssetKind::Background, b"not an image").is_err());
+        assert!(validate_import_bytes(AssetKind::Font, &[]).is_err());
+    }
+
+    #[test]
+    fn staged_import_ids_use_the_same_identifier_contract_as_manifest_assets() {
+        assert!(valid_asset_registration_id("bg.classroom-night_1"));
+        assert!(valid_asset_registration_id(&"a".repeat(128)));
+        assert!(!valid_asset_registration_id(""));
+        assert!(!valid_asset_registration_id("../outside"));
+        assert!(!valid_asset_registration_id("contains space"));
+        assert!(!valid_asset_registration_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn media_signature_rejects_renamed_audio_and_accepts_canonical_headers() {
+        let directory = tempdir().unwrap();
+        let wav = directory.path().join("sound.wav");
+        fs::write(&wav, b"RIFF0000WAVEfmt ").unwrap();
+        assert!(validate_media_signature(&wav, "wav").is_ok());
+        assert!(validate_media_signature(&wav, "ogg").is_err());
+
+        let mp4 = directory.path().join("movie.mp4");
+        fs::write(&mp4, b"\0\0\0\x18ftypisom").unwrap();
+        assert!(validate_media_signature(&mp4, "mp4").is_ok());
+        assert!(validate_media_signature(&mp4, "mp3").is_err());
+    }
+
+    #[test]
+    fn identical_imports_reuse_a_formal_asset_without_claiming_ownership() {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let session = ProjectSession {
+            root,
+            catalog,
+            fingerprint: String::new(),
+            document_models: BTreeMap::new(),
+        };
+        let (asset_id, path, absolute) = find_reusable_asset(
+            &session,
+            AssetKind::Background,
+            &hash_file_streaming(
+                &session
+                    .catalog
+                    .assets_root()
+                    .join("backgrounds/Photoshop_3a52oGnGn0.png"),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .expect("the demo classroom should be reusable");
+        assert_eq!(asset_id, "bg.nvctsp");
+        assert_eq!(path, "backgrounds/Photoshop_3a52oGnGn0.png");
+        assert!(absolute.is_file());
+    }
+
+    #[test]
+    fn import_path_reservations_are_case_insensitive() {
+        let directory = tempdir().unwrap();
+        let assets = directory.path().join("assets");
+        fs::create_dir_all(assets.join("backgrounds")).unwrap();
+        fs::write(assets.join("backgrounds/Classroom.PNG"), b"asset").unwrap();
+
+        assert!(path_exists_case_insensitive(&assets, "backgrounds/classroom.png").unwrap());
+        assert_eq!(
+            path_reservation_key("backgrounds\\Classroom.PNG"),
+            "backgrounds/classroom.png"
+        );
+    }
+
+    #[test]
+    fn clearing_one_project_keeps_other_project_import_staging() {
+        let root = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let root_import = root.path().join(".vectspace/tmp/imports/import-root");
+        let other_import = other.path().join(".vectspace/tmp/imports/import-other");
+        fs::create_dir_all(&root_import).unwrap();
+        fs::create_dir_all(&other_import).unwrap();
+        fs::write(root_import.join("asset.png"), b"root").unwrap();
+        fs::write(other_import.join("asset.png"), b"other").unwrap();
+
+        let state = EditorState::default();
+        state.imports.lock().unwrap().insert(
+            "other-token".to_owned(),
+            StagedImport {
+                token: "other-token".to_owned(),
+                project_root: other.path().to_path_buf(),
+                id: "asset.other".to_owned(),
+                kind: AssetKind::Sprite,
+                relative_path: "sprites/asset.png".to_owned(),
+                staged_path: other_import.join("asset.png"),
+                sha256: hash_bytes(b"other"),
+                owns_staged_path: true,
+                reused_from: None,
+            },
+        );
+
+        clear_staged_imports(&state, root.path()).unwrap();
+
+        assert!(!root_import.exists());
+        assert!(other_import.exists());
+        assert!(state.imports.lock().unwrap().contains_key("other-token"));
     }
 
     #[test]
@@ -2306,7 +4087,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let root = directory.path();
         let target = root.join("scene.yaml");
-        fs::write(&target, b"partial").unwrap();
+        // The target is still the validated old version, but the staged
+        // payload was lost.  Recovery can safely choose the old backup.
+        fs::write(&target, b"old").unwrap();
         let transaction_id = "456";
         let transaction_root = root.join(".vectspace/tmp").join(transaction_id);
         let backup_root = root.join(".vectspace/backups").join(transaction_id);
@@ -2332,6 +4115,39 @@ mod tests {
 
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert!(!transaction_root.exists());
+    }
+
+    #[test]
+    fn recovery_stops_on_an_external_target_conflict() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let target = root.join("scene.yaml");
+        fs::write(&target, b"external").unwrap();
+        let transaction_id = "457";
+        let transaction_root = root.join(".vectspace/tmp").join(transaction_id);
+        let backup_root = root.join(".vectspace/backups").join(transaction_id);
+        fs::create_dir_all(&transaction_root).unwrap();
+        fs::create_dir_all(&backup_root).unwrap();
+        fs::write(backup_root.join("scene.yaml"), b"old").unwrap();
+        let journal = TransactionJournal {
+            version: TRANSACTION_VERSION,
+            transaction_id: transaction_id.to_owned(),
+            state: TransactionState::Applying,
+            files: vec![TransactionFile {
+                relative_path: "scene.yaml".to_owned(),
+                new_sha256: Some(hash_bytes(b"new")),
+                old_sha256: Some(hash_bytes(b"old")),
+                existed: true,
+                delete: false,
+            }],
+            applied: 0,
+        };
+        write_transaction_journal(&transaction_root.join("journal.json"), &journal).unwrap();
+
+        let error = recover_pending_transactions(root).unwrap_err();
+        assert!(error.to_string().contains("外部修改"));
+        assert_eq!(fs::read(&target).unwrap(), b"external");
+        assert!(transaction_root.exists());
     }
 
     #[test]

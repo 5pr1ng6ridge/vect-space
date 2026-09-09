@@ -53,6 +53,8 @@ interface TimelineWorkspaceProps {
   onUndo(): void;
   onRedo(): void;
   onError(message: string): void;
+  /** Opaque imports that are still staged, forwarded to the Rust preview. */
+  importTokens: string[];
 }
 
 type Tool = "select" | "camera";
@@ -80,6 +82,7 @@ export function TimelineWorkspace({
   onUndo,
   onRedo,
   onError,
+  importTokens,
 }: TimelineWorkspaceProps): ReactElement {
   const [localNode, setLocalNode] = useState(node);
   const [playhead, setPlayhead] = useState(0);
@@ -241,7 +244,7 @@ export function TimelineWorkspace({
       setPendingChoice(null);
       try {
         const result = await editorApi.buildNodePreview({
-          project: projectRequest(projectRef.current),
+          project: projectRequest(projectRef.current, importTokens),
           target: {
             scene_id: sceneId,
             node_id: nodeId,
@@ -287,7 +290,7 @@ export function TimelineWorkspace({
         if (requestId === contextRequestRef.current) setContextBusy(false);
       }
     },
-    [muted, sceneId, nodeId, settings, urls],
+    [importTokens, muted, sceneId, nodeId, settings, urls],
   );
 
   useEffect(() => {
@@ -347,13 +350,28 @@ export function TimelineWorkspace({
 
   const commitNode = useCallback(
     (next: TimelineNode): void => {
+      if (
+        selectedId !== null &&
+        selectedObjectAssetChanged(nodeRef.current, next, selectedId)
+      ) {
+        // Replacing artwork can keep the same logical sprite id. Invalidate
+        // the old interaction state instead of carrying its selection box and
+        // pending transform onto the replacement.
+        setSelectedId(null);
+        setPendingTransforms((current) => {
+          if (current[selectedId] === undefined) return current;
+          const remaining = { ...current };
+          Reflect.deleteProperty(remaining, selectedId);
+          return remaining;
+        });
+      }
       setLocalNode(next);
       nodeRef.current = next;
       parentNodeCommitRef.current = next;
       onChange(next);
       patchLoadedCue(next);
     },
-    [onChange, patchLoadedCue],
+    [onChange, patchLoadedCue, selectedId],
   );
 
   const setPosition = useCallback(
@@ -894,6 +912,13 @@ export function TimelineWorkspace({
     selectedId === null
       ? undefined
       : objects.find((object) => object.id === selectedId);
+  useEffect(() => {
+    if (selectedId === null || selectedObject !== undefined) return;
+    // A video replacement changes its preview object id. Drop the departed
+    // object's selection as soon as the refreshed frame arrives.
+    const frame = requestAnimationFrame(() => setSelectedId(null));
+    return () => cancelAnimationFrame(frame);
+  }, [selectedId, selectedObject]);
   const editObjectChannel = (
     object: PreviewObjectFrame,
     channel: keyof PreviewObjectFrame,
@@ -1703,6 +1728,25 @@ function TimelineEventInspector({
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function selectedObjectAssetChanged(
+  current: TimelineNode,
+  next: TimelineNode,
+  objectId: string,
+): boolean {
+  const findAsset = (node: TimelineNode): string | null | undefined => {
+    const sprite = node.tracks.find(
+      (track) => track.type === "sprite" && track.sprite_id === objectId,
+    );
+    if (sprite?.type === "sprite") return sprite.asset;
+    const video = node.tracks.find(
+      (track) => track.type === "video" && `video:${track.asset}` === objectId,
+    );
+    return video?.type === "video" ? video.asset : undefined;
+  };
+  const currentAsset = findAsset(current);
+  return currentAsset !== undefined && findAsset(next) !== currentAsset;
 }
 
 function gizmoStyle(
