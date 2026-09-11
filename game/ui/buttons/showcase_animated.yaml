@@ -1,0 +1,9 @@
+schema_version: 1
+id: showcase.animated
+width: 200.0
+height: 80.0
+asset_mode: separate
+fit: contain
+normal: gui.button_pulse
+hover: gui.button_pulse
+pressed: gui.button_pulse

@@ -25,6 +25,8 @@ import type {
   TextRevealAnimation,
 } from "../engine/types";
 import { MarkupText } from "./MarkupText";
+import { useAnimatedImage, useAnimationPreload } from "./useAnimatedImage";
+import type { ImageAssetSource } from "@vectspace/presentation-core/image-animation";
 import {
   paginateLongTextVisualSteps,
   resolveLongTextPageWindow,
@@ -55,7 +57,11 @@ interface LongTextPanelProps {
   defaultCps: number;
   disabled: boolean;
   /** null means a configured asset is still resolving; undefined is transparent. */
-  paperUrl: string | null | undefined;
+  /**
+   * Resolved paper artwork.  `undefined` means the document declares no paper
+   * at all; `null` means one was requested but cannot be resolved.
+   */
+  paperSource?: ImageAssetSource | null | undefined;
   revealImmediately: boolean;
   /** Per RuntimeUpdate/prompt identity; stable prompt IDs are revisitable. */
   sessionKey?: string;
@@ -97,7 +103,7 @@ export const LongTextPanel = forwardRef<
     initialCps,
     defaultCps,
     disabled,
-    paperUrl,
+    paperSource,
     revealImmediately,
     sessionKey,
     revealAnimation = "typewriter",
@@ -279,6 +285,13 @@ export const LongTextPanel = forwardRef<
     });
     return result;
   }, [activeLayoutUnits]);
+  // The paper artwork follows the same decorative clock as every other image
+  // entry: it advances only while the document is live, and it never restarts
+  // when the panel re-renders.
+  const paperFrames = useAnimatedImage(paperSource, suspended ?? false);
+  useAnimationPreload(paperSource);
+  const paperUrl =
+    paperSource === undefined ? undefined : (paperFrames.url ?? null);
   const artwork = usePaperArtwork(paperUrl);
   const paperArtworkReady = artwork.ready;
   const applyScrollOffset = useCallback((offset: number): void => {
@@ -569,6 +582,24 @@ export const LongTextPanel = forwardRef<
     ],
   );
 
+  // MarkupText deliberately gives every unit an explicit visibility style so
+  // the reveal clock can hide individual characters.  That means an ancestor
+  // `visibility: hidden` is not a sufficient boundary for a retained long
+  // text document: a unit can explicitly opt back into visibility.  Publish
+  // the page surface only after its paper artwork is settled and while the
+  // document is visible.  `display: none` is intentional here; it is the
+  // one boundary that cannot be overridden by an inline unit style and it
+  // keeps the paper and text stacks in lockstep during hide/show transitions.
+  const presentationVisible = visible && paperArtworkReady;
+
+  useLayoutEffect(() => {
+    if (!visible) return;
+    // A retained document may be hidden while the scroll controller is
+    // already settled.  In that case no new RAF callback is emitted when it
+    // is shown again, so explicitly enter the currently visible pages.
+    markVisiblePages(scrollOffsetRef.current);
+  }, [layoutReady, markVisiblePages, paperArtworkReady, visible]);
+
   const handleMotionOffset = useCallback(
     (offset: number): void => {
       applyScrollOffset(offset);
@@ -598,7 +629,9 @@ export const LongTextPanel = forwardRef<
     maxScroll,
     fastForward,
     enabled: layoutReady && paperArtworkReady,
-    suspended,
+    // A retained document remains mounted while hidden, but neither its
+    // reveal clock nor its scroll animation should continue off-screen.
+    suspended: suspended || !visible,
     initialPosition: 0,
     // The reveal instance changes for every runtime update.  It must not reset
     // the document scroll controller; only a new mounted document resets it.
@@ -739,7 +772,7 @@ export const LongTextPanel = forwardRef<
     onComplete: handleSessionComplete,
     ready: revealReady,
     restorePresentation: revealImmediately,
-    suspended: suspended || disabled,
+    suspended: suspended || disabled || !visible,
     units,
     waitForInlineMath: revealAnimation !== "drop_fade",
   });
@@ -786,6 +819,7 @@ export const LongTextPanel = forwardRef<
       prompt !== null &&
       !disabled &&
       !suspended &&
+      visible &&
       !complete &&
       session.state.activePause === null;
     onTypingChange(typing, typingCps);
@@ -798,6 +832,7 @@ export const LongTextPanel = forwardRef<
     suspended,
     prompt,
     typingCps,
+    visible,
   ]);
 
   useLayoutEffect(() => {
@@ -1009,7 +1044,12 @@ export const LongTextPanel = forwardRef<
       </div>
       <div
         className="long-text-viewport"
-        style={{ visibility: paperArtworkReady ? undefined : "hidden" }}
+        aria-hidden={!presentationVisible}
+        style={
+          presentationVisible
+            ? undefined
+            : { display: "none", visibility: "hidden" }
+        }
       >
         <div
           className="long-text-surface-stack"
@@ -1020,7 +1060,7 @@ export const LongTextPanel = forwardRef<
         >
           {renderedPages.map(({ paper, top }) => (
             <article
-              className={`long-text-paper${paperUrl === undefined ? "" : " has-paper-art"}${enteredPageKeys.has(pageAppearanceKeys[paper.index] ?? "") ? " is-entered" : ""}${revealImmediately ? " is-immediate" : ""}`}
+              className={`long-text-paper${paperSource === undefined ? "" : " has-paper-art"}${enteredPageKeys.has(pageAppearanceKeys[paper.index] ?? "") ? " is-entered" : ""}${revealImmediately ? " is-immediate" : ""}`}
               key={paper.index}
               style={{
                 height: `${paper.height}px`,

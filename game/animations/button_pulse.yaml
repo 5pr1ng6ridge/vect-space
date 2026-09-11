@@ -1,0 +1,7 @@
+schema_version: 1
+id: anim.button_pulse
+frames:
+  - asset: gui.button_pulse_a
+    duration_ms: 420
+  - asset: gui.button_pulse_b
+    duration_ms: 420

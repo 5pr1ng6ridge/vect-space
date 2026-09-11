@@ -32,6 +32,12 @@ export function findAssetReferences(
         references.push(`button-template:${file.definition.id}/${state}`);
     }
   }
+  for (const file of project.animations ?? []) {
+    for (const [index, frame] of file.definition.frames.entries()) {
+      if (frame.asset === assetId)
+        references.push(`帧动画:${file.definition.id} / 第 ${index + 1} 帧`);
+    }
+  }
   const map = project.chapter_map?.definition;
   if (map?.background === assetId) references.push("chapter-map / 背景");
   for (const decoration of map?.decorations ?? []) {

@@ -29,9 +29,22 @@ import type {
 import { TimelineClock } from "@vectspace/presentation-core/timeline";
 import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import { advanceVirtualElapsed } from "@vectspace/presentation-core/virtual-clock";
+import {
+  FrameSequencePlayer,
+  resolveImageAsset,
+  type AnimationMap,
+  type ImageAssetSource,
+} from "@vectspace/presentation-core/image-animation";
 import { DESIGN_HEIGHT, DESIGN_WIDTH } from "../viewport/viewport";
 
-const MAX_SESSION_TEXTURES = 256;
+// Texture budget for one game session.  Content validation allows a single
+// frame animation to hold hundreds of images, so a fixed count can never be
+// reconciled with "every legal harness must load": the budget is instead
+// derived from the resolved animation map (see `#textureBudget`) and this value
+// is only the floor for projects that declare no animations at all.
+const MIN_SESSION_TEXTURES = 512;
+/** Headroom for backgrounds, sprites, GUI art and buttons beside the frames. */
+const TEXTURE_BUDGET_HEADROOM = 128;
 
 export class PresentationController {
   readonly #application = new Application();
@@ -45,10 +58,18 @@ export class PresentationController {
   readonly #uiMotionHost: UiMotionHost;
   readonly #oneShotLedger = new BoundedLedger<string>(4_096);
   readonly #texturePromises = new Map<string, Promise<Texture>>();
+  /** Decoded frame textures per animated asset; shared by every instance. */
+  readonly #animationFrames = new Map<string, Promise<Texture[]>>();
+  /** One loop position per displayed instance; never shared between them. */
+  readonly #spritePlayers = new Map<string, FrameSequencePlayer>();
+  /** Resolved frame lists for animated assets, keyed by logical asset id. */
+  #animations: AnimationMap = {};
+  #backgroundPlayer: FrameSequencePlayer | null = null;
   #background: Sprite | null = null;
   #camera: CameraSnapshot = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
   #generation = 0;
   #abort = new AbortController();
+  #textureBudget = MIN_SESSION_TEXTURES;
   #currentUpdateId: string | null = null;
   #currentPromise: Promise<PresentationOutcome> | null = null;
   #playbackRate = 1;
@@ -90,7 +111,42 @@ export class PresentationController {
     this.#application.stage.addChild(this.#world, this.#effects);
     this.#applyCamera();
     this.#application.render();
+    // Frame loops are decorative: they advance with real elapsed time, never
+    // with the fast-forward rate, and stop while the presentation is paused.
+    this.#application.ticker.add(this.#tickFrameLoops);
   }
+
+  /**
+   * Replaces the frame lists used for animated assets.
+   *
+   * Called whenever the host re-resolves the project's assets (bootstrap,
+   * scene switch, editor-driven reload).  Existing players keep their position
+   * unless the asset they display actually changed, so re-resolving assets
+   * never restarts a running loop.
+   */
+  setAnimationAssets(animations: AnimationMap): void {
+    this.#animations = animations;
+    this.#animationFrames.clear();
+    this.#textureBudget = Math.max(
+      MIN_SESSION_TEXTURES,
+      countAnimationFrames(animations) + TEXTURE_BUDGET_HEADROOM,
+    );
+  }
+
+  #tickFrameLoops = (): void => {
+    if (this.#paused) return;
+    const delta = this.#application.ticker.deltaMS;
+    if (!Number.isFinite(delta) || delta <= 0) return;
+    const players = [
+      ...(this.#backgroundPlayer === null ? [] : [this.#backgroundPlayer]),
+      ...this.#spritePlayers.values(),
+    ];
+    let changed = false;
+    for (const player of players) {
+      if (player.advance(delta) && !player.clock.isPaused()) changed = true;
+    }
+    if (changed) this.#application.render();
+  };
 
   unlockAudio(): Promise<void> {
     return this.#audio.unlock();
@@ -117,6 +173,12 @@ export class PresentationController {
   setPaused(paused: boolean): void {
     this.#paused = paused;
     this.#timelineClock?.setPaused(paused);
+    // Decoration rules: a paused presentation freezes frame loops without
+    // accruing time, so resuming continues on the same frame.
+    this.#backgroundPlayer?.setPaused(paused);
+    for (const player of this.#spritePlayers.values()) {
+      player.setPaused(paused);
+    }
     if (paused) this.#activeVideo?.pause();
     else void this.#activeVideo?.play().catch(() => undefined);
     void this.#audio.setPaused(paused);
@@ -181,11 +243,32 @@ export class PresentationController {
         await this.#reconcile(update.snapshot, assets, signal);
         return "completed" as const;
       }
-      const results = await Promise.allSettled(
-        update.cues.map((cue) =>
-          this.#executeCue(update.update_id, cue, assets, signal),
-        ),
-      );
+      // Most cues are independent and should start together (for example a
+      // background cross-fade and a camera move).  Sprite transforms are the
+      // exception: a non-blocking move followed by a reusable sprite action
+      // must finish the previous transform before the next one samples the
+      // pose.  Build a small per-update dependency graph instead of making
+      // every cue serial, preserving authored concurrency while guaranteeing
+      // same-instance ordering.
+      const lastBySprite = new Map<string, Promise<PresentationOutcome>>();
+      const tasks = update.cues.map((cue) => {
+        const spriteIds = cueSpriteResourceIds(cue);
+        const predecessors = spriteIds
+          .map((id) => lastBySprite.get(id))
+          .filter(
+            (task): task is Promise<PresentationOutcome> => task !== undefined,
+          );
+        const task = (async (): Promise<PresentationOutcome> => {
+          // A failed predecessor is reconciled at the end of this update, but
+          // must not prevent the later cue from attempting to establish its
+          // own final pose.
+          await Promise.allSettled(predecessors);
+          return this.#executeCue(update.update_id, cue, assets, signal);
+        })();
+        for (const id of spriteIds) lastBySprite.set(id, task);
+        return task;
+      });
+      const results = await Promise.allSettled(tasks);
       let outcome: PresentationOutcome = "completed";
       for (const result of results) {
         if (result.status === "rejected") {
@@ -247,6 +330,11 @@ export class PresentationController {
   destroy(): void {
     this.#abort.abort();
     this.#audio.destroy();
+    this.#backgroundPlayer?.dispose();
+    this.#backgroundPlayer = null;
+    for (const player of this.#spritePlayers.values()) player.dispose();
+    this.#spritePlayers.clear();
+    this.#application.ticker.remove(this.#tickFrameLoops);
     this.#application.destroy({ removeView: false }, { children: true });
     for (const texture of this.#texturePromises.values()) {
       void texture
@@ -280,6 +368,7 @@ export class PresentationController {
           cue.to,
           cue.duration_ms,
           cue.easing,
+          cue.crossfade_ms,
           assets,
           signal,
         );
@@ -393,6 +482,7 @@ export class PresentationController {
     target: SpriteSnapshot | null,
     durationMs: number,
     easing: Easing,
+    crossfadeMs: number | null | undefined,
     assets: AssetUrlMap,
     signal: AbortSignal,
   ): Promise<void> {
@@ -414,20 +504,32 @@ export class PresentationController {
       );
       if (!signal.aborted && view !== undefined) {
         this.#spriteViews.delete(id);
+        // A hidden instance releases its loop position along with the view.
+        this.#spritePlayers.get(id)?.dispose();
+        this.#spritePlayers.delete(id);
         view.destroy();
       }
       return;
     }
 
-    const targetUrl = requireAssetUrl(assets, target.asset);
-    if (view === undefined || view.label !== targetUrl) {
-      view?.destroy();
-      view = await this.#makeSprite(target, assets);
+    const targetSource = this.#resolveImage(target.asset, assets);
+    const targetLabel = assetLabel(targetSource);
+    const replacing = view !== undefined && view.label !== targetLabel;
+    const previousView = replacing ? view : undefined;
+    const previousPlayer = replacing ? this.#spritePlayers.get(id) : undefined;
+    const previousAlpha = previousView?.alpha ?? 0;
+    if (view === undefined || replacing) {
+      if (!replacing) {
+        view?.destroy();
+        this.#spritePlayers.get(id)?.dispose();
+        this.#spritePlayers.delete(id);
+      }
+      view = await this.#makeSprite(id, target, assets, replacing);
       if (signal.aborted) {
         view.destroy();
         return;
       }
-      view.label = targetUrl;
+      view.label = targetLabel;
       view.x = target.x;
       view.y = target.y + 48;
       view.scale.set(
@@ -439,36 +541,69 @@ export class PresentationController {
       this.#spriteViews.set(id, view);
     }
     if (signal.aborted) return;
-    const start = readSprite(view);
+    const start =
+      replacing && previousView !== undefined
+        ? readSprite(previousView)
+        : readSprite(view);
+    const fadeDuration =
+      crossfadeMs === undefined || crossfadeMs === null
+        ? 0
+        : Math.max(0, crossfadeMs);
+    const animationDuration = Math.max(durationMs, fadeDuration);
     await this.#animate(
-      durationMs,
+      animationDuration,
       easing,
       (progress) => {
         if (view === undefined) {
           return;
         }
-        view.x = mix(start.x, target.x, progress);
-        view.y = mix(start.y, target.y, progress);
+        const transformProgress =
+          durationMs <= 0
+            ? 1
+            : Math.min(1, (progress * animationDuration) / durationMs);
+        view.x = mix(start.x, target.x, transformProgress);
+        view.y = mix(start.y, target.y, transformProgress);
+        view.anchor.set(target.anchor_x ?? 0.5, target.anchor_y ?? 1);
         view.scale.set(
-          mix(
-            start.scale * start.scale_x,
-            target.scale * target.scale_x,
-            progress,
-          ),
+          (target.flip_x ? -1 : 1) *
+            mix(
+              start.scale * start.scale_x,
+              target.scale * target.scale_x,
+              transformProgress,
+            ),
           mix(
             start.scale * start.scale_y,
             target.scale * target.scale_y,
-            progress,
+            transformProgress,
           ),
         );
         view.rotation =
-          (mix(start.rotation_deg, target.rotation_deg, progress) * Math.PI) /
+          (mix(start.rotation_deg, target.rotation_deg, transformProgress) *
+            Math.PI) /
           180;
-        view.alpha = mix(start.opacity, target.opacity, progress);
-        view.zIndex = progress < 1 ? start.z : target.z;
+        view.alpha =
+          replacing && fadeDuration > 0
+            ? mix(
+                0,
+                target.opacity,
+                Math.min(1, (progress * animationDuration) / fadeDuration),
+              )
+            : mix(start.opacity, target.opacity, transformProgress);
+        view.zIndex = transformProgress < 1 ? start.z : target.z;
+        if (replacing && previousView !== undefined) {
+          const fadeProgress =
+            fadeDuration <= 0
+              ? 1
+              : Math.min(1, (progress * animationDuration) / fadeDuration);
+          previousView.alpha = previousAlpha * (1 - fadeProgress);
+        }
       },
       signal,
     );
+    if (replacing && previousView !== undefined && !signal.aborted) {
+      previousPlayer?.dispose();
+      previousView.destroy();
+    }
   }
 
   /** Fade every scene-owned Pixi view, then remove it. The authoritative
@@ -517,6 +652,8 @@ export class PresentationController {
     for (const [id, view] of sprites) {
       if (this.#spriteViews.get(id) === view) {
         this.#spriteViews.delete(id);
+        this.#spritePlayers.get(id)?.dispose();
+        this.#spritePlayers.delete(id);
         if (view.parent === this.#world) this.#world.removeChild(view);
         view.destroy();
       }
@@ -601,13 +738,19 @@ export class PresentationController {
       if (track.asset === null && view === undefined) {
         throw new Error(`立绘 ${track.sprite_id} 没有可继承的素材`);
       }
-      const url =
+      const label =
         track.asset === null
-          ? (view as Sprite).label
-          : requireAssetUrl(assets, track.asset);
-      if (track.asset !== null && (view === undefined || view.label !== url)) {
+          ? ((view as Sprite).label ?? "")
+          : assetLabel(this.#resolveImage(track.asset, assets));
+      if (
+        track.asset !== null &&
+        (view === undefined || view.label !== label)
+      ) {
         view?.destroy();
+        this.#spritePlayers.get(track.sprite_id)?.dispose();
+        this.#spritePlayers.delete(track.sprite_id);
         view = await this.#makeSprite(
+          track.sprite_id,
           {
             asset: track.asset,
             x: 960,
@@ -625,7 +768,7 @@ export class PresentationController {
           view.destroy();
           return "failed";
         }
-        view.label = url;
+        view.label = label;
         this.#world.addChild(view);
         this.#spriteViews.set(track.sprite_id, view);
       }
@@ -752,9 +895,10 @@ export class PresentationController {
         view.x = sprite.x;
         view.y = sprite.y;
         view.scale.set(
-          sprite.scale * sprite.scale_x,
+          (sprite.flip_x ? -1 : 1) * sprite.scale * sprite.scale_x,
           sprite.scale * sprite.scale_y,
         );
+        view.anchor.set(sprite.anchor_x ?? 0.5, sprite.anchor_y ?? 1);
         view.rotation = (sprite.rotation_deg * Math.PI) / 180;
         view.alpha = sprite.opacity;
         view.zIndex = sprite.z;
@@ -901,19 +1045,27 @@ export class PresentationController {
       if (!wanted.has(id)) {
         view.destroy();
         this.#spriteViews.delete(id);
+        // An instance that no longer exists must not keep a frame loop alive.
+        this.#spritePlayers.get(id)?.dispose();
+        this.#spritePlayers.delete(id);
       }
     }
     for (const [id, state] of Object.entries(snapshot.world.sprites)) {
       let view = this.#spriteViews.get(id);
-      const url = requireAssetUrl(assets, state.asset);
-      if (view === undefined || view.label !== url) {
+      const source = this.#resolveImage(state.asset, assets);
+      const label = assetLabel(source);
+      if (view === undefined || view.label !== label) {
         view?.destroy();
-        view = await this.#makeSprite(state, assets);
+        // A different asset - including another animation - starts at the
+        // first frame; merely moving or re-applying the same snapshot does not.
+        this.#spritePlayers.get(id)?.dispose();
+        this.#spritePlayers.delete(id);
+        view = await this.#makeSprite(id, state, assets);
         if (signal.aborted) {
           view.destroy();
           return;
         }
-        view.label = url;
+        view.label = label;
         this.#world.addChild(view);
         this.#spriteViews.set(id, view);
       }
@@ -949,8 +1101,10 @@ export class PresentationController {
       this.#clearBackgrounds();
       return;
     }
-    const url = requireAssetUrl(assets, asset);
-    if (this.#background?.label === url) {
+    const source = this.#resolveImage(asset, assets);
+    const label = assetLabel(source);
+    if (this.#background?.label === label) {
+      // Re-applying the same snapshot must not restart the loop.
       this.#background.alpha = 1;
       return;
     }
@@ -959,43 +1113,155 @@ export class PresentationController {
       background.destroy();
       return;
     }
-    background.label = url;
     this.#clearBackgrounds();
     this.#background = background;
     this.#backgrounds.addChild(background);
   }
 
   async #makeBackground(asset: string, assets: AssetUrlMap): Promise<Sprite> {
-    const url = requireAssetUrl(assets, asset);
-    const texture = await this.#loadTexture(url);
+    const source = this.#resolveImage(asset, assets);
+    const textures = await this.#texturesFor(source);
+    const texture = textures[0] ?? (await this.#loadTexture(source.url));
     const sprite = new Sprite(texture);
-    sprite.label = url;
-    const scale = Math.max(
-      DESIGN_WIDTH / texture.width,
-      DESIGN_HEIGHT / texture.height,
-    );
+    sprite.label = assetLabel(source);
+    // An animated asset keeps one layout size for the whole loop, so it uses
+    // the measured animation size instead of the current frame's texture.
+    const width = source.animation === undefined ? texture.width : source.width;
+    const height =
+      source.animation === undefined ? texture.height : source.height;
+    const scale = Math.max(DESIGN_WIDTH / width, DESIGN_HEIGHT / height);
     sprite.scale.set(scale);
     sprite.position.set(
-      (DESIGN_WIDTH - texture.width * scale) / 2,
-      (DESIGN_HEIGHT - texture.height * scale) / 2,
+      (DESIGN_WIDTH - width * scale) / 2,
+      (DESIGN_HEIGHT - height * scale) / 2,
+    );
+    this.#backgroundPlayer = this.#installFrameLoop(
+      sprite,
+      source,
+      textures,
+      this.#backgroundPlayer,
     );
     return sprite;
   }
 
   async #makeSprite(
+    id: string,
     state: SpriteSnapshot,
     assets: AssetUrlMap,
+    preservePreviousLoop = false,
   ): Promise<Sprite> {
-    const url = requireAssetUrl(assets, state.asset);
-    const texture = await this.#loadTexture(url);
+    const source = this.#resolveImage(state.asset, assets);
+    const textures = await this.#texturesFor(source);
+    const texture = textures[0] ?? (await this.#loadTexture(source.url));
     const sprite = new Sprite(texture);
     sprite.anchor.set(0.5, 1);
-    sprite.label = url;
+    sprite.label = assetLabel(source);
     applySprite(sprite, state);
+    const player = this.#installFrameLoop(
+      sprite,
+      source,
+      textures,
+      preservePreviousLoop ? null : (this.#spritePlayers.get(id) ?? null),
+    );
+    this.#spritePlayers.set(id, player);
     return sprite;
   }
 
+  /**
+   * Resolves a logical asset id to pixels through the shared resolver, so the
+   * game and the editor agree on frame selection for the same input.
+   */
+  #resolveImage(asset: string, assets: AssetUrlMap): ImageAssetSource {
+    const source = resolveImageAsset(asset, assets, this.#animations);
+    if (source === undefined) {
+      throw new Error(`素材尚未解析: ${asset}`);
+    }
+    return source;
+  }
+
+  /**
+   * Prepares every frame of an animated asset before its first display.
+   *
+   * A frame that cannot be decoded is reported with its position and replaced
+   * by the nearest usable frame, so one broken file can never block a story
+   * gate.  Only an animation with no usable frame at all fails.
+   */
+  async #texturesFor(source: ImageAssetSource): Promise<Texture[]> {
+    const animation = source.animation;
+    if (animation === undefined) return [await this.#loadTexture(source.url)];
+    const cached = this.#animationFrames.get(source.asset);
+    if (cached !== undefined) return cached;
+    const loading = (async (): Promise<Texture[]> => {
+      const textures: (Texture | null)[] = [];
+      const successful: number[] = [];
+      for (const [index, frame] of animation.frames.entries()) {
+        try {
+          const texture = await this.#loadTexture(frame.url);
+          textures.push(texture);
+          successful.push(index);
+        } catch (error) {
+          const message = errorMessage(error);
+          this.#diagnostic(
+            `图片动画 ${animation.id} 第 ${index + 1} 帧（素材 ${frame.asset}）加载失败：${message}`,
+          );
+          textures.push(null);
+        }
+      }
+      if (successful.length === 0) {
+        throw new Error(`图片动画 ${animation.id} 没有可用帧`);
+      }
+      const firstSuccessful = successful[0];
+      if (firstSuccessful === undefined) {
+        throw new Error(`图片动画 ${animation.id} 没有可用帧`);
+      }
+      const usable = textures as Texture[];
+      for (let index = 0; index < usable.length; index += 1) {
+        if (usable[index] !== null) continue;
+        let nearest = firstSuccessful;
+        for (const candidate of successful) {
+          if (Math.abs(candidate - index) < Math.abs(nearest - index)) {
+            nearest = candidate;
+          }
+        }
+        usable[index] = usable[nearest] as Texture;
+      }
+      return usable;
+    })();
+    this.#animationFrames.set(source.asset, loading);
+    void loading.catch(() => this.#animationFrames.delete(source.asset));
+    return loading;
+  }
+
+  /**
+   * Binds one view to one loop position.
+   *
+   * A player is created per displayed instance, so two objects showing the
+   * same animation share decoded textures but never a frame index.
+   */
+  #installFrameLoop(
+    view: Sprite,
+    source: ImageAssetSource,
+    textures: Texture[],
+    previous: FrameSequencePlayer | null,
+  ): FrameSequencePlayer {
+    previous?.dispose();
+    const player = new FrameSequencePlayer(source);
+    player.setPaused(this.#paused);
+    player.subscribe(() => {
+      const texture = textures[player.frameIndex()] ?? textures[0];
+      if (texture !== undefined) view.texture = texture;
+    });
+    const first = player.frame();
+    if (first !== undefined) {
+      const texture = textures[player.frameIndex()] ?? textures[0];
+      if (texture !== undefined) view.texture = texture;
+    }
+    return player;
+  }
+
   #clearBackgrounds(): void {
+    this.#backgroundPlayer?.dispose();
+    this.#backgroundPlayer = null;
     for (const child of this.#backgrounds.removeChildren()) {
       child.destroy();
     }
@@ -1033,9 +1299,9 @@ export class PresentationController {
   #loadTexture(url: string): Promise<Texture> {
     const existing = this.#texturePromises.get(url);
     if (existing !== undefined) return existing;
-    if (this.#texturePromises.size >= MAX_SESSION_TEXTURES) {
+    if (this.#texturePromises.size >= this.#textureBudget) {
       return Promise.reject(
-        new Error(`单次游戏会话纹理数量超过 ${MAX_SESSION_TEXTURES} 个`),
+        new Error(`单次游戏会话纹理数量超过 ${this.#textureBudget} 个`),
       );
     }
     const loading = withTimeout(
@@ -1056,22 +1322,50 @@ export class PresentationController {
   }
 }
 
+/**
+ * Unique frame urls across every resolved animation.
+ *
+ * Two animations may legally share a frame image, so the raw frame count would
+ * over-report the budget; only distinct urls occupy a texture slot.
+ */
+function countAnimationFrames(animations: AnimationMap): number {
+  const urls = new Set<string>();
+  for (const animation of Object.values(animations)) {
+    for (const frame of animation.frames) urls.add(frame.url);
+  }
+  return urls.size;
+}
+
 function applySprite(view: Sprite, state: SpriteSnapshot): void {
+  view.anchor.set(state.anchor_x ?? 0.5, state.anchor_y ?? 1);
   view.position.set(state.x, state.y);
-  view.scale.set(state.scale * state.scale_x, state.scale * state.scale_y);
+  const direction = state.flip_x ? -1 : 1;
+  view.scale.set(
+    direction * state.scale * state.scale_x,
+    state.scale * state.scale_y,
+  );
   view.rotation = (state.rotation_deg * Math.PI) / 180;
   view.alpha = state.opacity;
   view.zIndex = state.z;
 }
 
 function readSprite(view: Sprite): Omit<SpriteSnapshot, "asset"> {
+  // `scale.x` carries the horizontal flip sign.  Dividing the vertical scale
+  // by that signed value would turn a flipped sprite's Y scale negative and
+  // make a later action/tween drift through the origin.  Read the two axes
+  // independently so a round-trip preserves both pose and flip state.
+  const horizontalScale = Math.abs(view.scale.x);
+  const verticalScale = Math.abs(view.scale.y);
   return {
     x: view.x,
     y: view.y,
-    scale: view.scale.x,
+    scale: horizontalScale,
     scale_x: 1,
-    scale_y: view.scale.x === 0 ? 1 : view.scale.y / view.scale.x,
+    scale_y: horizontalScale === 0 ? 1 : verticalScale / horizontalScale,
     rotation_deg: (view.rotation * 180) / Math.PI,
+    flip_x: view.scale.x < 0,
+    anchor_x: view.anchor.x,
+    anchor_y: view.anchor.y,
     opacity: view.alpha,
     z: view.zIndex,
   };
@@ -1211,6 +1505,29 @@ function requireAssetUrl(assets: AssetUrlMap, id: string): string {
     throw new Error(`素材尚未解析: ${id}`);
   }
   return url;
+}
+
+/**
+ * Identity of the pixels a view currently shows.
+ *
+ * Static assets keep the historical url identity.  Animated assets use their
+ * logical id, so switching between the animation and one of its frame images
+ * (which can share a url) is still recognised as a real change.
+ */
+function assetLabel(source: ImageAssetSource): string {
+  return source.animation === undefined ? source.url : `anim:${source.asset}`;
+}
+
+function cueSpriteResourceIds(cue: PresentationCue): string[] {
+  const ids = new Set<string>();
+  if (cue.type === "sprite_tween") {
+    ids.add(`sprite:${cue.sprite_id}`);
+  } else if (cue.type === "timeline") {
+    for (const track of cue.tracks) {
+      if (track.type === "sprite") ids.add(`sprite:${track.sprite_id}`);
+    }
+  }
+  return [...ids];
 }
 
 function animate(

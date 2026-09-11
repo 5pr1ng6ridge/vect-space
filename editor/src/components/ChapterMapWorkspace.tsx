@@ -16,7 +16,9 @@ import type {
   EditorAsset,
   ContentManifest,
 } from "../types";
-import { assetUrl } from "../api";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import { editorImageSource } from "../imageAnimationMap";
+import { AnimatedImage } from "./AnimatedImage";
 import {
   clampMapCenter,
   containMapRect,
@@ -32,6 +34,7 @@ interface ChapterMapWorkspaceProps {
   manifest: ContentManifest;
   sceneIds: string[];
   assets: EditorAsset[];
+  animationMap?: AnimationMap;
   dirty: boolean;
   selectionId: string | null;
   onSelectionChange?(selectionId: string | null): void;
@@ -129,6 +132,7 @@ export function ChapterMapWorkspace({
   manifest,
   sceneIds,
   assets,
+  animationMap = {},
   dirty,
   selectionId,
   onSelectionChange,
@@ -1253,9 +1257,18 @@ export function ChapterMapWorkspace({
                 <div
                   className="map-editor-background"
                   style={{
-                    backgroundImage: `url("${assetUrl(assets.find((asset) => asset.id === map.background)?.absolute_path ?? "")}")`,
+                    backgroundImage: undefined,
                   }}
-                />
+                >
+                  <AnimatedImage
+                    alt=""
+                    source={editorImageSource(
+                      assets.find((asset) => asset.id === map.background),
+                      assets,
+                      animationMap,
+                    )}
+                  />
+                </div>
               )}
               {mapObjects.map(({ kind, item }) => {
                 const active = selection?.id === item.id;
@@ -1289,10 +1302,7 @@ export function ChapterMapWorkspace({
                     }
                     onPointerLeave={() => setHoveredObjectId(null)}
                     style={{
-                      backgroundImage:
-                        source === undefined
-                          ? undefined
-                          : `url("${assetUrl(source.absolute_path)}")`,
+                      backgroundImage: undefined,
                       display: hiddenIds.has(item.id) ? "none" : undefined,
                       height: shown.height,
                       left: shown.x,
@@ -1301,6 +1311,13 @@ export function ChapterMapWorkspace({
                       zIndex: item.z,
                     }}
                   >
+                    {source !== undefined && (
+                      <AnimatedImage
+                        alt=""
+                        className="map-editor-object-artwork"
+                        source={editorImageSource(source, assets, animationMap)}
+                      />
+                    )}
                     {source === undefined &&
                       (kind === "decoration" ? (
                         <span>{item.id}</span>

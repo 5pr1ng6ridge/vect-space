@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent,
   type ReactElement,
   type WheelEvent,
@@ -23,10 +24,21 @@ import {
   sortMapLayer,
 } from "@vectspace/presentation-core/chapter-map";
 import type { MapLayerObject } from "@vectspace/presentation-core/chapter-map";
+import {
+  resolveImageAsset,
+  type AnimationMap,
+  type ImageAssetSource,
+} from "@vectspace/presentation-core/image-animation";
+import { AnimatedImage } from "./AnimatedImage";
+import { useAnimatedImage } from "./useAnimatedImage";
 
 interface ChapterMapPageProps {
   map: ChapterMapSnapshot;
   assets: AssetUrlMap;
+  /** Frame lists for animated map artwork.  Defaults to static-only. */
+  animations?: AnimationMap;
+  /** Hidden pages pause every map loop instead of ticking in the background. */
+  paused?: boolean;
   sessionCenter?: Point | null;
   onViewChange?(center: Point): void;
   onClose(): void;
@@ -47,6 +59,8 @@ const VIEWPORT_HEIGHT = 1080;
 export function ChapterMapPage({
   map,
   assets,
+  animations = {},
+  paused = false,
   sessionCenter,
   onViewChange,
   onClose,
@@ -263,27 +277,28 @@ export function ChapterMapPage({
           {map.background !== null &&
             map.background !== undefined &&
             assets[map.background] !== undefined && (
-              <img
+              <AnimatedImage
                 alt=""
                 className="chapter-map-background"
-                draggable={false}
-                src={assets[map.background]}
+                paused={paused}
+                source={resolveImageAsset(map.background, assets, animations)}
               />
             )}
           {mapObjects.map(({ kind, item }) => {
             if (kind === "decoration") {
-              const source = assets[item.asset];
+              const source = resolveImageAsset(item.asset, assets, animations);
+              if (source === undefined) return null;
               // Decorations are intentionally non-interactive.  Keeping them
               // in the same sorted render sequence as hotspots makes ties
               // deterministic while the CSS pointer-events rule ensures a
               // decoration can never steal a hotspot click.
               return (
-                <img
+                <AnimatedImage
                   alt=""
                   className="chapter-map-decoration"
-                  draggable={false}
                   key={item.id}
-                  src={source}
+                  paused={paused}
+                  source={source}
                   style={{
                     height: `${item.height}px`,
                     left: `${item.x}px`,
@@ -295,8 +310,11 @@ export function ChapterMapPage({
               );
             }
             const hotspot = item;
-            const image =
-              hotspot.asset === null ? undefined : assets[hotspot.asset];
+            const image = resolveImageAsset(
+              hotspot.asset ?? "",
+              assets,
+              animations,
+            );
             const hoverText = resolveChapterMapHoverText(
               hotspot.title,
               hotspot.hover_text,
@@ -305,16 +323,13 @@ export function ChapterMapPage({
               hoveredHotspotId === hotspot.id ||
               focusedHotspotId === hotspot.id;
             return (
-              <button
-                aria-label={`${hotspot.title}${hotspot.completed ? "，可重演" : "，尚未完成"}`}
-                className={`chapter-map-hotspot${image === undefined ? "" : " has-artwork"}${hotspot.completed ? " is-completed" : " is-locked"}`}
-                disabled={!hotspot.completed}
-                onBlur={() => setFocusedHotspotId(null)}
-                onFocus={() => setFocusedHotspotId(hotspot.id)}
-                onPointerEnter={() => setHoveredHotspotId(hotspot.id)}
-                onPointerDown={(event) => event.stopPropagation()}
-                onPointerLeave={() => setHoveredHotspotId(null)}
-                key={`${hotspot.id}:${hotspot.asset ?? ""}:${image ?? ""}`}
+              <HotspotButton
+                focused={focusedHotspotId === hotspot.id}
+                hoverText={hoverText}
+                hovering={isHovering}
+                hotspot={hotspot}
+                image={image}
+                key={`${hotspot.id}:${hotspot.asset ?? ""}:${image?.url ?? ""}`}
                 onClick={(event) => {
                   event.stopPropagation();
                   if (suppressClick.current) {
@@ -323,34 +338,14 @@ export function ChapterMapPage({
                   }
                   if (hotspot.completed) onReplay(hotspot.scene_id);
                 }}
-                data-hotspot-id={hotspot.id}
-                style={{
-                  backgroundImage:
-                    image === undefined ? undefined : `url("${image}")`,
-                  height: `${hotspot.height}px`,
-                  left: `${hotspot.x}px`,
-                  top: `${hotspot.y}px`,
-                  width: `${hotspot.width}px`,
-                  zIndex: hotspot.z,
-                }}
-                type="button"
-              >
-                {image === undefined && (
-                  <>
-                    <span>{hotspot.title}</span>
-                    <small>{hotspot.completed ? "重演" : "未完成"}</small>
-                  </>
-                )}
-                {hoverText !== null && isHovering && (
-                  <span
-                    className="chapter-map-hover-card"
-                    id={`chapter-map-hover-${hotspot.id}`}
-                    role="tooltip"
-                  >
-                    {hoverText}
-                  </span>
-                )}
-              </button>
+                onFocusChange={(focused) =>
+                  setFocusedHotspotId(focused ? hotspot.id : null)
+                }
+                onHoverChange={(hovering) =>
+                  setHoveredHotspotId(hovering ? hotspot.id : null)
+                }
+                paused={paused}
+              />
             );
           })}
         </div>
@@ -359,5 +354,78 @@ export function ChapterMapPage({
         拖动背景查看房间，滚轮平移；悬停查看说明，单击已完成章节进入
       </p>
     </div>
+  );
+}
+
+/**
+ * One hotspot button.
+ *
+ * Extracted so each hotspot can own a frame loop (hooks cannot live in the
+ * map callback) while keeping the interactive behaviour identical to the
+ * static artwork case.
+ */
+function HotspotButton({
+  hotspot,
+  image,
+  hoverText,
+  hovering,
+  focused,
+  paused,
+  onClick,
+  onFocusChange,
+  onHoverChange,
+}: {
+  hotspot: ChapterMapHotspotSnapshot;
+  image: ImageAssetSource | undefined;
+  hoverText: string | null;
+  hovering: boolean;
+  focused: boolean;
+  paused: boolean;
+  onClick(event: ReactMouseEvent<HTMLButtonElement>): void;
+  onFocusChange(focused: boolean): void;
+  onHoverChange(hovering: boolean): void;
+}): ReactElement {
+  const frame = useAnimatedImage(image, paused);
+  const artwork = frame.url ?? image?.url;
+  const isHovering = hovering || focused;
+  return (
+    <button
+      aria-label={`${hotspot.title}${hotspot.completed ? "，可重演" : "，尚未完成"}`}
+      className={`chapter-map-hotspot${artwork === undefined ? "" : " has-artwork"}${hotspot.completed ? " is-completed" : " is-locked"}`}
+      data-hotspot-id={hotspot.id}
+      disabled={!hotspot.completed}
+      onBlur={() => onFocusChange(false)}
+      onClick={onClick}
+      onFocus={() => onFocusChange(true)}
+      onPointerDown={(event) => event.stopPropagation()}
+      onPointerEnter={() => onHoverChange(true)}
+      onPointerLeave={() => onHoverChange(false)}
+      style={{
+        backgroundImage:
+          artwork === undefined ? undefined : `url(${JSON.stringify(artwork)})`,
+        height: `${hotspot.height}px`,
+        left: `${hotspot.x}px`,
+        top: `${hotspot.y}px`,
+        width: `${hotspot.width}px`,
+        zIndex: hotspot.z,
+      }}
+      type="button"
+    >
+      {artwork === undefined && (
+        <>
+          <span>{hotspot.title}</span>
+          <small>{hotspot.completed ? "重演" : "未完成"}</small>
+        </>
+      )}
+      {hoverText !== null && isHovering && (
+        <span
+          className="chapter-map-hover-card"
+          id={`chapter-map-hover-${hotspot.id}`}
+          role="tooltip"
+        >
+          {hoverText}
+        </span>
+      )}
+    </button>
   );
 }

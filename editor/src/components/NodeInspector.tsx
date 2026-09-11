@@ -14,10 +14,16 @@ import {
 } from "../story";
 import { interpolateTemplate } from "../textTemplate";
 import { isCanonicalIntegerText, scalarType } from "../scalars";
+import { assetUrl } from "../api";
+import { animationSourceId } from "../imageAnimation";
+import { FrameSequencePreview } from "./FrameSequencePreview";
 import type {
+  AnimationFile,
+  ActionFile,
   AssetKind,
   ConditionExpression,
   ContentManifest,
+  EditorAsset,
   MutationValue,
   LongTextLayout,
   LongTextStep,
@@ -32,6 +38,7 @@ import type {
   ButtonClickAction,
   ButtonPostAction,
   ButtonSetAction,
+  SpriteActionEnd,
 } from "../types";
 import { MeasuredMarkup } from "@vectspace/text-react";
 
@@ -55,12 +62,17 @@ interface NodeInspectorProps {
   onDelete(nodeId: string): void;
   onDuplicate(nodeId: string): void;
   onConvertToTimeline(nodeId: string): void;
+  /** Inline a reusable sprite action into an ordinary Timeline node. */
+  onConvertActionToTimeline?(nodeId: string): void | Promise<void>;
   onSplitDialogue(nodeId: string, offset: number, text?: string): void;
   onSplitLongText(nodeId: string, stepIndex: number): void;
   onSetEntry(nodeId: string): void;
   onOpenLongTextWorkspace(nodeId: string): void;
   uiMotions: UiMotionFile[];
   buttons: ButtonFile[];
+  animations?: AnimationFile[];
+  actions?: ActionFile[];
+  assets?: EditorAsset[];
   /** Scene definitions used to author cross-scene button jumps. */
   scenes?: SceneDefinition[];
 }
@@ -74,12 +86,16 @@ export function NodeInspector({
   onDelete,
   onDuplicate,
   onConvertToTimeline,
+  onConvertActionToTimeline,
   onSplitDialogue,
   onSplitLongText,
   onSetEntry,
   onOpenLongTextWorkspace,
   uiMotions,
   buttons,
+  animations = [],
+  actions = [],
+  assets = [],
   scenes = [],
 }: NodeInspectorProps): ReactElement {
   const node = nodeId === null ? undefined : scene.nodes[nodeId];
@@ -161,6 +177,9 @@ export function NodeInspector({
           manifest,
           uiMotions,
           buttons,
+          assets,
+          animations,
+          actions,
           scenes,
           (offset, text) => onSplitDialogue(nodeId, offset, text),
           (stepIndex) => onSplitLongText(nodeId, stepIndex),
@@ -169,6 +188,19 @@ export function NodeInspector({
       </section>
 
       <section className="inspector-section inspector-actions">
+        {node.type === "action" &&
+          onConvertActionToTimeline !== undefined &&
+          actions.some((file) => file.definition.id === node.action) && (
+            <button
+              className="convert-timeline-button"
+              onClick={() => {
+                void onConvertActionToTimeline(nodeId);
+              }}
+              type="button"
+            >
+              解除引用为关键帧时间线
+            </button>
+          )}
         {canConvertToTimeline(node) && (
           <>
             <button
@@ -213,6 +245,9 @@ function renderFields(
   manifest: ContentManifest,
   uiMotions: UiMotionFile[],
   buttons: ButtonFile[],
+  assets: readonly EditorAsset[],
+  animations: readonly AnimationFile[],
+  actions: readonly ActionFile[],
   scenes: SceneDefinition[],
   splitDialogue: (offset: number, text?: string) => void,
   splitLongText: (stepIndex: number) => void,
@@ -225,6 +260,8 @@ function renderFields(
         <>
           <AssetSelect
             allowNone
+            animations={animations}
+            assets={assets}
             kind="background"
             label="背景素材"
             manifest={manifest}
@@ -278,8 +315,58 @@ function renderFields(
               <option value="hide">隐藏</option>
             </select>
           </Field>
+          <Field label="角色绑定（可选）">
+            <select
+              value={node.character ?? ""}
+              onChange={(event) => {
+                const character = event.currentTarget.value || null;
+                const definition =
+                  character === null
+                    ? undefined
+                    : manifest.characters[character];
+                const expression =
+                  character === null
+                    ? null
+                    : (node.expression ??
+                      definition?.default_expression ??
+                      null);
+                update({ ...node, character, expression });
+              }}
+            >
+              <option value="">不绑定角色（直接素材）</option>
+              {Object.entries(manifest.characters).map(([id, definition]) => (
+                <option key={id} value={id}>
+                  {definition.display_name} · {id}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {node.character != null && (
+            <Field label="表情">
+              <select
+                value={node.expression ?? ""}
+                onChange={(event) =>
+                  update({
+                    ...node,
+                    expression: event.currentTarget.value || null,
+                  })
+                }
+              >
+                <option value="">使用默认表情</option>
+                {Object.keys(
+                  manifest.characters[node.character]?.expressions ?? {},
+                ).map((expressionId) => (
+                  <option key={expressionId} value={expressionId}>
+                    {expressionId}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
           <AssetSelect
-            allowNone={node.action !== "show"}
+            allowNone={node.action !== "show" || node.character != null}
+            animations={animations}
+            assets={assets}
             kind="sprite"
             label="立绘素材"
             manifest={manifest}
@@ -317,6 +404,43 @@ function renderFields(
               onChange={(z) => update({ ...node, z })}
               step={1}
               value={node.z}
+            />
+            {node.action === "move" ? (
+              <Field label="水平翻转">
+                <select
+                  onChange={(event) =>
+                    update({
+                      ...node,
+                      flip_x:
+                        event.currentTarget.value === "keep"
+                          ? undefined
+                          : event.currentTarget.value === "true",
+                    })
+                  }
+                  value={node.flip_x == null ? "keep" : String(node.flip_x)}
+                >
+                  <option value="keep">保持当前</option>
+                  <option value="false">不翻转</option>
+                  <option value="true">翻转</option>
+                </select>
+              </Field>
+            ) : (
+              <label className="checkbox-field">
+                <span>水平翻转</span>
+                <input
+                  checked={node.flip_x ?? false}
+                  onChange={(event) =>
+                    update({ ...node, flip_x: event.currentTarget.checked })
+                  }
+                  type="checkbox"
+                />
+              </label>
+            )}
+            <OptionalNumber
+              label="换表情淡化 ms"
+              min={0}
+              onChange={(crossfade_ms) => update({ ...node, crossfade_ms })}
+              value={node.crossfade_ms ?? null}
             />
           </div>
           <AnimationFields node={node} onChange={update} />
@@ -592,6 +716,8 @@ function renderFields(
           </Field>
           <AssetSelect
             allowNone
+            animations={animations}
+            assets={assets}
             disabled={isContinuation}
             kind="gui"
             label="纸张素材"
@@ -1020,6 +1146,125 @@ function renderFields(
           />
         </>
       );
+    case "action": {
+      const definition = actions.find(
+        (file) => file.definition.id === node.action,
+      )?.definition;
+      const spriteIds = Object.entries(scene.nodes)
+        .filter(([, candidate]) => candidate.type === "sprite")
+        .map(([id]) => id);
+      return (
+        <>
+          <Field label="目标立绘实例">
+            <select
+              onChange={(event) =>
+                update({ ...node, sprite_id: event.currentTarget.value })
+              }
+              value={node.sprite_id}
+            >
+              {!spriteIds.includes(node.sprite_id) && (
+                <option value={node.sprite_id}>{node.sprite_id}</option>
+              )}
+              {spriteIds.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="动作">
+            <select
+              onChange={(event) =>
+                update({
+                  ...node,
+                  action: event.currentTarget.value,
+                  parameters: {},
+                })
+              }
+              value={node.action}
+            >
+              {!actions.some((file) => file.definition.id === node.action) && (
+                <option value={node.action}>
+                  {node.action || "— 未选择 —"}
+                </option>
+              )}
+              {actions.map(({ definition: candidate }) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.id} · {candidate.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {definition !== undefined && (
+            <>
+              <OptionalNumber
+                label="覆盖时长 ms（留空使用定义）"
+                max={1_800_000}
+                min={1}
+                onChange={(duration_ms) => update({ ...node, duration_ms })}
+                step={1}
+                value={node.duration_ms ?? null}
+              />
+              {Object.entries(definition.parameters ?? {}).map(
+                ([parameter, parameterDefinition]) => (
+                  <NumberField
+                    key={parameter}
+                    label={`参数 ${parameter}`}
+                    max={parameterDefinition.max ?? undefined}
+                    min={parameterDefinition.min ?? undefined}
+                    onChange={(value) =>
+                      update({
+                        ...node,
+                        parameters: {
+                          ...(node.parameters ?? {}),
+                          [parameter]: value,
+                        },
+                      })
+                    }
+                    value={
+                      node.parameters?.[parameter] ??
+                      parameterDefinition.default
+                    }
+                  />
+                ),
+              )}
+            </>
+          )}
+          <Field label="结束姿态">
+            <select
+              onChange={(event) =>
+                update({
+                  ...node,
+                  end: (event.currentTarget.value ||
+                    null) as SpriteActionEnd | null,
+                })
+              }
+              value={node.end ?? ""}
+            >
+              <option value="">使用动作定义</option>
+              <option value="hold">保持最后一帧</option>
+              <option value="restore">恢复动作前姿态</option>
+            </select>
+          </Field>
+          <BooleanField
+            label="等待动作完成"
+            onChange={(await_completion) =>
+              update({ ...node, await: await_completion })
+            }
+            value={node.await}
+          />
+          {actions.length === 0 && (
+            <p className="field-note">请先在项目面板创建一个立绘动作。</p>
+          )}
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    }
     case "jump": {
       const targetScene = node.scene === null ? scene : undefined;
       return (
@@ -2000,6 +2245,8 @@ function UiMotionSelect({
 
 function AssetSelect({
   allowNone = false,
+  animations = [],
+  assets: imageAssets = [],
   disabled = false,
   kind,
   label,
@@ -2008,6 +2255,10 @@ function AssetSelect({
   value,
 }: {
   allowNone?: boolean;
+  /** Animation documents used to preview an animated selection. */
+  animations?: readonly AnimationFile[];
+  /** Registered assets, for the animated preview's frame urls and size. */
+  assets?: readonly EditorAsset[];
   disabled?: boolean;
   kind: AssetKind;
   label: string;
@@ -2022,6 +2273,21 @@ function AssetSelect({
       ),
     [kind, manifest.assets],
   );
+  const selectedDefinition =
+    value === null ? undefined : manifest.assets[value];
+  const animation =
+    selectedDefinition?.animation === undefined
+      ? undefined
+      : animationSourceId(selectedDefinition.animation, animations);
+  const selectedAsset = imageAssets.find((asset) => asset.id === value);
+  const metadata = selectedAsset?.metadata;
+  const size =
+    metadata === undefined ||
+    metadata === null ||
+    metadata.width === null ||
+    metadata.height === null
+      ? undefined
+      : { width: metadata.width, height: metadata.height };
   return (
     <Field label={label}>
       <select
@@ -2031,12 +2297,27 @@ function AssetSelect({
       >
         {allowNone && <option value="">— 无 —</option>}
         {!allowNone && <option value="">— 请选择 —</option>}
-        {assets.map(([id]) => (
+        {assets.map(([id, definition]) => (
           <option key={id} value={id}>
-            {id}
+            {definition.animation === undefined ? id : `${id}（动画）`}
           </option>
         ))}
       </select>
+      {animation !== undefined && (
+        <FrameSequencePreview
+          frames={animation.definition.frames.map((frame) => ({
+            asset: frame.asset,
+            url: assetUrl(
+              imageAssets.find((asset) => asset.id === frame.asset)
+                ?.absolute_path ?? "",
+            ),
+            duration_ms: frame.duration_ms,
+          }))}
+          height={size?.height}
+          label={`素材 ${value ?? ""}`}
+          width={size?.width}
+        />
+      )}
     </Field>
   );
 }

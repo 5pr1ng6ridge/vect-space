@@ -1,0 +1,82 @@
+schema_version: 2
+id: presentation_showcase
+entry: scan_in
+# 前半里程碑的演出夹具：用一个场景覆盖「动态素材可用在全部图片入口」。
+# 这里刻意只使用数据与已有节点类型，不需要任何新代码路径：
+#   - 背景是 120ms 两帧循环（bg.anim_scan）
+#   - 长文本纸张是 900ms 两帧循环（gui.dialogue_pulse）
+#   - 按钮贴图是 420ms 两帧循环（showcase.animated → gui.button_pulse）
+# 帧循环是装饰动画：Ctrl 快进不加速它，打开菜单会暂停，读档从第一帧开始。
+nodes:
+  scan_in:
+    type: background
+    background: bg.anim_scan
+    transition: cross_fade
+    duration_ms: 400
+    easing: ease_in_out
+    await: true
+    next: intro
+  intro:
+    type: say
+    speaker: test
+    text: |-
+      这是动态素材夹具。背景正在按 120ms 逐帧循环；纸面上的扫描线应该持续移动，而不是跟随对话逐字推进。
+      帧循环属于装饰动画：按住 Ctrl 只会加速这里的文字与补间。
+    mode: start
+    speed_cps: null
+    next: paper
+  paper:
+    type: long_text
+    document: anim_paper
+    paper: gui.dialogue_pulse
+    pagination: continuous
+    on_exit: keep_visible
+    steps:
+      - id: frame_loop
+        text: |-
+          纸张素材 gui.dialogue_pulse 是两帧循环动画。同一张纸在换帧时不会改变尺寸，
+          所以这里的排版、行宽与点击区域都不需要重新测量。
+      - id: decoration_clock
+        text: |-
+          暂停（打开菜单、切到别的窗口）会冻结帧循环，恢复后从同一帧继续；
+          读档只保存素材 ID，因此回到本节点时会从第一帧重新开始。
+    next: animated_button
+  animated_button:
+    type: button_create
+    instance_id: pulse
+    template: showcase.animated
+    x: 860.0
+    y: 900.0
+    width: 200.0
+    height: 80.0
+    z: 50
+    action:
+      sets: []
+      next: null
+    next: explain_button
+  explain_button:
+    type: say
+    speaker: test
+    text: |-
+      屏幕下方是动画按钮。切换到悬停或按下状态时，新贴图会从它的第一帧开始播放；
+      停留在同一状态里重新渲染界面不会把循环拨回第一帧。
+    mode: start
+    speed_cps: null
+    next: hold
+  hold:
+    type: wait
+    duration_ms: 2000
+    next: remove_button
+  remove_button:
+    type: button_remove
+    instance_id: pulse
+    next: closing
+  closing:
+    type: say
+    speaker: test
+    text: 夹具结束。背景与纸张会继续循环，直到离开本场景或打开菜单。
+    mode: start
+    speed_cps: null
+    next: end
+  end:
+    type: end

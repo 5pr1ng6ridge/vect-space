@@ -9,7 +9,7 @@ export function DiagnosticsPanel({
   onNavigate(
     sceneId: string | null,
     nodeId: string | null,
-    workspace?: "story" | "flow" | "map",
+    workspace?: "story" | "map",
     flowElementId?: string | null,
   ): void;
 }): ReactElement {

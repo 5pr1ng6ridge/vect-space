@@ -16,3 +16,7 @@ when replacing or redistributing them.
   samples whose ownership and redistribution terms have not yet been recorded.
   They must not be included in a public distribution until the project owner
   supplies that information or replaces them with licensed assets.
+- Files under `test/` (the Alli/Sat portraits, test backgrounds, button states,
+  stop-motion frames, and ambient tracks) were supplied as local development
+  fixtures. Their redistribution terms are not recorded yet; keep them in
+  development builds only until the project owner confirms their license.

@@ -38,6 +38,9 @@ import {
   useLongTextScroll,
   usePaperArtwork,
 } from "@vectspace/text-react";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import { editorImageSource } from "../imageAnimationMap";
+import { AnimatedImage } from "./AnimatedImage";
 
 const DESIGN_WIDTH = 1920;
 const DESIGN_HEIGHT = 1080;
@@ -74,6 +77,7 @@ export interface LongTextWorkspaceProps {
   nodeId: string;
   node: LongTextNode;
   assets: EditorAsset[];
+  animationMap: AnimationMap;
   dirty: boolean;
   undoAvailable: boolean;
   redoAvailable: boolean;
@@ -99,6 +103,7 @@ export function LongTextWorkspace({
   nodeId,
   node,
   assets,
+  animationMap,
   dirty,
   undoAvailable,
   redoAvailable,
@@ -186,10 +191,11 @@ export function LongTextWorkspace({
         : backgroundChoice;
   const backgroundAsset =
     backgroundId === null ? undefined : assetsById.get(backgroundId);
-  const backgroundUrl =
-    backgroundAsset?.kind === "background"
-      ? assetUrl(backgroundAsset.absolute_path)
-      : undefined;
+  const backgroundSource = editorImageSource(
+    backgroundAsset,
+    assets,
+    animationMap,
+  );
   const previewFont =
     assets.find((asset) => asset.id === project.manifest.default_font) ??
     assets.find((asset) => asset.id === "font.fusion_pixel") ??
@@ -241,6 +247,7 @@ export function LongTextWorkspace({
       : assetsById.get(presentationPaper);
   const paperUrl =
     paperAsset?.kind === "gui" ? assetUrl(paperAsset.absolute_path) : undefined;
+  const paperSource = editorImageSource(paperAsset, assets, animationMap);
   const artwork = usePaperArtwork(paperUrl);
   const previewSteps = useMemo<readonly LongTextStep[]>(() => {
     // A failed/unfinished continuation must not silently fall back to its
@@ -444,9 +451,9 @@ export function LongTextWorkspace({
     const saved = project.layout.timeline_previews?.[
       `${sceneId}/${nodeId}`
     ] ?? {
-        variable_overrides: {},
-        choices: [],
-      };
+      variable_overrides: {},
+      choices: [],
+    };
     return {
       ...saved,
       choices: saved.choices.filter((choice) => choice.scene_id === sceneId),
@@ -581,14 +588,7 @@ export function LongTextWorkspace({
       if (generation === previewRequestGeneration.current)
         previewRequestGeneration.current += 1;
     };
-  }, [
-    draft.steps,
-    importTokens,
-    nodeId,
-    previewSettings,
-    project,
-    sceneId,
-  ]);
+  }, [draft.steps, importTokens, nodeId, previewSettings, project, sceneId]);
 
   const onChoice = useCallback(
     (choiceId: string): void => {
@@ -1292,7 +1292,7 @@ export function LongTextWorkspace({
   } as CSSProperties;
   const paperArtworkStyle = {
     visibility: artwork.ready ? undefined : "hidden",
-    ...(artwork.url === undefined
+    ...(artwork.url === undefined || paperSource?.animation !== undefined
       ? {}
       : {
           backgroundImage: `url(${JSON.stringify(artwork.url)})`,
@@ -1394,16 +1394,16 @@ export function LongTextWorkspace({
               ref={designRef}
               style={designStyle}
             >
-              {backgroundUrl === undefined ? (
+              {backgroundSource === undefined ? (
                 <div className="long-text-workspace-empty-background">
                   当前场景没有可达的背景节点
                 </div>
               ) : (
-                <img
+                <AnimatedImage
                   alt=""
                   className="long-text-workspace-background"
-                  draggable={false}
-                  src={backgroundUrl}
+                  paused={!previewPlaying}
+                  source={backgroundSource}
                 />
               )}
               {previewUnavailable && (
@@ -1454,7 +1454,16 @@ export function LongTextWorkspace({
                           height: `${page.height}px`,
                           top: `${top}px`,
                         }}
-                      />
+                      >
+                        {paperSource !== undefined && (
+                          <AnimatedImage
+                            alt=""
+                            className="long-text-workspace-paper-artwork"
+                            paused={!previewPlaying}
+                            source={paperSource}
+                          />
+                        )}
+                      </div>
                     ))}
                   </div>
                   <div

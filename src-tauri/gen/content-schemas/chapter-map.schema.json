@@ -124,7 +124,7 @@
           "type": "string"
         },
         "reveal": {
-          "$ref": "#/$defs/StoryFlowReveal",
+          "$ref": "#/$defs/ChapterMapReveal",
           "default": {
             "mode": "completed"
           }
@@ -170,6 +170,53 @@
         "y",
         "width",
         "height"
+      ]
+    },
+    "ChapterMapReveal": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "completed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "always"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/ConditionExpression"
+            },
+            "mode": {
+              "type": "string",
+              "const": "condition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "condition"
+          ]
+        }
       ]
     },
     "ConditionExpression": {
@@ -386,53 +433,6 @@
         },
         {
           "type": "string"
-        }
-      ]
-    },
-    "StoryFlowReveal": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "mode": {
-              "type": "string",
-              "const": "completed"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "mode"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "mode": {
-              "type": "string",
-              "const": "always"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "mode"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "condition": {
-              "$ref": "#/$defs/ConditionExpression"
-            },
-            "mode": {
-              "type": "string",
-              "const": "condition"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "mode",
-            "condition"
-          ]
         }
       ]
     },

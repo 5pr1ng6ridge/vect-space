@@ -100,6 +100,18 @@ export interface CharacterDefinition {
   display_name: string;
   name_color?: string | null;
   text_color?: string | null;
+  expressions?: Record<string, CharacterExpression>;
+  default_expression?: string | null;
+  default_scale?: number;
+}
+
+export interface CharacterExpression {
+  asset: string;
+  anchor_x?: number;
+  anchor_y?: number;
+  offset_x?: number;
+  offset_y?: number;
+  scale?: number;
 }
 
 export type VariableOperation =
@@ -120,7 +132,56 @@ export type ConditionExpression =
 
 export interface AssetDefinition {
   kind: AssetKind;
+  /** Static image path; mutually exclusive with `animation`. */
+  path?: string;
+  /** Loop animation document id; mutually exclusive with `path`. */
+  animation?: string;
+}
+
+/** One ordered frame of a standalone image animation document. */
+export interface AnimationFrame {
+  /** Logical id of a static image asset. */
+  asset: string;
+  duration_ms: number;
+}
+
+/** Standalone image animation document (schema v1). */
+export interface ImageAnimationDefinition {
+  schema_version: number;
+  id: string;
+  frames: AnimationFrame[];
+}
+
+/** An animation document keyed by the manifest path that lists it. */
+export interface AnimationFile {
   path: string;
+  definition: ImageAnimationDefinition;
+}
+
+export type SpriteActionEnd = "hold" | "restore";
+export interface SpriteActionKeyframe {
+  at_ms: number;
+  value: number;
+  easing?: TimelineEasing;
+  parameter?: string | null;
+}
+export interface SpriteActionParameter {
+  default: number;
+  min?: number | null;
+  max?: number | null;
+}
+export interface SpriteActionDefinition {
+  schema_version: number;
+  id: string;
+  name: string;
+  duration_ms: number;
+  channels: Record<string, SpriteActionKeyframe[]>;
+  parameters?: Record<string, SpriteActionParameter>;
+  end?: SpriteActionEnd;
+}
+export interface ActionFile {
+  path: string;
+  definition: SpriteActionDefinition;
 }
 
 export interface ContentManifest {
@@ -135,12 +196,16 @@ export interface ContentManifest {
   scenes: string[];
   ui_motions: string[];
   buttons?: string[];
+  animations?: string[];
+  actions?: string[];
   ui_motion_defaults: UiMotionBindings;
-  story_flow?: string | null;
   chapter_map?: string | null;
 }
 
-export type ChapterMapReveal = StoryFlowReveal;
+export type ChapterMapReveal =
+  | { mode: "completed" }
+  | { mode: "always" }
+  | { mode: "condition"; condition: ConditionExpression };
 export interface ChapterMapDecoration {
   id: string;
   asset: string;
@@ -179,36 +244,6 @@ export interface ChapterMapFile {
   definition: ChapterMapDefinition;
 }
 
-export type StoryFlowReveal =
-  | { mode: "completed" }
-  | { mode: "always" }
-  | { mode: "condition"; condition: ConditionExpression };
-
-export interface StoryFlowNode {
-  title: string;
-  x: number;
-  y: number;
-  reveal?: StoryFlowReveal;
-}
-
-export interface StoryFlowEdge {
-  id: string;
-  from: string;
-  to: string;
-  label?: string | null;
-}
-
-export interface StoryFlowDefinition {
-  schema_version: number;
-  nodes: Record<string, StoryFlowNode>;
-  edges: StoryFlowEdge[];
-}
-
-export interface StoryFlowFile {
-  path: string;
-  definition: StoryFlowDefinition;
-}
-
 interface NextNode {
   next: string;
 }
@@ -230,6 +265,10 @@ export interface SpriteNode extends AwaitedNode {
   sprite_id: string;
   action: "show" | "move" | "hide";
   asset: string | null;
+  character?: string | null;
+  expression?: string | null;
+  flip_x?: boolean;
+  crossfade_ms?: number | null;
   x: number | null;
   y: number | null;
   scale: number | null;
@@ -326,6 +365,16 @@ export interface PlaybackNode extends NextNode {
   type: "playback";
   auto: "normal" | "forced";
   ctrl_fast_forward: "allow" | "block";
+}
+
+export interface ActionNode extends NextNode {
+  type: "action";
+  sprite_id: string;
+  action: string;
+  duration_ms?: number | null;
+  await: boolean;
+  parameters?: Record<string, number>;
+  end?: SpriteActionEnd | null;
 }
 
 export interface JumpNode {
@@ -484,6 +533,7 @@ export type SceneNode =
   | SetNode
   | ConditionNode
   | PlaybackNode
+  | ActionNode
   | JumpNode
   | WaitNode
   | BgmNode
@@ -548,7 +598,11 @@ export interface PreviewChoiceDecision {
 export interface EditorAsset {
   id: string;
   kind: AssetKind;
-  path: string;
+  /** Static image path.  Animated assets carry `animation` instead. */
+  path?: string;
+  /** Loop animation document id, present for animated assets. */
+  animation?: string;
+  /** For animated assets this is the first frame, so every host shows pixels. */
   absolute_path: string;
   /** WireU64 string; formatting may safely down-convert for display only. */
   size_bytes?: string;
@@ -564,7 +618,7 @@ export interface EditorDiagnostic {
   message: string;
   scene_id: string | null;
   node_id: string | null;
-  workspace?: "story" | "flow" | "map";
+  workspace?: "story" | "map";
   flow_element_id?: string | null;
 }
 
@@ -574,7 +628,8 @@ export interface EditorProject {
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
   buttons?: ButtonFile[];
-  story_flow: StoryFlowFile | null;
+  animations?: AnimationFile[];
+  actions?: ActionFile[];
   chapter_map?: ChapterMapFile | null;
   layout: EditorLayout;
   assets: EditorAsset[];
@@ -587,7 +642,8 @@ export interface SaveProjectRequest {
   scenes: EditorSceneFile[];
   ui_motions: UiMotionFile[];
   buttons?: ButtonFile[];
-  story_flow: StoryFlowFile | null;
+  animations?: AnimationFile[];
+  actions?: ActionFile[];
   chapter_map: ChapterMapFile | null;
   layout: EditorLayout;
   expected_fingerprint: string;
@@ -616,6 +672,9 @@ export interface SpriteSnapshot {
   scale_x: number;
   scale_y: number;
   rotation_deg: number;
+  flip_x?: boolean;
+  anchor_x?: number;
+  anchor_y?: number;
   opacity: number;
   z: number;
 }

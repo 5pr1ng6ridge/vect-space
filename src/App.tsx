@@ -19,10 +19,15 @@ import {
 } from "./components/LongTextPanel";
 import { MarkupText } from "./components/MarkupText";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
 import { ButtonLayer } from "./components/ButtonLayer";
-import { StoryFlowPage } from "./components/StoryFlowPage";
 import { ChapterMapPage } from "./components/ChapterMapPage";
-import { engineApi, resolvedAssetsToUrls } from "./engine/api";
+import {
+  engineApi,
+  resolvedAssetsToAnimations,
+  resolvedAssetsToUrls,
+} from "./engine/api";
 import {
   requireSessionId,
   SessionTransitionController,
@@ -49,7 +54,6 @@ import type {
   RuntimeUpdate,
   SaveSlotSummary,
   Settings,
-  StoryFlowSnapshot,
   ChapterMapSnapshot,
   TextRevealAnimation,
 } from "./engine/types";
@@ -67,7 +71,7 @@ const DEFAULT_SETTINGS: Settings = {
   skip_mode: "read_only",
 };
 
-type Phase = "booting" | "title" | "story_flow" | "chapter_map" | "playing";
+type Phase = "booting" | "title" | "chapter_map" | "playing";
 type Panel = "none" | "saves" | "settings" | "history";
 
 interface InitialAppState {
@@ -75,6 +79,7 @@ interface InitialAppState {
   settings: Settings;
   slots: SaveSlotSummary[];
   assets: AssetUrlMap;
+  animations: AnimationMap;
 }
 
 interface LockedTextSettings {
@@ -116,6 +121,7 @@ export default function App(): ReactElement {
   const [panel, setPanel] = useState<Panel>("none");
   const [update, setUpdate] = useState<RuntimeUpdate | null>(null);
   const [assets, setAssets] = useState<AssetUrlMap>({});
+  const [animations, setAnimations] = useState<AnimationMap>({});
   const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
   const [fontLoadErrorUrl, setFontLoadErrorUrl] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -139,8 +145,6 @@ export default function App(): ReactElement {
     null,
   );
   const [history, setHistory] = useState<DialogueHistoryEntry[]>([]);
-  const [storyFlow, setStoryFlow] = useState<StoryFlowSnapshot | null>(null);
-  const [storyFlowAvailable, setStoryFlowAvailable] = useState(false);
   const [chapterMap, setChapterMap] = useState<ChapterMapSnapshot | null>(null);
   const [chapterMapAvailable, setChapterMapAvailable] = useState(false);
   const [replayMode, setReplayMode] = useState(false);
@@ -159,23 +163,33 @@ export default function App(): ReactElement {
   useEffect(() => {
     let active = true;
     void getInitialAppState()
-      .then(({ bootstrap, settings: loadedSettings, slots, assets }) => {
-        if (!active) {
-          return;
-        }
-        setAssets(assets);
-        setSettings(loadedSettings);
-        setDraftSettings(loadedSettings);
-        setSaveSlots(slots);
-        sessionGenerationRef.current += 1;
-        activeSessionId.current = requireSessionId(bootstrap.update.session_id);
-        setUpdate(bootstrap.update);
-        setContentVersion(bootstrap.content_version);
-        setDefaultFontId(bootstrap.default_font ?? null);
-        setStoryFlowAvailable(bootstrap.story_flow_available);
-        setChapterMapAvailable(bootstrap.chapter_map_available === true);
-        setPhase("title");
-      })
+      .then(
+        ({
+          bootstrap,
+          settings: loadedSettings,
+          slots,
+          assets,
+          animations,
+        }) => {
+          if (!active) {
+            return;
+          }
+          setAssets(assets);
+          setAnimations(animations);
+          setSettings(loadedSettings);
+          setDraftSettings(loadedSettings);
+          setSaveSlots(slots);
+          sessionGenerationRef.current += 1;
+          activeSessionId.current = requireSessionId(
+            bootstrap.update.session_id,
+          );
+          setUpdate(bootstrap.update);
+          setContentVersion(bootstrap.content_version);
+          setDefaultFontId(bootstrap.default_font ?? null);
+          setChapterMapAvailable(bootstrap.chapter_map_available === true);
+          setPhase("title");
+        },
+      )
       .catch((reason: unknown) => {
         if (active) {
           setError(errorMessage(reason));
@@ -766,38 +780,6 @@ export default function App(): ReactElement {
       });
   };
 
-  const openStoryFlow = (): void => {
-    const requestGeneration = ++pageRequestGenerationRef.current;
-    const requestSessionId = activeSessionId.current;
-    void engineApi
-      .getStoryFlow()
-      .then((flow) => {
-        if (
-          requestGeneration !== pageRequestGenerationRef.current ||
-          requestSessionId !== activeSessionId.current ||
-          phaseRef.current !== "title"
-        )
-          return;
-        if (flow === null) {
-          setError("当前内容未配置剧情流程。");
-          return;
-        }
-        setStoryFlow(flow);
-        setNormalAuto(false);
-        setPanel("none");
-        setPhase("story_flow");
-        phaseRef.current = "story_flow";
-      })
-      .catch((reason: unknown) => {
-        if (
-          requestGeneration === pageRequestGenerationRef.current &&
-          requestSessionId === activeSessionId.current &&
-          phaseRef.current === "title"
-        )
-          setError(errorMessage(reason));
-      });
-  };
-
   const openChapterMap = (): void => {
     const requestGeneration = ++pageRequestGenerationRef.current;
     const requestSessionId = activeSessionId.current;
@@ -980,12 +962,6 @@ export default function App(): ReactElement {
     }
     return undefined;
   }, [finishSceneReplay, replayMode, replaySceneId, update]);
-
-  const closeStoryFlow = (): void => {
-    if (busyRef.current || replayTransitionRef.current !== null) return;
-    setPhase("title");
-    phaseRef.current = "title";
-  };
 
   const closeChapterMap = (): void => {
     if (busyRef.current || replayTransitionRef.current !== null) return;
@@ -1303,10 +1279,6 @@ export default function App(): ReactElement {
       if (event.key === "Escape" && panel === "history") {
         event.preventDefault();
         setPanel("none");
-      } else if (event.key === "Escape" && phase === "story_flow") {
-        event.preventDefault();
-        setPhase("title");
-        phaseRef.current = "title";
       }
     };
     window.addEventListener("keydown", closePanel);
@@ -1330,6 +1302,7 @@ export default function App(): ReactElement {
     <main className="app-shell">
       <section className="game-viewport" style={viewportStyle}>
         <SceneCanvas
+          animations={animations}
           assets={assets}
           onDiagnostic={setError}
           onSettled={handlePresentationSettled}
@@ -1347,6 +1320,7 @@ export default function App(): ReactElement {
 
         {phase === "playing" && update !== null && (
           <ButtonLayer
+            animations={animations}
             assets={assets}
             disabled={panel !== "none" || busy || runtimeLocked}
             onClick={clickButton}
@@ -1389,36 +1363,28 @@ export default function App(): ReactElement {
                 <button onClick={() => setPanel("settings")} type="button">
                   设置
                 </button>
-                {chapterMapAvailable ? (
-                  <button onClick={openChapterMap} type="button">
-                    章节地图
-                  </button>
-                ) : (
-                  <button
-                    disabled={!storyFlowAvailable}
-                    onClick={openStoryFlow}
-                    type="button"
-                  >
-                    剧情流程
-                  </button>
-                )}
+                <button
+                  disabled={!chapterMapAvailable}
+                  onClick={openChapterMap}
+                  type="button"
+                >
+                  章节地图
+                </button>
               </div>
               <small>内容版本 {contentVersion || "未载入"}</small>
             </div>
           </div>
         )}
 
-        {phase === "story_flow" && storyFlow !== null && (
-          <StoryFlowPage flow={storyFlow} onClose={closeStoryFlow} />
-        )}
-
         {phase === "chapter_map" && chapterMap !== null && (
           <ChapterMapPage
+            animations={animations}
             assets={assets}
             map={chapterMap}
             onClose={closeChapterMap}
             onReplay={startSceneReplay}
             onViewChange={setChapterMapCenter}
+            paused={pageHidden}
             sessionCenter={chapterMapCenter}
           />
         )}
@@ -1460,12 +1426,17 @@ export default function App(): ReactElement {
             {renderedDialoguePage !== null && (
               <DialogueBox
                 defaultCps={revealDefaultCps}
-                dialogueBoxUrl={assets["gui.dialogue_box"] ?? ""}
+                dialogueBoxSource={
+                  resolveImageAsset("gui.dialogue_box", assets, animations) ??
+                  null
+                }
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
                 key={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${update.snapshot.revision}`}`}
                 motionHost={uiMotionHost}
-                nameBoxUrl={assets["gui.name_box"] ?? ""}
+                nameBoxSource={
+                  resolveImageAsset("gui.name_box", assets, animations) ?? null
+                }
                 onTypingChange={handleTypingChange}
                 onRevealComplete={handleRevealComplete}
                 page={renderedDialoguePage}
@@ -1491,11 +1462,15 @@ export default function App(): ReactElement {
                 onRevealComplete={handleRevealComplete}
                 onTypingChange={handleTypingChange}
                 page={longTextPage}
-                paperUrl={
+                paperSource={
                   longTextPage.paper === null ||
                   longTextPage.paper === undefined
                     ? undefined
-                    : (assets[longTextPage.paper] ?? null)
+                    : (resolveImageAsset(
+                        longTextPage.paper,
+                        assets,
+                        animations,
+                      ) ?? null)
                 }
                 prompt={longText}
                 revealAnimation={revealAnimation}
@@ -1897,6 +1872,7 @@ async function loadInitialAppStateAttempt(): Promise<InitialAppState> {
     settings,
     slots,
     assets: resolvedAssetsToUrls(resolved),
+    animations: resolvedAssetsToAnimations(resolved),
   };
 }
 

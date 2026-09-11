@@ -10,10 +10,10 @@ import type {
   SaveSlotSummary,
   Settings,
   PresentationOutcome,
-  StoryFlowSnapshot,
   ChapterMapSnapshot,
 } from "./types";
 import type { WireU64 } from "../../shared/generated/WireU64";
+import type { AnimationSource } from "@vectspace/presentation-core/image-animation";
 import { toCommandError } from "../../shared/commandError";
 
 async function command<T>(
@@ -130,7 +130,6 @@ export const engineApi = {
     command<unknown>("clear_dialogue_history", {
       expectedSessionId,
     }),
-  getStoryFlow: () => command<StoryFlowSnapshot | null>("get_story_flow"),
   getChapterMap: () => command<ChapterMapSnapshot | null>("get_chapter_map"),
   startSceneReplay: (sceneId: string, expectedSessionId: WireU64) =>
     command<RuntimeUpdate>("start_scene_replay", {
@@ -173,4 +172,32 @@ export function resolvedAssetsToUrls(
   return Object.fromEntries(
     assets.map((asset) => [asset.id, convertFileSrc(asset.absolute_path)]),
   );
+}
+
+/**
+ * Frame lists for every animated asset, keyed by logical asset id.
+ *
+ * A static asset is deliberately absent: the shared image resolver falls back
+ * to the plain url map, so nothing about existing content changes.
+ */
+export function resolvedAssetsToAnimations(
+  assets: ResolvedAsset[],
+): Record<string, AnimationSource> {
+  const animations: Record<string, AnimationSource> = {};
+  for (const asset of assets) {
+    const animation = asset.animation;
+    if (animation == null || animation.frames.length === 0) continue;
+    animations[asset.id] = {
+      id: animation.id,
+      width: animation.width,
+      height: animation.height,
+      total_duration_ms: animation.total_duration_ms,
+      frames: animation.frames.map((frame) => ({
+        asset: frame.asset,
+        duration_ms: frame.duration_ms,
+        url: convertFileSrc(frame.absolute_path),
+      })),
+    };
+  }
+  return animations;
 }

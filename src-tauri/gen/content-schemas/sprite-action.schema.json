@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SpriteActionDefinition",
+  "description": "A reusable, single-sprite transform animation.  Position and rotation\nvalues are offsets from the instance's starting pose; scale and opacity\nvalues are multipliers.  The runtime expands these relative keyframes into\nan ordinary absolute Timeline cue, so the presentation layer stays small.",
+  "type": "object",
+  "properties": {
+    "channels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/SpriteActionKeyframe"
+        }
+      },
+      "default": {}
+    },
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "end": {
+      "$ref": "#/$defs/SpriteActionEnd",
+      "default": "hold"
+    },
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/SpriteActionParameter"
+      },
+      "default": {}
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "duration_ms"
+  ],
+  "$defs": {
+    "SpriteActionEnd": {
+      "type": "string",
+      "enum": [
+        "hold",
+        "restore"
+      ]
+    },
+    "SpriteActionKeyframe": {
+      "type": "object",
+      "properties": {
+        "at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "easing": {
+          "$ref": "#/$defs/TimelineEasing",
+          "default": "linear"
+        },
+        "parameter": {
+          "description": "Optional named parameter. When present, `value` is the fallback\ndefault and the action invocation may override it safely.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at_ms",
+        "value"
+      ]
+    },
+    "SpriteActionParameter": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "type": "number",
+          "format": "float"
+        },
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "min": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "default"
+      ]
+    },
+    "TimelineEasing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TimelineEasingPreset"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cubic_bezier": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 4,
+              "minItems": 4
+            }
+          },
+          "required": [
+            "cubic_bezier"
+          ]
+        }
+      ]
+    },
+    "TimelineEasingPreset": {
+      "type": "string",
+      "enum": [
+        "step",
+        "linear",
+        "ease_in",
+        "ease_out",
+        "ease_in_out"
+      ]
+    }
+  }
+}

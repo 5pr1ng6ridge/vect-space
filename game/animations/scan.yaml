@@ -1,0 +1,7 @@
+schema_version: 1
+id: anim.scan
+frames:
+  - asset: bg.anim_scan_a
+    duration_ms: 120
+  - asset: bg.anim_scan_b
+    duration_ms: 120

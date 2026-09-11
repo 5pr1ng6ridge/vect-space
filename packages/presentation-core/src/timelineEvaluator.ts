@@ -9,6 +9,9 @@ export interface TimelineBaseSprite {
   scale_x: number;
   scale_y: number;
   rotation_deg: number;
+  flip_x?: boolean;
+  anchor_x?: number;
+  anchor_y?: number;
   opacity: number;
   z: number;
   width?: number;
@@ -182,6 +185,9 @@ export function evaluateTimelineFrame(
           elapsed,
           base.rotation_deg,
         ),
+        flip_x: base.flip_x ?? false,
+        anchor_x: base.anchor_x ?? 0.5,
+        anchor_y: base.anchor_y ?? 1,
         opacity: evaluateChannel(
           track.channels,
           "opacity",
@@ -292,6 +298,8 @@ function defaultSprite(asset: string | null | undefined): TimelineBaseSprite {
     scale_x: 1,
     scale_y: 1,
     rotation_deg: 0,
+    anchor_x: 0.5,
+    anchor_y: 1,
     opacity: 1,
     z: 0,
   };

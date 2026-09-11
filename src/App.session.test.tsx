@@ -58,7 +58,6 @@ vi.mock("@tauri-apps/api/core", () => ({
         asset_ids: [],
         content_version: "test",
         chapter_map_available: true,
-        story_flow_available: false,
         default_font: null,
       };
     if (command === "resolve_assets") return [];

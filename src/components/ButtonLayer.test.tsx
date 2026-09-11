@@ -1,5 +1,13 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { ReactElement } from "react";
 
 import type {
   ButtonSnapshot,
@@ -174,5 +182,62 @@ describe("ButtonLayer", () => {
     );
     fireEvent.pointerEnter(overlayElement);
     expect(overlayElement?.querySelectorAll("img")).toHaveLength(2);
+  });
+
+  it("starts a state animation on its first frame and never restarts it", () => {
+    vi.useFakeTimers();
+    const hoverAnimation = {
+      id: "anim.hover",
+      width: 200,
+      height: 80,
+      total_duration_ms: 400,
+      frames: [
+        { asset: "hover_a", duration_ms: 200, url: "hover_a.png" },
+        { asset: "hover_b", duration_ms: 200, url: "hover_b.png" },
+      ],
+    };
+    const animated = button({
+      id: "animated",
+      normal: "normal",
+      hover: "hover",
+      asset_mode: "separate",
+      x: 300,
+    });
+    const renderButton = (): ReactElement => (
+      <ButtonLayer
+        animations={{ hover: hoverAnimation }}
+        assets={{ normal: "normal.png", hover: "hover_a.png" }}
+        onClick={() => undefined}
+        snapshot={snapshot({ animated })}
+      />
+    );
+    const { rerender } = render(renderButton());
+    // The mount effect drops stale pointer state on the next frame; flush it
+    // so the hover below is not immediately undone by that deferred reset.
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+    const element = screen.getByRole("button", { name: "animated" });
+    expect(element.querySelector("img")).toHaveAttribute("src", "normal.png");
+
+    fireEvent.pointerEnter(element);
+    expect(element.querySelector("img")).toHaveAttribute("src", "hover_a.png");
+
+    // Advance into a later frame so a restart becomes observable at all.
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+    expect(element.querySelector("img")).toHaveAttribute("src", "hover_b.png");
+
+    // A re-render inside the same state keeps the loop going rather than
+    // snapping back to the first frame.
+    rerender(renderButton());
+    expect(element.querySelector("img")).toHaveAttribute("src", "hover_b.png");
+
+    // Leaving and re-entering is a state change, so the loop does restart.
+    fireEvent.pointerLeave(element);
+    expect(element.querySelector("img")).toHaveAttribute("src", "normal.png");
+    fireEvent.pointerEnter(element);
+    expect(element.querySelector("img")).toHaveAttribute("src", "hover_a.png");
   });
 });

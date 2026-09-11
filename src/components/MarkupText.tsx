@@ -339,8 +339,14 @@ export const MarkupText = memo(function MarkupText({
     visible: boolean,
     lineSweepTiming: LineSweepUnitTiming | undefined,
   ): ReactElement => {
+    // A visible unit must inherit the visibility of its presentation
+    // surface.  Writing `visibility: visible` here would opt the unit back
+    // into rendering when the dialogue/long-text container is hidden (the
+    // reveal renderer keeps every unit mounted for stable layout).  Hidden
+    // units still get an explicit value so the typewriter can reserve their
+    // final geometry without painting them.
     const style = {
-      visibility: visible ? "visible" : "hidden",
+      visibility: visible ? "inherit" : "hidden",
       "--unit-index": index,
       ...(lineSweepTiming === undefined
         ? {}

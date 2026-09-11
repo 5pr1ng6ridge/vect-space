@@ -1,12 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { assetUrl, editorApi } from "../api";
+import {
+  animationSourceId,
+  frameCandidates,
+  type AnimationDraft,
+} from "../imageAnimation";
 import { isCanonicalIntegerText } from "../scalars";
 import { useAssetFont } from "../useAssetFont";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { findAssetReferences } from "./assetReferences";
+import { FrameSequencePreview } from "./FrameSequencePreview";
+import { ImageAnimationPanel } from "./ImageAnimationPanel";
 import type {
+  AnimationFile,
   AssetKind,
   CharacterDefinition,
+  CharacterExpression,
   ContentManifest,
   EditorAsset,
   EditorDiagnostic,
@@ -16,6 +25,8 @@ import type {
   ScalarValue,
   VariableDefinition,
   VariableType,
+  SpriteActionDefinition,
+  SpriteActionKeyframe,
 } from "../types";
 
 interface ProjectSidebarProps {
@@ -30,6 +41,7 @@ interface ProjectSidebarProps {
   onManifestChange(manifest: ContentManifest): void;
   onImportAssets(items: ImportDraft[]): Promise<void>;
   onRemoveAsset(id: string): boolean;
+  onCreateImageAnimation(draft: AnimationDraft): boolean;
   onSelectAsset?(id: string): void;
   selectedAssetId?: string | null;
   onAddVariable(id: string, definition: VariableDefinition): boolean;
@@ -47,10 +59,15 @@ interface ProjectSidebarProps {
   onEditButtonTemplate(id: string): void;
   onDuplicateButtonTemplate(id: string): void;
   onDeleteButtonTemplate(id: string): void;
+  onCreateAction(id: string): boolean;
+  onChangeAction(id: string, definition: SpriteActionDefinition): void;
+  onRenameAction(previousId: string, nextId: string): boolean;
+  onDuplicateAction(id: string): void;
+  onDeleteAction(id: string): void;
   onNavigate(
     sceneId: string | null,
     nodeId: string | null,
-    workspace?: "story" | "flow" | "map",
+    workspace?: "story" | "map",
     flowElementId?: string | null,
   ): void;
   onTabChange?(tab: SidebarTab): void;
@@ -70,6 +87,7 @@ export function ProjectSidebar({
   onManifestChange,
   onImportAssets,
   onRemoveAsset,
+  onCreateImageAnimation,
   onSelectAsset,
   selectedAssetId,
   onAddVariable,
@@ -87,6 +105,11 @@ export function ProjectSidebar({
   onEditButtonTemplate,
   onDuplicateButtonTemplate,
   onDeleteButtonTemplate,
+  onCreateAction,
+  onChangeAction,
+  onRenameAction,
+  onDuplicateAction,
+  onDeleteAction,
   onNavigate,
   onTabChange,
 }: ProjectSidebarProps): ReactElement {
@@ -157,6 +180,7 @@ export function ProjectSidebar({
       )}
       {tab === "assets" && (
         <AssetsPanel
+          onCreateImageAnimation={onCreateImageAnimation}
           project={project}
           onImportAssets={onImportAssets}
           onRemoveAsset={onRemoveAsset}
@@ -182,6 +206,11 @@ export function ProjectSidebar({
           onEditButtonTemplate={onEditButtonTemplate}
           onDuplicateButtonTemplate={onDuplicateButtonTemplate}
           onDeleteButtonTemplate={onDeleteButtonTemplate}
+          onCreateAction={onCreateAction}
+          onChangeAction={onChangeAction}
+          onRenameAction={onRenameAction}
+          onDuplicateAction={onDuplicateAction}
+          onDeleteAction={onDeleteAction}
           project={project}
         />
       )}
@@ -201,7 +230,7 @@ function ProjectSearch({
   onNavigate(
     sceneId: string | null,
     nodeId: string | null,
-    workspace?: "story" | "flow" | "map",
+    workspace?: "story" | "map",
     flowElementId?: string | null,
   ): void;
   onSelectAsset?(id: string): void;
@@ -245,10 +274,14 @@ function ProjectSearch({
     }
     if (output.length < 40) {
       for (const asset of project.assets) {
-        if (`${asset.id} ${asset.path}`.toLowerCase().includes(needle))
+        const description =
+          asset.animation === undefined
+            ? (asset.path ?? "")
+            : `动画 ${asset.animation}`;
+        if (`${asset.id} ${description}`.toLowerCase().includes(needle))
           output.push({
             label: asset.id,
-            detail: asset.path,
+            detail: description,
             sceneId: null,
             nodeId: null,
             assetId: asset.id,
@@ -414,14 +447,17 @@ function AssetsPanel({
   project,
   onImportAssets,
   onRemoveAsset,
+  onCreateImageAnimation,
   selectedAssetId,
 }: {
   project: EditorProject;
   onImportAssets(items: ImportDraft[]): Promise<void>;
   onRemoveAsset(id: string): boolean;
+  onCreateImageAnimation(draft: AnimationDraft): boolean;
   selectedAssetId?: string | null;
 }): ReactElement {
   const { assets, manifest } = project;
+  const animations = project.animations ?? [];
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
   const [selected, setSelected] = useState<string | null>(null);
@@ -429,6 +465,7 @@ function AssetsPanel({
   const [importQueue, setImportQueue] = useState<ImportDraft[] | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [inspecting, setInspecting] = useState(false);
+  const [animationPanel, setAnimationPanel] = useState(false);
   const references = useMemo(
     () =>
       new Map(
@@ -624,6 +661,15 @@ function AssetsPanel({
           {inspecting ? "检查中…" : "＋"}
         </button>
       </div>
+      <button
+        className="animation-create-entry"
+        disabled={frameCandidates(assets).length === 0}
+        onClick={() => setAnimationPanel(true)}
+        title="把多张静态图片登记为一个循环帧动画素材"
+        type="button"
+      >
+        创建帧动画
+      </button>
       <div className="asset-list">
         {assets.length === 0 && (
           <p className="muted">将文件拖到这里，或点击 ＋ 批量导入</p>
@@ -639,9 +685,14 @@ function AssetsPanel({
               {asset.kind.slice(0, 2).toUpperCase()}
             </span>
             <span>
-              <strong>{asset.id}</strong>
+              <strong>
+                {asset.id}
+                {asset.animation !== undefined && (
+                  <span className="animation-badge">动画</span>
+                )}
+              </strong>
               <small>
-                {manifest.assets[asset.id]?.path ?? asset.path} ·{" "}
+                {assetDescription(asset, manifest)} ·{" "}
                 {formatAssetSize(asset.size_bytes)} ·{" "}
                 {formatAssetMetadata(asset.metadata)} ·{" "}
                 {references.get(asset.id)?.length ?? 0} 处引用
@@ -652,9 +703,25 @@ function AssetsPanel({
       </div>
       {selectedAsset !== undefined && (
         <div className="asset-detail">
-          <AssetPreview asset={selectedAsset} />
-          <strong>{selectedAsset.id}</strong>
-          <code>{selectedAsset.path}</code>
+          <AssetPreview
+            animations={animations}
+            asset={selectedAsset}
+            assets={assets}
+          />
+          <strong>
+            {selectedAsset.id}
+            {selectedAsset.animation !== undefined && (
+              <span className="animation-badge">动画</span>
+            )}
+          </strong>
+          <code>
+            {selectedAsset.animation === undefined
+              ? selectedAsset.path
+              : `动画：${selectedAsset.animation}`}
+          </code>
+          {selectedAsset.animation !== undefined && (
+            <small>{animationSummary(selectedAsset, assets, animations)}</small>
+          )}
           <small>
             大小：{formatAssetSize(selectedAsset.size_bytes)} ·{" "}
             {formatAssetMetadata(selectedAsset.metadata)} · 引用：
@@ -669,6 +736,11 @@ function AssetsPanel({
                 ))}
               </ul>
             </details>
+          )}
+          {(references.get(selectedAsset.id)?.length ?? 0) > 0 && (
+            <small className="inline-error">
+              该素材仍被引用（可展开上方“使用位置”查看，帧动画也会列入），需先解除引用才能移除。
+            </small>
           )}
           <button
             className="danger-button"
@@ -778,6 +850,18 @@ function AssetsPanel({
             {importing ? "导入中…" : "导入清单"}
           </button>
         </div>
+      )}
+      {animationPanel && (
+        <ImageAnimationPanel
+          assets={assets}
+          existingAnimationIds={
+            new Set(animations.map((file) => file.definition.id))
+          }
+          existingAnimationPaths={new Set(animations.map((file) => file.path))}
+          existingAssetIds={new Set(Object.keys(manifest.assets))}
+          onClose={() => setAnimationPanel(false)}
+          onCreate={onCreateImageAnimation}
+        />
       )}
     </div>
   );
@@ -1017,12 +1101,90 @@ function uniqueAssetId(
   }
 }
 
-function AssetPreview({ asset }: { asset: EditorAsset }): ReactElement {
+/** Human label for the small list line: static path or animation reference. */
+function assetDescription(
+  asset: EditorAsset,
+  manifest: ContentManifest,
+): string {
+  const declared = manifest.assets[asset.id];
+  if (asset.animation !== undefined) return `动画 ${asset.animation}`;
+  return declared?.path ?? asset.path ?? "（未登记路径）";
+}
+
+function assetSize(
+  asset: EditorAsset,
+): { width: number; height: number } | undefined {
+  const metadata = asset.metadata;
+  if (metadata === undefined || metadata === null) return undefined;
+  if (metadata.width === null || metadata.height === null) return undefined;
+  return { width: metadata.width, height: metadata.height };
+}
+
+/** Resolved frames of one animation document, in document order. */
+function previewFramesFor(
+  file: AnimationFile,
+  assets: readonly EditorAsset[],
+): { asset: string; url: string; duration_ms: number }[] {
+  return file.definition.frames.map((frame) => ({
+    asset: frame.asset,
+    url: assetUrl(
+      assets.find((candidate) => candidate.id === frame.asset)?.absolute_path ??
+        "",
+    ),
+    duration_ms: frame.duration_ms,
+  }));
+}
+
+function animationSummary(
+  asset: EditorAsset,
+  assets: readonly EditorAsset[],
+  animations: readonly AnimationFile[],
+): string {
+  const file = animationSourceId(asset.animation ?? "", animations);
+  if (file === undefined) return "动画描述文件缺失，保存前请修正。";
+  const frames = file.definition.frames;
+  const seen = new Set<string>();
+  let decoded = 0;
+  for (const frame of frames) {
+    if (seen.has(frame.asset)) continue;
+    seen.add(frame.asset);
+    const size = assetSize(
+      assets.find((candidate) => candidate.id === frame.asset) ?? asset,
+    );
+    if (size !== undefined) decoded += size.width * size.height * 4;
+  }
+  const size = assetSize(asset);
+  return `${frames.length} 帧 · 总时长 ${frames.reduce((sum, frame) => sum + frame.duration_ms, 0)} ms · ${
+    size === undefined ? "尺寸未知" : `${size.width} × ${size.height}`
+  } · 解码约 ${Math.round(decoded / (1024 * 1024))} MiB`;
+}
+
+function AssetPreview({
+  asset,
+  assets,
+  animations,
+}: {
+  asset: EditorAsset;
+  assets: readonly EditorAsset[];
+  animations: readonly AnimationFile[];
+}): ReactElement {
   const url = assetUrl(asset.absolute_path);
   const font = useAssetFont(
     asset.kind === "font" ? url : undefined,
     `Asset ${asset.id}`,
   );
+  const animation = animationSourceId(asset.animation ?? "", animations);
+  if (animation !== undefined) {
+    const size = assetSize(asset);
+    return (
+      <FrameSequencePreview
+        frames={previewFramesFor(animation, assets)}
+        height={size?.height}
+        label={`素材 ${asset.id}`}
+        width={size?.width}
+      />
+    );
+  }
   if (["background", "sprite", "gui"].includes(asset.kind)) {
     return <img alt={asset.id} className="asset-preview" src={url} />;
   }
@@ -1059,6 +1221,11 @@ function ProjectPanel({
   onEditButtonTemplate,
   onDuplicateButtonTemplate,
   onDeleteButtonTemplate,
+  onCreateAction,
+  onChangeAction,
+  onRenameAction,
+  onDuplicateAction,
+  onDeleteAction,
   project,
 }: {
   manifest: ContentManifest;
@@ -1078,13 +1245,23 @@ function ProjectPanel({
   onEditButtonTemplate(id: string): void;
   onDuplicateButtonTemplate(id: string): void;
   onDeleteButtonTemplate(id: string): void;
+  onCreateAction(id: string): boolean;
+  onChangeAction(id: string, definition: SpriteActionDefinition): void;
+  onRenameAction(previousId: string, nextId: string): boolean;
+  onDuplicateAction(id: string): void;
+  onDeleteAction(id: string): void;
   project: EditorProject;
 }): ReactElement {
   const [dialog, setDialog] = useState<{
     title: string;
     value: string;
     kind:
-      "character_add" | "character_rename" | "variable_add" | "variable_rename";
+      | "character_add"
+      | "character_rename"
+      | "variable_add"
+      | "variable_rename"
+      | "action_add"
+      | "action_rename";
     previous?: string;
   } | null>(null);
   return (
@@ -1265,6 +1442,59 @@ function ProjectPanel({
           )}
         </div>
       </section>
+      <section className="variable-settings action-settings">
+        <header>
+          <strong>立绘动作库</strong>
+          <button
+            onClick={() => {
+              let index = (project.actions ?? []).length + 1;
+              let id = `sprite.action_${index}`;
+              while (
+                (project.actions ?? []).some(
+                  (file) => file.definition.id === id,
+                )
+              ) {
+                index += 1;
+                id = `sprite.action_${index}`;
+              }
+              setDialog({
+                title: "新立绘动作 ID",
+                value: id,
+                kind: "action_add",
+              });
+            }}
+            type="button"
+          >
+            ＋
+          </button>
+        </header>
+        <p className="field-note">
+          动作以当前立绘姿态为基准，位置/旋转为偏移，缩放/透明度为倍率。
+        </p>
+        <div className="ui-motion-list">
+          {(project.actions ?? []).map(({ definition, path }) => (
+            <ActionDefinitionEditor
+              definition={definition}
+              key={definition.id}
+              onChange={(next) => onChangeAction(definition.id, next)}
+              onRename={() =>
+                setDialog({
+                  title: "新的动作 ID",
+                  value: definition.id,
+                  kind: "action_rename",
+                  previous: definition.id,
+                })
+              }
+              onDuplicate={() => onDuplicateAction(definition.id)}
+              onDelete={() => onDeleteAction(definition.id)}
+              path={path}
+            />
+          ))}
+          {(project.actions ?? []).length === 0 && (
+            <small>还没有动作。创建后可在“立绘动作”节点中调用。</small>
+          )}
+        </div>
+      </section>
       <section className="variable-settings character-settings">
         <header>
           <strong>角色</strong>
@@ -1332,6 +1562,112 @@ function ProjectPanel({
               }
               value={definition.text_color}
             />
+            <label>
+              <span>默认表情</span>
+              <select
+                value={definition.default_expression ?? ""}
+                onChange={(event) =>
+                  onChangeCharacter(id, {
+                    ...definition,
+                    default_expression: event.currentTarget.value || null,
+                  })
+                }
+              >
+                <option value="">无（由节点指定素材）</option>
+                {Object.keys(definition.expressions ?? {}).map(
+                  (expressionId) => (
+                    <option key={expressionId} value={expressionId}>
+                      {expressionId}
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+            <label>
+              <span>默认缩放</span>
+              <input
+                min={0.01}
+                onChange={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  if (Number.isFinite(value) && value > 0)
+                    onChangeCharacter(id, {
+                      ...definition,
+                      default_scale: value,
+                    });
+                }}
+                step={0.05}
+                type="number"
+                value={definition.default_scale ?? 1}
+              />
+            </label>
+            <div className="character-expression-list">
+              <header>
+                <span>表情图</span>
+                <button
+                  onClick={() => {
+                    const expressions = { ...(definition.expressions ?? {}) };
+                    let index = Object.keys(expressions).length + 1;
+                    let expressionId = `expression_${index}`;
+                    while (expressions[expressionId] !== undefined) {
+                      index += 1;
+                      expressionId = `expression_${index}`;
+                    }
+                    const firstSprite = project.assets.find(
+                      (asset) => asset.kind === "sprite",
+                    )?.id;
+                    if (firstSprite === undefined) return;
+                    expressions[expressionId] = {
+                      asset: firstSprite,
+                      anchor_x: 0.5,
+                      anchor_y: 1,
+                      offset_x: 0,
+                      offset_y: 0,
+                      scale: 1,
+                    };
+                    onChangeCharacter(id, { ...definition, expressions });
+                  }}
+                  type="button"
+                >
+                  ＋
+                </button>
+              </header>
+              {Object.entries(definition.expressions ?? {}).map(
+                ([expressionId, expression]) => (
+                  <CharacterExpressionEditor
+                    assets={project.assets}
+                    expression={expression}
+                    expressionId={expressionId}
+                    key={expressionId}
+                    onChange={(next) =>
+                      onChangeCharacter(id, {
+                        ...definition,
+                        expressions: {
+                          ...(definition.expressions ?? {}),
+                          [expressionId]: next,
+                        },
+                      })
+                    }
+                    onDelete={() => {
+                      const expressions = withoutKey(
+                        definition.expressions ?? {},
+                        expressionId,
+                      );
+                      onChangeCharacter(id, {
+                        ...definition,
+                        expressions,
+                        default_expression:
+                          definition.default_expression === expressionId
+                            ? null
+                            : definition.default_expression,
+                      });
+                    }}
+                  />
+                ),
+              )}
+              {Object.keys(definition.expressions ?? {}).length === 0 && (
+                <small>添加 sprite 素材后，可为角色注册表情。</small>
+              )}
+            </div>
           </article>
         ))}
       </section>
@@ -1469,6 +1805,13 @@ function ProjectPanel({
               } else {
                 accepted = false;
               }
+            } else if (dialog.kind === "action_add") {
+              accepted = onCreateAction(value);
+            } else if (
+              dialog.kind === "action_rename" &&
+              dialog.previous !== undefined
+            ) {
+              accepted = onRenameAction(dialog.previous, value);
             } else if (
               dialog.previous !== undefined &&
               value !== dialog.previous
@@ -1482,6 +1825,376 @@ function ProjectPanel({
         />
       )}
     </div>
+  );
+}
+
+const ACTION_CHANNELS: { id: string; label: string; defaultValue: number }[] = [
+  { id: "x", label: "X 偏移", defaultValue: 0 },
+  { id: "y", label: "Y 偏移", defaultValue: 0 },
+  { id: "rotation_deg", label: "旋转偏移", defaultValue: 0 },
+  { id: "scale", label: "整体缩放倍率", defaultValue: 1 },
+  { id: "scale_x", label: "横向缩放倍率", defaultValue: 1 },
+  { id: "scale_y", label: "纵向缩放倍率", defaultValue: 1 },
+  { id: "opacity", label: "透明度倍率", defaultValue: 1 },
+];
+
+function ActionDefinitionEditor({
+  definition,
+  onRename,
+  onDuplicate,
+  onChange,
+  onDelete,
+  path,
+}: {
+  definition: SpriteActionDefinition;
+  onRename(): void;
+  onDuplicate(): void;
+  onChange(definition: SpriteActionDefinition): void;
+  onDelete(): void;
+  path: string;
+}): ReactElement {
+  const channels = definition.channels ?? {};
+  const parameters = definition.parameters ?? {};
+  const updateChannel = (
+    channel: string,
+    keyframes: SpriteActionKeyframe[],
+  ): void => {
+    const nextChannels = { ...channels };
+    if (keyframes.length === 0) {
+      onChange({
+        ...definition,
+        channels: withoutKey(channels, channel),
+      });
+      return;
+    } else {
+      nextChannels[channel] = [...keyframes].sort((a, b) => a.at_ms - b.at_ms);
+    }
+    onChange({ ...definition, channels: nextChannels });
+  };
+  return (
+    <article className="variable-card action-card">
+      <header>
+        <span>
+          <code>{definition.id}</code>
+          <small>{definition.duration_ms} ms</small>
+        </span>
+        <div>
+          <button onClick={onRename} title="重命名动作" type="button">
+            ✎
+          </button>
+          <button onClick={onDuplicate} title="复制动作" type="button">
+            复制
+          </button>
+          <button className="danger-text" onClick={onDelete} type="button">
+            ×
+          </button>
+        </div>
+      </header>
+      <small>{path}</small>
+      <label>
+        <span>动作名称</span>
+        <DeferredTextInput
+          maxLength={128}
+          onCommit={(name) => onChange({ ...definition, name })}
+          value={definition.name}
+        />
+      </label>
+      <div className="field-grid">
+        <label>
+          <span>默认时长 ms</span>
+          <ActionNumberInput
+            min={1}
+            onCommit={(duration_ms) => onChange({ ...definition, duration_ms })}
+            value={definition.duration_ms}
+          />
+        </label>
+        <label>
+          <span>结束姿态</span>
+          <select
+            onChange={(event) =>
+              onChange({
+                ...definition,
+                end: event.currentTarget.value as "hold" | "restore",
+              })
+            }
+            value={definition.end ?? "hold"}
+          >
+            <option value="hold">保持最后一帧</option>
+            <option value="restore">恢复动作前姿态</option>
+          </select>
+        </label>
+      </div>
+      <div className="action-channel-list">
+        <div className="action-channel-toolbar">
+          <strong>参数</strong>
+          <button
+            onClick={() => {
+              let index = Object.keys(parameters).length + 1;
+              let id = `amount_${index}`;
+              while (parameters[id] !== undefined) {
+                index += 1;
+                id = `amount_${index}`;
+              }
+              onChange({
+                ...definition,
+                parameters: {
+                  ...parameters,
+                  [id]: { default: 1, min: -10, max: 10 },
+                },
+              });
+            }}
+            type="button"
+          >
+            ＋ 添加参数
+          </button>
+        </div>
+        {Object.entries(parameters).map(([parameterId, parameter]) => (
+          <div className="action-keyframe action-parameter" key={parameterId}>
+            <code>{parameterId}</code>
+            <ActionNumberInput
+              ariaLabel={`${parameterId} 默认值`}
+              onCommit={(value) =>
+                onChange({
+                  ...definition,
+                  parameters: {
+                    ...parameters,
+                    [parameterId]: { ...parameter, default: value },
+                  },
+                })
+              }
+              value={parameter.default}
+            />
+            <ActionNumberInput
+              ariaLabel={`${parameterId} 最小值`}
+              onCommit={(value) =>
+                onChange({
+                  ...definition,
+                  parameters: {
+                    ...parameters,
+                    [parameterId]: { ...parameter, min: value },
+                  },
+                })
+              }
+              value={parameter.min ?? -10}
+            />
+            <ActionNumberInput
+              ariaLabel={`${parameterId} 最大值`}
+              onCommit={(value) =>
+                onChange({
+                  ...definition,
+                  parameters: {
+                    ...parameters,
+                    [parameterId]: { ...parameter, max: value },
+                  },
+                })
+              }
+              value={parameter.max ?? 10}
+            />
+            <button
+              className="danger-text"
+              onClick={() => {
+                const next = withoutKey(parameters, parameterId);
+                onChange({ ...definition, parameters: next });
+              }}
+              type="button"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <div className="action-channel-toolbar">
+          <strong>变换通道</strong>
+          <select
+            aria-label="添加动作通道"
+            defaultValue=""
+            onChange={(event) => {
+              const channel = event.currentTarget.value;
+              event.currentTarget.value = "";
+              if (!channel || channels[channel] !== undefined) return;
+              const defaultValue =
+                ACTION_CHANNELS.find((candidate) => candidate.id === channel)
+                  ?.defaultValue ?? 0;
+              updateChannel(channel, [
+                { at_ms: 0, value: defaultValue, easing: "linear" },
+                {
+                  at_ms: definition.duration_ms,
+                  value: defaultValue,
+                  easing: "linear",
+                },
+              ]);
+            }}
+          >
+            <option value="">＋ 添加通道</option>
+            {ACTION_CHANNELS.filter(({ id }) => channels[id] === undefined).map(
+              ({ id, label }) => (
+                <option key={id} value={id}>
+                  {label}
+                </option>
+              ),
+            )}
+          </select>
+        </div>
+        {Object.entries(channels).map(([channel, keyframes]) => (
+          <section className="action-channel" key={channel}>
+            <header>
+              <strong>
+                {ACTION_CHANNELS.find((candidate) => candidate.id === channel)
+                  ?.label ?? channel}
+              </strong>
+              <button
+                className="danger-text"
+                onClick={() => updateChannel(channel, [])}
+                type="button"
+              >
+                删除通道
+              </button>
+            </header>
+            {keyframes.map((keyframe, index) => (
+              <div className="action-keyframe" key={`${channel}-${index}`}>
+                <ActionNumberInput
+                  ariaLabel="关键帧时间"
+                  min={0}
+                  max={definition.duration_ms}
+                  onCommit={(at_ms) => {
+                    const next = [...keyframes];
+                    next[index] = { ...keyframe, at_ms };
+                    updateChannel(channel, next);
+                  }}
+                  value={keyframe.at_ms}
+                />
+                <ActionNumberInput
+                  ariaLabel="关键帧数值"
+                  onCommit={(value) => {
+                    const next = [...keyframes];
+                    next[index] = { ...keyframe, value };
+                    updateChannel(channel, next);
+                  }}
+                  value={keyframe.value}
+                />
+                <select
+                  aria-label="关键帧缓动"
+                  onChange={(event) => {
+                    const next = [...keyframes];
+                    next[index] = {
+                      ...keyframe,
+                      easing: event.currentTarget.value as
+                        | "linear"
+                        | "ease_in"
+                        | "ease_out"
+                        | "ease_in_out"
+                        | "step",
+                    };
+                    updateChannel(channel, next);
+                  }}
+                  value={
+                    typeof keyframe.easing === "string"
+                      ? keyframe.easing
+                      : "linear"
+                  }
+                >
+                  <option value="linear">linear</option>
+                  <option value="ease_in">ease in</option>
+                  <option value="ease_out">ease out</option>
+                  <option value="ease_in_out">ease in/out</option>
+                  <option value="step">step</option>
+                </select>
+                <select
+                  aria-label="关键帧参数"
+                  onChange={(event) => {
+                    const next = [...keyframes];
+                    next[index] = {
+                      ...keyframe,
+                      parameter: event.currentTarget.value || undefined,
+                    };
+                    updateChannel(channel, next);
+                  }}
+                  value={keyframe.parameter ?? ""}
+                >
+                  <option value="">固定值</option>
+                  {Object.keys(parameters).map((parameterId) => (
+                    <option key={parameterId} value={parameterId}>
+                      参数：{parameterId}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="danger-text"
+                  disabled={keyframes.length <= 1}
+                  onClick={() =>
+                    updateChannel(
+                      channel,
+                      keyframes.filter((_, current) => current !== index),
+                    )
+                  }
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              onClick={() =>
+                updateChannel(channel, [
+                  ...keyframes,
+                  {
+                    at_ms: definition.duration_ms,
+                    value: keyframes.at(-1)?.value ?? 0,
+                    easing: "linear",
+                  },
+                ])
+              }
+              type="button"
+            >
+              ＋ 关键帧
+            </button>
+          </section>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function ActionNumberInput({
+  ariaLabel,
+  max,
+  min,
+  onCommit,
+  value,
+}: {
+  ariaLabel?: string;
+  max?: number;
+  min?: number;
+  onCommit(value: number): void;
+  value: number;
+}): ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commit = (): void => {
+    const parsed = Number(inputRef.current?.value ?? value);
+    if (!Number.isFinite(parsed)) {
+      if (inputRef.current) inputRef.current.value = String(value);
+      return;
+    }
+    const bounded = Math.min(max ?? parsed, Math.max(min ?? parsed, parsed));
+    if (bounded !== value) onCommit(bounded);
+  };
+  return (
+    <input
+      aria-label={ariaLabel}
+      defaultValue={String(value)}
+      key={String(value)}
+      max={max}
+      min={min}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        }
+      }}
+      ref={inputRef}
+      step="any"
+      type="number"
+    />
   );
 }
 
@@ -1515,6 +2228,115 @@ function CharacterColorInput({
           onCommit={(next) => onChange(next || null)}
         />
       </span>
+    </label>
+  );
+}
+
+function CharacterExpressionEditor({
+  assets,
+  expression,
+  expressionId,
+  onChange,
+  onDelete,
+}: {
+  assets: readonly EditorAsset[];
+  expression: CharacterExpression;
+  expressionId: string;
+  onChange(value: CharacterExpression): void;
+  onDelete(): void;
+}): ReactElement {
+  const spriteAssets = assets.filter((asset) => asset.kind === "sprite");
+  return (
+    <article className="character-expression-card">
+      <header>
+        <code>{expressionId}</code>
+        <button className="danger-text" onClick={onDelete} type="button">
+          ×
+        </button>
+      </header>
+      <label>
+        <span>素材</span>
+        <select
+          onChange={(event) =>
+            onChange({ ...expression, asset: event.currentTarget.value })
+          }
+          value={expression.asset}
+        >
+          {spriteAssets.map((asset) => (
+            <option key={asset.id} value={asset.id}>
+              {asset.id}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="field-grid compact-grid">
+        <NumberInput
+          label="锚点 X"
+          max={1}
+          min={0}
+          onChange={(anchor_x) => onChange({ ...expression, anchor_x })}
+          step={0.01}
+          value={expression.anchor_x ?? 0.5}
+        />
+        <NumberInput
+          label="锚点 Y"
+          max={1}
+          min={0}
+          onChange={(anchor_y) => onChange({ ...expression, anchor_y })}
+          step={0.01}
+          value={expression.anchor_y ?? 1}
+        />
+        <NumberInput
+          label="偏移 X"
+          onChange={(offset_x) => onChange({ ...expression, offset_x })}
+          value={expression.offset_x ?? 0}
+        />
+        <NumberInput
+          label="偏移 Y"
+          onChange={(offset_y) => onChange({ ...expression, offset_y })}
+          value={expression.offset_y ?? 0}
+        />
+        <NumberInput
+          label="表情倍率"
+          min={0.01}
+          onChange={(scale) => onChange({ ...expression, scale })}
+          step={0.05}
+          value={expression.scale ?? 1}
+        />
+      </div>
+    </article>
+  );
+}
+
+function NumberInput({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+}: {
+  label: string;
+  value: number;
+  onChange(value: number): void;
+  min?: number;
+  max?: number;
+  step?: number;
+}): ReactElement {
+  return (
+    <label>
+      <span>{label}</span>
+      <input
+        max={max}
+        min={min}
+        onChange={(event) => {
+          const next = Number(event.currentTarget.value);
+          if (Number.isFinite(next)) onChange(next);
+        }}
+        step={step ?? "any"}
+        type="number"
+        value={value}
+      />
     </label>
   );
 }
@@ -1641,4 +2463,13 @@ function defaultForVariableType(type: VariableType): ScalarValue {
     case "string":
       return "";
   }
+}
+
+function withoutKey<T>(
+  record: Record<string, T>,
+  key: string,
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).filter(([candidate]) => candidate !== key),
+  );
 }

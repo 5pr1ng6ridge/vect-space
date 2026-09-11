@@ -28,6 +28,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "choice", label: "选择", group: "逻辑" },
   { type: "condition", label: "条件分支", group: "逻辑" },
   { type: "playback", label: "播放控制", group: "流程" },
+  { type: "action", label: "立绘动作", group: "画面" },
   { type: "set", label: "设置变量", group: "逻辑" },
   { type: "jump", label: "跳转", group: "逻辑" },
   { type: "background", label: "背景", group: "画面" },
@@ -147,6 +148,8 @@ export function summarizeNode(node: SceneNode): string {
       return summarizeCondition(node.condition);
     case "playback":
       return `${node.auto === "forced" ? "强制自动" : "普通自动"} · Ctrl ${node.ctrl_fast_forward === "block" ? "禁止" : "允许"}`;
+    case "action":
+      return `${node.action} · ${node.sprite_id}${node.duration_ms ? ` · ${node.duration_ms} ms` : ""}`;
     case "jump":
       return `${node.scene ?? "本场景"} / ${node.target}`;
     case "background":
@@ -194,6 +197,17 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         duration_ms: 500,
         easing: "ease_in_out",
         await: false,
+        next: fallback,
+      };
+    case "action":
+      return {
+        type,
+        sprite_id: "character",
+        action: "action.id",
+        duration_ms: null,
+        await: true,
+        parameters: {},
+        end: null,
         next: fallback,
       };
     case "sprite":
@@ -1203,6 +1217,9 @@ export function renameCharacter(
       if (node.type === "say" && node.speaker === previousId) {
         node.speaker = nextId;
       }
+      if (node.type === "sprite" && node.character === previousId) {
+        node.character = nextId;
+      }
     }
   }
   return updated;
@@ -1216,6 +1233,7 @@ export function countCharacterReferences(
   for (const file of project.scenes) {
     for (const node of Object.values(file.definition.nodes)) {
       if (node.type === "say" && node.speaker === characterId) count += 1;
+      if (node.type === "sprite" && node.character === characterId) count += 1;
     }
   }
   return count;
@@ -1437,18 +1455,6 @@ export function renameScene(
     updated.layout.scenes[nextId] = updated.layout.scenes[previousId];
     Reflect.deleteProperty(updated.layout.scenes, previousId);
   }
-  if (
-    updated.story_flow !== null &&
-    updated.story_flow.definition.nodes[previousId] !== undefined
-  ) {
-    updated.story_flow.definition.nodes[nextId] =
-      updated.story_flow.definition.nodes[previousId];
-    Reflect.deleteProperty(updated.story_flow.definition.nodes, previousId);
-    for (const edge of updated.story_flow.definition.edges) {
-      if (edge.from === previousId) edge.from = nextId;
-      if (edge.to === previousId) edge.to = nextId;
-    }
-  }
   if (updated.chapter_map !== null && updated.chapter_map !== undefined) {
     for (const hotspot of updated.chapter_map.definition.hotspots) {
       if (hotspot.scene_id === previousId) hotspot.scene_id = nextId;
@@ -1466,6 +1472,52 @@ export function renameScene(
     migratePreviewChoices(previews, (choice) =>
       choice.scene_id === previousId ? { ...choice, scene_id: nextId } : choice,
     );
+  }
+  return updated;
+}
+
+/** Rename a reusable sprite action and keep every scene reference/file path in
+ * sync.  The caller performs user-facing validation; returning the original
+ * project makes this helper safe to use from an editor reducer when a race
+ * caused the source action to disappear. */
+export function renameSpriteAction(
+  project: EditorProject,
+  previousId: string,
+  nextId: string,
+): EditorProject {
+  const updated = cloneProject(project);
+  const action = (updated.actions ?? []).find(
+    (file) => file.definition.id === previousId,
+  );
+  if (
+    action === undefined ||
+    previousId === nextId ||
+    (updated.actions ?? []).some((file) => file.definition.id === nextId) ||
+    updated.manifest.assets[nextId] !== undefined ||
+    (updated.animations ?? []).some((file) => file.definition.id === nextId)
+  ) {
+    return project;
+  }
+  const oldPath = action.path;
+  const newPath = `actions/${nextId.replaceAll(".", "_")}.yaml`;
+  if (
+    (updated.actions ?? []).some(
+      (file) => file !== action && file.path === newPath,
+    )
+  ) {
+    return project;
+  }
+  action.definition.id = nextId;
+  action.path = newPath;
+  updated.manifest.actions = (updated.manifest.actions ?? []).map((path) =>
+    path === oldPath ? newPath : path,
+  );
+  for (const scene of updated.scenes) {
+    for (const node of Object.values(scene.definition.nodes)) {
+      if (node.type === "action" && node.action === previousId) {
+        node.action = nextId;
+      }
+    }
   }
   return updated;
 }
@@ -1490,7 +1542,8 @@ export function projectRequest(
     scenes: project.scenes,
     ui_motions: project.ui_motions,
     buttons: project.buttons ?? [],
-    story_flow: project.story_flow,
+    animations: project.animations ?? [],
+    actions: project.actions ?? [],
     chapter_map: project.chapter_map ?? null,
     layout: project.layout,
     expected_fingerprint: project.fingerprint,

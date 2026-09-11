@@ -3,6 +3,14 @@ content_version: demo-2
 entry_scene: prologue
 default_locale: zh-CN
 variables:
+  button_test_clicks:
+    scope: save
+    type: integer
+    default: 0
+  button_test_last:
+    scope: save
+    type: string
+    default: ""
   ending_seen:
     scope: profile
     type: boolean
@@ -15,20 +23,64 @@ variables:
     scope: save
     type: integer
     default: 0
-  button_test_clicks:
-    scope: save
-    type: integer
-    default: 0
-  button_test_last:
-    scope: save
-    type: string
-    default: ""
 characters:
   test:
     display_name: 测试角色
     name_color: "#1D5C78"
     text_color: "#17213A"
+  alli:
+    display_name: 艾莉
+    name_color: "#80D8FF"
+    text_color: "#FFFFFF"
+    default_expression: neutral
+    default_scale: 0.78
+    expressions:
+      neutral:
+        asset: sprite.alli_neutral
+        anchor_x: 0.5
+        anchor_y: 1.0
+      smug:
+        asset: sprite.alli_smug
+        anchor_x: 0.5
+        anchor_y: 1.0
+        offset_y: 4.0
+      surprise:
+        asset: sprite.alli_surprise
+        anchor_x: 0.5
+        anchor_y: 1.0
+        offset_y: 2.0
+  sat:
+    display_name: 萨特
+    name_color: "#FFB86C"
+    text_color: "#FFF7E6"
+    default_expression: smile
+    default_scale: 0.68
+    expressions:
+      smile:
+        asset: sprite.sat_smile
+        anchor_x: 0.5
+        anchor_y: 1.0
+      smug:
+        asset: sprite.sat_smug
+        anchor_x: 0.5
+        anchor_y: 1.0
+      soft:
+        asset: sprite.sat_soft
+        anchor_x: 0.5
+        anchor_y: 1.0
 assets:
+  bg.anim_scan:
+    kind: background
+    animation: anim.scan
+  bg.anim_scan_a:
+    kind: background
+    path: backgrounds/anim_scan_a.png
+  bg.anim_scan_b:
+    kind: background
+    path: backgrounds/anim_scan_b.png
+  bg.celeste_grok:
+    kind: background
+    path: backgrounds/Celeste_4B5yjmVqS4.png
   bg.nvctsp:
     kind: background
     path: backgrounds/Photoshop_3a52oGnGn0.png
@@ -38,21 +90,81 @@ assets:
   bg.vector_space:
     kind: background
     path: backgrounds/bg_vstest.png
+  bg.test_1:
+    kind: background
+    path: test/backtest1.png
+  bg.test_2:
+    kind: background
+    path: test/backtest2.png
+  bg.test_3:
+    kind: background
+    path: test/backtest3.png
+  bgm.test_birds:
+    kind: bgm
+    path: test/bgs_birds.ogg
+  bgm.test_rain:
+    kind: bgm
+    path: test/bgs_rain.ogg
+  bgm.test_intro:
+    kind: bgm
+    path: test/intro.ogg
   bgm.test1:
     kind: bgm
     path: audio/test_bgm.ogg
   font.fusion_pixel:
     kind: font
     path: fonts/fusion-pixel-12px-monospaced-zh_hans.ttf
+  gui.button_pulse:
+    kind: gui
+    animation: anim.button_pulse
+  gui.button_pulse_a:
+    kind: gui
+    path: gui/anim_button_pulse_a.png
+  gui.button_pulse_b:
+    kind: gui
+    path: gui/anim_button_pulse_b.png
   gui.dialogue_box:
     kind: gui
     path: gui/diaboxtest.png
+  gui.dialogue_pulse:
+    kind: gui
+    animation: anim.dialogue_pulse
+  gui.dialogue_pulse_a:
+    kind: gui
+    path: gui/anim_dialogue_pulse_a.png
+  gui.dialogue_pulse_b:
+    kind: gui
+    path: gui/anim_dialogue_pulse_b.png
   gui.name_box:
     kind: gui
     path: gui/nameboxtest.png
   gui.scratch_paper:
     kind: gui
     path: gui/scratchpapertest.png
+  gui.testbutton0_0:
+    kind: gui
+    path: test/testbutton0_0.png
+  gui.testbutton0_1:
+    kind: gui
+    path: test/testbutton0_1.png
+  gui.testbutton0_2:
+    kind: gui
+    path: test/testbutton0_2.png
+  gui.testbutton1_0:
+    kind: gui
+    path: test/testbutton1_0.png
+  gui.testbutton1_1:
+    kind: gui
+    path: test/testbutton1_1.png
+  gui.testbutton1_2:
+    kind: gui
+    path: test/testbutton1_2.png
+  gui.testbutton_2:
+    kind: gui
+    path: test/testbutton_2.png
+  gui.testbutton_2_hoveradd:
+    kind: gui
+    path: test/testbutton_2_hoveradd.png
   sfx.typing:
     kind: sfx
     path: audio/sfx_typing.wav
@@ -62,6 +174,111 @@ assets:
   sprite.omo:
     kind: sprite
     path: sprites/omo.png
+  sprite.alli_neutral:
+    kind: sprite
+    path: test/alli_neutral.png
+  sprite.alli_smug:
+    kind: sprite
+    path: test/alli_smug.png
+  sprite.alli_surprise:
+    kind: sprite
+    path: test/alli_surprise.png
+  sprite.sat_smile:
+    kind: sprite
+    path: test/sat_smile.png
+  sprite.sat_smug:
+    kind: sprite
+    path: test/sat_smug.png
+  sprite.sat_soft:
+    kind: sprite
+    path: test/sat_soft.png
+  sprite.stopmotion:
+    kind: sprite
+    animation: anim.stopmotion
+  sprite.stopmotion_01:
+    kind: sprite
+    path: test/sm/stopmotion (1).png
+  sprite.stopmotion_02:
+    kind: sprite
+    path: test/sm/stopmotion (2).png
+  sprite.stopmotion_03:
+    kind: sprite
+    path: test/sm/stopmotion (3).png
+  sprite.stopmotion_04:
+    kind: sprite
+    path: test/sm/stopmotion (4).png
+  sprite.stopmotion_05:
+    kind: sprite
+    path: test/sm/stopmotion (5).png
+  sprite.stopmotion_06:
+    kind: sprite
+    path: test/sm/stopmotion (6).png
+  sprite.stopmotion_07:
+    kind: sprite
+    path: test/sm/stopmotion (7).png
+  sprite.stopmotion_08:
+    kind: sprite
+    path: test/sm/stopmotion (8).png
+  sprite.stopmotion_09:
+    kind: sprite
+    path: test/sm/stopmotion (9).png
+  sprite.stopmotion_10:
+    kind: sprite
+    path: test/sm/stopmotion (10).png
+  sprite.stopmotion_11:
+    kind: sprite
+    path: test/sm/stopmotion (11).png
+  sprite.stopmotion_12:
+    kind: sprite
+    path: test/sm/stopmotion (12).png
+  sprite.stopmotion_13:
+    kind: sprite
+    path: test/sm/stopmotion (13).png
+  sprite.stopmotion_14:
+    kind: sprite
+    path: test/sm/stopmotion (14).png
+  sprite.stopmotion_15:
+    kind: sprite
+    path: test/sm/stopmotion (15).png
+  sprite.stopmotion_16:
+    kind: sprite
+    path: test/sm/stopmotion (16).png
+  sprite.stopmotion_17:
+    kind: sprite
+    path: test/sm/stopmotion (17).png
+  sprite.stopmotion_18:
+    kind: sprite
+    path: test/sm/stopmotion (18).png
+  sprite.stopmotion_19:
+    kind: sprite
+    path: test/sm/stopmotion (19).png
+  sprite.stopmotion_20:
+    kind: sprite
+    path: test/sm/stopmotion (20).png
+  sprite.stopmotion_21:
+    kind: sprite
+    path: test/sm/stopmotion (21).png
+  sprite.stopmotion_22:
+    kind: sprite
+    path: test/sm/stopmotion (22).png
+  sprite.stopmotion_23:
+    kind: sprite
+    path: test/sm/stopmotion (23).png
+  sprite.stopmotion_24:
+    kind: sprite
+    path: test/sm/stopmotion (24).png
+  sprite.stopmotion_25:
+    kind: sprite
+    path: test/sm/stopmotion (25).png
+  sprite.stopmotion_26:
+    kind: sprite
+    path: test/sm/stopmotion (26).png
+  sprite.stopmotion_27:
+    kind: sprite
+    path: test/sm/stopmotion (27).png
+  sprite.stopmotion_28:
+    kind: sprite
+    path: test/sm/stopmotion (28).png
   video.test:
     kind: video
     path: videos/test_movie.mp4
@@ -71,6 +288,16 @@ scenes:
 - scenes/sandbox.yaml
 - scenes/button_test.yaml
 - scenes/ui_motion_regression.yaml
+- scenes/presentation_showcase.yaml
+- scenes/ch0.yaml
+- scenes/character_action_showcase.yaml
+animations:
+- animations/scan.yaml
+- animations/dialogue_pulse.yaml
+- animations/button_pulse.yaml
+- animations/stopmotion.yaml
+actions:
+- actions/bounce.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml
@@ -80,8 +307,8 @@ buttons:
 - ui/buttons/demo_transparent.yaml
 - ui/buttons/demo_separate.yaml
 - ui/buttons/demo_overlay.yaml
+- ui/buttons/showcase_animated.yaml
 ui_motion_defaults:
   dialogue_show: ui.dialogue.slide_in
   dialogue_hide: ui.dialogue.slide_out
-story_flow: story-flow.yaml
 chapter_map: chapter-map.yaml

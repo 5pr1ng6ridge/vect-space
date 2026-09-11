@@ -81,6 +81,42 @@ pub struct CharacterDefinition {
     pub name_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_color: Option<String>,
+    /// Optional semantic portrait variants. A missing table preserves the
+    /// legacy generic-sprite authoring path.
+    #[serde(default)]
+    pub expressions: BTreeMap<String, CharacterExpression>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expression: Option<String>,
+    #[serde(default = "default_character_scale")]
+    pub default_scale: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterExpression {
+    pub asset: String,
+    #[serde(default = "default_character_anchor_x")]
+    pub anchor_x: f32,
+    #[serde(default = "default_character_anchor_y")]
+    pub anchor_y: f32,
+    #[serde(default)]
+    pub offset_x: f32,
+    #[serde(default)]
+    pub offset_y: f32,
+    #[serde(default = "default_character_scale")]
+    pub scale: f32,
+}
+
+fn default_character_scale() -> f32 {
+    1.0
+}
+
+fn default_character_anchor_x() -> f32 {
+    0.5
+}
+
+fn default_character_anchor_y() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -185,11 +221,15 @@ pub struct ContentManifest {
     pub buttons: Vec<String>,
     #[serde(default)]
     pub ui_motion_defaults: UiMotionBindings,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub story_flow: Option<String>,
-    /// Optional author-authored room map used as the chapter selector.  The
-    /// legacy story flow remains available for projects that have not yet
-    /// moved to a map.
+    /// Optional standalone image animation documents.  Empty keeps legacy
+    /// projects fully compatible.
+    #[serde(default)]
+    pub animations: Vec<String>,
+    /// Optional reusable single-sprite action documents.  Empty preserves
+    /// existing projects and keeps the action system opt-in.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    /// Optional author-authored room map used as the chapter selector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_map: Option<String>,
 }
@@ -438,7 +478,7 @@ pub struct ChapterMapHotspot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset: Option<String>,
     #[serde(default)]
-    pub reveal: StoryFlowReveal,
+    pub reveal: ChapterMapReveal,
     #[serde(default)]
     pub variable_overrides: VariableMap,
 }
@@ -499,72 +539,15 @@ pub struct ChapterMapHotspotSnapshot {
     pub completed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct StoryFlowDefinition {
-    pub schema_version: u32,
-    #[serde(default)]
-    pub nodes: BTreeMap<String, StoryFlowNode>,
-    #[serde(default)]
-    pub edges: Vec<StoryFlowEdge>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct StoryFlowNode {
-    pub title: String,
-    pub x: i32,
-    pub y: i32,
-    #[serde(default)]
-    pub reveal: StoryFlowReveal,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoryFlowReveal {
+pub enum ChapterMapReveal {
     #[default]
     Completed,
     Always,
     Condition {
         condition: ConditionExpression,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct StoryFlowEdge {
-    pub id: String,
-    pub from: String,
-    pub to: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct StoryFlowSnapshot {
-    pub nodes: Vec<VisibleStoryFlowNode>,
-    pub edges: Vec<VisibleStoryFlowEdge>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct VisibleStoryFlowNode {
-    pub scene_id: String,
-    pub title: String,
-    pub x: i32,
-    pub y: i32,
-    pub completed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct VisibleStoryFlowEdge {
-    pub id: String,
-    pub from: String,
-    pub to: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -622,7 +605,129 @@ fn default_locale() -> String {
 #[serde(deny_unknown_fields)]
 pub struct AssetDefinition {
     pub kind: AssetKind,
-    pub path: String,
+    /// Static image path.  Mutually exclusive with `animation`; exactly one of
+    /// the two describes the pixels this logical asset resolves to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Loop animation document id.  The asset keeps its `kind`, so every
+    /// existing image position accepts an animated asset without a new field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
+}
+
+/// Schema version of a standalone image animation document.
+pub const IMAGE_ANIMATION_SCHEMA_VERSION: u32 = 1;
+/// Upper bound on the ordered frame list of one animation.
+pub const IMAGE_ANIMATION_MAX_FRAMES: usize = 512;
+/// A frame must be visible for at least one millisecond.
+pub const IMAGE_ANIMATION_MIN_FRAME_MS: u64 = 1;
+/// Longest allowed single frame duration.  Anything slower is an authoring
+/// mistake rather than a loop.
+pub const IMAGE_ANIMATION_MAX_FRAME_MS: u64 = 60_000;
+/// Decoded RGBA budget for the unique frames of one animation.
+pub const IMAGE_ANIMATION_MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+/// Longest allowed edge of one animation frame, in pixels.
+pub const IMAGE_ANIMATION_MAX_EDGE: u32 = 8192;
+
+/// Standalone `image animation` document (Schema v1).
+///
+/// The plan deliberately keeps animation out of the asset *kind* namespace:
+/// an asset says what it is used for (background, sprite, GUI) and separately
+/// says whether its pixels are one static image or an ordered frame sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageAnimationDefinition {
+    pub schema_version: u32,
+    pub id: String,
+    /// Frames play in list order and loop forever.  A ping-pong animation is
+    /// authored by repeating frames rather than by a direction flag.
+    #[serde(default)]
+    pub frames: Vec<ImageAnimationFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageAnimationFrame {
+    /// Static image asset id.  Animation frames may not reference another
+    /// animation, so the frame graph is always one level deep.
+    pub asset: String,
+    pub duration_ms: u64,
+}
+
+/// Schema version of a reusable sprite action document.
+pub const SPRITE_ACTION_SCHEMA_VERSION: u32 = 1;
+
+/// A reusable, single-sprite transform animation.  Position and rotation
+/// values are offsets from the instance's starting pose; scale and opacity
+/// values are multipliers.  The runtime expands these relative keyframes into
+/// an ordinary absolute Timeline cue, so the presentation layer stays small.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpriteActionDefinition {
+    pub schema_version: u32,
+    pub id: String,
+    pub name: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub channels: BTreeMap<String, Vec<SpriteActionKeyframe>>,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, SpriteActionParameter>,
+    #[serde(default)]
+    pub end: SpriteActionEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpriteActionKeyframe {
+    pub at_ms: u64,
+    pub value: f32,
+    #[serde(default)]
+    pub easing: TimelineEasing,
+    /// Optional named parameter. When present, `value` is the fallback
+    /// default and the action invocation may override it safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpriteActionParameter {
+    pub default: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpriteActionEnd {
+    #[default]
+    Hold,
+    Restore,
+}
+
+/// Stable identity for diagnostics and reference statistics.
+impl ImageAnimationDefinition {
+    pub fn frame_assets(&self) -> BTreeSet<&str> {
+        self.frames
+            .iter()
+            .map(|frame| frame.asset.as_str())
+            .collect()
+    }
+
+    pub fn total_duration_ms(&self) -> u64 {
+        self.frames.iter().fold(0_u64, |total, frame| {
+            total.saturating_add(frame.duration_ms)
+        })
+    }
+
+    pub fn unique_frame_assets(&self) -> BTreeSet<String> {
+        self.frames
+            .iter()
+            .map(|frame| frame.asset.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -664,7 +769,16 @@ pub enum SceneNode {
     Sprite {
         sprite_id: String,
         action: SpriteAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         asset: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        character: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expression: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flip_x: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crossfade_ms: Option<u64>,
         x: Option<f32>,
         y: Option<f32>,
         scale: Option<f32>,
@@ -758,6 +872,22 @@ pub enum SceneNode {
     Playback {
         auto: PlaybackAutoMode,
         ctrl_fast_forward: CtrlFastForwardMode,
+        next: String,
+    },
+    /// Invoke a reusable relative transform action on an existing sprite.
+    /// The action document is resolved by the runtime against the instance's
+    /// current pose, then emitted as an ordinary Timeline cue.
+    Action {
+        sprite_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        #[serde(default)]
+        parameters: BTreeMap<String, f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<SpriteActionEnd>,
         next: String,
     },
     Jump {
@@ -1420,8 +1550,24 @@ pub struct SpriteSnapshot {
     pub scale_y: f32,
     #[serde(default)]
     pub rotation_deg: f32,
+    #[serde(default)]
+    pub flip_x: bool,
+    /// Normalized texture anchor.  Legacy snapshots used the VN default of
+    /// bottom-centre, so both fields remain serde-defaulted for old saves.
+    #[serde(default = "default_sprite_anchor_x")]
+    pub anchor_x: f32,
+    #[serde(default = "default_sprite_anchor_y")]
+    pub anchor_y: f32,
     pub opacity: f32,
     pub z: i32,
+}
+
+fn default_sprite_anchor_x() -> f32 {
+    0.5
+}
+
+fn default_sprite_anchor_y() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1553,6 +1699,8 @@ pub enum PresentationCueKind {
         to: Option<SpriteSnapshot>,
         duration_ms: u64,
         easing: Easing,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crossfade_ms: Option<u64>,
     },
     /// Clears backgrounds, sprites and persistent visual state as one
     /// coordinated fade. The resulting world always comes from the snapshot.
@@ -1639,10 +1787,7 @@ pub struct BootstrapPayload {
     pub update: RuntimeUpdate,
     pub asset_ids: Vec<String>,
     pub content_version: String,
-    pub story_flow_available: bool,
-    /// True when an author-authored chapter map is available.  The field is
-    /// defaulted so older bootstrap payloads can still be decoded by tools
-    /// that predate the room-map milestone.
+    /// True when an author-authored chapter map is available.
     #[serde(default)]
     pub chapter_map_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1654,6 +1799,31 @@ pub struct BootstrapPayload {
 pub struct ResolvedAsset {
     pub id: String,
     pub kind: AssetKind,
+    /// Absolute path of the static image, or of the first frame when this
+    /// asset resolves to a loop animation.
+    pub absolute_path: String,
+    /// Present only for animated assets.  The host turns every frame path into
+    /// an asset-protocol URL; the resulting frame list is what the shared
+    /// image resolver hands to Pixi and to the React image components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<ResolvedAnimation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedAnimation {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    pub total_duration_ms: u64,
+    pub frames: Vec<ResolvedAnimationFrame>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedAnimationFrame {
+    pub asset: String,
+    pub duration_ms: u64,
     pub absolute_path: String,
 }
 

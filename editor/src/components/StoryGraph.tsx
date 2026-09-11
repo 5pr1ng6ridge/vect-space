@@ -31,7 +31,7 @@ import type {
   SceneDefinition,
   SceneLayout,
 } from "../types";
-import { StoryNodeCard, type StoryFlowNode } from "./StoryNode";
+import { StoryNodeCard, type StoryGraphNode } from "./StoryNode";
 
 const nodeTypes = { story: StoryNodeCard };
 
@@ -84,7 +84,7 @@ function StoryGraphInner({
   onQuickInsert,
 }: StoryGraphProps): ReactElement {
   const { fitView, screenToFlowPosition, setViewport } =
-    useReactFlow<StoryFlowNode>();
+    useReactFlow<StoryGraphNode>();
   const graphShellRef = useRef<HTMLDivElement>(null);
   const lastPointerRef = useRef({
     x: window.innerWidth / 2,
@@ -128,7 +128,7 @@ function StoryGraphInner({
   );
 
   const buildNodes = useCallback(
-    (): StoryFlowNode[] =>
+    (): StoryGraphNode[] =>
       Object.entries(scene.nodes).map(([nodeId, node], index) => ({
         id: nodeId,
         type: "story",
@@ -185,7 +185,7 @@ function StoryGraphInner({
     return edges;
   }, [scene]);
 
-  const [nodes, setNodes] = useState<StoryFlowNode[]>([]);
+  const [nodes, setNodes] = useState<StoryGraphNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
 
   useEffect(() => {
@@ -208,7 +208,7 @@ function StoryGraphInner({
     }
   }, [fitView, layout?.viewport, nodes.length, scene.id, setViewport]);
 
-  const handleNodesChange = (changes: NodeChange<StoryFlowNode>[]): void => {
+  const handleNodesChange = (changes: NodeChange<StoryGraphNode>[]): void => {
     setNodes((current) => applyNodeChanges(changes, current));
   };
   const handleEdgesChange = (changes: EdgeChange<Edge>[]): void => {
@@ -223,7 +223,7 @@ function StoryGraphInner({
       onConnect(connection.source, connection.sourceHandle, connection.target);
     }
   };
-  const handleNodeClick: NodeMouseHandler<StoryFlowNode> = (_event, node) => {
+  const handleNodeClick: NodeMouseHandler<StoryGraphNode> = (_event, node) => {
     setQuickInsertMenu(null);
     onSelect(node.id);
   };
@@ -312,7 +312,7 @@ function StoryGraphInner({
           适合画布
         </button>
       </div>
-      <ReactFlow<StoryFlowNode>
+      <ReactFlow<StoryGraphNode>
         deleteKeyCode={null}
         edges={edges}
         fitViewOptions={{ padding: 0.2 }}

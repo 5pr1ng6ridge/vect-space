@@ -34,13 +34,13 @@ export interface StoryNodeData extends Record<string, unknown> {
   ): void;
 }
 
-export type StoryFlowNode = Node<StoryNodeData, "story">;
+export type StoryGraphNode = Node<StoryNodeData, "story">;
 
 export const StoryNodeCard = memo(function StoryNodeCard({
   id,
   data,
   selected,
-}: NodeProps<StoryFlowNode>): ReactElement {
+}: NodeProps<StoryGraphNode>): ReactElement {
   const updateNodeInternals = useUpdateNodeInternals();
   const ports = outputPorts(data.node);
   const hasNextPort = ports.some((port) => port.id === "next");

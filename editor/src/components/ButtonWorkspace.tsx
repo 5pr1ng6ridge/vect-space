@@ -6,7 +6,9 @@ import {
   type CSSProperties,
   type ReactElement,
 } from "react";
-import { assetUrl } from "../api";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import { editorImageSource } from "../imageAnimationMap";
+import { AnimatedImage } from "./AnimatedImage";
 import { evaluateChannel } from "../timeline";
 import type {
   ButtonAnimation,
@@ -46,6 +48,7 @@ interface FrameSelection {
 export function ButtonWorkspace({
   file,
   assets,
+  animationMap,
   dirty,
   onBack,
   onChange,
@@ -55,6 +58,7 @@ export function ButtonWorkspace({
 }: {
   file: ButtonFile;
   assets: EditorAsset[];
+  animationMap: AnimationMap;
   dirty: boolean;
   onBack(): void;
   onChange(file: ButtonFile): void;
@@ -268,7 +272,12 @@ export function ButtonWorkspace({
         <div className="button-preview" ref={previewRef}>
           <div
             className="button-preview-design"
-            style={{ transform: `scale(${previewScale})` }}
+            style={{
+              // Center in design pixels first, then apply the preview scale;
+              // this keeps button hit areas and artwork aligned with the
+              // 1920×1080 coordinate system.
+              transform: `translate(-50%, -50%) scale(${previewScale})`,
+            }}
           >
             <div className="button-preview-background">
               1920 × 1080 设计坐标
@@ -296,16 +305,20 @@ export function ButtonWorkspace({
                 {draft.asset_mode === "overlay" &&
                   state !== "normal" &&
                   baseAsset !== undefined && (
-                    <img
+                    <AnimatedImage
                       alt=""
-                      src={assetUrl(baseAsset.absolute_path)}
+                      source={editorImageSource(
+                        baseAsset,
+                        assets,
+                        animationMap,
+                      )}
                       style={{ objectFit: objectFit(draft.fit) }}
                     />
                   )}
                 {stateAsset !== undefined && (
-                  <img
+                  <AnimatedImage
                     alt=""
-                    src={assetUrl(stateAsset.absolute_path)}
+                    source={editorImageSource(stateAsset, assets, animationMap)}
                     style={{ objectFit: objectFit(draft.fit) }}
                   />
                 )}

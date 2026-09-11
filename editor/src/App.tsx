@@ -25,6 +25,13 @@ import { CommandError } from "../../shared/commandError";
 import { NodeInspector } from "./components/NodeInspector";
 import { findAssetReferences } from "./components/assetReferences";
 import {
+  animationDefinition,
+  animationFilePath,
+  type AnimationDraft,
+} from "./imageAnimation";
+import { projectAnimationMap } from "./imageAnimationMap";
+import { expandSpriteActionNode } from "./timeline";
+import {
   ProjectSidebar,
   type ImportDraft,
   type SidebarTab,
@@ -47,6 +54,7 @@ import {
   projectRequest,
   renameCharacter,
   renameNode,
+  renameSpriteAction,
   renameScene,
   renameVariable,
   rewriteLongTextDocumentReferences,
@@ -61,6 +69,8 @@ import type {
   NodePosition,
   NodeType,
   SceneNode,
+  SpriteActionDefinition,
+  SpriteSnapshot,
 } from "./types";
 import { validateLive } from "./validation";
 
@@ -450,11 +460,6 @@ function editorReducer(state: EditorState, action: EditorAction): EditorState {
   }
 }
 
-const StoryFlowWorkspace = lazy(() =>
-  import("./components/StoryFlowWorkspace").then((module) => ({
-    default: module.StoryFlowWorkspace,
-  })),
-);
 const ChapterMapWorkspace = lazy(() =>
   import("./components/ChapterMapWorkspace").then((module) => ({
     default: module.ChapterMapWorkspace,
@@ -566,6 +571,10 @@ export function App(): ReactElement {
   );
   const { project, past, future, activeEdit } = editorState;
   const dirty = editorState.dirty || activeEdit !== null;
+  const animationMap = useMemo(
+    () => (project === null ? {} : projectAnimationMap(project)),
+    [project],
+  );
   const [activeSceneId, setActiveSceneId] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [sceneViewMode, setSceneViewMode] = useState<"graph" | "script">(
@@ -587,11 +596,8 @@ export function App(): ReactElement {
   const [uiMotionDialog, setUiMotionDialog] = useState<string | null>(null);
   const [buttonTarget, setButtonTarget] = useState<string | null>(null);
   const [buttonDialog, setButtonDialog] = useState<string | null>(null);
-  const [flowWorkspace, setFlowWorkspace] = useState(false);
-  const [flowSelectionId, setFlowSelectionId] = useState<string | null>(null);
   const [mapWorkspace, setMapWorkspace] = useState(false);
   const [mapSelectionId, setMapSelectionId] = useState<string | null>(null);
-  const [mapConversionPending, setMapConversionPending] = useState(false);
   const [deleteRequest, setDeleteRequest] = useState<{
     nodeIds: string[];
     options: { id: string; label: string }[];
@@ -882,8 +888,6 @@ export function App(): ReactElement {
       setUiMotionTarget(null);
       setButtonTarget(null);
       setButtonDialog(null);
-      setFlowWorkspace(false);
-      setFlowSelectionId(null);
       setMapWorkspace(false);
       setMapSelectionId(null);
       localStorage.setItem("vectspace-editor:last-project", loaded.root);
@@ -1096,6 +1100,75 @@ export function App(): ReactElement {
         `已将 ${nodeLabel(sourceNode.type)}节点展开为关键帧时间线；起始通道继承真实入口值。`,
       );
       setTimelineTarget({ sceneId, nodeId });
+    } catch (reason) {
+      reportCommandError(reason);
+    }
+  };
+
+  const convertActionNodeToTimeline = async (nodeId: string): Promise<void> => {
+    const scene = findScene(
+      editorStateRef.current.project ?? project,
+      activeSceneId,
+    )?.definition;
+    const sourceNode = scene?.nodes[nodeId];
+    if (scene === undefined || sourceNode?.type !== "action") return;
+    const action = (editorStateRef.current.project ?? project).actions?.find(
+      (file) => file.definition.id === sourceNode.action,
+    )?.definition;
+    if (action === undefined) {
+      setError(`未找到立绘动作 ${sourceNode.action}。`);
+      return;
+    }
+    const currentProject = editorStateRef.current.project ?? project;
+    try {
+      const previewSettings = currentProject.layout.timeline_previews?.[
+        `${activeSceneId}/${nodeId}`
+      ] ?? { variable_overrides: {}, choices: [] };
+      const preview = await editorApi.buildNodePreview({
+        project: projectRequest(currentProject, activeImportTokens),
+        target: { scene_id: activeSceneId, node_id: nodeId },
+        variable_overrides: previewSettings.variable_overrides,
+        choices: previewSettings.choices,
+      });
+      if (preview.status === "needs_choice") {
+        setError(
+          `解除引用需要唯一的真实进入状态；请先补充 ${preview.location.scene_id}/${preview.location.node_id} 的预览路径选择。`,
+        );
+        return;
+      }
+      if (preview.status === "unreachable") {
+        setError(`无法构造动作节点的真实进入状态：${preview.message}`);
+        return;
+      }
+      const base: SpriteSnapshot | undefined =
+        preview.start_snapshot.world.sprites[sourceNode.sprite_id];
+      if (base === undefined) {
+        setError(
+          `动作节点进入时不存在立绘 ${sourceNode.sprite_id}，无法安全解除引用。`,
+        );
+        return;
+      }
+      const converted = expandSpriteActionNode({
+        node: sourceNode,
+        action,
+        base,
+      });
+      commit((draft) => {
+        const target = findScene(draft, activeSceneId);
+        const latest = target?.definition.nodes[nodeId];
+        if (
+          target !== undefined &&
+          latest?.type === "action" &&
+          latest.action === sourceNode.action &&
+          latest.sprite_id === sourceNode.sprite_id
+        ) {
+          target.definition.nodes[nodeId] = converted;
+        }
+      });
+      setNotice(
+        `已将动作 ${sourceNode.action} 解除引用为关键帧时间线；通道已按当前立绘姿态展开。`,
+      );
+      setTimelineTarget({ sceneId: activeSceneId, nodeId });
     } catch (reason) {
       reportCommandError(reason);
     }
@@ -1740,13 +1813,6 @@ export function App(): ReactElement {
           );
         }
       }
-      if (draft.story_flow !== null) {
-        Reflect.deleteProperty(draft.story_flow.definition.nodes, sceneId);
-        draft.story_flow.definition.edges =
-          draft.story_flow.definition.edges.filter(
-            (edge) => edge.from !== sceneId && edge.to !== sceneId,
-          );
-      }
       if (draft.chapter_map !== null && draft.chapter_map !== undefined) {
         draft.chapter_map.definition.hotspots =
           draft.chapter_map.definition.hotspots.filter(
@@ -1878,13 +1944,6 @@ export function App(): ReactElement {
       currentProject.chapter_map === null ||
       currentProject.chapter_map === undefined
     ) {
-      // Legacy Story Flow conversion is an explicit authoring operation. Do
-      // not silently mutate the project just because the toolbar was opened;
-      // the user must be able to cancel and keep the old read-only flow.
-      if (currentProject.story_flow !== null) {
-        setMapConversionPending(true);
-        return;
-      }
       createEmptyChapterMap();
     }
     setMapSelectionId(selectionId);
@@ -1929,76 +1988,6 @@ export function App(): ReactElement {
       true,
       "创建章节地图",
     );
-  };
-
-  const convertLegacyStoryFlow = (): void => {
-    setMapConversionPending(false);
-    const currentProject = projectRef.current;
-    if (currentProject === null) return;
-    if (
-      currentProject.chapter_map !== null &&
-      currentProject.chapter_map !== undefined
-    ) {
-      setMapWorkspace(true);
-      return;
-    }
-    const legacyNodes = currentProject.story_flow?.definition.nodes ?? {};
-    const placed = Object.entries(legacyNodes).filter(([sceneId]) =>
-      currentProject.scenes.some((file) => file.definition.id === sceneId),
-    );
-    const entry = currentProject.manifest.entry_scene;
-    if (placed.length === 0) {
-      createEmptyChapterMap();
-      setMapWorkspace(true);
-      return;
-    }
-    const minX = Math.min(...placed.map(([, node]) => node.x));
-    const maxX = Math.max(...placed.map(([, node]) => node.x));
-    const minY = Math.min(...placed.map(([, node]) => node.y));
-    const maxY = Math.max(...placed.map(([, node]) => node.y));
-    const width = Math.max(1920, Math.ceil((maxX - minX + 760) / 20) * 20);
-    const height = Math.max(1080, Math.ceil((maxY - minY + 620) / 20) * 20);
-    if (width > 16380 || height > 16380) {
-      setError("旧流程节点范围超过章节地图的最大尺寸，无法自动转换。");
-      return;
-    }
-    const hotspots = placed.map(([sceneId, node]) => ({
-      id: sceneId,
-      scene_id: sceneId,
-      title: node.title,
-      x: Math.round((node.x - minX + 240) / 20) * 20,
-      y: Math.round((node.y - minY + 460) / 20) * 20,
-      width: 280,
-      height: 160,
-      z: 10,
-      asset: null,
-      reveal: node.reveal ?? { mode: "completed" as const },
-      variable_overrides: {},
-    }));
-    commit(
-      (draft) => {
-        draft.manifest.chapter_map = "chapter-map.yaml";
-        draft.chapter_map = {
-          path: "chapter-map.yaml",
-          definition: {
-            schema_version: 1,
-            width,
-            height,
-            view_x: Math.round(width / 2 / 20) * 20,
-            view_y: Math.round(height / 2 / 20) * 20,
-            background: null,
-            decorations: [],
-            hotspots,
-          },
-        };
-      },
-      true,
-      "转换旧流程为章节地图",
-    );
-    setMapSelectionId(
-      hotspots.find((hotspot) => hotspot.scene_id === entry)?.id ?? null,
-    );
-    setMapWorkspace(true);
   };
 
   const importAssets = async (items: ImportDraft[]): Promise<void> => {
@@ -2090,17 +2079,12 @@ export function App(): ReactElement {
   const navigate = (
     sceneId: string | null,
     nodeId: string | null,
-    workspace?: "story" | "flow" | "map",
+    workspace?: "story" | "map",
     flowElementId?: string | null,
   ): void => {
     if (!flushBeforeNavigation()) return;
     const currentProject = projectRef.current;
     if (currentProject === null) return;
-    if (workspace === "flow") {
-      setFlowSelectionId(flowElementId ?? null);
-      setFlowWorkspace(true);
-      return;
-    }
     if (workspace === "map") {
       openChapterMapWorkspace(flowElementId ?? null);
       return;
@@ -2289,6 +2273,170 @@ export function App(): ReactElement {
     if (buttonTarget === id) setButtonTarget(null);
   };
 
+  const createImageAnimation = (draft: AnimationDraft): boolean => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const animations = currentProject.animations ?? [];
+    if (
+      !/^[A-Za-z0-9._-]{1,128}$/.test(draft.id) ||
+      !/^[A-Za-z0-9._-]{1,128}$/.test(draft.assetId)
+    ) {
+      setError("图片动画 ID 或素材 ID 非法。");
+      return false;
+    }
+    if (
+      currentProject.manifest.assets[draft.id] !== undefined ||
+      currentProject.manifest.assets[draft.assetId] !== undefined ||
+      animations.some((file) => file.definition.id === draft.id)
+    ) {
+      setError("图片动画 ID 或素材 ID 已经存在。");
+      return false;
+    }
+    const path = animationFilePath(draft.id);
+    if (animations.some((file) => file.path === path)) {
+      setError(`图片动画文件路径 ${path} 已经存在。`);
+      return false;
+    }
+    const definition = animationDefinition(draft);
+    // Rust resolves an animated asset to its first frame, so the optimistic
+    // asset carries the same path, size and metadata the save response will.
+    const firstFrame = currentProject.assets.find(
+      (asset) => asset.id === definition.frames[0]?.asset,
+    );
+    commit((draftProject) => {
+      draftProject.manifest.animations ??= [];
+      draftProject.manifest.animations.push(path);
+      draftProject.manifest.assets[draft.assetId] = {
+        kind: draft.kind,
+        animation: draft.id,
+      };
+      draftProject.animations ??= [];
+      draftProject.animations.push({ path, definition });
+      draftProject.assets.push({
+        id: draft.assetId,
+        kind: draft.kind,
+        animation: draft.id,
+        absolute_path: firstFrame?.absolute_path ?? "",
+        size_bytes: firstFrame?.size_bytes,
+        metadata: firstFrame?.metadata ?? null,
+      });
+    });
+    setNotice(
+      `已创建帧动画 ${draft.id}（${definition.frames.length} 帧）；图片与动画描述会在同一次保存中写入。`,
+    );
+    return true;
+  };
+
+  const createSpriteAction = (rawId: string): boolean => {
+    const id = rawId.trim();
+    const currentProject = editorStateRef.current.project ?? project;
+    const actions = currentProject.actions ?? [];
+    if (
+      !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
+      actions.some((file) => file.definition.id === id) ||
+      currentProject.manifest.assets[id] !== undefined ||
+      (currentProject.animations ?? []).some(
+        (file) => file.definition.id === id,
+      )
+    ) {
+      setError("立绘动作 ID 非法、已存在或与素材/图片动画冲突。");
+      return false;
+    }
+    const path = `actions/${id.replaceAll(".", "_")}.yaml`;
+    if (actions.some((file) => file.path === path)) {
+      setError(`立绘动作文件路径 ${path} 已经存在。`);
+      return false;
+    }
+    const definition: SpriteActionDefinition = {
+      schema_version: 1,
+      id,
+      name: "新立绘动作",
+      duration_ms: 400,
+      channels: {
+        y: [
+          { at_ms: 0, value: 0, easing: "linear" },
+          { at_ms: 200, value: -18, easing: "ease_out" },
+          { at_ms: 400, value: 0, easing: "ease_in" },
+        ],
+      },
+      parameters: {},
+      end: "hold",
+    };
+    commit((draft) => {
+      draft.manifest.actions ??= [];
+      draft.manifest.actions.push(path);
+      draft.actions ??= [];
+      draft.actions.push({ path, definition });
+    });
+    setNotice(`已创建立绘动作 ${id}。`);
+    return true;
+  };
+
+  const deleteSpriteAction = (id: string): void => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const references: string[] = [];
+    for (const scene of currentProject.scenes) {
+      for (const [nodeId, node] of Object.entries(scene.definition.nodes)) {
+        if (node.type === "action" && node.action === id)
+          references.push(`${scene.definition.id}/${nodeId}`);
+      }
+    }
+    if (references.length > 0) {
+      setError(
+        `立绘动作 ${id} 仍被 ${references.length} 个节点引用（${references
+          .slice(0, 8)
+          .join("、")}${references.length > 8 ? "…" : ""}），不能删除。`,
+      );
+      return;
+    }
+    const file = (currentProject.actions ?? []).find(
+      (candidate) => candidate.definition.id === id,
+    );
+    if (file === undefined) return;
+    if (!window.confirm(`从项目清单移除立绘动作 ${id}？YAML 文件会保留。`))
+      return;
+    commit((draft) => {
+      draft.actions = (draft.actions ?? []).filter(
+        (candidate) => candidate.definition.id !== id,
+      );
+      draft.manifest.actions = (draft.manifest.actions ?? []).filter(
+        (path) => path !== file.path,
+      );
+    });
+  };
+
+  const duplicateSpriteAction = (id: string): void => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const source = (currentProject.actions ?? []).find(
+      (file) => file.definition.id === id,
+    );
+    if (source === undefined) return;
+    const used = new Set(
+      (currentProject.actions ?? []).map((file) => file.definition.id),
+    );
+    let nextId = `${id}_copy`;
+    let index = 2;
+    while (
+      used.has(nextId) ||
+      currentProject.manifest.assets[nextId] !== undefined ||
+      (currentProject.animations ?? []).some(
+        (file) => file.definition.id === nextId,
+      )
+    ) {
+      nextId = `${id}_copy_${index++}`;
+    }
+    const path = `actions/${nextId.replaceAll(".", "_")}.yaml`;
+    const definition = structuredClone(source.definition);
+    definition.id = nextId;
+    definition.name = `${definition.name}（副本）`;
+    commit((draft) => {
+      draft.manifest.actions ??= [];
+      draft.manifest.actions.push(path);
+      draft.actions ??= [];
+      draft.actions.push({ path, definition });
+    });
+    setNotice(`已复制立绘动作 ${id} → ${nextId}。`);
+  };
+
   const duplicateButtonTemplate = (id: string): void => {
     const source = (project.buttons ?? []).find(
       (candidate) => candidate.definition.id === id,
@@ -2333,6 +2481,7 @@ export function App(): ReactElement {
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <LongTextWorkspace
+            animationMap={animationMap}
             assets={project.assets}
             dirty={dirty}
             importTokens={activeImportTokens}
@@ -2383,6 +2532,7 @@ export function App(): ReactElement {
     return (
       <Suspense fallback={<WorkspaceFallback />}>
         <ChapterMapWorkspace
+          animationMap={animationMap}
           assets={project.assets}
           dirty={dirty}
           manifest={project.manifest}
@@ -2441,47 +2591,12 @@ export function App(): ReactElement {
       </Suspense>
     );
   }
-  if (flowWorkspace && project.story_flow !== null) {
-    return (
-      <Suspense fallback={<WorkspaceFallback />}>
-        <StoryFlowWorkspace
-          projectManifest={project.manifest}
-          sceneIds={project.scenes.map((file) => file.definition.id)}
-          flow={project.story_flow.definition}
-          dirty={dirty}
-          initialSelectionId={flowSelectionId}
-          onClose={() => {
-            if (flushBeforeNavigation()) setFlowWorkspace(false);
-          }}
-          onChange={(definition) =>
-            commit((draft) => {
-              if (draft.story_flow !== null)
-                draft.story_flow.definition = definition;
-            })
-          }
-          onSave={() => void saveProject()}
-          onValidate={() => {
-            if (!flushBeforeNavigation()) return;
-            const current = projectRef.current;
-            if (current === null) return;
-            void editorApi
-              .validateProject(projectRequest(current, activeImportTokens))
-              .then(() => setNotice("总流程已通过 Rust 权威校验。"))
-              .catch((reason: unknown) => reportCommandError(reason));
-          }}
-          onUndo={undo}
-          onRedo={redo}
-          undoAvailable={past.length > 0}
-          redoAvailable={future.length > 0}
-        />
-      </Suspense>
-    );
-  }
   if (buttonTarget !== null && buttonFile !== undefined) {
     return (
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <ButtonWorkspace
+            animationMap={animationMap}
             assets={project.assets}
             dirty={dirty}
             file={buttonFile}
@@ -2519,6 +2634,7 @@ export function App(): ReactElement {
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <UiMotionWorkspace
+            animationMap={animationMap}
             assets={project.assets}
             dirty={dirty}
             file={uiMotionFile}
@@ -2699,11 +2815,31 @@ export function App(): ReactElement {
             return false;
           }
           commit((draft) => {
+            const animationId = draft.manifest.assets[id]?.animation;
             Reflect.deleteProperty(draft.manifest.assets, id);
             draft.assets = draft.assets.filter((asset) => asset.id !== id);
+            if (animationId === undefined) return;
+            // An animation document is only reachable through its asset, so
+            // removing the asset removes the document in the same commit.
+            // A hand-authored manifest may share one document between assets;
+            // keep it while another asset still references it.
+            const shared = Object.values(draft.manifest.assets).some(
+              (definition) => definition.animation === animationId,
+            );
+            if (shared) return;
+            const file = (draft.animations ?? []).find(
+              (candidate) => candidate.definition.id === animationId,
+            );
+            draft.animations = (draft.animations ?? []).filter(
+              (candidate) => candidate.definition.id !== animationId,
+            );
+            draft.manifest.animations = (
+              draft.manifest.animations ?? []
+            ).filter((path) => path !== file?.path);
           });
           return true;
         }}
+        onCreateImageAnimation={createImageAnimation}
         onSelectAsset={(id) => {
           setAssetSelectionId(id);
           setSidebarTab("assets");
@@ -2831,6 +2967,64 @@ export function App(): ReactElement {
         }}
         onDuplicateButtonTemplate={duplicateButtonTemplate}
         onDeleteButtonTemplate={deleteButtonTemplate}
+        onCreateAction={(id) => {
+          if (!flushBeforeNavigation()) return false;
+          return createSpriteAction(id);
+        }}
+        onChangeAction={(id, definition) =>
+          commit((draft) => {
+            const file = (draft.actions ?? []).find(
+              (candidate) => candidate.definition.id === id,
+            );
+            if (file !== undefined) file.definition = definition;
+          })
+        }
+        onRenameAction={(previousId, nextId) => {
+          const currentProject = editorStateRef.current.project ?? project;
+          const normalized = nextId.trim();
+          if (
+            !/^[A-Za-z0-9._-]{1,128}$/.test(normalized) ||
+            (currentProject.actions ?? []).some(
+              (file) =>
+                file.definition.id !== previousId &&
+                file.definition.id === normalized,
+            ) ||
+            currentProject.manifest.assets[normalized] !== undefined ||
+            (currentProject.animations ?? []).some(
+              (file) => file.definition.id === normalized,
+            )
+          ) {
+            setError("动作 ID 非法、已经存在或与素材/图片动画冲突。");
+            return false;
+          }
+          const existingPath = (currentProject.actions ?? []).find(
+            (file) => file.definition.id === previousId,
+          )?.path;
+          const nextPath = `actions/${normalized.replaceAll(".", "_")}.yaml`;
+          if (
+            existingPath !== undefined &&
+            (currentProject.actions ?? []).some(
+              (file) => file.path === nextPath && file.path !== existingPath,
+            )
+          ) {
+            setError(`动作文件路径 ${nextPath} 已经存在。`);
+            return false;
+          }
+          commit((draft) => {
+            const renamed = renameSpriteAction(
+              currentPlainProject(draft),
+              previousId,
+              normalized,
+            );
+            draft.actions = renamed.actions;
+            draft.manifest.actions = renamed.manifest.actions;
+            draft.scenes = renamed.scenes;
+          });
+          setNotice(`已重命名立绘动作 ${previousId} → ${normalized}。`);
+          return true;
+        }}
+        onDuplicateAction={duplicateSpriteAction}
+        onDeleteAction={deleteSpriteAction}
         onSelectScene={(sceneId) => {
           if (!flushBeforeNavigation()) return;
           setActiveSceneId(sceneId);
@@ -3008,6 +3202,7 @@ export function App(): ReactElement {
           onDelete={deleteNode}
           onDuplicate={duplicateNode}
           onConvertToTimeline={convertNodeToTimeline}
+          onConvertActionToTimeline={convertActionNodeToTimeline}
           onSplitDialogue={splitDialogue}
           onSplitLongText={splitLongText}
           onOpenLongTextWorkspace={(nodeId) => {
@@ -3017,6 +3212,9 @@ export function App(): ReactElement {
             setLongTextTarget({ sceneId: activeSceneId, nodeId });
           }}
           buttons={project.buttons ?? []}
+          animations={project.animations ?? []}
+          actions={project.actions ?? []}
+          assets={project.assets}
           scenes={project.scenes.map((file) => file.definition)}
           uiMotions={project.ui_motions}
           onRename={(previousId, nextId) => {
@@ -3094,40 +3292,6 @@ export function App(): ReactElement {
           }}
         />
       )}
-      {mapConversionPending && (
-        <div
-          aria-label="转换旧流程"
-          className="editor-dialog-backdrop"
-          role="presentation"
-        >
-          <section
-            className="editor-dialog map-conversion-dialog"
-            role="dialog"
-            aria-modal="true"
-          >
-            <h2>转换旧流程为章节地图？</h2>
-            <p>
-              将保留旧 Story Flow
-              文件，并按现有相对位置建立章节热点。边和流程连接不会转换，操作可撤销。
-            </p>
-            <div className="editor-dialog-actions">
-              <button
-                onClick={() => setMapConversionPending(false)}
-                type="button"
-              >
-                取消
-              </button>
-              <button
-                className="primary-button"
-                onClick={convertLegacyStoryFlow}
-                type="button"
-              >
-                转换并打开地图
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
       {deleteRequest !== null && (
         <DeleteNodesDialog
           nodeIds={deleteRequest.nodeIds}
@@ -3153,7 +3317,8 @@ function contentDocumentFingerprint(project: EditorProject): string {
       scenes: project.scenes,
       ui_motions: project.ui_motions,
       buttons: project.buttons ?? [],
-      story_flow: project.story_flow,
+      animations: project.animations ?? [],
+      actions: project.actions ?? [],
       chapter_map: project.chapter_map,
     },
     (_key, value: unknown) =>

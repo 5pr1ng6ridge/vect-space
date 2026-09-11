@@ -57,7 +57,7 @@ describe("LongTextPanel", () => {
             },
           ],
         }}
-        paperUrl={undefined}
+        paperSource={undefined}
         prompt={{
           kind: "long_text",
           prompt_id: "prologue/lecture/derivation",
@@ -80,6 +80,53 @@ describe("LongTextPanel", () => {
       2,
     );
     expect(html).toContain("long-text-indicator");
+  });
+
+  it("hides the paper and its explicit markup units as one presentation surface", () => {
+    const html = renderToStaticMarkup(
+      <LongTextPanel
+        defaultCps={30}
+        disabled={false}
+        fastForward={false}
+        initialCps={30}
+        onRevealComplete={vi.fn()}
+        onTypingChange={vi.fn()}
+        page={{
+          document_id: "prologue/hidden-document",
+          visible: false,
+          paper: null,
+          pagination: "auto",
+          font_size: 32,
+          text_color: "#212533",
+          layout: {
+            x: 340,
+            y: 0,
+            width: 1240,
+            height: 1080,
+            padding_x: 118,
+            padding_y: 112,
+            page_height: 1340,
+            page_gap: 92,
+          },
+          steps: [
+            {
+              step_id: "hidden",
+              text: "隐藏的 $x$ 文本",
+              page_break_before: false,
+            },
+          ],
+          active_step_index: 0,
+        }}
+        paperSource={undefined}
+        prompt={null}
+        ref={createRef<LongTextPanelHandle>()}
+        revealImmediately
+        visible={false}
+      />,
+    );
+
+    expect(html).toContain('class="long-text-panel is-hidden"');
+    expect(html).toContain('style="display:none;visibility:hidden"');
   });
 
   it("leaves browsing space below the final sheet", () => {

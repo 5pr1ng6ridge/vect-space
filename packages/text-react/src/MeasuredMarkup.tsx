@@ -231,9 +231,13 @@ function renderUnit(
   const effect = effectClass(unit.effect);
   const revealClass =
     visible && isRevealing ? ` is-preview-reveal-${reveal}` : "";
-  const unitStyle: CSSProperties = {
-    visibility: visible ? "visible" : "hidden",
-  };
+  // Keep revealed units attached to the parent visibility boundary.  An
+  // explicit `visible` value would make text leak through a hidden dialogue
+  // or long-text surface, while unrevealed units remain explicitly hidden so
+  // they continue to reserve their measured layout.
+  const unitStyle: CSSProperties = visible
+    ? { visibility: "inherit" }
+    : { visibility: "hidden" };
   if (unit.kind === "character") {
     return (
       <span

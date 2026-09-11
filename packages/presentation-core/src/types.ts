@@ -21,6 +21,9 @@ export interface SpriteSnapshot {
   scale_x: number;
   scale_y: number;
   rotation_deg: number;
+  flip_x?: boolean;
+  anchor_x?: number;
+  anchor_y?: number;
   opacity: number;
   z: number;
 }
@@ -322,6 +325,7 @@ export type PresentationCue = CueBase &
         to: SpriteSnapshot | null;
         duration_ms: number;
         easing: Easing;
+        crossfade_ms?: number | null;
       }
     | {
         type: "clear_scene";
@@ -412,7 +416,6 @@ export interface BootstrapPayload {
   update: RuntimeUpdate;
   asset_ids: string[];
   content_version: string;
-  story_flow_available: boolean;
   chapter_map_available?: boolean;
   default_font?: string | null;
 }
@@ -461,29 +464,25 @@ export interface DialogueHistoryEntry {
   text: string;
 }
 
-export interface VisibleStoryFlowNode {
-  scene_id: string;
-  title: string;
-  x: number;
-  y: number;
-  completed: boolean;
-}
-
-export interface VisibleStoryFlowEdge {
-  id: string;
-  from: string;
-  to: string;
-  label?: string | null;
-}
-
-export interface StoryFlowSnapshot {
-  nodes: VisibleStoryFlowNode[];
-  edges: VisibleStoryFlowEdge[];
-}
-
 export interface ResolvedAsset {
   id: string;
   kind: AssetKind;
+  absolute_path: string;
+  /** Present only when the asset resolves to a loop animation document. */
+  animation?: ResolvedAnimation | null;
+}
+
+export interface ResolvedAnimation {
+  id: string;
+  width: number;
+  height: number;
+  total_duration_ms: number;
+  frames: ResolvedAnimationFrame[];
+}
+
+export interface ResolvedAnimationFrame {
+  asset: string;
+  duration_ms: number;
   absolute_path: string;
 }
 

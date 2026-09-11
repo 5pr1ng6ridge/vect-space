@@ -14,6 +14,12 @@ import {
   evaluateTimelineFrame,
 } from "./timelineEvaluator";
 import { BoundedLedger } from "./ledger";
+import {
+  frameIndexAt,
+  type AnimationMap,
+  type ImageAssetSource,
+} from "./imageAnimation";
+import { resolveImageAsset } from "./imageAnimation";
 import type {
   AssetUrlMap,
   RuntimeSnapshot,
@@ -90,6 +96,14 @@ export class SceneSurface {
   readonly #backgrounds = new Container();
   readonly #effects = new Container();
   readonly #spriteViews = new Map<string, Sprite>();
+  /** Decoded frame textures per animated asset, shared by every view. */
+  readonly #animationTextures = new Map<string, Texture[]>();
+  /** In-flight frame preparation, so one animation loads its frames once. */
+  readonly #animationLoads = new Map<string, Promise<Texture[]>>();
+  /** Frame lists for animated assets; empty keeps static-only behaviour. */
+  #animations: AnimationMap = {};
+  /** Last preview playhead, used to re-apply a frame after async loading. */
+  #playheadMs = 0;
   readonly #audio: AudioManager;
   readonly #canvas: HTMLCanvasElement;
   readonly #diagnostic: (message: string) => void;
@@ -293,6 +307,25 @@ export class SceneSurface {
 
   setOnFrame(onFrame: ((frame: TimelinePreviewFrame) => void) | null): void {
     this.#onFrame = onFrame;
+  }
+
+  /**
+   * Replaces the frame lists for animated assets.
+   *
+   * The editor preview positions frames from its own playhead, so unlike the
+   * game surface there is no wall-clock loop here: `seek()` alone decides
+   * which frame is shown.  That is what makes scrubbing deterministic and
+   * makes `pause()` freeze the loop without any accumulated time.
+   */
+  setAnimationAssets(animations: AnimationMap): void {
+    this.#animations = animations;
+    this.#animationLoads.clear();
+    this.#animationTextures.clear();
+  }
+
+  /** True when at least one asset in the current target is animated. */
+  hasAnimatedAssets(): boolean {
+    return Object.keys(this.#animations).length > 0;
   }
 
   setOnPlayingChange(
@@ -712,7 +745,11 @@ export class SceneSurface {
       for (const child of this.#backgrounds.removeChildren()) child.destroy();
       this.#background = null;
     } else if (
-      this.#background?.label !== this.#assets[snapshot.world.background]
+      this.#background?.label !==
+      this.#assetLabel(
+        this.#resolveImage(snapshot.world.background),
+        snapshot.world.background,
+      )
     ) {
       const background = await this.#makeBackground(snapshot.world.background);
       if (!isCurrentLoad()) {
@@ -732,14 +769,16 @@ export class SceneSurface {
     }
     for (const [id, state] of Object.entries(snapshot.world.sprites)) {
       let view = this.#spriteViews.get(id);
-      if (view === undefined || view.label !== this.#assets[state.asset]) {
+      const source = this.#resolveImage(state.asset);
+      const label = this.#assetLabel(source, state.asset);
+      if (view === undefined || view.label !== label) {
         view?.destroy();
         view = await this.#makeSprite(state.asset, state);
         if (!isCurrentLoad()) {
           view.destroy();
           return false;
         }
-        view.label = this.#assets[state.asset] ?? state.asset;
+        view.label = label;
         this.#world.addChild(view);
         this.#spriteViews.set(id, view);
       }
@@ -753,28 +792,143 @@ export class SceneSurface {
   }
 
   async #makeBackground(asset: string): Promise<Sprite> {
-    const texture = await loadTexture(requireAssetUrl(this.#assets, asset));
+    const source = this.#resolveImage(asset);
+    const textures = await this.#texturesFor(source);
+    const texture =
+      textures[0] ?? (await loadTexture(requireAssetUrl(this.#assets, asset)));
     const sprite = new Sprite(texture);
-    const scale = Math.max(
-      DESIGN_WIDTH / texture.width,
-      DESIGN_HEIGHT / texture.height,
-    );
+    // The layout size of an animated background never changes with the frame,
+    // so the cover scale uses the measured animation size.
+    const width = source.animation === undefined ? texture.width : source.width;
+    const height =
+      source.animation === undefined ? texture.height : source.height;
+    const scale = Math.max(DESIGN_WIDTH / width, DESIGN_HEIGHT / height);
     sprite.scale.set(scale);
     sprite.position.set(
-      (DESIGN_WIDTH - texture.width * scale) / 2,
-      (DESIGN_HEIGHT - texture.height * scale) / 2,
+      (DESIGN_WIDTH - width * scale) / 2,
+      (DESIGN_HEIGHT - height * scale) / 2,
     );
-    sprite.label = this.#assets[asset] ?? asset;
+    sprite.label = this.#assetLabel(source, asset);
     return sprite;
   }
 
   async #makeSprite(asset: string, state: SpriteSnapshot): Promise<Sprite> {
-    const sprite = new Sprite(
-      await loadTexture(requireAssetUrl(this.#assets, asset)),
-    );
+    const source = this.#resolveImage(asset);
+    const textures = await this.#texturesFor(source);
+    const texture =
+      textures[0] ?? (await loadTexture(requireAssetUrl(this.#assets, asset)));
+    const sprite = new Sprite(texture);
     sprite.anchor.set(0.5, 1);
     applySprite(sprite, state);
+    sprite.label = this.#assetLabel(source, asset);
     return sprite;
+  }
+
+  /**
+   * Resolves one asset id for the preview.  Static assets keep working when
+   * the host never calls `setAnimationAssets`.
+   */
+  #resolveImage(asset: string): ImageAssetSource {
+    return (
+      resolveImageAsset(asset, this.#assets, this.#animations) ?? {
+        asset,
+        url: requireAssetUrl(this.#assets, asset),
+        width: 0,
+        height: 0,
+      }
+    );
+  }
+
+  /**
+   * Identity of the pixels a view shows.  Animated assets use their logical
+   * id so switching between an animation and one of its frames is a change.
+   */
+  #assetLabel(source: ImageAssetSource, asset: string): string {
+    return source.animation === undefined
+      ? (this.#assets[asset] ?? asset)
+      : `anim:${asset}`;
+  }
+
+  /**
+   * Prepares every frame of an animated asset once, then reuses the decoded
+   * textures for every view and every seek.
+   */
+  #texturesFor(source: ImageAssetSource): Promise<Texture[]> {
+    const animation = source.animation;
+    if (animation === undefined) {
+      return loadTexture(source.url).then((texture) => [texture]);
+    }
+    const cached = this.#animationLoads.get(source.asset);
+    if (cached !== undefined) return cached;
+    const loading = (async (): Promise<Texture[]> => {
+      const textures: Array<Texture | null> = [];
+      const successful: number[] = [];
+      for (const [index, frame] of animation.frames.entries()) {
+        try {
+          const texture = await loadTexture(frame.url);
+          textures.push(texture);
+          successful.push(index);
+        } catch (error) {
+          this.#diagnostic(
+            `帧动画 ${animation.id} 第 ${index + 1} 帧（${frame.asset}）加载失败：${errorMessage(error)}`,
+          );
+          textures.push(null);
+        }
+      }
+      if (successful.length === 0) {
+        throw new Error(`图片动画 ${animation.id} 没有可用帧`);
+      }
+      const firstSuccessful = successful[0];
+      if (firstSuccessful === undefined) {
+        throw new Error(`图片动画 ${animation.id} 没有可用帧`);
+      }
+      const usable = textures as Texture[];
+      for (let index = 0; index < usable.length; index += 1) {
+        if (usable[index] !== null) continue;
+        let nearest = firstSuccessful;
+        for (const candidate of successful) {
+          if (Math.abs(candidate - index) < Math.abs(nearest - index)) {
+            nearest = candidate;
+          }
+        }
+        usable[index] = usable[nearest] as Texture;
+      }
+      this.#animationTextures.set(source.asset, usable);
+      return usable;
+    })();
+    this.#animationLoads.set(source.asset, loading);
+    void loading.catch(() => this.#animationLoads.delete(source.asset));
+    return loading;
+  }
+
+  /** Selects the frame for one view at the preview playhead. */
+  #applyAnimatedTexture(view: Sprite, asset: string, elapsedMs: number): void {
+    const animation = this.#animations[asset];
+    if (animation === undefined) return;
+    const textures = this.#animationTextures.get(asset);
+    if (textures === undefined) {
+      // First use of this animation: prepare every frame, then re-apply the
+      // current playhead so the very first displayed frame is correct.
+      void this.#texturesFor(this.#resolveImage(asset))
+        .then(() => {
+          if (!this.#destroyed)
+            this.#applyFrame(this.frameAt(this.#playheadMs));
+        })
+        .catch(() => undefined);
+      return;
+    }
+    const index = frameIndexAt(elapsedMs, animation.frames);
+    const texture = textures[index] ?? textures[0];
+    if (texture !== undefined) view.texture = texture;
+  }
+
+  /** Applies the animated background frame at the playhead. */
+  #applyBackgroundFrame(elapsedMs: number): void {
+    const background = this.#background;
+    if (background === null) return;
+    const asset = this.#start?.world.background ?? null;
+    if (asset === null) return;
+    this.#applyAnimatedTexture(background, asset, elapsedMs);
   }
 
   async #prepareVideo(
@@ -896,11 +1050,17 @@ export class SceneSurface {
 
   #applyFrame(frame: TimelinePreviewFrame): void {
     this.#camera = { ...frame.camera };
+    this.#playheadMs = frame.elapsed_ms;
     this.#applyCamera();
+    // Animated artwork follows the playhead: the same elapsed time always
+    // selects the same frame, so scrubbing is deterministic and repeating a
+    // frame produces no extra work or one-shot events.
+    this.#applyBackgroundFrame(frame.elapsed_ms);
     for (const object of frame.objects) {
       if (object.kind === "sprite") {
         const view = this.#spriteViews.get(object.id);
         if (view === undefined) continue;
+        this.#applyAnimatedTexture(view, object.asset, frame.elapsed_ms);
         applySprite(view, {
           asset: object.asset,
           x: object.x,
@@ -909,6 +1069,9 @@ export class SceneSurface {
           scale_x: object.scale_x,
           scale_y: object.scale_y,
           rotation_deg: object.rotation_deg,
+          anchor_x: this.#start?.world.sprites[object.id]?.anchor_x,
+          anchor_y: this.#start?.world.sprites[object.id]?.anchor_y,
+          flip_x: this.#start?.world.sprites[object.id]?.flip_x,
           opacity: object.opacity,
           z: object.z,
         });
@@ -1046,8 +1209,13 @@ export class SceneSurface {
 export { SceneSurface as TimelinePreviewSurface };
 
 function applySprite(view: Sprite, state: SpriteSnapshot): void {
+  view.anchor.set(state.anchor_x ?? 0.5, state.anchor_y ?? 1);
   view.position.set(state.x, state.y);
-  view.scale.set(state.scale * state.scale_x, state.scale * state.scale_y);
+  const direction = state.flip_x ? -1 : 1;
+  view.scale.set(
+    direction * state.scale * state.scale_x,
+    state.scale * state.scale_y,
+  );
   view.rotation = (state.rotation_deg * Math.PI) / 180;
   view.alpha = state.opacity;
   view.zIndex = state.z;
@@ -1061,6 +1229,7 @@ function omitSpriteAsset(state: SpriteSnapshot): Omit<SpriteSnapshot, "asset"> {
     scale_x: state.scale_x,
     scale_y: state.scale_y,
     rotation_deg: state.rotation_deg,
+    flip_x: state.flip_x ?? false,
     opacity: state.opacity,
     z: state.z,
   };
@@ -1074,6 +1243,7 @@ function defaultSpriteFrame(): Omit<SpriteSnapshot, "asset"> {
     scale_x: 1,
     scale_y: 1,
     rotation_deg: 0,
+    flip_x: false,
     opacity: 1,
     z: 0,
   };
@@ -1116,13 +1286,28 @@ function applyVideoFrame(
 function loadTexture(url: string): Promise<Texture> {
   return new Promise<Texture>((resolve, reject) => {
     const image = new Image();
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`图片加载超时：${url}`));
+    }, 8_000);
+    const cleanup = (): void => {
+      window.clearTimeout(timeout);
+      image.onload = null;
+      image.onerror = null;
+    };
     // convertFileSrc() uses Tauri's asset origin. Without an explicit
     // anonymous CORS request WebView2 may decode the image for <img>, but marks
     // it origin-dirty and WebGL rejects it in texImage2D().
     image.crossOrigin = "anonymous";
     image.decoding = "async";
-    image.onload = () => resolve(Texture.from(image));
-    image.onerror = () => reject(new Error(`图片加载失败：${url}`));
+    image.onload = () => {
+      cleanup();
+      resolve(Texture.from(image));
+    };
+    image.onerror = () => {
+      cleanup();
+      reject(new Error(`图片加载失败：${url}`));
+    };
     image.src = url;
   });
 }

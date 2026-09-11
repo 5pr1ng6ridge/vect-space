@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ImageAnimationDefinition",
+  "description": "Standalone `image animation` document (Schema v1).\n\nThe plan deliberately keeps animation out of the asset *kind* namespace:\nan asset says what it is used for (background, sprite, GUI) and separately\nsays whether its pixels are one static image or an ordered frame sequence.",
+  "type": "object",
+  "properties": {
+    "frames": {
+      "description": "Frames play in list order and loop forever.  A ping-pong animation is\nauthored by repeating frames rather than by a direction flag.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ImageAnimationFrame"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id"
+  ],
+  "$defs": {
+    "ImageAnimationFrame": {
+      "type": "object",
+      "properties": {
+        "asset": {
+          "description": "Static image asset id.  Animation frames may not reference another\nanimation, so the frame graph is always one level deep.",
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asset",
+        "duration_ms"
+      ]
+    }
+  }
+}

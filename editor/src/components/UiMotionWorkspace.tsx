@@ -8,6 +8,9 @@ import {
   type ReactElement,
 } from "react";
 import { assetUrl } from "../api";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import { editorImageSource } from "../imageAnimationMap";
+import { AnimatedImage } from "./AnimatedImage";
 import { evaluateChannel } from "../timeline";
 import { useAssetFont } from "../useAssetFont";
 import type {
@@ -47,6 +50,7 @@ interface Selection {
 export function UiMotionWorkspace({
   file,
   assets,
+  animationMap,
   dirty,
   onBack,
   onChange,
@@ -56,6 +60,7 @@ export function UiMotionWorkspace({
 }: {
   file: UiMotionFile;
   assets: EditorAsset[];
+  animationMap: AnimationMap;
   dirty: boolean;
   onBack(): void;
   onChange(file: UiMotionFile): void;
@@ -371,7 +376,11 @@ export function UiMotionWorkspace({
             className="ui-motion-design"
             style={{
               fontFamily: font.fontFamily,
-              transform: `scale(${previewScale})`,
+              // Keep the design viewport centered after scaling.  Using a
+              // separate CSS `translate` property makes its percentage
+              // offset get scaled as well, which pushes the preview toward
+              // the upper-left corner at non-1x scales.
+              transform: `translate(-50%, -50%) scale(${previewScale})`,
             }}
           >
             <div className="ui-motion-background">1920 × 1080 UI PREVIEW</div>
@@ -380,52 +389,59 @@ export function UiMotionWorkspace({
               onPointerDown={(event) => beginTargetDrag(event, "dialogue_root")}
               ref={dialogueRootRef}
             >
-              {dialogueBox !== undefined && (
-                <img
-                  alt=""
-                  className={`ui-preview-frame${selectedTarget === "dialogue_frame" ? " selected" : ""}`}
-                  draggable={false}
-                  onPointerDown={(event) =>
-                    beginTargetDrag(event, "dialogue_frame")
-                  }
-                  ref={dialogueFrameRef}
-                  src={assetUrl(dialogueBox.absolute_path)}
-                />
-              )}
-              <span
-                className={`ui-preview-name${selectedTarget === "dialogue_nameplate" ? " selected" : ""}`}
-                onPointerDown={(event) =>
-                  beginTargetDrag(event, "dialogue_nameplate")
-                }
-                ref={dialogueNameplateRef}
-              >
-                {nameBox !== undefined && (
-                  <img
+              <div className="ui-preview-surface" ref={dialogueFrameRef}>
+                {dialogueBox !== undefined && (
+                  <AnimatedImage
                     alt=""
+                    className={`ui-preview-frame${selectedTarget === "dialogue_frame" ? " selected" : ""}`}
                     draggable={false}
-                    src={assetUrl(nameBox.absolute_path)}
+                    onPointerDown={(event) =>
+                      beginTargetDrag(event, "dialogue_frame")
+                    }
+                    source={editorImageSource(
+                      dialogueBox,
+                      assets,
+                      animationMap,
+                    )}
                   />
                 )}
-                <span>爱丽丝</span>
-              </span>
-              <span
-                className={`ui-preview-text${selectedTarget === "dialogue_text" ? " selected" : ""}`}
-                onPointerDown={(event) =>
-                  beginTargetDrag(event, "dialogue_text")
-                }
-                ref={dialogueTextRef}
-              >
-                <MeasuredMarkup source={"向量 $v\\in V$ 可以写成 $v=u+w$。"} />
-              </span>
-              <span
-                className={`ui-preview-indicator${selectedTarget === "dialogue_advance_indicator" ? " selected" : ""}`}
-                onPointerDown={(event) =>
-                  beginTargetDrag(event, "dialogue_advance_indicator")
-                }
-                ref={dialogueIndicatorRef}
-              >
-                ◆
-              </span>
+                <span
+                  className={`ui-preview-name${selectedTarget === "dialogue_nameplate" ? " selected" : ""}`}
+                  onPointerDown={(event) =>
+                    beginTargetDrag(event, "dialogue_nameplate")
+                  }
+                  ref={dialogueNameplateRef}
+                >
+                  {nameBox !== undefined && (
+                    <AnimatedImage
+                      alt=""
+                      draggable={false}
+                      source={editorImageSource(nameBox, assets, animationMap)}
+                    />
+                  )}
+                  <span>爱丽丝</span>
+                </span>
+                <span
+                  className={`ui-preview-text${selectedTarget === "dialogue_text" ? " selected" : ""}`}
+                  onPointerDown={(event) =>
+                    beginTargetDrag(event, "dialogue_text")
+                  }
+                  ref={dialogueTextRef}
+                >
+                  <MeasuredMarkup
+                    source={"向量 $v\\in V$ 可以写成 $v=u+w$。"}
+                  />
+                </span>
+                <span
+                  className={`ui-preview-indicator${selectedTarget === "dialogue_advance_indicator" ? " selected" : ""}`}
+                  onPointerDown={(event) =>
+                    beginTargetDrag(event, "dialogue_advance_indicator")
+                  }
+                  ref={dialogueIndicatorRef}
+                >
+                  ◆
+                </span>
+              </div>
             </section>
           </div>
         </div>

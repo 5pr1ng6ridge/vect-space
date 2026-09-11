@@ -20,8 +20,9 @@ use vectspace_core::{
     content::ContentCatalog,
     model::{
         AssetKind, ButtonTemplate, ChapterMapDefinition, ChoiceSnapshot, ContentManifest,
-        ResolvedAsset, SceneDefinition, SceneNode, StoryFlowDefinition, StoryLocation,
-        TimelineEvent, TimelineTrack, UiMotionPreset, VariableMap,
+        ImageAnimationDefinition, ResolvedAsset, SceneDefinition, SceneNode,
+        SpriteActionDefinition, StoryLocation, TimelineEvent, TimelineTrack,
+        UiMotionPreset, VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
@@ -142,7 +143,8 @@ struct EditorProject {
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
     buttons: Vec<EditorButtonFile>,
-    story_flow: Option<EditorStoryFlowFile>,
+    animations: Vec<EditorAnimationFile>,
+    actions: Vec<EditorActionFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     assets: Vec<EditorAsset>,
@@ -157,7 +159,8 @@ struct EditorProjectView<'a> {
     scenes: &'a [EditorSceneFile],
     ui_motions: &'a [EditorUiMotionFile],
     buttons: &'a [EditorButtonFile],
-    story_flow: &'a Option<EditorStoryFlowFile>,
+    animations: &'a [EditorAnimationFile],
+    actions: &'a [EditorActionFile],
     chapter_map: &'a Option<EditorChapterMapFile>,
     layout: &'a EditorLayout,
     assets: &'a [EditorAsset],
@@ -176,7 +179,8 @@ impl Serialize for EditorProject {
             scenes: &self.scenes,
             ui_motions: &self.ui_motions,
             buttons: &self.buttons,
-            story_flow: &self.story_flow,
+            animations: &self.animations,
+            actions: &self.actions,
             chapter_map: &self.chapter_map,
             layout: &self.layout,
             assets: &self.assets,
@@ -220,11 +224,23 @@ struct EditorButtonFile {
     definition: ButtonTemplate,
 }
 
+/// One standalone image animation document, keyed by the manifest path that
+/// lists it.  Unsaved drafts travel through the same shape as a saved file, so
+/// preview and commit validate identical bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EditorStoryFlowFile {
+struct EditorAnimationFile {
     path: String,
-    definition: StoryFlowDefinition,
+    definition: ImageAnimationDefinition,
+}
+
+/// One reusable relative sprite action document, keyed by the manifest path
+/// that lists it. Unsaved drafts use the same shape as on-disk files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditorActionFile {
+    path: String,
+    definition: SpriteActionDefinition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,7 +255,12 @@ struct EditorChapterMapFile {
 struct EditorAsset {
     id: String,
     kind: AssetKind,
-    path: String,
+    /// Static image path.  Animated assets carry `animation` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    /// Loop animation document id, present for animated assets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    animation: Option<String>,
     absolute_path: String,
     #[serde(default = "default_wire_u64")]
     size_bytes: WireU64,
@@ -370,7 +391,8 @@ struct SaveProjectRequest {
     scenes: Vec<EditorSceneFile>,
     ui_motions: Vec<EditorUiMotionFile>,
     buttons: Vec<EditorButtonFile>,
-    story_flow: Option<EditorStoryFlowFile>,
+    animations: Vec<EditorAnimationFile>,
+    actions: Vec<EditorActionFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     expected_fingerprint: String,
@@ -385,7 +407,10 @@ struct SaveProjectRequestRaw {
     ui_motions: Vec<EditorUiMotionFile>,
     #[serde(default)]
     buttons: Vec<EditorButtonFile>,
-    story_flow: Option<EditorStoryFlowFile>,
+    #[serde(default)]
+    animations: Vec<EditorAnimationFile>,
+    #[serde(default)]
+    actions: Vec<EditorActionFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     expected_fingerprint: String,
@@ -407,7 +432,8 @@ impl<'de> Deserialize<'de> for SaveProjectRequest {
             scenes: raw.scenes,
             ui_motions: raw.ui_motions,
             buttons: raw.buttons,
-            story_flow: raw.story_flow,
+            animations: raw.animations,
+            actions: raw.actions,
             chapter_map: raw.chapter_map,
             layout: raw.layout,
             expected_fingerprint: raw.expected_fingerprint,
@@ -781,12 +807,16 @@ fn inspect_asset_imports(
         let mut reuse_candidates = Vec::new();
         if let (Some(path), Some(hash)) = (&source_path, &sha256) {
             for (id, definition) in &session.catalog.manifest.assets {
-                let absolute = session.catalog.assets_root().join(&definition.path);
+                // Animated assets have no single file to compare against.
+                let Some(relative) = &definition.path else {
+                    continue;
+                };
+                let absolute = session.catalog.assets_root().join(relative);
                 if hash_file_streaming(&absolute).ok().as_deref() == Some(hash) {
                     reuse_candidates.push(WireAssetReuseCandidate {
                         id: id.clone(),
                         kind: wire_asset_kind(definition.kind),
-                        path: definition.path.clone(),
+                        path: relative.clone(),
                     });
                 }
             }
@@ -928,24 +958,25 @@ fn save_project(
             .map_err(validation_command_error)?;
         let buttons = validate_button_file_set(&request.manifest, &request.buttons)
             .map_err(validation_command_error)?;
-        let candidate =
-            ContentCatalog::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
-                session.root.clone(),
-                request.manifest.clone(),
-                scenes,
-                ui_motions,
-                request
-                    .story_flow
-                    .as_ref()
-                    .map(|file| file.definition.clone()),
-                request
-                    .chapter_map
-                    .as_ref()
-                    .map(|file| file.definition.clone()),
-                &asset_overrides,
-                Some(buttons),
-            )
+        let animations = validate_animation_file_set(&request.manifest, &request.animations)
             .map_err(validation_command_error)?;
+        let actions = validate_action_file_set(&request.manifest, &request.actions)
+            .map_err(validation_command_error)?;
+        let candidate = ContentCatalog::from_documents_with_all_documents_and_actions(
+            session.root.clone(),
+            request.manifest.clone(),
+            scenes,
+            ui_motions,
+            request
+                .chapter_map
+                .as_ref()
+                .map(|file| file.definition.clone()),
+            &asset_overrides,
+            Some(buttons),
+            Some(animations),
+            Some(actions),
+        )
+        .map_err(validation_command_error)?;
 
         let all_writes =
             serialize_project(&session.root, &request).map_err(validation_command_error)?;
@@ -1137,24 +1168,25 @@ fn validate_project(
         .map_err(validation_command_error)?;
     let buttons = validate_button_file_set(&request.manifest, &request.buttons)
         .map_err(validation_command_error)?;
-    let candidate =
-        ContentCatalog::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
-            session.root.clone(),
-            request.manifest,
-            scenes,
-            ui_motions,
-            request
-                .story_flow
-                .as_ref()
-                .map(|file| file.definition.clone()),
-            request
-                .chapter_map
-                .as_ref()
-                .map(|file| file.definition.clone()),
-            &asset_overrides,
-            Some(buttons),
-        )
+    let animations = validate_animation_file_set(&request.manifest, &request.animations)
         .map_err(validation_command_error)?;
+    let actions = validate_action_file_set(&request.manifest, &request.actions)
+        .map_err(validation_command_error)?;
+    let candidate = ContentCatalog::from_documents_with_all_documents_and_actions(
+        session.root.clone(),
+        request.manifest,
+        scenes,
+        ui_motions,
+        request
+            .chapter_map
+            .as_ref()
+            .map(|file| file.definition.clone()),
+        &asset_overrides,
+        Some(buttons),
+        Some(animations),
+        Some(actions),
+    )
+    .map_err(validation_command_error)?;
     Ok(analyze_catalog(&candidate))
 }
 
@@ -1208,7 +1240,8 @@ fn stage_asset_imports(
         .manifest
         .assets
         .values()
-        .map(|asset| path_reservation_key(&asset.path))
+        .filter_map(|asset| asset.path.as_deref())
+        .map(path_reservation_key)
         .collect::<BTreeSet<_>>();
     // A second import dialog can be opened before the first one is saved.
     // Reserve those staged IDs and destinations as well, otherwise two
@@ -1696,11 +1729,16 @@ fn find_reusable_asset(
 ) -> Result<Option<(String, String, PathBuf)>, std::io::Error> {
     let mut fallback = None;
     for (id, definition) in &session.catalog.manifest.assets {
-        let absolute = session.catalog.assets_root().join(&definition.path);
+        // Reuse matching only applies to static files; an animated asset
+        // already owns a whole frame list.
+        let Some(relative) = &definition.path else {
+            continue;
+        };
+        let absolute = session.catalog.assets_root().join(relative);
         if hash_file_streaming(&absolute)?.as_str() != sha256 {
             continue;
         }
-        let candidate = (id.clone(), definition.path.clone(), absolute);
+        let candidate = (id.clone(), relative.clone(), absolute);
         if definition.kind == kind {
             return Ok(Some(candidate));
         }
@@ -1734,7 +1772,11 @@ fn staged_imports_for_request(
             .get(&staged.id)
             .ok_or_else(|| format!("素材导入 {} 已不在当前 manifest 中", staged.id))?;
         if definition.kind != staged.kind
-            || definition.path.replace('\\', "/") != staged.relative_path
+            || definition
+                .path
+                .as_deref()
+                .map(|path| path.replace('\\', "/"))
+                != Some(staged.relative_path.clone())
         {
             return Err(format!("素材导入 {} 的类型或目标路径已被修改", staged.id));
         }
@@ -1890,16 +1932,16 @@ fn build_node_preview_impl(
             .map_err(validation_command_error)?;
     let buttons = validate_button_file_set(&request.project.manifest, &request.project.buttons)
         .map_err(validation_command_error)?;
-    let catalog = ContentCatalog::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
+    let animations =
+        validate_animation_file_set(&request.project.manifest, &request.project.animations)
+            .map_err(validation_command_error)?;
+    let actions = validate_action_file_set(&request.project.manifest, &request.project.actions)
+        .map_err(validation_command_error)?;
+    let catalog = ContentCatalog::from_documents_with_all_documents_and_actions(
         session.root.clone(),
         request.project.manifest.clone(),
         scenes,
         ui_motions,
-        request
-            .project
-            .story_flow
-            .as_ref()
-            .map(|file| file.definition.clone()),
         request
             .project
             .chapter_map
@@ -1907,6 +1949,8 @@ fn build_node_preview_impl(
             .map(|file| file.definition.clone()),
         &asset_overrides,
         Some(buttons),
+        Some(animations),
+        Some(actions),
     )
     .map_err(validation_command_error)?;
     // Preview metadata used to be collected from the story entry and can
@@ -2031,13 +2075,20 @@ fn project_payload(
             definition: read_yaml(&root.join(path))?,
         });
     }
-    let story_flow = match &catalog.manifest.story_flow {
-        Some(path) => Some(EditorStoryFlowFile {
+    let mut animations = Vec::with_capacity(catalog.manifest.animations.len());
+    for path in &catalog.manifest.animations {
+        animations.push(EditorAnimationFile {
             path: path.clone(),
             definition: read_yaml(&root.join(path))?,
-        }),
-        None => None,
-    };
+        });
+    }
+    let mut actions = Vec::with_capacity(catalog.manifest.actions.len());
+    for path in &catalog.manifest.actions {
+        actions.push(EditorActionFile {
+            path: path.clone(),
+            definition: read_yaml(&root.join(path))?,
+        });
+    }
     let chapter_map = match &catalog.manifest.chapter_map {
         Some(path) => Some(EditorChapterMapFile {
             path: path.clone(),
@@ -2060,6 +2111,7 @@ fn project_payload(
                 id: id.clone(),
                 kind: definition.kind,
                 path: definition.path.clone(),
+                animation: definition.animation.clone(),
                 absolute_path: asset.absolute_path.clone(),
                 size_bytes: WireU64::from(
                     fs::metadata(&asset.absolute_path)
@@ -2077,7 +2129,8 @@ fn project_payload(
         scenes,
         ui_motions,
         buttons,
-        story_flow,
+        animations,
+        actions,
         chapter_map,
         layout,
         assets,
@@ -2110,6 +2163,7 @@ fn project_payload_from_request(
                 id: id.clone(),
                 kind: definition.kind,
                 path: definition.path.clone(),
+                animation: definition.animation.clone(),
                 // Resolve metadata from the trusted staging path before the
                 // transaction, but return the formal path the newly committed
                 // project will use after staging is cleaned up.
@@ -2132,7 +2186,8 @@ fn project_payload_from_request(
         scenes: request.scenes.clone(),
         ui_motions: request.ui_motions.clone(),
         buttons: request.buttons.clone(),
-        story_flow: request.story_flow.clone(),
+        animations: request.animations.clone(),
+        actions: request.actions.clone(),
         chapter_map: request.chapter_map.clone(),
         layout,
         assets,
@@ -2243,12 +2298,78 @@ fn validate_button_file_set(
     Ok(buttons)
 }
 
+/// Same contract as `validate_button_file_set`, for the standalone image
+/// animation documents a project may register.
+fn validate_animation_file_set(
+    manifest: &ContentManifest,
+    files: &[EditorAnimationFile],
+) -> Result<BTreeMap<String, ImageAnimationDefinition>, String> {
+    if manifest.animations.len() != files.len() {
+        return Err("manifest 的图片动画文件列表与编辑器文档不一致".to_owned());
+    }
+    let declared = manifest
+        .animations
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let provided = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if declared.len() != manifest.animations.len() || declared != provided {
+        return Err("提交的图片动画路径与 manifest 不一致".to_owned());
+    }
+    let mut animations = BTreeMap::new();
+    for file in files {
+        safe_relative_path(&file.path)?;
+        animations.insert(file.path.clone(), file.definition.clone());
+    }
+    Ok(animations)
+}
+
+fn validate_action_file_set(
+    manifest: &ContentManifest,
+    files: &[EditorActionFile],
+) -> Result<BTreeMap<String, SpriteActionDefinition>, String> {
+    if manifest.actions.len() != files.len() {
+        return Err("manifest 的立绘动作文件列表与编辑器文档不一致".to_owned());
+    }
+    let declared = manifest
+        .actions
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let provided = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if declared.len() != manifest.actions.len() || declared != provided {
+        return Err("提交的立绘动作路径与 manifest 不一致".to_owned());
+    }
+    let mut actions = BTreeMap::new();
+    for file in files {
+        safe_relative_path(&file.path)?;
+        if actions
+            .insert(file.path.clone(), file.definition.clone())
+            .is_some()
+        {
+            return Err(format!("立绘动作路径重复: {}", file.path));
+        }
+    }
+    Ok(actions)
+}
+
 fn serialize_project(
     root: &Path,
     request: &SaveProjectRequest,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
     let mut writes = Vec::with_capacity(
-        request.scenes.len() + request.ui_motions.len() + request.buttons.len() + 4,
+        request.scenes.len()
+            + request.ui_motions.len()
+            + request.buttons.len()
+            + request.animations.len()
+            + request.actions.len()
+            + 4,
     );
     writes.push((root.join("manifest.yaml"), yaml_bytes(&request.manifest)?));
     for scene in &request.scenes {
@@ -2263,9 +2384,16 @@ fn serialize_project(
         safe_relative_path(&button.path)?;
         writes.push((root.join(&button.path), yaml_bytes(&button.definition)?));
     }
-    if let Some(flow) = &request.story_flow {
-        safe_relative_path(&flow.path)?;
-        writes.push((root.join(&flow.path), yaml_bytes(&flow.definition)?));
+    for animation in &request.animations {
+        safe_relative_path(&animation.path)?;
+        writes.push((
+            root.join(&animation.path),
+            yaml_bytes(&animation.definition)?,
+        ));
+    }
+    for action in &request.actions {
+        safe_relative_path(&action.path)?;
+        writes.push((root.join(&action.path), yaml_bytes(&action.definition)?));
     }
     if let Some(map) = &request.chapter_map {
         safe_relative_path(&map.path)?;
@@ -2284,18 +2412,16 @@ fn managed_deletions(
     let mut previous_paths = previous.scenes.clone();
     previous_paths.extend(previous.ui_motions.iter().cloned());
     previous_paths.extend(previous.buttons.iter().cloned());
-    if let Some(path) = &previous.story_flow {
-        previous_paths.push(path.clone());
-    }
+    previous_paths.extend(previous.animations.iter().cloned());
+    previous_paths.extend(previous.actions.iter().cloned());
     if let Some(path) = &previous.chapter_map {
         previous_paths.push(path.clone());
     }
     let mut next_paths = next.scenes.clone();
     next_paths.extend(next.ui_motions.iter().cloned());
     next_paths.extend(next.buttons.iter().cloned());
-    if let Some(path) = &next.story_flow {
-        next_paths.push(path.clone());
-    }
+    next_paths.extend(next.animations.iter().cloned());
+    next_paths.extend(next.actions.iter().cloned());
     if let Some(path) = &next.chapter_map {
         next_paths.push(path.clone());
     }
@@ -2344,8 +2470,15 @@ fn document_models(
             serde_json::to_value(definition).map_err(display_error)?,
         );
     }
-    if let Some(path) = &manifest.story_flow {
-        let definition: StoryFlowDefinition = read_yaml(&root.join(path))?;
+    for path in &manifest.animations {
+        let definition: ImageAnimationDefinition = read_yaml(&root.join(path))?;
+        models.insert(
+            path.replace('\\', "/"),
+            serde_json::to_value(definition).map_err(display_error)?,
+        );
+    }
+    for path in &manifest.actions {
+        let definition: SpriteActionDefinition = read_yaml(&root.join(path))?;
         models.insert(
             path.replace('\\', "/"),
             serde_json::to_value(definition).map_err(display_error)?,
@@ -2391,7 +2524,13 @@ fn document_models_from_request(
             serde_json::to_value(&file.definition).map_err(display_error)?,
         );
     }
-    if let Some(file) = &request.story_flow {
+    for file in &request.animations {
+        models.insert(
+            file.path.replace('\\', "/"),
+            serde_json::to_value(&file.definition).map_err(display_error)?,
+        );
+    }
+    for file in &request.actions {
         models.insert(
             file.path.replace('\\', "/"),
             serde_json::to_value(&file.definition).map_err(display_error)?,
@@ -2447,9 +2586,16 @@ fn retain_changed_model_writes(
                     })
                     .or_else(|| {
                         request
-                            .story_flow
-                            .as_ref()
-                            .filter(|file| file.path.replace('\\', "/") == key)
+                            .animations
+                            .iter()
+                            .find(|file| file.path.replace('\\', "/") == key)
+                            .map(|file| serde_json::to_value(&file.definition))
+                    })
+                    .or_else(|| {
+                        request
+                            .actions
+                            .iter()
+                            .find(|file| file.path.replace('\\', "/") == key)
                             .map(|file| serde_json::to_value(&file.definition))
                     })
                     .or_else(|| {
@@ -2510,29 +2656,6 @@ fn encode_project_scalars(
             {
                 for node in nodes.values_mut() {
                     encode_node_scalars(node);
-                }
-            }
-        }
-    }
-    if let Some(story_flow) = object
-        .get_mut("story_flow")
-        .and_then(|value| value.as_object_mut())
-        .and_then(|value| value.get_mut("definition"))
-    {
-        if let Some(nodes) = story_flow
-            .as_object_mut()
-            .and_then(|value| value.get_mut("nodes"))
-        {
-            if let Some(nodes) = nodes.as_object_mut() {
-                for node in nodes.values_mut() {
-                    if let Some(condition) = node
-                        .as_object_mut()
-                        .and_then(|value| value.get_mut("reveal"))
-                        .and_then(|value| value.as_object_mut())
-                        .and_then(|value| value.get_mut("condition"))
-                    {
-                        encode_condition_scalars(condition);
-                    }
                 }
             }
         }
@@ -3420,6 +3543,8 @@ fn project_fingerprint_with_hashes(
             + manifest.scenes.len()
             + manifest.ui_motions.len()
             + manifest.buttons.len()
+            + manifest.animations.len()
+            + manifest.actions.len()
             + 3,
     );
     paths.push(root.join("manifest.yaml"));
@@ -3432,7 +3557,10 @@ fn project_fingerprint_with_hashes(
     for path in &manifest.buttons {
         paths.push(root.join(path));
     }
-    if let Some(path) = &manifest.story_flow {
+    for path in &manifest.animations {
+        paths.push(root.join(path));
+    }
+    for path in &manifest.actions {
         paths.push(root.join(path));
     }
     if let Some(path) = &manifest.chapter_map {
@@ -3446,7 +3574,14 @@ fn project_fingerprint_with_hashes(
     let mut assets = manifest
         .assets
         .iter()
-        .map(|(id, asset)| (id, root.join("assets").join(&asset.path)))
+        .filter_map(|(id, asset)| {
+            // Animated assets carry no static file of their own; their frame
+            // list lives in an animation document that is hashed above.
+            asset
+                .path
+                .as_ref()
+                .map(|relative| (id, root.join("assets").join(relative)))
+        })
         .collect::<Vec<_>>();
     assets.sort_by(|left, right| left.0.cmp(right.0));
     for (id, path) in assets {
@@ -3598,6 +3733,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::LongTextControl { next, .. }
         | SceneNode::Set { next, .. }
         | SceneNode::Playback { next, .. }
+        | SceneNode::Action { next, .. }
         | SceneNode::Wait { next, .. }
         | SceneNode::Bgm { next, .. }
         | SceneNode::Sfx { next, .. }
@@ -3661,6 +3797,7 @@ fn is_immediate(node: &SceneNode) -> bool {
         SceneNode::Set { .. }
         | SceneNode::Condition { .. }
         | SceneNode::Playback { .. }
+        | SceneNode::Action { .. }
         | SceneNode::Jump { .. }
         | SceneNode::UiMotionSet { .. }
         | SceneNode::Sfx { .. }
@@ -3749,6 +3886,7 @@ fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
         } => {
             output.insert(id.clone());
         }
+        SceneNode::Action { .. } => {}
         SceneNode::Timeline { tracks, events, .. } => {
             for track in tracks {
                 match track {
@@ -3918,7 +4056,6 @@ mod tests {
             catalog.manifest.clone(),
             scenes,
             ui_motions,
-            catalog.story_flow.clone(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("目标节点不存在"));
@@ -4003,7 +4140,6 @@ mod tests {
             catalog.manifest.clone(),
             scenes,
             ui_motions,
-            catalog.story_flow.clone(),
         )
         .unwrap();
         assert!(analyze_catalog(&candidate)

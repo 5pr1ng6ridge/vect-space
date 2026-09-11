@@ -73,7 +73,6 @@ function project(): EditorProject {
       },
     ],
     ui_motions: [],
-    story_flow: null,
     layout: { version: 1, scenes: {} },
     assets: [],
     diagnostics: [],
@@ -816,10 +815,33 @@ describe("story graph mapping", () => {
     const source = project();
     const right = source.scenes[0].definition.nodes.right;
     if (right.type === "say") right.speaker = "alice";
-    expect(countCharacterReferences(source, "alice")).toBe(1);
+    source.scenes[0].definition.nodes.portrait = {
+      type: "sprite",
+      sprite_id: "alice-instance",
+      action: "show",
+      asset: null,
+      character: "alice",
+      expression: null,
+      flip_x: false,
+      crossfade_ms: null,
+      x: 960,
+      y: 1080,
+      scale: 1,
+      opacity: 1,
+      z: 1,
+      duration_ms: 1,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    expect(countCharacterReferences(source, "alice")).toBe(2);
     const renamed = renameCharacter(source, "alice", "alicia");
     const renamedRight = renamed.scenes[0].definition.nodes.right;
     expect(renamed.manifest.characters.alicia.display_name).toBe("爱丽丝");
     expect(renamedRight.type === "say" && renamedRight.speaker).toBe("alicia");
+    const renamedPortrait = renamed.scenes[0].definition.nodes.portrait;
+    expect(renamedPortrait.type === "sprite" && renamedPortrait.character).toBe(
+      "alicia",
+    );
   });
 });

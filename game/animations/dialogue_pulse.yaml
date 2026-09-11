@@ -1,0 +1,7 @@
+schema_version: 1
+id: anim.dialogue_pulse
+frames:
+  - asset: gui.dialogue_pulse_a
+    duration_ms: 900
+  - asset: gui.dialogue_pulse_b
+    duration_ms: 900

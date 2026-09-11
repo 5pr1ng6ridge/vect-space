@@ -8,14 +8,19 @@ use std::{
 use schemars::schema_for;
 use thiserror::Error;
 
+use crate::image_header::{probe, ImageSize};
 use crate::model::{
     AssetDefinition, AssetKind, AudioAction, ButtonClickAction, ButtonPanel, ButtonPostAction,
-    ButtonTemplate, ChapterMapDefinition, CharacterDefinition, ConditionExpression,
-    ContentManifest, DialogueMode, LongTextMode, LongTextPagination, MutationValue, ResolvedAsset,
-    ScalarValue, SceneDefinition, SceneNode, SpriteAction, StoryFlowDefinition, StoryFlowReveal,
-    TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings,
-    UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation, VariableScope,
-    VariableType, LONG_TEXT_FONT_SIZE_MAX, LONG_TEXT_FONT_SIZE_MIN,
+    ButtonTemplate, ChapterMapDefinition, CharacterDefinition, CharacterExpression,
+    ConditionExpression, ContentManifest, DialogueMode, ImageAnimationDefinition, LongTextMode,
+    LongTextPagination, MutationValue, ResolvedAnimation, ResolvedAnimationFrame, ResolvedAsset,
+    ScalarValue, SceneDefinition, SceneNode, SpriteAction, SpriteActionDefinition,
+    ChapterMapReveal, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack,
+    UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition,
+    VariableOperation, VariableScope, VariableType, IMAGE_ANIMATION_MAX_DECODED_BYTES,
+    IMAGE_ANIMATION_MAX_EDGE, IMAGE_ANIMATION_MAX_FRAMES, IMAGE_ANIMATION_MAX_FRAME_MS,
+    IMAGE_ANIMATION_MIN_FRAME_MS, IMAGE_ANIMATION_SCHEMA_VERSION, LONG_TEXT_FONT_SIZE_MAX,
+    LONG_TEXT_FONT_SIZE_MIN, SPRITE_ACTION_SCHEMA_VERSION,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -28,9 +33,11 @@ const MAX_TIMELINE_KEYFRAMES: usize = 10_000;
 const MAX_TIMELINE_EVENTS: usize = 2_048;
 const MAX_LONG_TEXT_STEPS: usize = 1_024;
 const UI_MOTION_SCHEMA_VERSION: u32 = 1;
-const STORY_FLOW_SCHEMA_VERSION: u32 = 1;
 const CHAPTER_MAP_SCHEMA_VERSION: u32 = 1;
 const BUTTON_SCHEMA_VERSION: u32 = 1;
+const ACTION_MAX_PARAMETERS: usize = 32;
+const ACTION_MAX_CHANNELS: usize = 16;
+const ACTION_MAX_KEYFRAMES: usize = 2_048;
 const CHAPTER_MAP_MIN_WIDTH: u32 = 1920;
 const CHAPTER_MAP_MIN_HEIGHT: u32 = 1080;
 const CHAPTER_MAP_MAX_SIZE: u32 = 16_380;
@@ -60,8 +67,25 @@ pub struct ContentCatalog {
     pub scenes: BTreeMap<String, SceneDefinition>,
     pub ui_motions: BTreeMap<String, UiMotionPreset>,
     pub buttons: BTreeMap<String, ButtonTemplate>,
-    pub story_flow: Option<StoryFlowDefinition>,
     pub chapter_map: Option<ChapterMapDefinition>,
+    /// Validated loop animation documents, keyed by animation id.
+    pub animations: BTreeMap<String, ImageAnimationDefinition>,
+    /// Validated reusable sprite actions, keyed by action id.
+    pub actions: BTreeMap<String, SpriteActionDefinition>,
+    /// Geometry measured once while the catalog was built.  The shared image
+    /// resolver needs a stable layout size per animation so switching frames
+    /// can never move or resize an object, and re-probing headers on every
+    /// resolve would repeat the same I/O for no benefit.
+    animation_metrics: BTreeMap<String, AnimationMetrics>,
+}
+
+/// Measured geometry of one animation.  Derived, never author-written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationMetrics {
+    pub width: u32,
+    pub height: u32,
+    /// Decoded RGBA footprint of the animation's unique frame images.
+    pub decoded_bytes: u64,
 }
 
 impl ContentCatalog {
@@ -78,11 +102,21 @@ impl ContentCatalog {
         validate_manifest_paths(&manifest)?;
         validate_identifier("entry_scene", &manifest.entry_scene)?;
         validate_variable_definitions(&manifest.variables)?;
-        validate_character_definitions(&manifest.characters)?;
+        validate_character_definitions(&manifest.characters, &manifest.assets)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets, &BTreeMap::new())?;
         validate_default_font(&manifest)?;
+
+        let animations = load_animations(&root, &manifest.animations)?;
+        let animation_metrics = validate_animations(
+            &animations,
+            &manifest.assets,
+            &assets_root,
+            &BTreeMap::new(),
+        )?;
+        let actions = load_actions(&root, &manifest.actions)?;
+        validate_action_namespace(&actions, &manifest.assets, &animations)?;
 
         let ui_motions = load_ui_motions(&root, &manifest.ui_motions)?;
         validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
@@ -122,12 +156,7 @@ impl ContentCatalog {
             &manifest.characters,
             &ui_motions,
             &buttons,
-        )?;
-        let story_flow = load_story_flow(
-            &root,
-            manifest.story_flow.as_deref(),
-            &scenes,
-            &manifest.variables,
+            &actions,
         )?;
         let chapter_map = load_chapter_map(
             &root,
@@ -144,8 +173,10 @@ impl ContentCatalog {
             scenes,
             ui_motions,
             buttons,
-            story_flow,
             chapter_map,
+            animations,
+            actions,
+            animation_metrics,
         })
     }
 
@@ -159,13 +190,7 @@ impl ContentCatalog {
         manifest: ContentManifest,
         scenes: BTreeMap<String, SceneDefinition>,
         ui_motion_files: BTreeMap<String, UiMotionPreset>,
-        story_flow: Option<StoryFlowDefinition>,
     ) -> Result<Self, ContentError> {
-        // Keep the original helper useful for callers that have not yet
-        // started modelling the optional room map.  When the manifest
-        // references one, resolve the current on-disk document rather than
-        // silently dropping it (which would make an otherwise valid
-        // in-memory candidate fail the manifest/document consistency check).
         let chapter_map = if manifest.chapter_map.is_some() {
             load_chapter_map(
                 &root,
@@ -182,7 +207,6 @@ impl ContentCatalog {
             manifest,
             scenes,
             ui_motion_files,
-            story_flow,
             chapter_map,
         )
     }
@@ -195,7 +219,6 @@ impl ContentCatalog {
         manifest: ContentManifest,
         scenes: BTreeMap<String, SceneDefinition>,
         ui_motion_files: BTreeMap<String, UiMotionPreset>,
-        story_flow: Option<StoryFlowDefinition>,
         chapter_map: Option<ChapterMapDefinition>,
     ) -> Result<Self, ContentError> {
         Self::from_documents_with_chapter_map_and_asset_overrides(
@@ -203,7 +226,6 @@ impl ContentCatalog {
             manifest,
             scenes,
             ui_motion_files,
-            story_flow,
             chapter_map,
             &BTreeMap::new(),
         )
@@ -217,7 +239,6 @@ impl ContentCatalog {
         manifest: ContentManifest,
         scenes: BTreeMap<String, SceneDefinition>,
         ui_motion_files: BTreeMap<String, UiMotionPreset>,
-        story_flow: Option<StoryFlowDefinition>,
         chapter_map: Option<ChapterMapDefinition>,
         asset_overrides: &BTreeMap<String, PathBuf>,
     ) -> Result<Self, ContentError> {
@@ -226,7 +247,6 @@ impl ContentCatalog {
             manifest,
             scenes,
             ui_motion_files,
-            story_flow,
             chapter_map,
             asset_overrides,
             None,
@@ -235,15 +255,69 @@ impl ContentCatalog {
 
     /// Editor variant that validates unsaved button template documents from
     /// memory while keeping the same trusted asset overlay rules.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_documents_with_chapter_map_and_asset_overrides_and_buttons(
         root: PathBuf,
         manifest: ContentManifest,
         scenes: BTreeMap<String, SceneDefinition>,
         ui_motion_files: BTreeMap<String, UiMotionPreset>,
-        story_flow: Option<StoryFlowDefinition>,
         chapter_map: Option<ChapterMapDefinition>,
         asset_overrides: &BTreeMap<String, PathBuf>,
         button_files: Option<BTreeMap<String, ButtonTemplate>>,
+    ) -> Result<Self, ContentError> {
+        Self::from_documents_with_all_documents(
+            root,
+            manifest,
+            scenes,
+            ui_motion_files,
+            chapter_map,
+            asset_overrides,
+            button_files,
+            None,
+        )
+    }
+
+    /// Deepest in-memory constructor.  Every optional document family can be
+    /// supplied as an unsaved editor draft; `None` loads whatever the manifest
+    /// references from the trusted project root instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_documents_with_all_documents(
+        root: PathBuf,
+        manifest: ContentManifest,
+        scenes: BTreeMap<String, SceneDefinition>,
+        ui_motion_files: BTreeMap<String, UiMotionPreset>,
+        chapter_map: Option<ChapterMapDefinition>,
+        asset_overrides: &BTreeMap<String, PathBuf>,
+        button_files: Option<BTreeMap<String, ButtonTemplate>>,
+        animation_files: Option<BTreeMap<String, ImageAnimationDefinition>>,
+    ) -> Result<Self, ContentError> {
+        Self::from_documents_with_all_documents_and_actions(
+            root,
+            manifest,
+            scenes,
+            ui_motion_files,
+            chapter_map,
+            asset_overrides,
+            button_files,
+            animation_files,
+            None,
+        )
+    }
+
+    /// Deepest in-memory constructor, including unsaved reusable action
+    /// documents.  The previous constructor remains as a compatibility
+    /// wrapper for callers that do not model actions yet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_documents_with_all_documents_and_actions(
+        root: PathBuf,
+        manifest: ContentManifest,
+        scenes: BTreeMap<String, SceneDefinition>,
+        ui_motion_files: BTreeMap<String, UiMotionPreset>,
+        chapter_map: Option<ChapterMapDefinition>,
+        asset_overrides: &BTreeMap<String, PathBuf>,
+        button_files: Option<BTreeMap<String, ButtonTemplate>>,
+        animation_files: Option<BTreeMap<String, ImageAnimationDefinition>>,
+        action_files: Option<BTreeMap<String, SpriteActionDefinition>>,
     ) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
         if manifest.schema_version != CONTENT_SCHEMA_VERSION {
@@ -255,7 +329,7 @@ impl ContentCatalog {
         validate_manifest_paths(&manifest)?;
         validate_identifier("entry_scene", &manifest.entry_scene)?;
         validate_variable_definitions(&manifest.variables)?;
-        validate_character_definitions(&manifest.characters)?;
+        validate_character_definitions(&manifest.characters, &manifest.assets)?;
 
         let assets_root = canonical_directory(&root.join("assets"))?;
         validate_assets(&assets_root, &manifest.assets, asset_overrides)?;
@@ -273,6 +347,23 @@ impl ContentCatalog {
             load_buttons(&root, &manifest.buttons)?
         };
         validate_all_button_assets(&buttons, &manifest.assets)?;
+        // Animation documents are validated against the asset table rather
+        // than the scene graph: a frame is legal exactly when it names a
+        // registered static image asset, no matter where the animation is
+        // later used.
+        let animations = match animation_files {
+            Some(files) => validate_animation_files(&manifest.animations, &files)?,
+            None if manifest.animations.is_empty() => BTreeMap::new(),
+            None => load_animations(&root, &manifest.animations)?,
+        };
+        let animation_metrics =
+            validate_animations(&animations, &manifest.assets, &assets_root, asset_overrides)?;
+        let actions = match action_files {
+            Some(files) => validate_action_files(&manifest.actions, &files)?,
+            None if manifest.actions.is_empty() => BTreeMap::new(),
+            None => load_actions(&root, &manifest.actions)?,
+        };
+        validate_action_namespace(&actions, &manifest.assets, &animations)?;
 
         for (scene_id, scene) in &scenes {
             if scene.schema_version != CONTENT_SCHEMA_VERSION {
@@ -302,15 +393,8 @@ impl ContentCatalog {
             &manifest.characters,
             &ui_motions,
             &buttons,
+            &actions,
         )?;
-        if manifest.story_flow.is_some() != story_flow.is_some() {
-            return Err(ContentError::Validation(
-                "manifest 的 story_flow 与编辑器文档不一致".to_owned(),
-            ));
-        }
-        if let Some(flow) = &story_flow {
-            validate_story_flow(flow, &scenes, &manifest.variables)?;
-        }
         if manifest.chapter_map.is_some() != chapter_map.is_some() {
             return Err(ContentError::Validation(
                 "manifest 的 chapter_map 与编辑器文档不一致".to_owned(),
@@ -327,8 +411,10 @@ impl ContentCatalog {
             scenes,
             ui_motions,
             buttons,
-            story_flow,
             chapter_map,
+            animations,
+            actions,
+            animation_metrics,
         })
     }
 
@@ -365,18 +451,96 @@ impl ContentCatalog {
             let definition = self.manifest.assets.get(id).ok_or_else(|| {
                 ContentError::Validation(format!("素材未登记或素材 ID 未知: {id}"))
             })?;
-            let relative = validate_relative_path(&definition.path)?;
-            let path = match self.asset_overrides.get(id) {
-                Some(override_path) => canonical_staged_asset(override_path)?,
-                None => canonical_file_within(&self.assets_root, &self.assets_root.join(relative))?,
-            };
-            resolved.push(ResolvedAsset {
-                id: id.clone(),
-                kind: definition.kind,
-                absolute_path: path.to_string_lossy().into_owned(),
-            });
+            match &definition.animation {
+                // Static asset: exactly the historical payload plus an
+                // explicit `animation: None`.
+                None => {
+                    let path = self.resolve_asset_path(id, definition)?;
+                    resolved.push(ResolvedAsset {
+                        id: id.clone(),
+                        kind: definition.kind,
+                        absolute_path: path.to_string_lossy().into_owned(),
+                        animation: None,
+                    });
+                }
+                Some(animation_id) => {
+                    let animation = self.animations.get(animation_id).ok_or_else(|| {
+                        ContentError::Validation(format!(
+                            "素材 {id} 引用了未登记的图片动画 {animation_id}"
+                        ))
+                    })?;
+                    let metrics = self.animation_metrics.get(animation_id).ok_or_else(|| {
+                        ContentError::Validation(format!(
+                            "图片动画 {animation_id} 缺少已验证的帧几何"
+                        ))
+                    })?;
+                    let mut frames = Vec::with_capacity(animation.frames.len());
+                    for frame in &animation.frames {
+                        let frame_definition =
+                            self.manifest.assets.get(&frame.asset).ok_or_else(|| {
+                                ContentError::Validation(format!(
+                                    "图片动画 {animation_id} 引用了未登记的素材 {}",
+                                    frame.asset
+                                ))
+                            })?;
+                        let path = self.resolve_asset_path(&frame.asset, frame_definition)?;
+                        frames.push(ResolvedAnimationFrame {
+                            asset: frame.asset.clone(),
+                            duration_ms: frame.duration_ms,
+                            absolute_path: path.to_string_lossy().into_owned(),
+                        });
+                    }
+                    // The legacy `absolute_path` keeps naming a real image so
+                    // hosts that only understand a single path still show the
+                    // first frame instead of failing.
+                    let absolute_path = frames
+                        .first()
+                        .map(|frame| frame.absolute_path.clone())
+                        .ok_or_else(|| {
+                            ContentError::Validation(format!("图片动画 {animation_id} 没有任何帧"))
+                        })?;
+                    resolved.push(ResolvedAsset {
+                        id: id.clone(),
+                        kind: definition.kind,
+                        absolute_path,
+                        animation: Some(ResolvedAnimation {
+                            id: animation_id.clone(),
+                            width: metrics.width,
+                            height: metrics.height,
+                            total_duration_ms: animation.total_duration_ms(),
+                            frames,
+                        }),
+                    });
+                }
+            }
         }
         Ok(resolved)
+    }
+
+    /// Animations that use `asset_id` as one of their frames.  The editor uses
+    /// this to block deleting an image that an animation still references.
+    pub fn animations_referencing(&self, asset_id: &str) -> Vec<String> {
+        self.animations
+            .iter()
+            .filter(|(_, animation)| animation.frame_assets().contains(asset_id))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn resolve_asset_path(
+        &self,
+        id: &str,
+        definition: &AssetDefinition,
+    ) -> Result<PathBuf, ContentError> {
+        let relative = definition
+            .path
+            .as_deref()
+            .ok_or_else(|| ContentError::Validation(format!("素材 {id} 没有静态图片路径")))?;
+        let relative = validate_relative_path(relative)?;
+        match self.asset_overrides.get(id) {
+            Some(override_path) => canonical_staged_asset(override_path),
+            None => canonical_file_within(&self.assets_root, &self.assets_root.join(relative)),
+        }
     }
 
     pub fn write_schemas(&self, target: &Path) -> Result<(), ContentError> {
@@ -387,10 +551,6 @@ impl ContentCatalog {
         write_schema(
             &target.join("manifest.schema.json"),
             &schema_for!(ContentManifest),
-        )?;
-        write_schema(
-            &target.join("story-flow.schema.json"),
-            &schema_for!(StoryFlowDefinition),
         )?;
         write_schema(
             &target.join("chapter-map.schema.json"),
@@ -407,6 +567,14 @@ impl ContentCatalog {
         write_schema(
             &target.join("button.schema.json"),
             &schema_for!(ButtonTemplate),
+        )?;
+        write_schema(
+            &target.join("image-animation.schema.json"),
+            &schema_for!(ImageAnimationDefinition),
+        )?;
+        write_schema(
+            &target.join("sprite-action.schema.json"),
+            &schema_for!(SpriteActionDefinition),
         )?;
         Ok(())
     }
@@ -543,20 +711,6 @@ fn validate_button_template(template: &ButtonTemplate) -> Result<(), ContentErro
     Ok(())
 }
 
-fn load_story_flow(
-    root: &Path,
-    path: Option<&str>,
-    scenes: &BTreeMap<String, SceneDefinition>,
-    variables: &BTreeMap<String, VariableDefinition>,
-) -> Result<Option<StoryFlowDefinition>, ContentError> {
-    let Some(path) = path else { return Ok(None) };
-    let relative = validate_relative_path(path)?;
-    let full_path = canonical_file_within(root, &root.join(relative))?;
-    let flow: StoryFlowDefinition = read_yaml(&full_path)?;
-    validate_story_flow(&flow, scenes, variables)?;
-    Ok(Some(flow))
-}
-
 fn load_chapter_map(
     root: &Path,
     path: Option<&str>,
@@ -688,7 +842,7 @@ fn validate_chapter_map(
             map,
             &hotspot.id,
         )?;
-        if let StoryFlowReveal::Condition { condition } = &hotspot.reveal {
+        if let ChapterMapReveal::Condition { condition } = &hotspot.reveal {
             validate_condition(condition, variables, "chapter_map", &hotspot.id)?;
             validate_profile_only_condition(condition, variables, &hotspot.id)?;
         }
@@ -778,79 +932,6 @@ fn validate_map_rect(
     Ok(())
 }
 
-fn validate_story_flow(
-    flow: &StoryFlowDefinition,
-    scenes: &BTreeMap<String, SceneDefinition>,
-    variables: &BTreeMap<String, VariableDefinition>,
-) -> Result<(), ContentError> {
-    if flow.schema_version != STORY_FLOW_SCHEMA_VERSION {
-        return Err(ContentError::Validation(format!(
-            "不支持 story flow schema_version {}",
-            flow.schema_version
-        )));
-    }
-    for (scene_id, node) in &flow.nodes {
-        validate_identifier("story flow scene id", scene_id)?;
-        if !scenes.contains_key(scene_id) {
-            return Err(ContentError::Validation(format!(
-                "流程图引用未知场景 {scene_id}"
-            )));
-        }
-        validate_display_name(&node.title).map_err(|message| {
-            ContentError::Validation(format!("流程节点 {scene_id} 标题无效: {message}"))
-        })?;
-        if node.x % 20 != 0 || node.y % 20 != 0 {
-            return Err(ContentError::Validation(format!(
-                "流程节点 {scene_id} 坐标必须吸附到 20px 网格"
-            )));
-        }
-        if !(-100_000..=100_000).contains(&node.x) || !(-100_000..=100_000).contains(&node.y) {
-            return Err(ContentError::Validation(format!(
-                "流程节点 {scene_id} 坐标超出允许范围"
-            )));
-        }
-        if let StoryFlowReveal::Condition { condition } = &node.reveal {
-            validate_condition(condition, variables, "story_flow", scene_id)?;
-            validate_profile_only_condition(condition, variables, scene_id)?;
-        }
-    }
-    let mut ids = BTreeSet::new();
-    let mut connections = BTreeSet::new();
-    for edge in &flow.edges {
-        validate_identifier("story flow edge id", &edge.id)?;
-        if !ids.insert(&edge.id) {
-            return Err(ContentError::Validation(format!(
-                "流程边 ID 重复: {}",
-                edge.id
-            )));
-        }
-        if edge.from == edge.to {
-            return Err(ContentError::Validation(format!(
-                "流程边 {} 不能自连接",
-                edge.id
-            )));
-        }
-        if !flow.nodes.contains_key(&edge.from) || !flow.nodes.contains_key(&edge.to) {
-            return Err(ContentError::Validation(format!(
-                "流程边 {} 存在悬空端点",
-                edge.id
-            )));
-        }
-        if !connections.insert((&edge.from, &edge.to)) {
-            return Err(ContentError::Validation(format!(
-                "流程连接重复: {} -> {}",
-                edge.from, edge.to
-            )));
-        }
-        if let Some(label) = &edge.label {
-            validate_display_name(label).map_err(|message| {
-                ContentError::Validation(format!("流程边 {} 标签无效: {message}", edge.id))
-            })?;
-        }
-    }
-    Ok(())
-}
-
 fn validate_profile_only_condition(
     condition: &ConditionExpression,
     variables: &BTreeMap<String, VariableDefinition>,
@@ -881,7 +962,7 @@ fn validate_profile_only_condition(
                 .is_none_or(|definition| definition.scope != VariableScope::Profile)
             {
                 return Err(ContentError::Validation(format!(
-                    "流程节点 {node_id} 的揭示条件只能引用 profile 变量: {}",
+                    "地图热点 {node_id} 的揭示条件只能引用 profile 变量: {}",
                     reference.variable
                 )));
             }
@@ -913,6 +994,378 @@ fn validate_ui_motion_files(
         }
     }
     Ok(result)
+}
+
+fn load_animations(
+    root: &Path,
+    paths: &[String],
+) -> Result<BTreeMap<String, ImageAnimationDefinition>, ContentError> {
+    let mut files = BTreeMap::new();
+    for path in paths {
+        let relative = validate_relative_path(path)?;
+        let full_path = canonical_file_within(root, &root.join(relative))?;
+        files.insert(path.clone(), read_yaml(&full_path)?);
+    }
+    validate_animation_files(paths, &files)
+}
+
+/// Mirrors `validate_ui_motion_files`: the manifest path list and the supplied
+/// document set must describe exactly the same files, so an unsaved editor
+/// draft can never silently drop or invent an animation document.
+fn validate_animation_files(
+    paths: &[String],
+    files: &BTreeMap<String, ImageAnimationDefinition>,
+) -> Result<BTreeMap<String, ImageAnimationDefinition>, ContentError> {
+    let expected = paths.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = files.keys().cloned().collect::<BTreeSet<_>>();
+    if expected != actual {
+        return Err(ContentError::Validation(
+            "图片动画文件集合与 manifest 不一致".to_owned(),
+        ));
+    }
+    let mut result = BTreeMap::new();
+    for (path, animation) in files {
+        validate_relative_path(path)?;
+        validate_animation_document(animation)?;
+        if result
+            .insert(animation.id.clone(), animation.clone())
+            .is_some()
+        {
+            return Err(ContentError::Validation(format!(
+                "图片动画 ID 重复: {}",
+                animation.id
+            )));
+        }
+    }
+    Ok(result)
+}
+
+fn load_actions(
+    root: &Path,
+    paths: &[String],
+) -> Result<BTreeMap<String, SpriteActionDefinition>, ContentError> {
+    let mut files = BTreeMap::new();
+    for path in paths {
+        let relative = validate_relative_path(path)?;
+        let full_path = canonical_file_within(root, &root.join(relative))?;
+        files.insert(path.clone(), read_yaml(&full_path)?);
+    }
+    validate_action_files(paths, &files)
+}
+
+/// Validate reusable relative transform actions and index them by stable ID.
+fn validate_action_files(
+    paths: &[String],
+    files: &BTreeMap<String, SpriteActionDefinition>,
+) -> Result<BTreeMap<String, SpriteActionDefinition>, ContentError> {
+    let expected = paths.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = files.keys().cloned().collect::<BTreeSet<_>>();
+    if expected != actual {
+        return Err(ContentError::Validation(
+            "立绘动作文件集合与 manifest 不一致".to_owned(),
+        ));
+    }
+    let mut result = BTreeMap::new();
+    for (path, action) in files {
+        validate_relative_path(path)?;
+        validate_action_document(action)?;
+        if result.insert(action.id.clone(), action.clone()).is_some() {
+            return Err(ContentError::Validation(format!(
+                "立绘动作 ID 重复: {}",
+                action.id
+            )));
+        }
+    }
+    Ok(result)
+}
+
+fn validate_action_document(action: &SpriteActionDefinition) -> Result<(), ContentError> {
+    if action.schema_version != SPRITE_ACTION_SCHEMA_VERSION {
+        return Err(ContentError::Validation(format!(
+            "立绘动作 {} 使用了不支持的 schema_version {}",
+            action.id, action.schema_version
+        )));
+    }
+    validate_identifier("sprite action id", &action.id)?;
+    if action.name.trim().is_empty() || action.name.chars().count() > 128 {
+        return Err(ContentError::Validation(format!(
+            "立绘动作 {} 的 name 不能为空且不能超过 128 个 Unicode 字符",
+            action.id
+        )));
+    }
+    if action.duration_ms == 0 || action.duration_ms > MAX_TIMELINE_DURATION_MS {
+        return Err(ContentError::Validation(format!(
+            "立绘动作 {} 时长必须在 1ms 到 30 分钟之间",
+            action.id
+        )));
+    }
+    if action.channels.len() > ACTION_MAX_CHANNELS {
+        return Err(ContentError::Validation(format!(
+            "立绘动作 {} 的通道超过 {} 条",
+            action.id, ACTION_MAX_CHANNELS
+        )));
+    }
+    if action.parameters.len() > ACTION_MAX_PARAMETERS {
+        return Err(ContentError::Validation(format!(
+            "立绘动作 {} 的参数超过 {} 个",
+            action.id, ACTION_MAX_PARAMETERS
+        )));
+    }
+    if action.channels.is_empty() {
+        return Err(ContentError::Validation(format!(
+            "立绘动作 {} 至少需要一个变换通道",
+            action.id
+        )));
+    }
+    for (parameter_id, parameter) in &action.parameters {
+        validate_identifier("sprite action parameter id", parameter_id)?;
+        if !parameter.default.is_finite()
+            || parameter.min.is_some_and(|value| !value.is_finite())
+            || parameter.max.is_some_and(|value| !value.is_finite())
+            || parameter
+                .min
+                .zip(parameter.max)
+                .is_some_and(|(min, max)| min > max)
+            || parameter.min.is_some_and(|min| parameter.default < min)
+            || parameter.max.is_some_and(|max| parameter.default > max)
+        {
+            return Err(ContentError::Validation(format!(
+                "立绘动作 {} 的参数 {} 范围或默认值无效",
+                action.id, parameter_id
+            )));
+        }
+    }
+    let allowed = [
+        "x",
+        "y",
+        "scale",
+        "scale_x",
+        "scale_y",
+        "rotation_deg",
+        "opacity",
+    ];
+    let mut keyframe_count = 0usize;
+    for (channel, keyframes) in &action.channels {
+        if !allowed.contains(&channel.as_str()) {
+            return Err(ContentError::Validation(format!(
+                "立绘动作 {} 不支持通道 {channel}",
+                action.id
+            )));
+        }
+        if keyframes.is_empty() {
+            return Err(ContentError::Validation(format!(
+                "立绘动作 {} 的通道 {channel} 不能为空",
+                action.id
+            )));
+        }
+        if keyframes.first().is_none_or(|keyframe| keyframe.at_ms != 0) {
+            return Err(ContentError::Validation(format!(
+                "立绘动作 {} 的通道 {channel} 必须从 0ms 关键帧开始",
+                action.id
+            )));
+        }
+        keyframe_count = keyframe_count.saturating_add(keyframes.len());
+        let mut previous = None;
+        for keyframe in keyframes {
+            if keyframe.at_ms > action.duration_ms
+                || previous.is_some_and(|at| keyframe.at_ms <= at)
+                || !keyframe.value.is_finite()
+                || (matches!(channel.as_str(), "scale" | "scale_x" | "scale_y")
+                    && keyframe.value <= 0.0)
+                || (channel == "opacity" && !(0.0..=1.0).contains(&keyframe.value))
+            {
+                return Err(ContentError::Validation(format!(
+                    "立绘动作 {} 的通道 {channel} 关键帧无效",
+                    action.id
+                )));
+            }
+            if let Some(parameter) = &keyframe.parameter {
+                if !action.parameters.contains_key(parameter) {
+                    return Err(ContentError::Validation(format!(
+                        "立绘动作 {} 的关键帧引用了未知参数 {parameter}",
+                        action.id
+                    )));
+                }
+            }
+            if let crate::model::TimelineEasing::CubicBezier { cubic_bezier } = &keyframe.easing {
+                if cubic_bezier.iter().any(|value| !value.is_finite())
+                    || !(0.0..=1.0).contains(&cubic_bezier[0])
+                    || !(0.0..=1.0).contains(&cubic_bezier[2])
+                {
+                    return Err(ContentError::Validation(format!(
+                        "立绘动作 {} 的 cubic_bezier 控制点无效",
+                        action.id
+                    )));
+                }
+            }
+            previous = Some(keyframe.at_ms);
+        }
+    }
+    if keyframe_count > ACTION_MAX_KEYFRAMES {
+        return Err(ContentError::Validation(format!(
+            "立绘动作 {} 的关键帧超过 {} 个",
+            action.id, ACTION_MAX_KEYFRAMES
+        )));
+    }
+    Ok(())
+}
+
+fn validate_action_namespace(
+    actions: &BTreeMap<String, SpriteActionDefinition>,
+    assets: &BTreeMap<String, AssetDefinition>,
+    animations: &BTreeMap<String, ImageAnimationDefinition>,
+) -> Result<(), ContentError> {
+    for id in actions.keys() {
+        if assets.contains_key(id) || animations.contains_key(id) {
+            return Err(ContentError::Validation(format!(
+                "立绘动作 ID {id} 与素材或图片动画 ID 冲突"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Document-local animation rules that need no asset table.
+fn validate_animation_document(animation: &ImageAnimationDefinition) -> Result<(), ContentError> {
+    if animation.schema_version != IMAGE_ANIMATION_SCHEMA_VERSION {
+        return Err(ContentError::Validation(format!(
+            "图片动画 {} 使用了不支持的 schema_version {}",
+            animation.id, animation.schema_version
+        )));
+    }
+    validate_identifier("image animation id", &animation.id)?;
+    if animation.frames.is_empty() {
+        return Err(ContentError::Validation(format!(
+            "图片动画 {} 至少需要一帧",
+            animation.id
+        )));
+    }
+    if animation.frames.len() > IMAGE_ANIMATION_MAX_FRAMES {
+        return Err(ContentError::Validation(format!(
+            "图片动画 {} 的帧数 {} 超过上限 {}",
+            animation.id,
+            animation.frames.len(),
+            IMAGE_ANIMATION_MAX_FRAMES
+        )));
+    }
+    for (index, frame) in animation.frames.iter().enumerate() {
+        validate_identifier("animation frame asset id", &frame.asset)?;
+        if !(IMAGE_ANIMATION_MIN_FRAME_MS..=IMAGE_ANIMATION_MAX_FRAME_MS)
+            .contains(&frame.duration_ms)
+        {
+            return Err(ContentError::Validation(format!(
+                "图片动画 {} 第 {} 帧时长 {}ms 必须在 {}-{}ms 之间",
+                animation.id,
+                index + 1,
+                frame.duration_ms,
+                IMAGE_ANIMATION_MIN_FRAME_MS,
+                IMAGE_ANIMATION_MAX_FRAME_MS
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Asset-aware animation validation: frame references, static-only frames,
+/// one shared pixel size, and the decode memory budget.  Returns the measured
+/// geometry that the shared image resolver later reuses.
+fn validate_animations(
+    animations: &BTreeMap<String, ImageAnimationDefinition>,
+    assets: &BTreeMap<String, AssetDefinition>,
+    assets_root: &Path,
+    asset_overrides: &BTreeMap<String, PathBuf>,
+) -> Result<BTreeMap<String, AnimationMetrics>, ContentError> {
+    let mut metrics = BTreeMap::new();
+    for (id, animation) in animations {
+        if assets.contains_key(id) {
+            return Err(ContentError::Validation(format!(
+                "图片动画 ID {id} 与素材 ID 冲突：动画 ID 必须独立于素材命名空间"
+            )));
+        }
+        let mut shared_size: Option<ImageSize> = None;
+        let mut decoded_bytes = 0_u64;
+        let mut counted = BTreeSet::new();
+        for (index, frame) in animation.frames.iter().enumerate() {
+            let position = index + 1;
+            let definition = assets.get(&frame.asset).ok_or_else(|| {
+                ContentError::Validation(format!(
+                    "图片动画 {id} 第 {position} 帧引用了未登记的素材 {}",
+                    frame.asset
+                ))
+            })?;
+            if !matches!(
+                definition.kind,
+                AssetKind::Background | AssetKind::Sprite | AssetKind::Gui
+            ) {
+                return Err(ContentError::Validation(format!(
+                    "图片动画 {id} 第 {position} 帧的素材 {} 不是图片素材",
+                    frame.asset
+                )));
+            }
+            if definition.animation.is_some() {
+                return Err(ContentError::Validation(format!(
+                    "图片动画 {id} 第 {position} 帧引用了动画素材 {}：动画帧只能引用静态图片",
+                    frame.asset
+                )));
+            }
+            let size = measure_frame(&frame.asset, definition, assets_root, asset_overrides)?;
+            match shared_size {
+                Some(expected) if expected != size => {
+                    return Err(ContentError::Validation(format!(
+                        "图片动画 {id} 第 {position} 帧尺寸 {}x{} 与首帧 {}x{} 不一致",
+                        size.width, size.height, expected.width, expected.height
+                    )));
+                }
+                Some(_) => {}
+                None => shared_size = Some(size),
+            }
+            if size.width > IMAGE_ANIMATION_MAX_EDGE || size.height > IMAGE_ANIMATION_MAX_EDGE {
+                return Err(ContentError::Validation(format!(
+                    "图片动画 {id} 第 {position} 帧尺寸 {}x{} 超过单边上限 {IMAGE_ANIMATION_MAX_EDGE}",
+                    size.width, size.height
+                )));
+            }
+            if counted.insert(frame.asset.clone()) {
+                decoded_bytes = decoded_bytes.saturating_add(size.decoded_bytes());
+            }
+        }
+        if decoded_bytes > IMAGE_ANIMATION_MAX_DECODED_BYTES {
+            return Err(ContentError::Validation(format!(
+                "图片动画 {id} 解码内存 {} MiB 超过预算 {} MiB：请减少帧数或降低分辨率",
+                decoded_bytes / (1024 * 1024),
+                IMAGE_ANIMATION_MAX_DECODED_BYTES / (1024 * 1024)
+            )));
+        }
+        let size = shared_size.expect("frame list was validated as non-empty");
+        metrics.insert(
+            id.clone(),
+            AnimationMetrics {
+                width: size.width,
+                height: size.height,
+                decoded_bytes,
+            },
+        );
+    }
+    Ok(metrics)
+}
+
+fn measure_frame(
+    asset_id: &str,
+    definition: &AssetDefinition,
+    assets_root: &Path,
+    asset_overrides: &BTreeMap<String, PathBuf>,
+) -> Result<ImageSize, ContentError> {
+    let relative = definition.path.as_deref().ok_or_else(|| {
+        ContentError::Validation(format!("动画帧素材 {asset_id} 没有静态图片路径"))
+    })?;
+    let relative = validate_relative_path(relative)?;
+    let path = match asset_overrides.get(asset_id) {
+        Some(override_path) => canonical_staged_asset(override_path)?,
+        None => canonical_file_within(assets_root, &assets_root.join(relative))?,
+    };
+    probe(&path).map_err(|error| {
+        ContentError::Validation(format!("动画帧素材 {asset_id} 无法测量像素尺寸：{error}"))
+    })
 }
 
 fn validate_ui_motion(preset: &UiMotionPreset) -> Result<(), ContentError> {
@@ -1019,14 +1472,38 @@ fn validate_assets(
     }
     for (id, definition) in assets {
         validate_identifier("asset id", id)?;
-        let relative = validate_relative_path(&definition.path)?;
-        let asset_path = match asset_overrides.get(id) {
-            Some(override_path) => canonical_staged_asset(override_path)?,
-            None => canonical_file_within(assets_root, &assets_root.join(relative))?,
+        let relative_text = match (&definition.path, &definition.animation) {
+            (Some(_), Some(_)) => {
+                return Err(ContentError::Validation(format!(
+                    "素材 {id} 的 path 与 animation 互斥，只能登记其中一个"
+                )));
+            }
+            (None, None) => {
+                return Err(ContentError::Validation(format!(
+                    "素材 {id} 必须登记 path 或 animation 之一"
+                )));
+            }
+            (Some(path), None) => path,
+            // Animated assets carry no static path.  Their frames are
+            // canonicalized and measured in `validate_animations`, which also
+            // owns the frame count, duration and memory budget rules.
+            (None, Some(_))
+                if matches!(
+                    definition.kind,
+                    AssetKind::Background | AssetKind::Sprite | AssetKind::Gui
+                ) =>
+            {
+                continue
+            }
+            (None, Some(_)) => {
+                return Err(ContentError::Validation(format!(
+                    "动画素材 {id} 必须是 background、sprite 或 gui 类型"
+                )));
+            }
         };
-        reject_git_lfs_pointer(id, &asset_path)?;
+        let relative = validate_relative_path(relative_text)?;
         if definition.kind == AssetKind::Video
-            && Path::new(&definition.path)
+            && Path::new(relative_text)
                 .extension()
                 .and_then(|value| value.to_str())
                 .is_none_or(|extension| !extension.eq_ignore_ascii_case("mp4"))
@@ -1035,6 +1512,11 @@ fn validate_assets(
                 "视频素材 {id} 必须使用 .mp4（H.264/AAC）"
             )));
         }
+        let asset_path = match asset_overrides.get(id) {
+            Some(override_path) => canonical_staged_asset(override_path)?,
+            None => canonical_file_within(assets_root, &assets_root.join(relative))?,
+        };
+        reject_git_lfs_pointer(id, &asset_path)?;
     }
     Ok(())
 }
@@ -1072,8 +1554,11 @@ fn validate_manifest_paths(manifest: &ContentManifest) -> Result<(), ContentErro
     for path in &manifest.buttons {
         register("button", path)?;
     }
-    if let Some(path) = &manifest.story_flow {
-        register("story_flow", path)?;
+    for path in &manifest.animations {
+        register("animation", path)?;
+    }
+    for path in &manifest.actions {
+        register("action", path)?;
     }
     if let Some(path) = &manifest.chapter_map {
         register("chapter_map", path)?;
@@ -1134,6 +1619,7 @@ fn validate_variable_definitions(
 
 fn validate_character_definitions(
     characters: &BTreeMap<String, CharacterDefinition>,
+    assets: &BTreeMap<String, AssetDefinition>,
 ) -> Result<(), ContentError> {
     for (id, definition) in characters {
         validate_identifier("character", id)?;
@@ -1150,6 +1636,61 @@ fn validate_character_definitions(
                 })?;
             }
         }
+        if !definition.default_scale.is_finite() || definition.default_scale <= 0.0 {
+            return Err(ContentError::Validation(format!(
+                "角色 {id} 的 default_scale 必须是有限正数"
+            )));
+        }
+        if let Some(expression) = &definition.default_expression {
+            if !definition.expressions.contains_key(expression) {
+                return Err(ContentError::Validation(format!(
+                    "角色 {id} 的 default_expression 未定义: {expression}"
+                )));
+            }
+        }
+        for (expression_id, expression) in &definition.expressions {
+            validate_identifier("character expression", expression_id)?;
+            validate_character_expression(id, expression_id, expression, assets)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_character_expression(
+    character_id: &str,
+    expression_id: &str,
+    expression: &CharacterExpression,
+    assets: &BTreeMap<String, AssetDefinition>,
+) -> Result<(), ContentError> {
+    let Some(asset) = assets.get(&expression.asset) else {
+        return Err(ContentError::Validation(format!(
+            "角色 {character_id} 的表情 {expression_id} 引用了未知素材: {}",
+            expression.asset
+        )));
+    };
+    if asset.kind != AssetKind::Sprite {
+        return Err(ContentError::Validation(format!(
+            "角色 {character_id} 的表情 {expression_id} 必须引用 sprite 素材: {}",
+            expression.asset
+        )));
+    }
+    if !expression.anchor_x.is_finite()
+        || !expression.anchor_y.is_finite()
+        || !(0.0..=1.0).contains(&expression.anchor_x)
+        || !(0.0..=1.0).contains(&expression.anchor_y)
+    {
+        return Err(ContentError::Validation(format!(
+            "角色 {character_id} 的表情 {expression_id} 锚点必须在 0 到 1 之间"
+        )));
+    }
+    if !expression.offset_x.is_finite()
+        || !expression.offset_y.is_finite()
+        || !expression.scale.is_finite()
+        || expression.scale <= 0.0
+    {
+        return Err(ContentError::Validation(format!(
+            "角色 {character_id} 的表情 {expression_id} 对齐参数无效"
+        )));
     }
     Ok(())
 }
@@ -1161,6 +1702,7 @@ fn validate_scenes(
     characters: &BTreeMap<String, CharacterDefinition>,
     ui_motions: &BTreeMap<String, UiMotionPreset>,
     buttons: &BTreeMap<String, ButtonTemplate>,
+    actions: &BTreeMap<String, SpriteActionDefinition>,
 ) -> Result<(), ContentError> {
     #[derive(Clone)]
     struct LongTextPresentation {
@@ -1249,6 +1791,9 @@ fn validate_scenes(
                 SceneNode::Sprite {
                     action,
                     asset,
+                    character,
+                    expression,
+                    crossfade_ms,
                     x,
                     y,
                     scale,
@@ -1257,11 +1802,42 @@ fn validate_scenes(
                     next,
                     ..
                 } => {
-                    if *action == SpriteAction::Show && asset.is_none() {
-                        return node_error(scene_id, node_id, "show 动作必须提供 asset");
+                    if *action == SpriteAction::Show && asset.is_none() && character.is_none() {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            "show 动作必须提供 asset 或 character",
+                        );
                     }
                     if let Some(id) = asset {
                         require_asset(assets, id, AssetKind::Sprite, scene_id, node_id)?;
+                    }
+                    if let Some(character_id) = character {
+                        let Some(character_definition) = characters.get(character_id) else {
+                            return Err(ContentError::Validation(format!(
+                                "{scene_id}/{node_id}: 未知角色 {character_id}"
+                            )));
+                        };
+                        if let Some(expression_id) = expression {
+                            if !character_definition.expressions.contains_key(expression_id) {
+                                return Err(ContentError::Validation(format!(
+                                    "{scene_id}/{node_id}: 角色 {character_id} 未定义表情 {expression_id}"
+                                )));
+                            }
+                        } else if character_definition.default_expression.is_none()
+                            && asset.is_none()
+                            && *action == SpriteAction::Show
+                        {
+                            return Err(ContentError::Validation(format!(
+                                "{scene_id}/{node_id}: 角色 {character_id} 没有默认表情"
+                            )));
+                        }
+                    } else if expression.is_some() {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            "expression 必须与 character 一起使用",
+                        );
                     }
                     if x.is_some_and(|value| !value.is_finite())
                         || y.is_some_and(|value| !value.is_finite())
@@ -1275,6 +1851,9 @@ fn validate_scenes(
                         return node_error(scene_id, node_id, "opacity 必须在 0 到 1 之间");
                     }
                     validate_duration(*duration_ms, scene_id, node_id)?;
+                    if let Some(duration) = crossfade_ms {
+                        validate_duration(*duration, scene_id, node_id)?;
+                    }
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Clear {
@@ -1510,6 +2089,60 @@ fn validate_scenes(
                     require_node(scene, otherwise, scene_id, node_id)?;
                 }
                 SceneNode::Playback { next, .. } => {
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::Action {
+                    sprite_id,
+                    action,
+                    duration_ms,
+                    await_completion: _,
+                    parameters,
+                    end: _,
+                    next,
+                } => {
+                    validate_identifier("action sprite id", sprite_id)?;
+                    validate_identifier("action id", action)?;
+                    if !actions.contains_key(action) {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            &format!("引用了未知立绘动作 {action}"),
+                        );
+                    }
+                    if let Some(duration_ms) = duration_ms {
+                        validate_duration(*duration_ms, scene_id, node_id)?;
+                    }
+                    let definition = actions.get(action).expect("checked above");
+                    for (parameter, value) in parameters {
+                        validate_identifier("action parameter", parameter)?;
+                        let Some(parameter_definition) = definition.parameters.get(parameter)
+                        else {
+                            return node_error(
+                                scene_id,
+                                node_id,
+                                &format!("引用了未声明的立绘动作参数 {parameter}"),
+                            );
+                        };
+                        if !value.is_finite()
+                            || parameter_definition.min.is_some_and(|min| *value < min)
+                            || parameter_definition.max.is_some_and(|max| *value > max)
+                        {
+                            return node_error(scene_id, node_id, "动作参数必须是有限数");
+                        }
+                    }
+                    if !scene.nodes.values().any(|candidate| {
+                        matches!(
+                            candidate,
+                            SceneNode::Sprite { sprite_id: declared, .. }
+                                if declared == sprite_id
+                        )
+                    }) {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            &format!("动作引用了未声明的立绘实例 {sprite_id}"),
+                        );
+                    }
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Jump {
@@ -2779,9 +3412,620 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        ChapterMapHotspot, LiteralOperand, StoryFlowReveal, TimelineEasingPreset, TimelineKeyframe,
-        TimelineKeyframeKeyword, TimelineKeyframeValue, VariableMap, VariableOperand,
+        ChapterMapHotspot, ImageAnimationFrame, LiteralOperand, SpriteActionDefinition,
+        ChapterMapReveal, SpriteActionEnd, SpriteActionKeyframe, SpriteActionParameter,
+        TimelineEasingPreset, TimelineKeyframe, TimelineKeyframeKeyword, TimelineKeyframeValue,
+        VariableMap, VariableOperand,
     };
+
+    /// Writes a real PNG header.  The animation validator only needs the
+    /// declared pixel size, and a header keeps the fixture hermetic: the test
+    /// never depends on a decoded (or LFS-backed) binary asset.
+    fn write_png(path: &Path, width: u32, height: u32) {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13_u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// Registers one image asset whose bytes live in the staging overlay, so
+    /// the in-memory catalog can measure a real frame size.
+    fn stage_image(
+        directory: &Path,
+        assets: &mut BTreeMap<String, AssetDefinition>,
+        overrides: &mut BTreeMap<String, PathBuf>,
+        id: &str,
+        width: u32,
+        height: u32,
+    ) {
+        let relative = format!("gui/{}.png", id.replace('.', "_"));
+        let path = directory.join(&relative);
+        write_png(&path, width, height);
+        overrides.insert(id.to_owned(), path);
+        assets.insert(
+            id.to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Gui,
+                path: Some(relative),
+                animation: None,
+            },
+        );
+    }
+
+    fn frames(entries: &[(&str, u64)]) -> Vec<ImageAnimationFrame> {
+        entries
+            .iter()
+            .map(|(asset, duration_ms)| ImageAnimationFrame {
+                asset: (*asset).to_owned(),
+                duration_ms: *duration_ms,
+            })
+            .collect()
+    }
+
+    /// Builds a catalog whose animation documents are supplied in memory, the
+    /// same path the editor uses for an unsaved draft.
+    fn animation_catalog(
+        assets: BTreeMap<String, AssetDefinition>,
+        overrides: &BTreeMap<String, PathBuf>,
+        manifest_animations: Vec<String>,
+        animations: BTreeMap<String, ImageAnimationDefinition>,
+    ) -> Result<ContentCatalog, ContentError> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
+        // `canonical_file_within` compares canonical paths, so the helper must
+        // not hand it a path with mixed separators.
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let mut manifest = catalog.manifest.clone();
+        // Merge instead of replacing: the fixture scenes keep referencing the
+        // project's own static assets, and each test only adds staged images.
+        for (id, definition) in assets {
+            manifest.assets.insert(id, definition);
+        }
+        manifest.animations = manifest_animations;
+        // The in-memory document map is keyed by manifest path, while the
+        // built catalog indexes the same documents by id.
+        let ui_motion_files: BTreeMap<String, UiMotionPreset> = manifest
+            .ui_motions
+            .iter()
+            .map(|path| (path.clone(), read_yaml(&canonical_root.join(path)).unwrap()))
+            .collect();
+        ContentCatalog::from_documents_with_all_documents(
+            root,
+            manifest,
+            catalog.scenes.clone(),
+            ui_motion_files,
+            catalog.chapter_map.clone(),
+            overrides,
+            None,
+            Some(animations),
+        )
+    }
+
+    #[test]
+    fn image_animation_resolves_frames_and_geometry() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.idle",
+            64,
+            48,
+        );
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.blink",
+            64,
+            48,
+        );
+        assets.insert(
+            "gui.blinking".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Gui,
+                path: None,
+                animation: Some("anim.blinking".to_owned()),
+            },
+        );
+        let mut animations = BTreeMap::new();
+        animations.insert(
+            "animations/blinking.yaml".to_owned(),
+            ImageAnimationDefinition {
+                schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                id: "anim.blinking".to_owned(),
+                frames: frames(&[("img.idle", 400), ("img.blink", 120)]),
+            },
+        );
+        let catalog = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/blinking.yaml".to_owned()],
+            animations,
+        )
+        .expect("animation project must validate");
+
+        let resolved = catalog
+            .resolve_assets(&["gui.blinking".to_owned()])
+            .unwrap();
+        assert_eq!(resolved.len(), 1);
+        let animation = resolved[0].animation.as_ref().unwrap();
+        assert_eq!(animation.id, "anim.blinking");
+        assert_eq!((animation.width, animation.height), (64, 48));
+        assert_eq!(animation.total_duration_ms, 520);
+        assert_eq!(animation.frames.len(), 2);
+        assert_eq!(animation.frames[0].duration_ms, 400);
+        assert_eq!(animation.frames[1].asset, "img.blink");
+        assert!(animation.frames[0].absolute_path.ends_with("img_idle.png"));
+        // The legacy single path keeps pointing at a real frame.
+        assert_eq!(resolved[0].absolute_path, animation.frames[0].absolute_path);
+        assert_eq!(
+            catalog.animations_referencing("img.blink"),
+            vec!["anim.blinking".to_owned()]
+        );
+        assert!(catalog.animations_referencing("img.idle").len() == 1);
+        assert!(catalog.animations_referencing("img.unused").is_empty());
+    }
+
+    #[test]
+    fn animated_assets_are_limited_to_visual_kinds() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.frame",
+            32,
+            32,
+        );
+        assets.insert(
+            "bgm.invalid_animation".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Bgm,
+                path: None,
+                animation: Some("anim.invalid_owner".to_owned()),
+            },
+        );
+        let animations = BTreeMap::from([(
+            "animations/invalid-owner.yaml".to_owned(),
+            ImageAnimationDefinition {
+                schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                id: "anim.invalid_owner".to_owned(),
+                frames: frames(&[("img.frame", 100)]),
+            },
+        )]);
+        let error = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/invalid-owner.yaml".to_owned()],
+            animations,
+        )
+        .expect_err("audio assets must not own image animations");
+        assert!(error
+            .to_string()
+            .contains("必须是 background、sprite 或 gui"));
+    }
+
+    #[test]
+    fn animation_frames_must_share_one_pixel_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.a",
+            64,
+            48,
+        );
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.b",
+            64,
+            49,
+        );
+        let mut animations = BTreeMap::new();
+        animations.insert(
+            "animations/mismatch.yaml".to_owned(),
+            ImageAnimationDefinition {
+                schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                id: "anim.mismatch".to_owned(),
+                frames: frames(&[("img.a", 100), ("img.b", 100)]),
+            },
+        );
+        let error = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/mismatch.yaml".to_owned()],
+            animations,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("尺寸"), "{error}");
+        assert!(error.to_string().contains("不一致"), "{error}");
+    }
+
+    #[test]
+    fn animation_frames_reject_unknown_animated_and_non_image_assets() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.a",
+            32,
+            32,
+        );
+        assets.insert(
+            "bgm.loop".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Bgm,
+                path: Some("audio/test_bgm.ogg".to_owned()),
+                animation: None,
+            },
+        );
+        assets.insert(
+            "gui.nested".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Gui,
+                path: None,
+                animation: Some("anim.outer".to_owned()),
+            },
+        );
+
+        let unknown = animation_catalog(
+            assets.clone(),
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("img.missing", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(unknown.to_string().contains("未登记"), "{unknown}");
+
+        let non_image = animation_catalog(
+            assets.clone(),
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("bgm.loop", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            non_image.to_string().contains("不是图片素材"),
+            "{non_image}"
+        );
+
+        let recursive = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("gui.nested", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            recursive.to_string().contains("只能引用静态图片"),
+            "{recursive}"
+        );
+    }
+
+    #[test]
+    fn animation_document_rules_reject_bad_shape_and_durations() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.a",
+            32,
+            32,
+        );
+
+        let empty = animation_catalog(
+            assets.clone(),
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: Vec::new(),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(empty.to_string().contains("至少需要一帧"), "{empty}");
+
+        let zero_duration = animation_catalog(
+            assets.clone(),
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("img.a", 0)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            zero_duration.to_string().contains("时长"),
+            "{zero_duration}"
+        );
+
+        let too_slow = animation_catalog(
+            assets.clone(),
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("img.a", IMAGE_ANIMATION_MAX_FRAME_MS + 1)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(too_slow.to_string().contains("时长"), "{too_slow}");
+
+        let wrong_schema = animation_catalog(
+            assets.clone(),
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: 2,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("img.a", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            wrong_schema.to_string().contains("schema_version"),
+            "{wrong_schema}"
+        );
+
+        let mismatched_files = animation_catalog(
+            assets.clone(),
+            &overrides,
+            vec!["animations/other.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/missing.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("img.a", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            mismatched_files
+                .to_string()
+                .contains("集合与 manifest 不一致"),
+            "{mismatched_files}"
+        );
+
+        let id_collision = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "img.a".to_owned(),
+                    frames: frames(&[("img.a", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            id_collision.to_string().contains("素材 ID 冲突"),
+            "{id_collision}"
+        );
+    }
+
+    #[test]
+    fn animation_decode_budget_is_enforced() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        // Two unique 8192x8192 frames decode to 2 x 256 MiB, which is over the
+        // 256 MiB budget.  Only headers are written: the budget is computed
+        // from the declared size, not from decoded pixels.
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.big",
+            8192,
+            8192,
+        );
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.big2",
+            8192,
+            8192,
+        );
+        let error = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("img.big", 100), ("img.big2", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("解码内存"), "{error}");
+    }
+
+    #[test]
+    fn animation_reuses_one_decoded_frame_for_repeated_assets() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.big",
+            8192,
+            8192,
+        );
+        // The same image twice is one decoded frame, so the budget holds.  A
+        // ping-pong animation is authored exactly this way.
+        let catalog = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.x".to_owned(),
+                    frames: frames(&[("img.big", 100), ("img.big", 200), ("img.big", 100)]),
+                },
+            )]),
+        )
+        .expect("one unique frame stays inside the budget");
+        let animation = &catalog.animations["anim.x"];
+        assert_eq!(animation.total_duration_ms(), 400);
+        assert_eq!(animation.unique_frame_assets().len(), 1);
+    }
+
+    #[test]
+    fn static_assets_still_require_exactly_one_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.a",
+            32,
+            32,
+        );
+        // path and animation together are ambiguous.
+        assets.insert(
+            "gui.both".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Gui,
+                path: Some("gui/a.png".to_owned()),
+                animation: Some("anim.a".to_owned()),
+            },
+        );
+        let error = animation_catalog(assets, &overrides, Vec::new(), BTreeMap::new()).unwrap_err();
+        assert!(error.to_string().contains("互斥"), "{error}");
+    }
+
+    #[test]
+    fn hidden_source_assets_surface_a_missing_frame_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut assets = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        // Declared as an animation frame but registered as another animation:
+        // the recursion rule fires before any path is resolved.
+        stage_image(
+            directory.path(),
+            &mut assets,
+            &mut overrides,
+            "img.a",
+            32,
+            32,
+        );
+        assets.insert(
+            "gui.animated".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Gui,
+                path: None,
+                animation: Some("anim.self".to_owned()),
+            },
+        );
+        let error = animation_catalog(
+            assets,
+            &overrides,
+            vec!["animations/x.yaml".to_owned()],
+            BTreeMap::from([(
+                "animations/x.yaml".to_owned(),
+                ImageAnimationDefinition {
+                    schema_version: IMAGE_ANIMATION_SCHEMA_VERSION,
+                    id: "anim.self".to_owned(),
+                    frames: frames(&[("gui.animated", 100)]),
+                },
+            )]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("只能引用静态图片"), "{error}");
+
+        let missing_path = animation_catalog(
+            BTreeMap::from([(
+                "gui.broken".to_owned(),
+                AssetDefinition {
+                    kind: AssetKind::Gui,
+                    path: None,
+                    animation: None,
+                },
+            )]),
+            &BTreeMap::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            missing_path
+                .to_string()
+                .contains("必须登记 path 或 animation"),
+            "{missing_path}"
+        );
+    }
 
     #[test]
     fn traversal_is_rejected() {
@@ -2794,7 +4038,7 @@ mod tests {
     fn bundled_demo_registers_all_button_template_modes() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../game");
         let catalog = ContentCatalog::from_root(root).expect("bundled demo must be valid");
-        assert_eq!(catalog.buttons.len(), 3);
+        assert_eq!(catalog.buttons.len(), 4);
         assert_eq!(
             catalog.buttons["demo.transparent"].normal, None,
             "transparent template keeps an empty hit area",
@@ -2806,6 +4050,18 @@ mod tests {
         assert_eq!(
             catalog.buttons["demo.overlay"].asset_mode,
             crate::model::ButtonAssetMode::Overlay
+        );
+        // The showcase template proves a button state can point at an animated
+        // asset, which is what the presentation fixture exercises.
+        assert_eq!(
+            catalog.buttons["showcase.animated"].normal.as_deref(),
+            Some("gui.button_pulse")
+        );
+        assert!(
+            catalog.manifest.assets["gui.button_pulse"]
+                .animation
+                .is_some(),
+            "the showcase button artwork must be an animation"
         );
     }
 
@@ -2850,7 +4106,7 @@ mod tests {
                 height: 160,
                 z: 1,
                 asset: None,
-                reveal: StoryFlowReveal::Completed,
+                reveal: ChapterMapReveal::Completed,
                 variable_overrides: VariableMap::new(),
             }],
         };
@@ -2963,10 +4219,10 @@ mod tests {
         for name in [
             "manifest.schema.json",
             "scene.schema.json",
-            "story-flow.schema.json",
             "chapter-map.schema.json",
             "ui-motion.schema.json",
             "button.schema.json",
+            "image-animation.schema.json",
         ] {
             assert_eq!(
                 fs::read(generated.path().join(name)).unwrap(),
@@ -3060,7 +4316,6 @@ mod tests {
             catalog.manifest.clone(),
             scenes.clone(),
             ui_motion_files.clone(),
-            catalog.story_flow.clone(),
         );
         assert!(valid.is_ok(), "{valid:?}");
 
@@ -3079,7 +4334,6 @@ mod tests {
             catalog.manifest.clone(),
             scenes,
             ui_motion_files,
-            catalog.story_flow.clone(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("第一步骤"));
@@ -3146,7 +4400,6 @@ mod tests {
             catalog.manifest.clone(),
             with_style,
             ui_motion_files.clone(),
-            catalog.story_flow.clone(),
         )
         .unwrap_err();
         assert!(style_error.to_string().contains("只能继承"));
@@ -3178,7 +4431,6 @@ mod tests {
             catalog.manifest,
             with_break,
             ui_motion_files,
-            catalog.story_flow,
         )
         .unwrap_err();
         assert!(break_error.to_string().contains("连续长文本"));
@@ -3196,6 +4448,7 @@ mod tests {
                 &catalog.manifest.characters,
                 &catalog.ui_motions,
                 &catalog.buttons,
+                &catalog.actions,
             )
         };
 
@@ -3206,6 +4459,10 @@ mod tests {
                 sprite_id: "nan".to_owned(),
                 action: SpriteAction::Show,
                 asset: Some("sprite.jelly".to_owned()),
+                character: None,
+                expression: None,
+                flip_x: Some(false),
+                crossfade_ms: None,
                 x: Some(f32::NAN),
                 y: None,
                 scale: Some(1.0),
@@ -3539,5 +4796,78 @@ mod tests {
             "node",
         )
         .is_err());
+    }
+
+    #[test]
+    fn sprite_action_documents_reject_empty_channels_and_bad_parameters() {
+        let base = SpriteActionDefinition {
+            schema_version: SPRITE_ACTION_SCHEMA_VERSION,
+            id: "sprite.test".to_owned(),
+            name: "测试动作".to_owned(),
+            duration_ms: 100,
+            channels: BTreeMap::new(),
+            parameters: BTreeMap::new(),
+            end: SpriteActionEnd::Hold,
+        };
+        assert!(validate_action_document(&base)
+            .unwrap_err()
+            .to_string()
+            .contains("至少需要一个变换通道"));
+
+        let invalid_range = SpriteActionDefinition {
+            channels: BTreeMap::from([(
+                "x".to_owned(),
+                vec![SpriteActionKeyframe {
+                    at_ms: 0,
+                    value: 0.0,
+                    easing: TimelineEasing::default(),
+                    parameter: Some("distance".to_owned()),
+                }],
+            )]),
+            parameters: BTreeMap::from([(
+                "distance".to_owned(),
+                SpriteActionParameter {
+                    default: 5.0,
+                    min: Some(10.0),
+                    max: Some(1.0),
+                },
+            )]),
+            ..base.clone()
+        };
+        assert!(validate_action_document(&invalid_range).is_err());
+
+        let delayed_start = SpriteActionDefinition {
+            channels: BTreeMap::from([(
+                "x".to_owned(),
+                vec![SpriteActionKeyframe {
+                    at_ms: 50,
+                    value: 10.0,
+                    easing: TimelineEasing::default(),
+                    parameter: None,
+                }],
+            )]),
+            ..base.clone()
+        };
+        assert!(validate_action_document(&delayed_start)
+            .unwrap_err()
+            .to_string()
+            .contains("必须从 0ms"));
+
+        let unknown_parameter = SpriteActionDefinition {
+            channels: BTreeMap::from([(
+                "x".to_owned(),
+                vec![SpriteActionKeyframe {
+                    at_ms: 0,
+                    value: 0.0,
+                    easing: TimelineEasing::default(),
+                    parameter: Some("missing".to_owned()),
+                }],
+            )]),
+            ..base
+        };
+        assert!(validate_action_document(&unknown_parameter)
+            .unwrap_err()
+            .to_string()
+            .contains("未知参数"));
     }
 }

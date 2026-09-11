@@ -1,0 +1,92 @@
+schema_version: 2
+id: character_action_showcase
+entry: room
+nodes:
+  room:
+    type: background
+    background: bg.test_1
+    transition: cross_fade
+    duration_ms: 350
+    easing: ease_in_out
+    await: true
+    next: alli_show
+  alli_show:
+    type: sprite
+    sprite_id: alli
+    action: show
+    character: alli
+    expression: neutral
+    x: 620
+    y: 1040
+    scale: 0.78
+    opacity: 1
+    z: 10
+    duration_ms: 300
+    easing: ease_out
+    await: true
+    next: sat_show
+  sat_show:
+    type: sprite
+    sprite_id: sat
+    action: show
+    character: sat
+    expression: smile
+    x: 1320
+    y: 1040
+    scale: 0.68
+    opacity: 1
+    z: 11
+    duration_ms: 300
+    easing: ease_out
+    await: true
+    next: hello
+  hello:
+    type: say
+    speaker: alli
+    text: "角色表情、锚点和站位由角色表统一提供。"
+    mode: start
+    next: alli_smug
+  alli_smug:
+    type: sprite
+    sprite_id: alli
+    action: move
+    character: alli
+    expression: smug
+    x: 620
+    y: 1040
+    scale: 0.78
+    opacity: 1
+    z: 10
+    crossfade_ms: 180
+    duration_ms: 260
+    easing: ease_in_out
+    await: true
+    next: bounce
+  bounce:
+    type: action
+    sprite_id: alli
+    action: sprite.bounce
+    await: true
+    next: stopmotion
+  stopmotion:
+    type: sprite
+    sprite_id: prop
+    action: show
+    asset: sprite.stopmotion
+    x: 960
+    y: 300
+    scale: 2
+    opacity: 1
+    z: 2
+    duration_ms: 1
+    easing: linear
+    await: false
+    next: finish_line
+  finish_line:
+    type: say
+    speaker: sat
+    text: "上方的小图标是 28 帧差分循环素材；动作调用则会展开为普通 Timeline。"
+    mode: start
+    next: end
+  end:
+    type: end

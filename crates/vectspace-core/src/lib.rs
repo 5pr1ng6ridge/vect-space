@@ -4,6 +4,7 @@
 //! either host's resource and persistence layout.
 
 pub mod content;
+pub mod image_header;
 pub mod model;
 pub mod runtime;
 pub mod text_template;

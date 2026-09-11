@@ -611,6 +611,20 @@
               "type": "boolean",
               "default": false
             },
+            "character": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "crossfade_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
             "duration_ms": {
               "type": "integer",
               "format": "uint64",
@@ -620,6 +634,18 @@
             "easing": {
               "$ref": "#/$defs/Easing",
               "default": "ease_in_out"
+            },
+            "expression": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "flip_x": {
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "next": {
               "type": "string"
@@ -984,6 +1010,62 @@
             "type",
             "auto",
             "ctrl_fast_forward",
+            "next"
+          ]
+        },
+        {
+          "description": "Invoke a reusable relative transform action on an existing sprite.\nThe action document is resolved by the runtime against the instance's\ncurrent pose, then emitted as an ordinary Timeline cue.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpriteActionEnd"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "next": {
+              "type": "string"
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "format": "float"
+              },
+              "default": {}
+            },
+            "sprite_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "action"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "sprite_id",
+            "action",
             "next"
           ]
         },
@@ -1633,6 +1715,13 @@
         "show",
         "move",
         "hide"
+      ]
+    },
+    "SpriteActionEnd": {
+      "type": "string",
+      "enum": [
+        "hold",
+        "restore"
       ]
     },
     "TextRevealAnimation": {

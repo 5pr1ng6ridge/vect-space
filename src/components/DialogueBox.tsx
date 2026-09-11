@@ -20,7 +20,9 @@ import type {
 } from "../engine/types";
 import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import { MarkupText } from "./MarkupText";
+import { AnimatedImage } from "./AnimatedImage";
 import { useTextRevealSession } from "./useTextRevealSession";
+import type { ImageAssetSource } from "@vectspace/presentation-core/image-animation";
 
 export interface DialogueBoxHandle {
   /** Completes reveal only; it never performs a load-style visual restore. */
@@ -35,8 +37,8 @@ interface DialogueBoxProps {
   defaultCps: number;
   visible: boolean;
   disabled: boolean;
-  dialogueBoxUrl: string;
-  nameBoxUrl: string;
+  dialogueBoxSource: ImageAssetSource | null;
+  nameBoxSource: ImageAssetSource | null;
   onTypingChange(typing: boolean, cps: number): void;
   onRevealComplete(instanceKey: string): void;
   /** Per RuntimeUpdate/prompt identity. Revisited prompt ids need a new key. */
@@ -73,8 +75,8 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
       defaultCps,
       visible,
       disabled,
-      dialogueBoxUrl,
-      nameBoxUrl,
+      dialogueBoxSource,
+      nameBoxSource,
       onTypingChange,
       onRevealComplete,
       sessionKey,
@@ -243,69 +245,68 @@ export const DialogueBox = forwardRef<DialogueBoxHandle, DialogueBoxProps>(
         className={`dialogue-box${visible ? " is-visible" : " is-hidden"}`}
         ref={dialogueRootRef}
       >
-        <img
-          alt=""
-          aria-hidden="true"
-          className="dialogue-frame"
-          draggable={false}
-          height={407}
-          src={dialogueBoxUrl}
-          ref={dialogueFrameRef}
-          width={1920}
-        />
-        {page.speaker !== null && (
+        <div className="dialogue-surface" ref={dialogueFrameRef}>
+          <AnimatedImage
+            alt=""
+            className="dialogue-frame"
+            height={407}
+            paused={suspended ?? false}
+            source={dialogueBoxSource}
+            width={1920}
+          />
+          {page.speaker !== null && (
+            <span
+              className="speaker-name"
+              ref={dialogueNameplateRef}
+              style={{ color: page.name_color ?? undefined }}
+            >
+              <AnimatedImage
+                alt=""
+                height={193}
+                paused={suspended ?? false}
+                source={nameBoxSource}
+                width={364}
+              />
+              <span>{page.speaker}</span>
+            </span>
+          )}
           <span
-            className="speaker-name"
-            ref={dialogueNameplateRef}
-            style={{ color: page.name_color ?? undefined }}
+            className="dialogue-text"
+            ref={dialogueTextRef}
+            style={{ color: page.text_color ?? undefined }}
           >
-            <img
-              alt=""
-              aria-hidden="true"
-              draggable={false}
-              height={193}
-              src={nameBoxUrl}
-              width={364}
+            <MarkupText
+              measurementScale={measurementScale}
+              source={completedText}
             />
-            <span>{page.speaker}</span>
+            <MarkupText
+              animateMath
+              fontReady={fontReady}
+              instantMathReveal={complete}
+              instantReveal={complete}
+              lineSweepElapsedMs={session.state.elapsedMs}
+              mathRevealDurations={mathRevealDurations}
+              measurementScale={measurementScale}
+              onMathMetrics={handleMathMetrics}
+              onLineSweepLayoutChange={handleLineSweepLayoutChange}
+              pauseWindows={session.plan.pauses}
+              revealAnimation={revealAnimation}
+              revealClock={session.clock}
+              revealSchedule={session.plan.events.map((event) => event.atMs)}
+              source={currentText}
+              unitCps={unitCps}
+              visibleCount={visibleCount}
+            />
           </span>
-        )}
-        <span
-          className="dialogue-text"
-          ref={dialogueTextRef}
-          style={{ color: page.text_color ?? undefined }}
-        >
-          <MarkupText
-            measurementScale={measurementScale}
-            source={completedText}
-          />
-          <MarkupText
-            animateMath
-            fontReady={fontReady}
-            instantMathReveal={complete}
-            instantReveal={complete}
-            lineSweepElapsedMs={session.state.elapsedMs}
-            mathRevealDurations={mathRevealDurations}
-            measurementScale={measurementScale}
-            onMathMetrics={handleMathMetrics}
-            onLineSweepLayoutChange={handleLineSweepLayoutChange}
-            pauseWindows={session.plan.pauses}
-            revealAnimation={revealAnimation}
-            revealClock={session.clock}
-            revealSchedule={session.plan.events.map((event) => event.atMs)}
-            source={currentText}
-            unitCps={unitCps}
-            visibleCount={visibleCount}
-          />
-        </span>
-        {prompt !== null && (
-          <span
-            className={`advance-indicator${complete ? " is-ready" : ""}`}
-            ref={dialogueIndicatorRef}
-          >
-            ◆
-          </span>
-        )}
+          {prompt !== null && (
+            <span
+              className={`advance-indicator${complete ? " is-ready" : ""}`}
+              ref={dialogueIndicatorRef}
+            >
+              ◆
+            </span>
+          )}
+        </div>
       </section>
     );
   },

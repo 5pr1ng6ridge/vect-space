@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { DialogueBox, type DialogueBoxHandle } from "./DialogueBox";
+import { staticImageSource } from "./useAnimatedImage";
 
 const page = {
   page_id: "realization",
@@ -22,8 +23,8 @@ describe("DialogueBox continued pages", () => {
     const props = {
       defaultCps: 30,
       initialCps: 30,
-      dialogueBoxUrl: "dialogue.png",
-      nameBoxUrl: "name.png",
+      dialogueBoxSource: staticImageSource("dialogue.png"),
+      nameBoxSource: staticImageSource("name.png"),
       disabled: false,
       visible: true,
       onRevealComplete: onComplete,
@@ -74,10 +75,10 @@ describe("DialogueBox continued pages", () => {
     const html = renderToStaticMarkup(
       <DialogueBox
         defaultCps={30}
-        dialogueBoxUrl="dialogue.png"
+        dialogueBoxSource={staticImageSource("dialogue.png")}
         disabled={false}
         initialCps={30}
-        nameBoxUrl="name.png"
+        nameBoxSource={staticImageSource("name.png")}
         onRevealComplete={vi.fn()}
         onTypingChange={vi.fn()}
         page={page}
@@ -105,10 +106,10 @@ describe("DialogueBox continued pages", () => {
     const html = renderToStaticMarkup(
       <DialogueBox
         defaultCps={30}
-        dialogueBoxUrl="dialogue.png"
+        dialogueBoxSource={staticImageSource("dialogue.png")}
         disabled
         initialCps={30}
-        nameBoxUrl="name.png"
+        nameBoxSource={staticImageSource("name.png")}
         onRevealComplete={vi.fn()}
         onTypingChange={vi.fn()}
         page={{ ...page, segments: ["等等……"] }}
@@ -120,5 +121,73 @@ describe("DialogueBox continued pages", () => {
     );
     expect(html).toContain("等等……");
     expect(html).not.toContain("advance-indicator");
+  });
+
+  it("keeps the frame and all dialogue content on one motion surface", () => {
+    const { container } = render(
+      <DialogueBox
+        defaultCps={30}
+        dialogueBoxSource={staticImageSource("dialogue.png")}
+        disabled
+        initialCps={30}
+        nameBoxSource={staticImageSource("name.png")}
+        onRevealComplete={vi.fn()}
+        onTypingChange={vi.fn()}
+        page={page}
+        prompt={{
+          kind: "dialogue",
+          prompt_id: "surface",
+          speaker: "爱丽丝",
+          speaker_id: "alice",
+          name_color: "#80D8FF",
+          text_color: "#FFFFFF",
+          text: "正文",
+          is_read: true,
+        }}
+        ref={createRef<DialogueBoxHandle>()}
+        revealImmediately
+        visible
+      />,
+    );
+    const surface = container.querySelector(".dialogue-surface");
+    expect(surface).not.toBeNull();
+    expect(surface?.querySelector(".dialogue-frame")).not.toBeNull();
+    expect(surface?.querySelector(".speaker-name")).not.toBeNull();
+    expect(surface?.querySelector(".dialogue-text")).not.toBeNull();
+    expect(surface?.querySelector(".advance-indicator")).not.toBeNull();
+  });
+
+  it("retains the hidden state on the shared surface", () => {
+    const { container } = render(
+      <DialogueBox
+        defaultCps={30}
+        dialogueBoxSource={staticImageSource("dialogue.png")}
+        disabled
+        initialCps={30}
+        nameBoxSource={staticImageSource("name.png")}
+        onRevealComplete={vi.fn()}
+        onTypingChange={vi.fn()}
+        page={page}
+        prompt={{
+          kind: "dialogue",
+          prompt_id: "hidden-surface",
+          speaker: null,
+          speaker_id: null,
+          name_color: null,
+          text_color: null,
+          text: "隐藏文本",
+          is_read: true,
+        }}
+        ref={createRef<DialogueBoxHandle>()}
+        revealImmediately
+        visible={false}
+      />,
+    );
+    expect(container.querySelector(".dialogue-box")).toHaveClass("is-hidden");
+    expect(container.querySelector(".dialogue-surface")).not.toBeNull();
+    expect(
+      container.querySelector<HTMLElement>(".dialogue-text .markup-unit")?.style
+        .visibility,
+    ).toBe("inherit");
   });
 });

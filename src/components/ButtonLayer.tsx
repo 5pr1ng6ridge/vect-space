@@ -13,11 +13,18 @@ import {
   type RuntimeSnapshot,
 } from "@vectspace/presentation-core/types";
 import { evaluateChannel } from "@vectspace/presentation-core/timeline";
+import {
+  resolveImageAsset,
+  type AnimationMap,
+} from "@vectspace/presentation-core/image-animation";
 import type { AssetUrlMap } from "../engine/types";
+import { AnimatedImage } from "./AnimatedImage";
 
 interface ButtonLayerProps {
   snapshot: RuntimeSnapshot;
   assets: AssetUrlMap;
+  /** Frame lists for animated button artwork.  Defaults to static-only. */
+  animations?: AnimationMap;
   disabled?: boolean;
   paused?: boolean;
   playbackRate?: number;
@@ -29,6 +36,7 @@ interface ButtonLayerProps {
 export function ButtonLayer({
   snapshot,
   assets,
+  animations = {},
   disabled = false,
   paused = false,
   playbackRate = 1,
@@ -84,6 +92,7 @@ export function ButtonLayer({
     <div className="button-layer" aria-label="剧情按钮">
       {buttons.map((button) => (
         <SceneButton
+          animations={animations}
           assets={assets}
           button={button}
           disabled={disabled}
@@ -136,6 +145,7 @@ function applyTimelineButton(
 function SceneButton({
   button,
   assets,
+  animations,
   disabled,
   onClick,
   paused,
@@ -144,6 +154,7 @@ function SceneButton({
 }: {
   button: ButtonSnapshot;
   assets: AssetUrlMap;
+  animations: AnimationMap;
   disabled: boolean;
   onClick(instanceId: string): void;
   paused: boolean;
@@ -251,10 +262,11 @@ function SceneButton({
     transform: `translate3d(${x}px, ${y}px, 0) rotate(${rotation}deg) scale(${scaleX}, ${scaleY})`,
     transformOrigin: "center",
   };
-  const normalUrl =
-    button.normal === undefined || button.normal === null
-      ? undefined
-      : assets[button.normal];
+  const normalSource = resolveImageAsset(
+    button.normal ?? "",
+    assets,
+    animations,
+  );
   const stateId =
     state === "normal"
       ? button.normal
@@ -265,8 +277,10 @@ function SceneButton({
         : state === "hover"
           ? button.hover
           : button.pressed;
-  const stateUrl =
-    stateId === undefined || stateId === null ? undefined : assets[stateId];
+  // Switching state resolves a different asset id, which starts that state's
+  // animation from its first frame; a same-state re-render keeps the player
+  // and therefore the current frame.
+  const stateSource = resolveImageAsset(stateId ?? "", assets, animations);
   const overlay = button.asset_mode === "overlay" && state !== "normal";
 
   const handlePointerDown = (
@@ -347,27 +361,30 @@ function SceneButton({
       type="button"
     >
       <span className="scene-button-visual" style={visualStyle}>
-        {normalUrl !== undefined && overlay && (
-          <img
+        {normalSource !== undefined && overlay && (
+          <AnimatedImage
             alt=""
             className="scene-button-image"
-            src={normalUrl}
+            paused={paused}
+            source={normalSource}
             style={{ objectFit: cssFit(button.fit) }}
           />
         )}
-        {!overlay && stateUrl !== undefined && (
-          <img
+        {!overlay && stateSource !== undefined && (
+          <AnimatedImage
             alt=""
             className="scene-button-image"
-            src={stateUrl}
+            paused={paused}
+            source={stateSource}
             style={{ objectFit: cssFit(button.fit) }}
           />
         )}
-        {overlay && stateUrl !== undefined && (
-          <img
+        {overlay && stateSource !== undefined && (
+          <AnimatedImage
             alt=""
             className="scene-button-image"
-            src={stateUrl}
+            paused={paused}
+            source={stateSource}
             style={{ objectFit: cssFit(button.fit) }}
           />
         )}

@@ -192,12 +192,6 @@ function encodeProjectScalars(request: SaveProjectRequest): void {
   for (const scene of request.scenes) {
     for (const node of Object.values(scene.definition.nodes)) encodeNode(node);
   }
-  if (request.story_flow !== null && request.story_flow !== undefined) {
-    for (const node of Object.values(request.story_flow.definition.nodes)) {
-      if (node.reveal?.mode === "condition")
-        encodeCondition(node.reveal.condition);
-    }
-  }
   if (request.chapter_map !== null && request.chapter_map !== undefined) {
     for (const hotspot of request.chapter_map.definition.hotspots) {
       for (const [id, value] of Object.entries(hotspot.variable_overrides)) {

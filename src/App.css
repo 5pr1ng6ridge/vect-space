@@ -430,6 +430,13 @@ button:disabled {
   pointer-events: none;
 }
 
+.dialogue-surface {
+  position: absolute;
+  inset: 0;
+  width: 1920px;
+  height: 387px;
+}
+
 .dialogue-frame {
   position: absolute;
   inset: 0;
@@ -487,7 +494,8 @@ button:disabled {
 }
 
 .markup-unit {
-  visibility: visible;
+  /* Let hidden dialogue/long-text surfaces hide revealed units too. */
+  visibility: inherit;
 }
 
 .character-unit {
@@ -1165,136 +1173,6 @@ button:disabled {
   text-align: center;
   margin: auto;
 }
-.story-flow-page {
-  position: absolute;
-  inset: 0;
-  z-index: 60;
-  background:
-    radial-gradient(circle at 50% 50%, rgb(27 47 69 / 38%), transparent 55%),
-    #060810;
-  color: #eef4ff;
-}
-.story-flow-back {
-  position: absolute;
-  z-index: 3;
-  top: 36px;
-  left: 42px;
-  min-width: 132px;
-  padding: 12px 18px;
-  border: 1px solid rgb(142 170 207 / 45%);
-  border-radius: 4px;
-  background: rgb(9 14 24 / 82%);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
-  cursor: pointer;
-}
-.story-flow-canvas {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  cursor: grab;
-  outline: none;
-  touch-action: none;
-}
-.story-flow-canvas:active {
-  cursor: grabbing;
-}
-.story-flow-world {
-  position: relative;
-  width: 1px;
-  height: 1px;
-  will-change: transform;
-}
-.story-flow-edges {
-  position: absolute;
-  overflow: visible;
-  width: 1px;
-  height: 1px;
-  pointer-events: none;
-}
-.story-flow-edges line {
-  stroke: #7288ae;
-  stroke-width: 2;
-}
-.story-flow-edges .story-flow-main-axis {
-  stroke: rgb(119 151 194 / 38%);
-  stroke-width: 4;
-}
-.story-flow-edges .main-edge line {
-  stroke: #8da9d2;
-  stroke-width: 3;
-}
-.story-flow-edges .branch-edge line {
-  stroke: #667d9f;
-  stroke-width: 2;
-}
-.story-flow-edges path {
-  fill: #7288ae;
-}
-.story-flow-edges text {
-  fill: #b9c8e6;
-  font-size: 16px;
-  text-anchor: middle;
-  paint-order: stroke;
-  stroke: #080a10;
-  stroke-width: 5px;
-}
-.story-flow-node {
-  position: absolute;
-  width: 240px;
-  min-height: 92px;
-  transform: translate(-50%, -50%);
-  box-sizing: border-box;
-  padding: 18px;
-  border: 1px solid #596a88;
-  background: #192133;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
-  display: grid;
-  gap: 8px;
-  pointer-events: none;
-}
-.story-flow-node.main-node {
-  border-width: 2px;
-  box-shadow:
-    0 0 0 7px rgb(9 15 25 / 78%),
-    0 14px 34px rgb(0 0 0 / 42%);
-}
-.story-flow-node.branch-node {
-  width: 220px;
-  min-height: 82px;
-  opacity: 0.94;
-}
-.story-flow-node.completed {
-  border-color: #71d2b3;
-  background: #18352f;
-}
-.story-flow-node strong {
-  font-size: 20px;
-}
-.story-flow-node span {
-  color: #aebbd4;
-  font-size: 14px;
-}
-.story-flow-help {
-  position: absolute;
-  z-index: 2;
-  right: 42px;
-  bottom: 30px;
-  margin: 0;
-  color: rgb(185 200 230 / 70%);
-  font-size: 15px;
-  letter-spacing: 0.06em;
-  pointer-events: none;
-}
-.story-flow-empty {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  margin: 0;
-  color: #8e9ab0;
-  font-size: 22px;
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

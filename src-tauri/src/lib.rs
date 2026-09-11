@@ -14,7 +14,7 @@ use vectspace_core::{
     content::ContentCatalog,
     model::{
         AdvanceSource, ChapterMapSnapshot, PresentationOutcome, ResolvedAsset, RuntimeUpdate,
-        SaveSlotRequest, SaveSlotSummary, SceneNode, Settings, StoryFlowSnapshot,
+        SaveSlotRequest, SaveSlotSummary, SceneNode, Settings,
     },
     runtime::{self, RuntimeEngine},
 };
@@ -192,7 +192,6 @@ fn bootstrap(state: State<'_, EngineState>) -> Result<WireBootstrapPayload, Wire
         update: wire_update(&state, payload.update, WireSessionMode::Story),
         asset_ids: payload.asset_ids,
         content_version: payload.content_version,
-        story_flow_available: payload.story_flow_available,
         chapter_map_available: payload.chapter_map_available,
         default_font: payload.default_font,
     })
@@ -375,17 +374,6 @@ fn clear_dialogue_history(
         *runtime = candidate;
     }
     Ok(())
-}
-
-#[tauri::command]
-fn get_story_flow(
-    state: State<'_, EngineState>,
-) -> Result<Option<StoryFlowSnapshot>, WireCommandError> {
-    let _gate = state.session_gate()?;
-    let runtime = state.runtime()?;
-    runtime
-        .story_flow(&state.content)
-        .map_err(WireCommandError::from)
 }
 
 #[tauri::command]
@@ -715,7 +703,6 @@ pub fn run() {
             get_snapshot,
             get_dialogue_history,
             clear_dialogue_history,
-            get_story_flow,
             get_chapter_map,
             start_scene_replay,
             exit_scene_replay,

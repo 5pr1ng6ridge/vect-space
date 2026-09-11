@@ -9,6 +9,7 @@ import {
 
 import { PresentationController } from "../engine/presentation";
 import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import type {
   AssetUrlMap,
   PresentationOutcome,
@@ -29,6 +30,7 @@ export interface SceneCanvasHandle {
 interface SceneCanvasProps {
   update: RuntimeUpdate | null;
   assets: AssetUrlMap;
+  animations: AnimationMap;
   settings: Settings;
   typingSfxActive: boolean;
   typingSfxCps: number;
@@ -51,6 +53,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
     {
       update,
       assets,
+      animations,
       settings,
       typingSfxActive,
       typingSfxCps,
@@ -148,6 +151,13 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
     useEffect(() => {
       controller?.setPaused(paused);
     }, [controller, paused]);
+
+    useEffect(() => {
+      // Frame lists are replaced whenever the host re-resolves assets.  The
+      // controller keeps each instance's loop position unless its asset
+      // actually changed, so this never restarts a running animation.
+      controller?.setAnimationAssets(animations);
+    }, [animations, controller]);
 
     useEffect(() => {
       if (controller === null) {

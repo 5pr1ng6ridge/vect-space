@@ -11,9 +11,11 @@ use crate::{
         LongTextPageSnapshot, LongTextStepSnapshot, LoopingAudioSnapshot, MutationValue,
         PlaybackAutoMode, PlaybackSnapshot, PresentationCue, PresentationCueKind,
         PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate,
-        ScalarValue, SceneNode, SpriteAction, SpriteSnapshot, StoryFlowReveal, StoryFlowSnapshot,
-        StoryLocation, TimelineChannels, TimelineTrack, UiMotionPreset, UiMotionSlot, ValueOperand,
-        VariableMap, VariableOperation, VariableScope, VariableType, WorldSnapshot,
+        ScalarValue, SceneNode, SpriteAction, SpriteActionDefinition, SpriteActionEnd,
+        ChapterMapReveal, SpriteSnapshot, StoryLocation, TimelineChannels,
+        TimelineEasing, TimelineKeyframe, TimelineKeyframeValue, TimelineTrack, UiMotionPreset,
+        UiMotionSlot, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
+        WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
@@ -438,7 +440,6 @@ impl RuntimeEngine {
             update,
             asset_ids: content.asset_ids(),
             content_version: content.manifest.content_version.clone(),
-            story_flow_available: content.story_flow.is_some(),
             chapter_map_available: content.chapter_map.is_some(),
             default_font: content.manifest.default_font.clone().or_else(|| {
                 content
@@ -838,53 +839,6 @@ impl RuntimeEngine {
         self.dialogue_history.clear();
     }
 
-    pub fn story_flow(
-        &self,
-        content: &ContentCatalog,
-    ) -> Result<Option<StoryFlowSnapshot>, RuntimeError> {
-        let Some(flow) = &content.story_flow else {
-            return Ok(None);
-        };
-        let mut nodes = Vec::new();
-        for (scene_id, node) in &flow.nodes {
-            let completed = self.completed_scenes.contains(scene_id);
-            let visible = match &node.reveal {
-                StoryFlowReveal::Completed => completed,
-                StoryFlowReveal::Always => true,
-                StoryFlowReveal::Condition { condition } => {
-                    self.evaluate_condition(content, condition)?
-                }
-            };
-            if visible {
-                nodes.push(crate::model::VisibleStoryFlowNode {
-                    scene_id: scene_id.clone(),
-                    title: node.title.clone(),
-                    x: node.x,
-                    y: node.y,
-                    completed,
-                });
-            }
-        }
-        let visible = nodes
-            .iter()
-            .map(|node| node.scene_id.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        let edges = flow
-            .edges
-            .iter()
-            .filter(|edge| {
-                visible.contains(edge.from.as_str()) && visible.contains(edge.to.as_str())
-            })
-            .map(|edge| crate::model::VisibleStoryFlowEdge {
-                id: edge.id.clone(),
-                from: edge.from.clone(),
-                to: edge.to.clone(),
-                label: edge.label.clone(),
-            })
-            .collect();
-        Ok(Some(StoryFlowSnapshot { nodes, edges }))
-    }
-
     /// Return only the revealed part of the chapter room.  The content map is
     /// authored independently from story jumps; profile conditions are
     /// evaluated here so hidden chapters never reach the WebView.
@@ -899,9 +853,9 @@ impl RuntimeEngine {
         for hotspot in &map.hotspots {
             let completed = self.completed_scenes.contains(&hotspot.scene_id);
             let visible = match &hotspot.reveal {
-                StoryFlowReveal::Completed => completed,
-                StoryFlowReveal::Always => true,
-                StoryFlowReveal::Condition { condition } => {
+                ChapterMapReveal::Completed => completed,
+                ChapterMapReveal::Always => true,
+                ChapterMapReveal::Condition { condition } => {
                     self.evaluate_condition(content, condition)?
                 }
             };
@@ -1092,6 +1046,10 @@ impl RuntimeEngine {
                     sprite_id,
                     action,
                     asset,
+                    character,
+                    expression,
+                    flip_x,
+                    crossfade_ms,
                     x,
                     y,
                     scale,
@@ -1104,44 +1062,86 @@ impl RuntimeEngine {
                 } => {
                     let from = self.snapshot.world.sprites.get(&sprite_id).cloned();
                     let to = match action {
-                        SpriteAction::Show => Some(SpriteSnapshot {
-                            asset: asset.ok_or_else(|| {
-                                RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: show 缺少 asset"
-                                ))
-                            })?,
-                            x: x.unwrap_or(960.0),
-                            y: y.unwrap_or(1080.0),
-                            scale: scale.unwrap_or(1.0),
-                            scale_x: 1.0,
-                            scale_y: 1.0,
-                            rotation_deg: 0.0,
-                            opacity: opacity.unwrap_or(1.0),
-                            z: z.unwrap_or(0),
-                        }),
+                        SpriteAction::Show => {
+                            let (
+                                resolved_asset,
+                                offset_x,
+                                offset_y,
+                                expression_scale,
+                                anchor_x,
+                                anchor_y,
+                            ) = resolve_character_asset(
+                                content,
+                                character.as_deref(),
+                                expression.as_deref(),
+                                asset,
+                                &scene_id,
+                                &node_id,
+                            )?;
+                            Some(SpriteSnapshot {
+                                asset: resolved_asset.ok_or_else(|| {
+                                    RuntimeError::Content(format!(
+                                        "{scene_id}/{node_id}: show 缺少 asset 或有效表情"
+                                    ))
+                                })?,
+                                x: x.unwrap_or(960.0) + offset_x,
+                                y: y.unwrap_or(1080.0) + offset_y,
+                                scale: scale.unwrap_or(1.0) * expression_scale,
+                                scale_x: 1.0,
+                                scale_y: 1.0,
+                                rotation_deg: 0.0,
+                                flip_x: flip_x.unwrap_or(false),
+                                anchor_x,
+                                anchor_y,
+                                opacity: opacity.unwrap_or(1.0),
+                                z: z.unwrap_or(0),
+                            })
+                        }
                         SpriteAction::Move => {
                             let mut target = from.clone().ok_or_else(|| {
                                 RuntimeError::Content(format!(
                                     "{scene_id}/{node_id}: 无法移动不存在的立绘 {sprite_id}"
                                 ))
                             })?;
-                            if let Some(value) = asset {
+                            let (
+                                resolved_asset,
+                                offset_x,
+                                offset_y,
+                                expression_scale,
+                                anchor_x,
+                                anchor_y,
+                            ) = resolve_character_asset(
+                                content,
+                                character.as_deref(),
+                                expression.as_deref(),
+                                asset,
+                                &scene_id,
+                                &node_id,
+                            )?;
+                            if let Some(value) = resolved_asset {
                                 target.asset = value;
                             }
                             if let Some(value) = x {
-                                target.x = value;
+                                target.x = value + offset_x;
                             }
                             if let Some(value) = y {
-                                target.y = value;
+                                target.y = value + offset_y;
                             }
                             if let Some(value) = scale {
-                                target.scale = value;
+                                target.scale = value * expression_scale;
+                            }
+                            if character.is_some() || expression.is_some() {
+                                target.anchor_x = anchor_x;
+                                target.anchor_y = anchor_y;
                             }
                             if let Some(value) = opacity {
                                 target.opacity = value;
                             }
                             if let Some(value) = z {
                                 target.z = value;
+                            }
+                            if let Some(value) = flip_x {
+                                target.flip_x = value;
                             }
                             Some(target)
                         }
@@ -1155,6 +1155,17 @@ impl RuntimeEngine {
                     } else {
                         self.snapshot.world.sprites.remove(&sprite_id);
                     }
+                    let crossfade_ms = crossfade_ms.or_else(|| {
+                        if !(character.is_some() || expression.is_some()) {
+                            return None;
+                        }
+                        match (from.as_ref(), to.as_ref()) {
+                            (Some(previous), Some(next)) if previous.asset != next.asset => {
+                                Some(150)
+                            }
+                            _ => None,
+                        }
+                    });
                     self.snapshot.location.node_id = next;
                     cues.push(self.cue(
                         gate(await_completion),
@@ -1164,6 +1175,7 @@ impl RuntimeEngine {
                             to,
                             duration_ms,
                             easing,
+                            crossfade_ms,
                         },
                     ));
                     if await_completion {
@@ -1509,6 +1521,63 @@ impl RuntimeEngine {
                         ctrl_fast_forward,
                     };
                     self.snapshot.location.node_id = next;
+                }
+                SceneNode::Action {
+                    sprite_id,
+                    action,
+                    duration_ms,
+                    await_completion,
+                    parameters,
+                    end,
+                    next,
+                } => {
+                    let base = self
+                        .snapshot
+                        .world
+                        .sprites
+                        .get(&sprite_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 动作引用了不存在的立绘实例 {sprite_id}"
+                            ))
+                        })?;
+                    let definition = content.actions.get(&action).ok_or_else(|| {
+                        RuntimeError::Content(format!(
+                            "{scene_id}/{node_id}: 未知立绘动作 {action}"
+                        ))
+                    })?;
+                    let duration = duration_ms.unwrap_or(definition.duration_ms);
+                    let tracks = expand_sprite_action(
+                        &sprite_id,
+                        definition,
+                        &base,
+                        duration,
+                        end.unwrap_or(definition.end),
+                        &parameters,
+                    )
+                    .map_err(|message| {
+                        RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
+                    })?;
+                    apply_timeline_final_state(&mut self.snapshot, &tracks).map_err(|message| {
+                        RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
+                    })?;
+                    self.snapshot.location.node_id = next;
+                    cues.push(self.cue(
+                        gate(await_completion),
+                        PresentationCueKind::Timeline {
+                            presentation_id: format!("action/{scene_id}/{node_id}/{action}"),
+                            duration_ms: duration,
+                            skippable: false,
+                            is_seen: false,
+                            button_bases: Default::default(),
+                            tracks,
+                            events: Vec::new(),
+                        },
+                    ));
+                    if await_completion {
+                        return Ok(cues);
+                    }
                 }
                 SceneNode::Jump { scene, target } => {
                     let crosses_scene = scene
@@ -2244,6 +2313,56 @@ fn gate(await_completion: bool) -> CueGate {
     }
 }
 
+type CharacterAssetResolution = (Option<String>, f32, f32, f32, f32, f32);
+
+fn resolve_character_asset(
+    content: &ContentCatalog,
+    character_id: Option<&str>,
+    expression_id: Option<&str>,
+    explicit_asset: Option<String>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<CharacterAssetResolution, RuntimeError> {
+    let Some(character_id) = character_id else {
+        if expression_id.is_some() {
+            return Err(RuntimeError::Content(format!(
+                "{scene_id}/{node_id}: expression 必须与 character 一起使用"
+            )));
+        }
+        return Ok((explicit_asset, 0.0, 0.0, 1.0, 0.5, 1.0));
+    };
+    let character = content
+        .manifest
+        .characters
+        .get(character_id)
+        .ok_or_else(|| RuntimeError::Content(format!("未知角色 {character_id}")))?;
+    let selected_expression = expression_id
+        .or(character.default_expression.as_deref())
+        .map(|id| {
+            character
+                .expressions
+                .get(id)
+                .ok_or_else(|| RuntimeError::Content(format!("未知角色表情 {character_id}/{id}")))
+        })
+        .transpose()?;
+    if explicit_asset.is_none() && selected_expression.is_none() {
+        return Err(RuntimeError::Content(format!(
+            "{scene_id}/{node_id}: 角色 {character_id} 没有默认表情"
+        )));
+    }
+    if let Some(expression) = selected_expression {
+        return Ok((
+            Some(explicit_asset.unwrap_or_else(|| expression.asset.clone())),
+            expression.offset_x,
+            expression.offset_y,
+            character.default_scale * expression.scale,
+            expression.anchor_x,
+            expression.anchor_y,
+        ));
+    }
+    Ok((explicit_asset, 0.0, 0.0, character.default_scale, 0.5, 1.0))
+}
+
 fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> {
     let local = |next: &str| StoryLocation {
         scene_id: scene_id.to_owned(),
@@ -2258,6 +2377,7 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::LongTextControl { next, .. }
         | SceneNode::Set { next, .. }
         | SceneNode::Playback { next, .. }
+        | SceneNode::Action { next, .. }
         | SceneNode::Wait { next, .. }
         | SceneNode::Bgm { next, .. }
         | SceneNode::Sfx { next, .. }
@@ -2282,6 +2402,154 @@ fn long_text_document_id(scene_id: &str, node_id: &str, document: Option<&str>) 
     match document {
         Some(document) => format!("{scene_id}/{document}"),
         None => format!("{scene_id}/{node_id}"),
+    }
+}
+
+/// Expand a reusable relative action into the absolute Timeline representation
+/// understood by both game and editor presentation layers.  Keeping this
+/// conversion in Rust means an action always uses the exact same starting pose
+/// and parameter validation as the authoritative runtime.
+fn expand_sprite_action(
+    sprite_id: &str,
+    action: &SpriteActionDefinition,
+    base: &SpriteSnapshot,
+    duration_ms: u64,
+    end: SpriteActionEnd,
+    overrides: &std::collections::BTreeMap<String, f32>,
+) -> Result<Vec<TimelineTrack>, String> {
+    if duration_ms == 0 {
+        return Err("动作时长必须大于 0".to_owned());
+    }
+    if overrides
+        .keys()
+        .any(|parameter| !action.parameters.contains_key(parameter))
+    {
+        let unknown = overrides
+            .keys()
+            .find(|parameter| !action.parameters.contains_key(*parameter))
+            .expect("checked above");
+        return Err(format!("动作参数未声明: {unknown}"));
+    }
+    for (parameter_id, parameter) in &action.parameters {
+        let value = overrides
+            .get(parameter_id)
+            .copied()
+            .unwrap_or(parameter.default);
+        if !value.is_finite()
+            || parameter.min.is_some_and(|min| value < min)
+            || parameter.max.is_some_and(|max| value > max)
+        {
+            return Err(format!("动作参数 {parameter_id} 超出声明范围"));
+        }
+    }
+
+    let mut channels = TimelineChannels::new();
+    for (channel, keyframes) in &action.channels {
+        let mut expanded =
+            Vec::with_capacity(keyframes.len() + usize::from(end == SpriteActionEnd::Restore));
+        let mut previous_at = None;
+        for keyframe in keyframes {
+            let at_ms = scale_action_time(keyframe.at_ms, action.duration_ms, duration_ms)?;
+            if previous_at.is_some_and(|previous| at_ms <= previous) {
+                return Err(format!("动作通道 {channel} 的关键帧在目标时长下发生重叠"));
+            }
+            let relative = keyframe
+                .parameter
+                .as_ref()
+                .and_then(|parameter| overrides.get(parameter).copied())
+                .or_else(|| {
+                    keyframe.parameter.as_ref().and_then(|parameter| {
+                        action.parameters.get(parameter).map(|value| value.default)
+                    })
+                })
+                .unwrap_or(keyframe.value);
+            if !relative.is_finite() {
+                return Err(format!("动作通道 {channel} 的值必须是有限数"));
+            }
+            let absolute = action_channel_value(channel, relative, base)?;
+            expanded.push(TimelineKeyframe {
+                at_ms,
+                value: TimelineKeyframeValue::Number(absolute),
+                easing: keyframe.easing.clone(),
+            });
+            previous_at = Some(at_ms);
+        }
+        if end == SpriteActionEnd::Restore {
+            let restore = action_base_channel_value(channel, base)?;
+            let restore_frame = TimelineKeyframe {
+                at_ms: duration_ms,
+                value: TimelineKeyframeValue::Number(restore),
+                easing: TimelineEasing::default(),
+            };
+            if expanded
+                .last()
+                .is_some_and(|frame| frame.at_ms == duration_ms)
+            {
+                *expanded.last_mut().expect("last exists") = restore_frame;
+            } else {
+                expanded.push(restore_frame);
+            }
+        }
+        channels.insert(channel.clone(), expanded);
+    }
+    if channels.is_empty() {
+        return Err("动作至少需要一个变换通道".to_owned());
+    }
+    Ok(vec![TimelineTrack::Sprite {
+        sprite_id: sprite_id.to_owned(),
+        asset: None,
+        remove_at_end: false,
+        channels,
+    }])
+}
+
+fn scale_action_time(
+    at_ms: u64,
+    source_duration: u64,
+    target_duration: u64,
+) -> Result<u64, String> {
+    if source_duration == 0 {
+        return Err("动作定义时长必须大于 0".to_owned());
+    }
+    let scaled = (u128::from(at_ms) * u128::from(target_duration)
+        + u128::from(source_duration / 2))
+        / u128::from(source_duration);
+    u64::try_from(scaled).map_err(|_| "动作关键帧时间溢出".to_owned())
+}
+
+fn action_channel_value(
+    channel: &str,
+    relative: f32,
+    base: &SpriteSnapshot,
+) -> Result<f32, String> {
+    let base_value = action_base_channel_value(channel, base)?;
+    let value = match channel {
+        "x" | "y" | "rotation_deg" => base_value + relative,
+        "scale" | "scale_x" | "scale_y" | "opacity" => base_value * relative,
+        _ => return Err(format!("动作不支持通道 {channel}")),
+    };
+    if !value.is_finite() {
+        return Err(format!("动作通道 {channel} 的结果必须是有限数"));
+    }
+    if matches!(channel, "scale" | "scale_x" | "scale_y") && value <= 0.0 {
+        return Err(format!("动作通道 {channel} 的结果必须为正数"));
+    }
+    if channel == "opacity" && !(0.0..=1.0).contains(&value) {
+        return Err("动作 opacity 结果必须在 0 到 1 之间".to_owned());
+    }
+    Ok(value)
+}
+
+fn action_base_channel_value(channel: &str, base: &SpriteSnapshot) -> Result<f32, String> {
+    match channel {
+        "x" => Ok(base.x),
+        "y" => Ok(base.y),
+        "scale" => Ok(base.scale),
+        "scale_x" => Ok(base.scale_x),
+        "scale_y" => Ok(base.scale_y),
+        "rotation_deg" => Ok(base.rotation_deg),
+        "opacity" => Ok(base.opacity),
+        _ => Err(format!("动作不支持通道 {channel}")),
     }
 }
 
@@ -2375,6 +2643,9 @@ fn apply_timeline_final_state(
                             scale_x: 1.0,
                             scale_y: 1.0,
                             rotation_deg: 0.0,
+                            flip_x: false,
+                            anchor_x: 0.5,
+                            anchor_y: 1.0,
                             opacity: 1.0,
                             z: 0,
                         })
@@ -3119,8 +3390,9 @@ mod tests {
     use super::*;
     use crate::model::{
         ButtonAssetFit, ButtonAssetMode, ButtonClickAction, ButtonPostAction, ButtonTemplate,
-        ChapterMapDefinition, ChapterMapHotspot, LiteralOperand, SceneDefinition, VariableOperand,
-        VariableOperation,
+        ChapterMapDefinition, ChapterMapHotspot, LiteralOperand, SceneDefinition,
+        SpriteActionDefinition, SpriteActionEnd, SpriteActionKeyframe, TimelineEasing,
+        TimelineEasingPreset, VariableOperand, VariableOperation,
     };
 
     #[derive(serde::Deserialize)]
@@ -3167,7 +3439,7 @@ mod tests {
                     height: 160,
                     z: 1,
                     asset: None,
-                    reveal: StoryFlowReveal::Completed,
+                    reveal: ChapterMapReveal::Completed,
                     variable_overrides: VariableMap::new(),
                 },
                 ChapterMapHotspot {
@@ -3181,7 +3453,7 @@ mod tests {
                     height: 160,
                     z: 1,
                     asset: None,
-                    reveal: StoryFlowReveal::Always,
+                    reveal: ChapterMapReveal::Always,
                     variable_overrides: VariableMap::new(),
                 },
             ],
@@ -3196,10 +3468,318 @@ mod tests {
                 .cloned()
                 .zip(base.ui_motions.values().cloned())
                 .collect(),
-            base.story_flow.clone(),
             Some(map),
         )
         .expect("fixture map should be valid")
+    }
+
+    #[test]
+    fn sprite_action_expands_relative_channels_and_parameters() {
+        let mut content = catalog();
+        content.actions.insert(
+            "sprite.bob".to_owned(),
+            SpriteActionDefinition {
+                schema_version: 1,
+                id: "sprite.bob".to_owned(),
+                name: "轻轻跳动".to_owned(),
+                duration_ms: 100,
+                channels: BTreeMap::from([
+                    (
+                        "x".to_owned(),
+                        vec![
+                            SpriteActionKeyframe {
+                                at_ms: 0,
+                                value: 0.0,
+                                easing: TimelineEasing::Preset(TimelineEasingPreset::Linear),
+                                parameter: None,
+                            },
+                            SpriteActionKeyframe {
+                                at_ms: 100,
+                                value: 10.0,
+                                easing: TimelineEasing::Preset(TimelineEasingPreset::EaseOut),
+                                parameter: Some("distance".to_owned()),
+                            },
+                        ],
+                    ),
+                    (
+                        "scale".to_owned(),
+                        vec![
+                            SpriteActionKeyframe {
+                                at_ms: 0,
+                                value: 1.0,
+                                easing: TimelineEasing::Preset(TimelineEasingPreset::Linear),
+                                parameter: None,
+                            },
+                            SpriteActionKeyframe {
+                                at_ms: 100,
+                                value: 1.2,
+                                easing: TimelineEasing::Preset(TimelineEasingPreset::EaseInOut),
+                                parameter: None,
+                            },
+                        ],
+                    ),
+                ]),
+                parameters: BTreeMap::from([(
+                    "distance".to_owned(),
+                    crate::model::SpriteActionParameter {
+                        default: 10.0,
+                        min: Some(0.0),
+                        max: Some(50.0),
+                    },
+                )]),
+                end: SpriteActionEnd::Hold,
+            },
+        );
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "show_action".to_owned();
+        scene.nodes = BTreeMap::from([
+            (
+                "show_action".to_owned(),
+                SceneNode::Sprite {
+                    sprite_id: "jelly".to_owned(),
+                    action: SpriteAction::Show,
+                    asset: Some("sprite.jelly".to_owned()),
+                    character: None,
+                    expression: None,
+                    flip_x: Some(false),
+                    crossfade_ms: None,
+                    x: Some(100.0),
+                    y: Some(200.0),
+                    scale: Some(2.0),
+                    opacity: Some(1.0),
+                    z: Some(3),
+                    duration_ms: 0,
+                    easing: crate::model::Easing::Linear,
+                    await_completion: false,
+                    next: "action".to_owned(),
+                },
+            ),
+            (
+                "action".to_owned(),
+                SceneNode::Action {
+                    sprite_id: "jelly".to_owned(),
+                    action: "sprite.bob".to_owned(),
+                    duration_ms: Some(200),
+                    await_completion: true,
+                    parameters: BTreeMap::from([("distance".to_owned(), 15.0)]),
+                    end: None,
+                    next: "done".to_owned(),
+                },
+            ),
+            ("done".to_owned(), SceneNode::End),
+        ]);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let update = runtime.start_scene_preview(&content, "prologue").unwrap();
+        let action_cue = update
+            .cues
+            .iter()
+            .find_map(|cue| match &cue.kind {
+                PresentationCueKind::Timeline { tracks, .. }
+                    if tracks.iter().any(|track| matches!(track, TimelineTrack::Sprite { sprite_id, .. } if sprite_id == "jelly")) =>
+                {
+                    Some(tracks)
+                }
+                _ => None,
+            })
+            .expect("action should emit a sprite timeline");
+        let track = action_cue
+            .iter()
+            .find_map(|track| match track {
+                TimelineTrack::Sprite { channels, .. } => Some(channels),
+                _ => None,
+            })
+            .unwrap();
+        let x = track["x"].last().unwrap();
+        assert_eq!(x.at_ms, 200);
+        assert_eq!(x.value, TimelineKeyframeValue::Number(115.0));
+        let scale = track["scale"].last().unwrap();
+        assert_eq!(scale.value, TimelineKeyframeValue::Number(2.4));
+        assert_eq!(update.snapshot.world.sprites["jelly"].x, 115.0);
+        assert_eq!(update.snapshot.world.sprites["jelly"].scale, 2.4);
+        assert!(update.requires_ack);
+    }
+
+    #[test]
+    fn character_expression_resolves_pose_and_default_crossfade() {
+        let mut content = catalog();
+        let character = content.manifest.characters.get_mut("test").unwrap();
+        character.default_expression = Some("neutral".to_owned());
+        character.default_scale = 1.25;
+        character.expressions.insert(
+            "neutral".to_owned(),
+            crate::model::CharacterExpression {
+                asset: "sprite.jelly".to_owned(),
+                anchor_x: 0.4,
+                anchor_y: 0.9,
+                offset_x: 12.0,
+                offset_y: -8.0,
+                scale: 0.8,
+            },
+        );
+        character.expressions.insert(
+            "smug".to_owned(),
+            crate::model::CharacterExpression {
+                asset: "sprite.omo".to_owned(),
+                anchor_x: 0.6,
+                anchor_y: 1.0,
+                offset_x: -4.0,
+                offset_y: 0.0,
+                scale: 1.0,
+            },
+        );
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "role_show".to_owned();
+        scene.nodes = BTreeMap::from([
+            (
+                "role_show".to_owned(),
+                SceneNode::Sprite {
+                    sprite_id: "role".to_owned(),
+                    action: SpriteAction::Show,
+                    asset: None,
+                    character: Some("test".to_owned()),
+                    expression: None,
+                    flip_x: Some(false),
+                    crossfade_ms: None,
+                    x: Some(100.0),
+                    y: Some(200.0),
+                    scale: Some(2.0),
+                    opacity: Some(1.0),
+                    z: Some(2),
+                    duration_ms: 0,
+                    easing: crate::model::Easing::Linear,
+                    await_completion: false,
+                    next: "role_change".to_owned(),
+                },
+            ),
+            (
+                "role_change".to_owned(),
+                SceneNode::Sprite {
+                    sprite_id: "role".to_owned(),
+                    action: SpriteAction::Move,
+                    asset: None,
+                    character: Some("test".to_owned()),
+                    expression: Some("smug".to_owned()),
+                    flip_x: Some(true),
+                    crossfade_ms: None,
+                    x: Some(120.0),
+                    y: Some(220.0),
+                    scale: Some(1.0),
+                    opacity: Some(0.9),
+                    z: Some(3),
+                    duration_ms: 100,
+                    easing: crate::model::Easing::Linear,
+                    await_completion: true,
+                    next: "done".to_owned(),
+                },
+            ),
+            ("done".to_owned(), SceneNode::End),
+        ]);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let update = runtime.start_scene_preview(&content, "prologue").unwrap();
+        let sprite = &update.snapshot.world.sprites["role"];
+        assert_eq!(sprite.asset, "sprite.omo");
+        assert_eq!(sprite.x, 116.0);
+        assert_eq!(sprite.y, 220.0);
+        assert_eq!(sprite.scale, 1.25);
+        assert!(sprite.flip_x);
+        assert_eq!(sprite.anchor_x, 0.6);
+        assert_eq!(sprite.anchor_y, 1.0);
+        assert_eq!(sprite.z, 3);
+        let tween = update.cues.iter().find_map(|cue| match &cue.kind {
+            PresentationCueKind::SpriteTween {
+                sprite_id,
+                crossfade_ms,
+                to: Some(to),
+                ..
+            } if sprite_id == "role" && to.asset == "sprite.omo" => Some((to, *crossfade_ms)),
+            _ => None,
+        });
+        let Some((to, crossfade_ms)) = tween else {
+            panic!("expected expression change tween")
+        };
+        assert_eq!(crossfade_ms, Some(150));
+        assert_eq!(to.anchor_x, 0.6);
+    }
+
+    #[test]
+    fn sprite_action_restore_returns_to_the_starting_pose() {
+        let mut content = catalog();
+        content.actions.insert(
+            "sprite.restore".to_owned(),
+            SpriteActionDefinition {
+                schema_version: 1,
+                id: "sprite.restore".to_owned(),
+                name: "恢复".to_owned(),
+                duration_ms: 100,
+                channels: BTreeMap::from([(
+                    "rotation_deg".to_owned(),
+                    vec![
+                        SpriteActionKeyframe {
+                            at_ms: 0,
+                            value: 0.0,
+                            easing: TimelineEasing::Preset(TimelineEasingPreset::Linear),
+                            parameter: None,
+                        },
+                        SpriteActionKeyframe {
+                            at_ms: 100,
+                            value: 45.0,
+                            easing: TimelineEasing::Preset(TimelineEasingPreset::Linear),
+                            parameter: None,
+                        },
+                    ],
+                )]),
+                parameters: BTreeMap::new(),
+                end: SpriteActionEnd::Restore,
+            },
+        );
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "show_restore".to_owned();
+        scene.nodes = BTreeMap::from([
+            (
+                "show_restore".to_owned(),
+                SceneNode::Sprite {
+                    sprite_id: "jelly".to_owned(),
+                    action: SpriteAction::Show,
+                    asset: Some("sprite.jelly".to_owned()),
+                    character: None,
+                    expression: None,
+                    flip_x: Some(false),
+                    crossfade_ms: None,
+                    x: Some(10.0),
+                    y: Some(20.0),
+                    scale: Some(1.0),
+                    opacity: Some(1.0),
+                    z: Some(3),
+                    duration_ms: 0,
+                    easing: crate::model::Easing::Linear,
+                    await_completion: false,
+                    next: "restore".to_owned(),
+                },
+            ),
+            (
+                "restore".to_owned(),
+                SceneNode::Action {
+                    sprite_id: "jelly".to_owned(),
+                    action: "sprite.restore".to_owned(),
+                    duration_ms: None,
+                    await_completion: true,
+                    parameters: BTreeMap::new(),
+                    end: Some(SpriteActionEnd::Restore),
+                    next: "done".to_owned(),
+                },
+            ),
+            ("done".to_owned(), SceneNode::End),
+        ]);
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let update = runtime.start_scene_preview(&content, "prologue").unwrap();
+        let sprite = &update.snapshot.world.sprites["jelly"];
+        assert_eq!(sprite.rotation_deg, 0.0);
+        assert!(update
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::Timeline { .. })));
     }
 
     #[test]
@@ -3498,6 +4078,9 @@ mod tests {
                 scale_x: 1.0,
                 scale_y: 1.0,
                 rotation_deg: 0.0,
+                flip_x: false,
+                anchor_x: 0.5,
+                anchor_y: 1.0,
                 opacity: 1.0,
                 z: 4,
             },
@@ -3557,6 +4140,10 @@ mod tests {
                 sprite_id: "alice".to_owned(),
                 action: SpriteAction::Show,
                 asset: Some("sprite.jelly".to_owned()),
+                character: None,
+                expression: None,
+                flip_x: Some(false),
+                crossfade_ms: None,
                 x: None,
                 y: None,
                 scale: None,
@@ -5364,19 +5951,7 @@ mod tests {
             "prologue/introduction"
         );
 
-        let before = runtime.story_flow(&content).unwrap().unwrap();
-        assert!(before
-            .nodes
-            .iter()
-            .any(|node| node.scene_id == "test_scene"));
-        assert!(!before.nodes.iter().any(|node| node.scene_id == "prologue"));
         runtime.completed_scenes.insert("prologue".to_owned());
-        let after = runtime.story_flow(&content).unwrap().unwrap();
-        assert!(after
-            .nodes
-            .iter()
-            .any(|node| node.scene_id == "prologue" && node.completed));
-
         runtime.start_new_game(&content).unwrap();
         assert!(runtime.dialogue_history().is_empty());
         assert!(runtime.completed_scenes.contains("prologue"));

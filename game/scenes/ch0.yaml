@@ -1,0 +1,14 @@
+schema_version: 2
+id: ch0
+entry: background_start
+nodes:
+  background_start:
+    type: background
+    background: bg.celeste_grok
+    transition: cross_fade
+    duration_ms: 2
+    easing: ease_in_out
+    await: false
+    next: start
+  start:
+    type: end

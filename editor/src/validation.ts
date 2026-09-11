@@ -1,6 +1,13 @@
 import { outputPorts } from "./story";
 import { validateTemplate } from "./textTemplate";
 import { isIntegerScalar, scalarType } from "./scalars";
+import {
+  IMAGE_ANIMATION_MAX_DECODED_BYTES,
+  IMAGE_ANIMATION_MAX_FRAME_MS,
+  IMAGE_ANIMATION_MAX_FRAMES,
+  IMAGE_ANIMATION_MIN_FRAME_MS,
+  IMAGE_ANIMATION_SCHEMA_VERSION,
+} from "./imageAnimation";
 import type {
   AssetKind,
   ConditionExpression,
@@ -68,6 +75,78 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
       ) {
         diagnostics.push(
           error("invalid_character_color", `角色 ${id} 的${field}格式非法`),
+        );
+      }
+    }
+    const expressions = definition.expressions ?? {};
+    const defaultExpression = definition.default_expression ?? null;
+    if (
+      definition.default_scale !== undefined &&
+      (!Number.isFinite(definition.default_scale) ||
+        definition.default_scale <= 0)
+    ) {
+      diagnostics.push(
+        error("invalid_character_scale", `角色 ${id} 的默认缩放必须为正数`),
+      );
+    }
+    if (
+      defaultExpression !== null &&
+      expressions[defaultExpression] === undefined
+    ) {
+      diagnostics.push(
+        error(
+          "unknown_character_expression",
+          `角色 ${id} 的默认表情不存在：${defaultExpression}`,
+        ),
+      );
+    }
+    for (const [expressionId, expression] of Object.entries(expressions)) {
+      if (!ID_PATTERN.test(expressionId)) {
+        diagnostics.push(
+          error(
+            "invalid_character_expression",
+            `角色 ${id} 的表情 ID 非法：${expressionId}`,
+          ),
+        );
+      }
+      const asset = project.manifest.assets[expression.asset];
+      if (asset === undefined || asset.kind !== "sprite") {
+        diagnostics.push(
+          error(
+            "invalid_character_expression_asset",
+            `角色 ${id}/${expressionId} 必须引用 sprite 素材：${expression.asset}`,
+          ),
+        );
+      }
+      const anchorX = expression.anchor_x ?? 0.5;
+      const anchorY = expression.anchor_y ?? 1;
+      const scale = expression.scale ?? 1;
+      if (
+        !Number.isFinite(anchorX) ||
+        !Number.isFinite(anchorY) ||
+        anchorX < 0 ||
+        anchorX > 1 ||
+        anchorY < 0 ||
+        anchorY > 1
+      ) {
+        diagnostics.push(
+          error(
+            "invalid_character_anchor",
+            `角色 ${id}/${expressionId} 的锚点必须在 0 到 1 之间`,
+          ),
+        );
+      }
+      if (
+        !Number.isFinite(expression.offset_x ?? 0) ||
+        !Number.isFinite(expression.offset_y ?? 0) ||
+        !Number.isFinite(scale) ||
+        scale <= 0
+      ) {
+        diagnostics.push(
+          error(
+            "invalid_character_alignment",
+            `角色 ${id}/${expressionId} 的对齐参数无效`,
+          ),
         );
       }
     }
@@ -252,6 +331,336 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
           `manifest 声明了按钮模板，但编辑器文档不存在：${path}`,
         ),
       );
+  }
+
+  // Image animations (schema v1) mirror the Rust rules so an authoring mistake
+  // is reported in the sidebar instead of only at save time.
+  const animationFiles = project.animations ?? [];
+  const animationIds = new Set<string>();
+  const declaredAnimationPaths = new Set(project.manifest.animations ?? []);
+  for (const file of animationFiles) {
+    const definition = file.definition;
+    if (!declaredAnimationPaths.has(file.path)) {
+      diagnostics.push(
+        error("undeclared_animation", `图片动画文件未登记：${file.path}`),
+      );
+    }
+    if (
+      definition.schema_version !== IMAGE_ANIMATION_SCHEMA_VERSION ||
+      !ID_PATTERN.test(definition.id)
+    ) {
+      diagnostics.push(
+        error("invalid_animation", `图片动画定义无效：${definition.id}`),
+      );
+    }
+    if (animationIds.has(definition.id)) {
+      diagnostics.push(
+        error("duplicate_animation", `图片动画 ID 重复：${definition.id}`),
+      );
+    }
+    animationIds.add(definition.id);
+    if (project.manifest.assets[definition.id] !== undefined) {
+      diagnostics.push(
+        error(
+          "animation_asset_collision",
+          `图片动画 ID ${definition.id} 与素材 ID 冲突：动画 ID 必须独立于素材命名空间`,
+        ),
+      );
+    }
+    const frames = definition.frames;
+    if (frames.length === 0) {
+      diagnostics.push(
+        error("empty_animation", `图片动画 ${definition.id} 至少需要一帧`),
+      );
+    }
+    if (frames.length > IMAGE_ANIMATION_MAX_FRAMES) {
+      diagnostics.push(
+        error(
+          "too_many_animation_frames",
+          `图片动画 ${definition.id} 的帧数超过 ${IMAGE_ANIMATION_MAX_FRAMES}`,
+        ),
+      );
+    }
+    let shared: { width: number; height: number } | undefined;
+    let sharedFrame = 0;
+    const measured = new Set<string>();
+    let decodedBytes = 0;
+    for (const [index, frame] of frames.entries()) {
+      const position = index + 1;
+      if (
+        !Number.isInteger(frame.duration_ms) ||
+        frame.duration_ms < IMAGE_ANIMATION_MIN_FRAME_MS ||
+        frame.duration_ms > IMAGE_ANIMATION_MAX_FRAME_MS
+      ) {
+        diagnostics.push(
+          error(
+            "invalid_animation_frame_duration",
+            `图片动画 ${definition.id} 第 ${position} 帧时长必须在 ${IMAGE_ANIMATION_MIN_FRAME_MS}–${IMAGE_ANIMATION_MAX_FRAME_MS}ms 之间`,
+          ),
+        );
+      }
+      const frameAsset = project.manifest.assets[frame.asset];
+      if (frameAsset === undefined) {
+        diagnostics.push(
+          error(
+            "unknown_animation_frame",
+            `图片动画 ${definition.id} 第 ${position} 帧引用了未登记的素材 ${frame.asset}`,
+          ),
+        );
+        continue;
+      }
+      if (!["background", "sprite", "gui"].includes(frameAsset.kind)) {
+        diagnostics.push(
+          error(
+            "invalid_animation_frame_kind",
+            `图片动画 ${definition.id} 第 ${position} 帧的素材 ${frame.asset} 不是图片素材`,
+          ),
+        );
+      }
+      if (frameAsset.animation !== undefined) {
+        diagnostics.push(
+          error(
+            "nested_animation_frame",
+            `图片动画 ${definition.id} 第 ${position} 帧引用了动画素材 ${frame.asset}`,
+          ),
+        );
+      }
+      const size = assetPixelSize(project, frame.asset);
+      if (size === undefined) continue;
+      if (shared === undefined) {
+        shared = size;
+        sharedFrame = position;
+      } else if (shared.width !== size.width || shared.height !== size.height) {
+        diagnostics.push(
+          error(
+            "animation_frame_size_mismatch",
+            `图片动画 ${definition.id} 第 ${position} 帧尺寸 ${size.width}×${size.height} 与第 ${sharedFrame} 帧 ${shared.width}×${shared.height} 不一致`,
+          ),
+        );
+      }
+      if (!measured.has(frame.asset)) {
+        measured.add(frame.asset);
+        decodedBytes += size.width * size.height * 4;
+      }
+    }
+    if (decodedBytes > IMAGE_ANIMATION_MAX_DECODED_BYTES) {
+      diagnostics.push(
+        error(
+          "animation_memory_budget",
+          `图片动画 ${definition.id} 解码内存超过 ${IMAGE_ANIMATION_MAX_DECODED_BYTES / (1024 * 1024)} MiB 预算`,
+        ),
+      );
+    }
+  }
+  for (const path of declaredAnimationPaths) {
+    if (!animationFiles.some((file) => file.path === path)) {
+      diagnostics.push(
+        error(
+          "missing_animation",
+          `manifest 声明了图片动画，但编辑器文档不存在：${path}`,
+        ),
+      );
+    }
+  }
+  for (const [id, definition] of Object.entries(project.manifest.assets)) {
+    if (definition.animation !== undefined) {
+      if (definition.path !== undefined) {
+        diagnostics.push(
+          error(
+            "asset_animation_conflict",
+            `素材 ${id} 的 path 与 animation 互斥`,
+          ),
+        );
+      }
+      if (!["background", "sprite", "gui"].includes(definition.kind)) {
+        diagnostics.push(
+          error(
+            "invalid_animation_owner_kind",
+            `动画素材 ${id} 必须是 background、sprite 或 gui 类型`,
+          ),
+        );
+      }
+      if (!animationIds.has(definition.animation)) {
+        diagnostics.push(
+          error(
+            "unknown_animation",
+            `素材 ${id} 引用了未登记的图片动画 ${definition.animation}`,
+          ),
+        );
+      }
+    } else if (definition.path === undefined) {
+      diagnostics.push(
+        error(
+          "asset_without_source",
+          `素材 ${id} 必须登记 path 或 animation 之一`,
+        ),
+      );
+    }
+  }
+
+  const actionFiles = project.actions ?? [];
+  const actionIds = new Set<string>();
+  const declaredActionPaths = new Set(project.manifest.actions ?? []);
+  for (const file of actionFiles) {
+    const definition = file.definition;
+    if (!declaredActionPaths.has(file.path)) {
+      diagnostics.push(
+        error("undeclared_action", `立绘动作文件未登记：${file.path}`),
+      );
+    }
+    if (
+      definition.schema_version !== 1 ||
+      !ID_PATTERN.test(definition.id) ||
+      definition.name.trim() === "" ||
+      definition.name.length > 128
+    ) {
+      diagnostics.push(
+        error("invalid_action", `立绘动作定义无效：${definition.id}`),
+      );
+    }
+    if (actionIds.has(definition.id)) {
+      diagnostics.push(
+        error("duplicate_action", `立绘动作 ID 重复：${definition.id}`),
+      );
+    }
+    actionIds.add(definition.id);
+    if (project.manifest.assets[definition.id] !== undefined) {
+      diagnostics.push(
+        error(
+          "action_asset_collision",
+          `立绘动作 ID ${definition.id} 与素材 ID 冲突`,
+        ),
+      );
+    }
+    if (
+      (project.animations ?? []).some(
+        (file) => file.definition.id === definition.id,
+      )
+    ) {
+      diagnostics.push(
+        error(
+          "action_animation_collision",
+          `立绘动作 ID ${definition.id} 与图片动画 ID 冲突`,
+        ),
+      );
+    }
+    if (
+      !Number.isInteger(definition.duration_ms) ||
+      definition.duration_ms < 1 ||
+      definition.duration_ms > 1_800_000
+    ) {
+      diagnostics.push(
+        error("invalid_action_duration", `立绘动作 ${definition.id} 时长无效`),
+      );
+    }
+    const parameters = definition.parameters ?? {};
+    if (Object.keys(parameters).length > 32) {
+      diagnostics.push(
+        error(
+          "too_many_action_parameters",
+          `立绘动作 ${definition.id} 参数过多`,
+        ),
+      );
+    }
+    for (const [parameterId, parameter] of Object.entries(parameters)) {
+      if (!ID_PATTERN.test(parameterId)) {
+        diagnostics.push(
+          error(
+            "invalid_action_parameter",
+            `立绘动作参数 ID 非法：${parameterId}`,
+          ),
+        );
+      }
+      if (
+        !Number.isFinite(parameter.default) ||
+        (parameter.min != null && !Number.isFinite(parameter.min)) ||
+        (parameter.max != null && !Number.isFinite(parameter.max)) ||
+        (parameter.min != null &&
+          parameter.max != null &&
+          parameter.min > parameter.max) ||
+        (parameter.min != null && parameter.default < parameter.min) ||
+        (parameter.max != null && parameter.default > parameter.max)
+      ) {
+        diagnostics.push(
+          error(
+            "invalid_action_parameter",
+            `立绘动作参数 ${parameterId} 范围无效`,
+          ),
+        );
+      }
+    }
+    const allowedChannels = new Set([
+      "x",
+      "y",
+      "scale",
+      "scale_x",
+      "scale_y",
+      "rotation_deg",
+      "opacity",
+    ]);
+    if (Object.keys(definition.channels).length === 0) {
+      diagnostics.push(
+        error("empty_action", `立绘动作 ${definition.id} 至少需要一个变换通道`),
+      );
+    }
+    if (Object.keys(definition.channels).length > 16) {
+      diagnostics.push(
+        error("too_many_action_channels", `立绘动作 ${definition.id} 通道过多`),
+      );
+    }
+    for (const [channel, frames] of Object.entries(definition.channels)) {
+      if (!allowedChannels.has(channel)) {
+        diagnostics.push(
+          error(
+            "invalid_action_channel",
+            `立绘动作 ${definition.id} 不支持 ${channel}`,
+          ),
+        );
+      }
+      let previous = -1;
+      if (frames[0]?.at_ms !== 0) {
+        diagnostics.push(
+          error(
+            "action_missing_initial_keyframe",
+            `立绘动作 ${definition.id}/${channel} 必须从 0ms 关键帧开始`,
+          ),
+        );
+      }
+      for (const frame of frames) {
+        const value = frame.value;
+        if (
+          !Number.isFinite(value) ||
+          !Number.isInteger(frame.at_ms) ||
+          frame.at_ms < 0 ||
+          frame.at_ms <= previous ||
+          frame.at_ms > definition.duration_ms ||
+          ((channel === "scale" ||
+            channel === "scale_x" ||
+            channel === "scale_y") &&
+            value <= 0) ||
+          (channel === "opacity" && (value < 0 || value > 1)) ||
+          (frame.parameter != null && parameters[frame.parameter] === undefined)
+        ) {
+          diagnostics.push(
+            error(
+              "invalid_action_keyframe",
+              `立绘动作 ${definition.id}/${channel} 关键帧无效`,
+            ),
+          );
+        }
+        previous = frame.at_ms;
+      }
+    }
+  }
+  for (const path of declaredActionPaths) {
+    if (!actionFiles.some((file) => file.path === path)) {
+      diagnostics.push(
+        error(
+          "missing_action",
+          `manifest 声明了立绘动作，但编辑器文档不存在：${path}`,
+        ),
+      );
+    }
   }
 
   const seenScenes = new Set<string>();
@@ -455,7 +864,6 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
     }
   }
 
-  validateStoryFlow(project, sceneById, diagnostics);
   validateChapterMap(project, sceneById, diagnostics);
 
   diagnostics.push(...reachabilityWarnings(project, sceneById));
@@ -476,9 +884,15 @@ function validateManagedDocumentPaths(
       "button",
       path,
     ]),
+    ...(project.manifest.animations ?? []).map((path): [string, string] => [
+      "animation",
+      path,
+    ]),
+    ...(project.manifest.actions ?? []).map((path): [string, string] => [
+      "action",
+      path,
+    ]),
   ];
-  if (project.manifest.story_flow != null)
-    paths.push(["story_flow", project.manifest.story_flow]);
   if (project.manifest.chapter_map != null)
     paths.push(["chapter_map", project.manifest.chapter_map]);
   const seen = new Map<string, string>();
@@ -508,6 +922,19 @@ function validateManagedDocumentPaths(
       seen.set(normalized, kind);
     }
   }
+}
+
+/** Host-inspected pixel size of one registered asset, when known. */
+function assetPixelSize(
+  project: EditorProject,
+  assetId: string,
+): { width: number; height: number } | undefined {
+  const metadata = project.assets.find(
+    (asset) => asset.id === assetId,
+  )?.metadata;
+  if (metadata === undefined || metadata === null) return undefined;
+  if (metadata.width === null || metadata.height === null) return undefined;
+  return { width: metadata.width, height: metadata.height };
 }
 
 function validateChapterMap(
@@ -723,112 +1150,6 @@ function validateMapRect(
     );
 }
 
-function validateStoryFlow(
-  project: EditorProject,
-  scenes: Map<string, EditorProject["scenes"][number]["definition"]>,
-  output: EditorDiagnostic[],
-): void {
-  const file = project.story_flow;
-  if (file === null) {
-    if (project.manifest.story_flow != null)
-      output.push(
-        flowError(
-          "missing_story_flow",
-          "manifest 声明了 story_flow，但编辑器文档不存在",
-          null,
-        ),
-      );
-    return;
-  }
-  if (project.manifest.story_flow !== file.path)
-    output.push(
-      flowError(
-        "story_flow_path",
-        "story_flow 文件路径与 manifest 不一致",
-        null,
-      ),
-    );
-  if (file.definition.schema_version !== 1)
-    output.push(
-      flowError(
-        "story_flow_schema",
-        "story flow schema_version 必须为 1",
-        null,
-      ),
-    );
-  const edges = new Set<string>();
-  const ids = new Set<string>();
-  const profileProject: EditorProject = {
-    ...project,
-    manifest: {
-      ...project.manifest,
-      variables: Object.fromEntries(
-        Object.entries(project.manifest.variables).filter(
-          ([, definition]) => definition.scope === "profile",
-        ),
-      ),
-    },
-  };
-  for (const [id, node] of Object.entries(file.definition.nodes)) {
-    if (!scenes.has(id))
-      output.push(
-        flowError("flow_unknown_scene", `流程节点引用未知场景：${id}`, id),
-      );
-    if (
-      !ID_PATTERN.test(id) ||
-      !node.title.trim() ||
-      /[\x00-\x1f]/.test(node.title)
-    )
-      output.push(flowError("flow_invalid_node", `流程节点 ${id} 无效`, id));
-    if (
-      !Number.isInteger(node.x) ||
-      !Number.isInteger(node.y) ||
-      node.x % 20 !== 0 ||
-      node.y % 20 !== 0
-    )
-      output.push(
-        flowError(
-          "flow_invalid_position",
-          `流程节点 ${id} 必须吸附到 20px 网格`,
-          id,
-        ),
-      );
-    if (node.reveal?.mode === "condition") {
-      validateCondition(
-        profileProject,
-        node.reveal.condition,
-        (code, message) =>
-          output.push(
-            flowError(`flow_${code}`, `流程节点 ${id}：${message}`, id),
-          ),
-      );
-    }
-  }
-  for (const edge of file.definition.edges) {
-    if (!ID_PATTERN.test(edge.id) || !ids.add(edge.id))
-      output.push(
-        flowError(
-          "flow_invalid_edge",
-          `流程边 ID 非法或重复：${edge.id}`,
-          edge.id,
-        ),
-      );
-    if (
-      edge.from === edge.to ||
-      !file.definition.nodes[edge.from] ||
-      !file.definition.nodes[edge.to] ||
-      !edges.add(`${edge.from}\u0000${edge.to}`)
-    )
-      output.push(
-        flowError(
-          "flow_invalid_connection",
-          `流程连接无效：${edge.from} → ${edge.to}`,
-          edge.id,
-        ),
-      );
-  }
-}
-
 function validateNode(
   project: EditorProject,
   sceneId: string,
@@ -836,6 +1157,9 @@ function validateNode(
   node: SceneNode,
   output: EditorDiagnostic[],
 ): void {
+  const scene = project.scenes.find(
+    (candidate) => candidate.definition.id === sceneId,
+  );
   const issue = (code: string, message: string) =>
     output.push(error(code, message, sceneId, nodeId));
   const checkDuration = (duration: number) => {
@@ -878,7 +1202,41 @@ function validateNode(
     case "sprite":
       if (!ID_PATTERN.test(node.sprite_id))
         issue("invalid_sprite_id", "立绘实例 ID 非法");
-      checkAsset(node.asset, "sprite", node.action === "show");
+      checkAsset(
+        node.asset,
+        "sprite",
+        node.action === "show" && node.character == null,
+      );
+      if (node.character != null) {
+        const character = project.manifest.characters[node.character];
+        if (character === undefined) {
+          issue("unknown_character", `角色未登记：${node.character}`);
+        } else if (
+          node.expression != null &&
+          (character.expressions ?? {})[node.expression] === undefined
+        ) {
+          issue(
+            "unknown_character_expression",
+            `角色 ${node.character} 未定义表情：${node.expression}`,
+          );
+        } else if (
+          node.expression == null &&
+          node.asset == null &&
+          character.default_expression == null
+        ) {
+          issue("missing_character_expression", "角色没有默认表情");
+        }
+      } else if (node.expression != null) {
+        issue("expression_without_character", "表情必须与角色一起使用");
+      }
+      if (
+        node.crossfade_ms != null &&
+        (!Number.isInteger(node.crossfade_ms) ||
+          node.crossfade_ms < 0 ||
+          node.crossfade_ms > 60_000)
+      ) {
+        issue("invalid_crossfade", "交叉淡化时长必须在 0–60000 ms 之间");
+      }
       checkDuration(node.duration_ms);
       if (
         (node.x !== null && !Number.isFinite(node.x)) ||
@@ -1085,6 +1443,47 @@ function validateNode(
       break;
     case "playback":
       break;
+    case "action": {
+      if (!ID_PATTERN.test(node.sprite_id))
+        issue("invalid_action_sprite", "动作目标立绘实例 ID 非法");
+      if (
+        !scene ||
+        !Object.values(scene.definition.nodes).some(
+          (candidate) =>
+            candidate.type === "sprite" &&
+            candidate.sprite_id === node.sprite_id,
+        )
+      ) {
+        issue(
+          "unknown_action_sprite",
+          `动作引用了未声明的立绘实例：${node.sprite_id}`,
+        );
+      }
+      const actionDefinition = project.actions?.find(
+        (file) => file.definition.id === node.action,
+      )?.definition;
+      if (actionDefinition === undefined)
+        issue("unknown_action", `未知立绘动作：${node.action}`);
+      if (node.duration_ms != null) checkDuration(node.duration_ms);
+      if (node.parameters != null) {
+        for (const [parameter, value] of Object.entries(node.parameters)) {
+          const definition = actionDefinition?.parameters?.[parameter];
+          if (definition === undefined) {
+            issue("unknown_action_parameter", `动作参数未声明：${parameter}`);
+          } else if (
+            !Number.isFinite(value) ||
+            (definition.min != null && value < definition.min) ||
+            (definition.max != null && value > definition.max)
+          ) {
+            issue(
+              "invalid_action_parameter",
+              `动作参数 ${parameter} 超出声明范围`,
+            );
+          }
+        }
+      }
+      break;
+    }
     case "wait":
       checkDuration(node.duration_ms);
       break;
@@ -1817,22 +2216,6 @@ function error(
     message,
     scene_id: sceneId,
     node_id: nodeId,
-  };
-}
-
-function flowError(
-  code: string,
-  message: string,
-  flowElementId: string | null,
-): EditorDiagnostic {
-  return {
-    severity: "error",
-    code,
-    message,
-    scene_id: null,
-    node_id: null,
-    workspace: "flow",
-    flow_element_id: flowElementId,
   };
 }
 

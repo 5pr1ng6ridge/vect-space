@@ -3,6 +3,22 @@
   "title": "ContentManifest",
   "type": "object",
   "properties": {
+    "actions": {
+      "description": "Optional reusable single-sprite action documents.  Empty preserves\nexisting projects and keeps the action system opt-in.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "animations": {
+      "description": "Optional standalone image animation documents.  Empty keeps legacy\nprojects fully compatible.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "assets": {
       "type": "object",
       "additionalProperties": {
@@ -18,7 +34,7 @@
       }
     },
     "chapter_map": {
-      "description": "Optional author-authored room map used as the chapter selector.  The\nlegacy story flow remains available for projects that have not yet\nmoved to a map.",
+      "description": "Optional author-authored room map used as the chapter selector.",
       "type": [
         "string",
         "null"
@@ -59,12 +75,6 @@
       "format": "uint32",
       "minimum": 0
     },
-    "story_flow": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "ui_motion_defaults": {
       "$ref": "#/$defs/UiMotionBindings",
       "default": {}
@@ -96,17 +106,27 @@
     "AssetDefinition": {
       "type": "object",
       "properties": {
+        "animation": {
+          "description": "Loop animation document id.  The asset keeps its `kind`, so every\nexisting image position accepts an animated asset without a new field.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/AssetKind"
         },
         "path": {
-          "type": "string"
+          "description": "Static image path.  Mutually exclusive with `animation`; exactly one of\nthe two describes the pixels this logical asset resolves to.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "kind",
-        "path"
+        "kind"
       ]
     },
     "AssetKind": {
@@ -124,8 +144,27 @@
     "CharacterDefinition": {
       "type": "object",
       "properties": {
+        "default_expression": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default_scale": {
+          "type": "number",
+          "format": "float",
+          "default": 1.0
+        },
         "display_name": {
           "type": "string"
+        },
+        "expressions": {
+          "description": "Optional semantic portrait variants. A missing table preserves the\nlegacy generic-sprite authoring path.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CharacterExpression"
+          },
+          "default": {}
         },
         "name_color": {
           "type": [
@@ -143,6 +182,43 @@
       "additionalProperties": false,
       "required": [
         "display_name"
+      ]
+    },
+    "CharacterExpression": {
+      "type": "object",
+      "properties": {
+        "anchor_x": {
+          "type": "number",
+          "format": "float",
+          "default": 0.5
+        },
+        "anchor_y": {
+          "type": "number",
+          "format": "float",
+          "default": 1.0
+        },
+        "asset": {
+          "type": "string"
+        },
+        "offset_x": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_y": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "scale": {
+          "type": "number",
+          "format": "float",
+          "default": 1.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asset"
       ]
     },
     "ScalarValue": {

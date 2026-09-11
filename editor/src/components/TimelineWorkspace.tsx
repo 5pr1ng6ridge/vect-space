@@ -36,6 +36,9 @@ import {
   type TimelinePreviewFrame,
 } from "@vectspace/presentation-core/timeline-preview";
 import { SceneSurface } from "@vectspace/presentation-core/scene-surface";
+import { buildAnimationMap } from "../imageAnimationMap";
+import { editorImageSource } from "../imageAnimationMap";
+import { AnimatedImage } from "./AnimatedImage";
 
 interface TimelineWorkspaceProps {
   project: EditorProject;
@@ -196,6 +199,14 @@ export function TimelineWorkspace({
     [assets],
   );
 
+  // Frame lists for animated artwork.  The preview positions frames from the
+  // timeline playhead, so scrubbing deterministically selects the same frame
+  // the game would show at that decorative time.
+  const animationMap = useMemo(
+    () => buildAnimationMap(assets, project.animations),
+    [assets, project.animations],
+  );
+
   const handleDiagnostic = useCallback(
     (message: string): void => onError(message),
     [onError],
@@ -291,6 +302,7 @@ export function TimelineWorkspace({
             // Set the requested audio policy before restoring a snapshot: the
             // snapshot can already contain a looping BGM from the story path.
             surface.setMuted(muted);
+            surface.setAnimationAssets(animationMap);
             await surface.load(result.start_snapshot, result.update, urls);
             await surface.seek(desiredPlayhead, false);
           }
@@ -310,7 +322,7 @@ export function TimelineWorkspace({
         if (requestId === contextRequestRef.current) setContextBusy(false);
       }
     },
-    [importTokens, muted, sceneId, nodeId, settings, urls],
+    [animationMap, importTokens, muted, sceneId, nodeId, settings, urls],
   );
 
   useEffect(() => {
@@ -340,6 +352,7 @@ export function TimelineWorkspace({
           }
         | undefined;
       if (timelineCue === undefined) return;
+      surface.setAnimationAssets(animationMap);
       timelineCue.duration_ms = nextNode.duration_ms;
       timelineCue.tracks = nextNode.tracks;
       timelineCue.events = nextNode.events;
@@ -352,7 +365,7 @@ export function TimelineWorkspace({
             onError(`时间轴预览刷新失败：${errorMessage(error)}`);
         });
     },
-    [onError, preview, urls],
+    [animationMap, onError, preview, urls],
   );
 
   useEffect(() => {
@@ -1140,16 +1153,14 @@ export function TimelineWorkspace({
                   style={gizmoStyle(object, frame?.camera)}
                 >
                   {object.kind === "button" && object.asset !== "" && (
-                    <img
+                    <AnimatedImage
                       alt=""
                       className="timeline-button-preview"
-                      src={(() => {
+                      source={(() => {
                         const asset = assets.find(
                           (candidate) => candidate.id === object.asset,
                         );
-                        return asset === undefined
-                          ? undefined
-                          : assetUrl(asset.absolute_path);
+                        return editorImageSource(asset, assets, animationMap);
                       })()}
                     />
                   )}

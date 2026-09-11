@@ -1,4 +1,8 @@
 import type {
+  ActionNode,
+  SpriteActionDefinition,
+  SpriteActionEnd,
+  SpriteSnapshot,
   TimelineEasing,
   TimelineKeyframe,
   TimelineNode,
@@ -10,6 +14,175 @@ import {
 } from "@vectspace/presentation-core/timeline";
 
 export { evaluateChannel };
+
+export interface SpriteActionExpansionOptions {
+  action: SpriteActionDefinition;
+  spriteId: string;
+  base: SpriteSnapshot;
+  durationMs?: number;
+  end?: SpriteActionEnd;
+  parameters?: Record<string, number>;
+}
+
+/**
+ * Convert an action call into the ordinary timeline representation used by
+ * the timeline editor.  The runtime performs the same expansion against its
+ * authoritative starting pose; this helper is deliberately pure and is only
+ * used when an author explicitly chooses to inline a call in the editor.
+ */
+export interface SpriteActionNodeExpansionOptions {
+  node: ActionNode;
+  action: SpriteActionDefinition;
+  base: SpriteSnapshot;
+}
+
+export function expandSpriteActionNode(
+  options: SpriteActionNodeExpansionOptions,
+): TimelineNode {
+  const { node, action, base } = options;
+  const durationMs = node.duration_ms ?? action.duration_ms;
+  return {
+    type: "timeline",
+    duration_ms: durationMs,
+    await: node.await,
+    skippable: false,
+    tracks: [
+      expandSpriteActionTrack({
+        action,
+        spriteId: node.sprite_id,
+        base,
+        durationMs,
+        end: node.end ?? action.end ?? "hold",
+        parameters: node.parameters ?? {},
+      }),
+    ],
+    events: [],
+    next: node.next,
+  };
+}
+
+/**
+ * Expand the editor's reusable action into the same absolute sprite track the
+ * Rust runtime emits.  This is intentionally a small, side-effect-free helper
+ * for the inspector's "解除引用" command and for conformance tests; runtime
+ * preview still comes from Rust, so this helper never becomes an authority.
+ */
+export function expandSpriteActionTrack(
+  options: SpriteActionExpansionOptions,
+): TimelineTrack {
+  const {
+    action,
+    spriteId,
+    base,
+    durationMs = action.duration_ms,
+    end = action.end ?? "hold",
+    parameters = {},
+  } = options;
+  if (!Number.isInteger(durationMs) || durationMs <= 0) {
+    throw new Error("动作时长必须大于 0");
+  }
+  if (!Number.isInteger(action.duration_ms) || action.duration_ms <= 0) {
+    throw new Error("动作定义时长必须大于 0");
+  }
+  for (const parameterId of Object.keys(parameters)) {
+    if (action.parameters?.[parameterId] === undefined) {
+      throw new Error(`动作参数未声明: ${parameterId}`);
+    }
+  }
+  for (const [parameterId, definition] of Object.entries(
+    action.parameters ?? {},
+  )) {
+    const value = parameters[parameterId] ?? definition.default;
+    if (
+      !Number.isFinite(value) ||
+      (definition.min != null && value < definition.min) ||
+      (definition.max != null && value > definition.max)
+    ) {
+      throw new Error(`动作参数 ${parameterId} 超出声明范围`);
+    }
+  }
+  const channels: Record<string, TimelineKeyframe[]> = {};
+  for (const [channel, keyframes] of Object.entries(action.channels)) {
+    const expanded: TimelineKeyframe[] = [];
+    for (const keyframe of keyframes) {
+      const atMs = Math.floor(
+        (keyframe.at_ms * durationMs + Math.floor(action.duration_ms / 2)) /
+          action.duration_ms,
+      );
+      const previous = expanded.at(-1);
+      if (previous !== undefined && atMs <= previous.at_ms) {
+        throw new Error(`动作通道 ${channel} 的关键帧在目标时长下发生重叠`);
+      }
+      const relative =
+        (keyframe.parameter == null
+          ? undefined
+          : parameters[keyframe.parameter]) ??
+        (keyframe.parameter == null
+          ? undefined
+          : action.parameters?.[keyframe.parameter]?.default) ??
+        keyframe.value;
+      const baseValue = actionBaseChannelValue(channel, base);
+      const absolute = ["x", "y", "rotation_deg"].includes(channel)
+        ? baseValue + relative
+        : baseValue * relative;
+      if (
+        !Number.isFinite(absolute) ||
+        (["scale", "scale_x", "scale_y"].includes(channel) && absolute <= 0) ||
+        (channel === "opacity" && (absolute < 0 || absolute > 1))
+      ) {
+        throw new Error(`动作通道 ${channel} 的结果无效`);
+      }
+      expanded.push({
+        at_ms: atMs,
+        value: absolute,
+        easing: keyframe.easing ?? "linear",
+      });
+    }
+    if (end === "restore") {
+      const restore = actionBaseChannelValue(channel, base);
+      const last = expanded.at(-1);
+      const frame = {
+        at_ms: durationMs,
+        value: restore,
+        easing: "linear" as const,
+      };
+      if (last?.at_ms === durationMs) expanded[expanded.length - 1] = frame;
+      else expanded.push(frame);
+    }
+    channels[channel] = expanded;
+  }
+  if (Object.keys(channels).length === 0) {
+    throw new Error("动作至少需要一个变换通道");
+  }
+  return {
+    type: "sprite",
+    sprite_id: spriteId,
+    asset: null,
+    remove_at_end: false,
+    channels,
+  };
+}
+
+function actionBaseChannelValue(channel: string, base: SpriteSnapshot): number {
+  switch (channel) {
+    case "x":
+      return base.x;
+    case "y":
+      return base.y;
+    case "scale":
+      return base.scale;
+    case "scale_x":
+      return base.scale_x;
+    case "scale_y":
+      return base.scale_y;
+    case "rotation_deg":
+      return base.rotation_deg;
+    case "opacity":
+      return base.opacity;
+    default:
+      throw new Error(`动作不支持通道 ${channel}`);
+  }
+}
 
 export interface TimelineKeyframeAddress {
   track: number;

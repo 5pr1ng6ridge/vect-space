@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { DialogueBox, type DialogueBoxHandle } from "./DialogueBox";
+import { staticImageSource } from "./useAnimatedImage";
 import { MarkupText } from "./MarkupText";
 
 const page = {
@@ -35,7 +36,7 @@ describe("text rendering boundaries", () => {
     root.innerHTML = html;
     const units = [...root.querySelectorAll<HTMLElement>(".markup-unit")];
     expect(units).toHaveLength(3);
-    expect(units[0]?.style.visibility).toBe("visible");
+    expect(units[0]?.style.visibility).toBe("inherit");
     expect(units[1]?.classList.contains("line-break-unit")).toBe(true);
     expect(units[2]?.style.visibility).toBe("hidden");
     expect(root.querySelector("br")).not.toBeNull();
@@ -55,8 +56,23 @@ describe("text rendering boundaries", () => {
     const characters = [
       ...root.querySelectorAll<HTMLElement>(".character-unit"),
     ].filter((element) => !element.classList.contains("line-break-unit"));
-    expect(characters[0]?.style.visibility).toBe("visible");
+    expect(characters[0]?.style.visibility).toBe("inherit");
     expect(characters[1]?.style.visibility).toBe("hidden");
+  });
+
+  it("inherits a hidden presentation surface for already revealed units", () => {
+    const root = document.createElement("div");
+    root.style.visibility = "hidden";
+    root.innerHTML = renderToStaticMarkup(
+      <MarkupText source="已显示但应随容器隐藏" />,
+    );
+    document.body.append(root);
+
+    const unit = root.querySelector<HTMLElement>(".markup-unit");
+    expect(unit?.style.visibility).toBe("inherit");
+    expect(getComputedStyle(unit as HTMLElement).visibility).toBe("hidden");
+
+    root.remove();
   });
 
   it("keeps display math as one mounted atomic unit during reveal", () => {
@@ -84,10 +100,10 @@ describe("DialogueBox live completion versus restore", () => {
     render(
       <DialogueBox
         defaultCps={30}
-        dialogueBoxUrl="dialogue.png"
+        dialogueBoxSource={staticImageSource("dialogue.png")}
         disabled={false}
         initialCps={30}
-        nameBoxUrl="name.png"
+        nameBoxSource={staticImageSource("name.png")}
         onRevealComplete={onRevealComplete}
         onTypingChange={vi.fn()}
         page={page}
@@ -110,10 +126,10 @@ describe("DialogueBox live completion versus restore", () => {
     render(
       <DialogueBox
         defaultCps={30}
-        dialogueBoxUrl="dialogue.png"
+        dialogueBoxSource={staticImageSource("dialogue.png")}
         disabled={false}
         initialCps={30}
-        nameBoxUrl="name.png"
+        nameBoxSource={staticImageSource("name.png")}
         onRevealComplete={onRevealComplete}
         onTypingChange={vi.fn()}
         page={page}

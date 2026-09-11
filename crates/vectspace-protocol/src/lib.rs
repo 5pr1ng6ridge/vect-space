@@ -396,7 +396,6 @@ pub struct WireBootstrapPayload {
     pub update: WireRuntimeUpdate,
     pub asset_ids: Vec<String>,
     pub content_version: String,
-    pub story_flow_available: bool,
     #[serde(default)]
     pub chapter_map_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -507,7 +506,6 @@ impl From<BootstrapPayload> for WireBootstrapPayload {
             update: payload.update.into(),
             asset_ids: payload.asset_ids,
             content_version: payload.content_version,
-            story_flow_available: payload.story_flow_available,
             chapter_map_available: payload.chapter_map_available,
             default_font: payload.default_font,
         }

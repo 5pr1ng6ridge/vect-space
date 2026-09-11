@@ -3,10 +3,17 @@ import corpus from "../../shared/timeline-conformance.json";
 import {
   copyTimelineKeyframes,
   evaluateChannel,
+  expandSpriteActionNode,
+  expandSpriteActionTrack,
   pasteTimelineKeyframes,
   snapTimelineTime,
 } from "./timeline";
-import type { TimelineEasing, TimelineNode } from "./types";
+import type {
+  SpriteActionDefinition,
+  SpriteSnapshot,
+  TimelineEasing,
+  TimelineNode,
+} from "./types";
 
 describe("editor timeline evaluator conformance", () => {
   for (const sample of corpus) {
@@ -166,9 +173,158 @@ describe("timeline keyframe clipboard", () => {
   });
 });
 
+describe("sprite action inlining", () => {
+  it("creates an equivalent timeline call with its duration and end policy", () => {
+    const node = {
+      type: "action" as const,
+      sprite_id: "alice",
+      action: "bob",
+      duration_ms: 240,
+      await: true,
+      parameters: { distance: 12 },
+      end: "restore" as const,
+      next: "dialogue",
+    };
+    const action: SpriteActionDefinition = {
+      schema_version: 1,
+      id: "bob",
+      name: "轻跳",
+      duration_ms: 120,
+      channels: {
+        x: [
+          { at_ms: 0, value: 0, easing: "linear" },
+          {
+            at_ms: 120,
+            value: 1,
+            easing: "ease_out",
+            parameter: "distance",
+          },
+        ],
+      },
+      parameters: { distance: { default: 8, min: 0, max: 50 } },
+      end: "hold",
+    };
+    const timeline = expandSpriteActionNode({
+      node,
+      action,
+      base: {
+        asset: "sprite.alice",
+        x: 100,
+        y: 800,
+        scale: 1,
+        scale_x: 1,
+        scale_y: 1,
+        rotation_deg: 0,
+        opacity: 1,
+        z: 2,
+      },
+    });
+    expect(timeline.duration_ms).toBe(240);
+    expect(timeline.await).toBe(true);
+    expect(timeline.next).toBe("dialogue");
+    expect(timeline.tracks[0]).toMatchObject({
+      type: "sprite",
+      sprite_id: "alice",
+      channels: {
+        x: [
+          { at_ms: 0, value: 100 },
+          { at_ms: 240, value: 100 },
+        ],
+      },
+    });
+  });
+});
+
 describe("timeline marker snapping", () => {
   it("uses the marker when it is closer than the timing grid", () => {
     expect(snapTimelineTime(478, 50, 480)).toBe(480);
     expect(snapTimelineTime(459, 50, 480)).toBe(450);
+  });
+});
+
+describe("reusable sprite action expansion", () => {
+  it("matches relative offsets, parameter defaults, overrides, and restore", () => {
+    const action: SpriteActionDefinition = {
+      schema_version: 1,
+      id: "sprite.bob",
+      name: "轻跳",
+      duration_ms: 100,
+      channels: {
+        x: [
+          { at_ms: 0, value: 0, easing: "linear" },
+          {
+            at_ms: 50,
+            value: 10,
+            easing: "ease_out",
+            parameter: "distance",
+          },
+        ],
+      },
+      parameters: { distance: { default: 8, min: 0, max: 20 } },
+      end: "restore",
+    };
+    const base: SpriteSnapshot = {
+      asset: "sprite.alice",
+      x: 40,
+      y: 20,
+      scale: 1,
+      scale_x: 1,
+      scale_y: 1,
+      rotation_deg: 0,
+      opacity: 1,
+      z: 1,
+    };
+    const track = expandSpriteActionTrack({
+      action,
+      spriteId: "alice",
+      base,
+      durationMs: 200,
+      parameters: { distance: 12 },
+    });
+    expect(track.type).toBe("sprite");
+    if (track.type !== "sprite") throw new Error("expected sprite track");
+    expect(track.channels.x).toEqual([
+      { at_ms: 0, value: 40, easing: "linear" },
+      { at_ms: 100, value: 52, easing: "ease_out" },
+      { at_ms: 200, value: 40, easing: "linear" },
+    ]);
+  });
+
+  it("rejects unknown or out-of-range parameters", () => {
+    const action: SpriteActionDefinition = {
+      schema_version: 1,
+      id: "sprite.test",
+      name: "测试",
+      duration_ms: 100,
+      channels: { x: [{ at_ms: 0, value: 0, easing: "linear" }] },
+      parameters: { distance: { default: 1, min: 0, max: 2 } },
+    };
+    const base: SpriteSnapshot = {
+      asset: "sprite.alice",
+      x: 0,
+      y: 0,
+      scale: 1,
+      scale_x: 1,
+      scale_y: 1,
+      rotation_deg: 0,
+      opacity: 1,
+      z: 0,
+    };
+    expect(() =>
+      expandSpriteActionTrack({
+        action,
+        spriteId: "alice",
+        base,
+        parameters: { missing: 1 },
+      }),
+    ).toThrow("未声明");
+    expect(() =>
+      expandSpriteActionTrack({
+        action,
+        spriteId: "alice",
+        base,
+        parameters: { distance: 3 },
+      }),
+    ).toThrow("超出");
   });
 });
