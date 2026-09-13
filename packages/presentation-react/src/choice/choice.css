@@ -1,0 +1,133 @@
+/*
+ * Shared choice presentation styles.
+ *
+ * This file is the single source of the ChoiceLayer / prompt-button skin.  The
+ * game and the editor inspector preview both load it through `ChoiceLayer`
+ * (the component imports it), so the two hosts cannot drift and a missing rule
+ * can never be hidden by a host-local copy.
+ *
+ * Layout contract:
+ *
+ * - `.choice-button` is placed by the resolved design-pixel rect the runtime
+ *   shipped (inline style); these rules must never re-flow, scale or re-anchor
+ *   it,
+ * - `.choice-button-image` fills that rect exactly (`inset: 0` plus
+ *   `width/height: 100%`) so `object-fit` decides how pixels map into it,
+ * - `.choice-button-content` overlays the artwork (icon + KaTeX label), so the
+ *   artwork can never cover the option text,
+ * - the built-in fallback skin is applied by `TemplateButton` whenever no
+ *   template resolves or its artwork fails to load.
+ */
+
+.choice-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 16;
+  pointer-events: none;
+}
+
+/* Every item is placed by its resolved rect in the 1920x1080 design space;
+   the layer never re-flows or scales a button itself. */
+.choice-button {
+  position: absolute;
+  display: block;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  color: #f4fbfd;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  transform-origin: center;
+}
+
+.choice-button:disabled {
+  cursor: default;
+}
+
+/* The visual layer is the positioning context for the state artwork. */
+.choice-button-visual {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The artwork always occupies the resolved button rect; intrinsic image sizes
+   therefore cannot displace it or push the label around. */
+.choice-button-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Overlay skins stack the state artwork above the normal artwork. */
+.choice-button-image ~ .choice-button-image {
+  z-index: 1;
+}
+
+/* Content (icon + label) overlays the artwork and stays click-through. */
+.choice-button-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 0 32px;
+  pointer-events: none;
+}
+
+.choice-button-icon {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+
+.choice-button-label {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.choice-button:focus-visible {
+  outline: 2px solid #bcecff;
+  outline-offset: 4px;
+}
+
+/* Built-in fallback skin: the documented CSS choice button, used when no
+   reusable template resolves or its artwork is missing. */
+.choice-button-fallback {
+  border: 1px solid rgb(158 231 255 / 38%);
+  background: linear-gradient(90deg, rgb(9 20 29 / 95%), rgb(19 47 62 / 92%));
+  box-shadow: 0 16px 44px rgb(0 0 0 / 38%);
+  font-size: 28px;
+  transition: 140ms ease;
+}
+
+.choice-button-fallback:hover:not(:disabled),
+.choice-button-fallback.choice-button-hover:not(:disabled) {
+  border-color: #bcecff;
+  background: linear-gradient(90deg, rgb(16 43 57 / 97%), rgb(29 78 97 / 94%));
+  transform: translateX(8px);
+}
+
+.choice-button-fallback.choice-button-pressed:not(:disabled) {
+  border-color: #7fd4ff;
+  background: linear-gradient(90deg, rgb(6 16 24 / 98%), rgb(12 38 52 / 96%));
+  transform: translateX(8px) scale(0.995);
+}
+
+.choice-button-fallback:disabled,
+.choice-button-fallback.is-disabled {
+  opacity: 0.55;
+}

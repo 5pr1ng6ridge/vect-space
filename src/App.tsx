@@ -22,6 +22,7 @@ import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
 import { ButtonLayer } from "./components/ButtonLayer";
+import { ChoiceLayer } from "@vectspace/presentation-react/choice";
 import { ChapterMapPage } from "./components/ChapterMapPage";
 import {
   engineApi,
@@ -46,7 +47,6 @@ import type {
   AdvanceSource,
   AssetUrlMap,
   BootstrapPayload,
-  ChoicePrompt,
   DialoguePrompt,
   DialogueHistoryEntry,
   LongTextPrompt,
@@ -1532,9 +1532,19 @@ export default function App(): ReactElement {
             )}
 
             {choice !== null && (
-              <ChoicePanel
+              // Keep this component mounted across same-prompt runtime updates.
+              // ChoiceLayer owns the stable prompt-id reset; update_id is a
+              // volatile revision and must not restart focus or artwork loops.
+              <ChoiceLayer
+                animations={animations}
+                assets={assets}
                 disabled={busy || runtimeLocked}
                 onChoose={choose}
+                // A non-fatal presentation problem (missing template/icon,
+                // invalid anchor) is surfaced once instead of locking the
+                // prompt; the resolved fallback skin stays playable.
+                onDiagnostic={(diagnostic) => setError(diagnostic.message)}
+                paused={panel !== "none" || pageHidden}
                 prompt={choice}
               />
             )}
@@ -1590,33 +1600,6 @@ export default function App(): ReactElement {
         )}
       </section>
     </main>
-  );
-}
-
-interface ChoicePanelProps {
-  prompt: ChoicePrompt;
-  disabled: boolean;
-  onChoose(choiceId: string): void;
-}
-
-function ChoicePanel({
-  prompt,
-  disabled,
-  onChoose,
-}: ChoicePanelProps): ReactElement {
-  return (
-    <div className="choice-panel">
-      {prompt.choices.map((choice) => (
-        <button
-          disabled={disabled || !choice.enabled}
-          key={choice.id}
-          onClick={() => onChoose(choice.id)}
-          type="button"
-        >
-          <MarkupText source={choice.label} />
-        </button>
-      ))}
-    </div>
   );
 }
 

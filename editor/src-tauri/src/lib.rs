@@ -1909,12 +1909,16 @@ fn build_node_preview(
     request: BuildNodePreviewRequest,
     state: State<'_, EditorState>,
 ) -> Result<BuildNodePreviewResult, WireCommandError> {
-    build_node_preview_impl(request, state)
+    build_node_preview_command(request, &state)
 }
 
-fn build_node_preview_impl(
+/// Core command path kept separate from the Tauri argument extractor.  The
+/// wrapper above is intentionally thin; this boundary lets the fixture test
+/// exercise the same project validation/runtime resolution without requiring a
+/// platform WebView binary in CI.
+fn build_node_preview_command(
     request: BuildNodePreviewRequest,
-    state: State<'_, EditorState>,
+    state: &EditorState,
 ) -> Result<BuildNodePreviewResult, WireCommandError> {
     let mut guard = state
         .session
@@ -1923,7 +1927,7 @@ fn build_node_preview_impl(
     let session = guard
         .as_mut()
         .ok_or_else(|| validation_command_error("尚未打开项目"))?;
-    let staged = request_staged_imports(&state, &session.root, &request.project)?;
+    let staged = request_staged_imports(state, &session.root, &request.project)?;
     let asset_overrides = staged_asset_overrides(&staged);
     let scenes = validate_scene_file_set(&request.project.manifest, &request.project.scenes)
         .map_err(validation_command_error)?;
@@ -3764,7 +3768,9 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::ButtonUpdate { next, .. }
         | SceneNode::ButtonRemove { next, .. } => vec![local(next)],
         SceneNode::Timeline { next, .. } => vec![local(next)],
-        SceneNode::Choice { choices } => choices.iter().map(|choice| local(&choice.next)).collect(),
+        SceneNode::Choice { choices, .. } => {
+            choices.iter().map(|choice| local(&choice.next)).collect()
+        }
         SceneNode::Condition {
             then, otherwise, ..
         } => vec![local(then), local(otherwise)],
@@ -3914,6 +3920,16 @@ fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
             output.insert(asset.clone());
         }
         SceneNode::Action { .. } => {}
+        // Choice icons are optional `gui` assets; like every other reference
+        // they keep the asset from being reported as unused or offered for
+        // deletion.
+        SceneNode::Choice { choices, .. } => {
+            for choice in choices {
+                if let Some(icon) = &choice.icon {
+                    output.insert(icon.clone());
+                }
+            }
+        }
         SceneNode::Timeline { tracks, events, .. } => {
             for track in tracks {
                 match track {
@@ -4055,6 +4071,77 @@ mod tests {
             .find(|scene| scene.definition.id == "prologue")
             .expect("entry scene should be present in the editor payload");
         assert!(prologue.definition.nodes.contains_key("route_choice"));
+    }
+
+    #[test]
+    fn build_node_preview_command_resolves_the_repository_choice_fixture() {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let fingerprint = project_fingerprint(&root, &catalog.manifest).unwrap();
+        let payload = project_payload(
+            &root,
+            &catalog,
+            EditorLayout::default(),
+            fingerprint.clone(),
+        )
+        .unwrap();
+
+        // The WebView sends the project request without host-only root/assets/
+        // diagnostics fields.  Serialize the real editor payload first so
+        // defaults and integer wire values follow the same IPC shape as the
+        // production `projectRequest` path.
+        let mut project = serde_json::to_value(&payload).unwrap();
+        let object = project.as_object_mut().unwrap();
+        object.remove("root");
+        object.remove("assets");
+        object.remove("diagnostics");
+        let wire_fingerprint = object
+            .remove("fingerprint")
+            .expect("editor payload should carry a fingerprint");
+        object.insert("expected_fingerprint".to_owned(), wire_fingerprint);
+        object.insert("import_tokens".to_owned(), serde_json::json!([]));
+        let request = serde_json::json!({
+            "request": {
+                "project": project,
+                "target": { "scene_id": "prologue", "node_id": "route_choice" },
+                "choices": [],
+                "variable_overrides": {}
+            }
+        });
+
+        let state = EditorState::default();
+        state.session.lock().unwrap().replace(ProjectSession {
+            root,
+            catalog,
+            fingerprint,
+            document_models: BTreeMap::new(),
+        });
+        // Deserialize the exact JSON body sent through Tauri, then call the
+        // command's state-backed implementation.  The public Tauri wrapper is
+        // only the extractor/delegation boundary, so this still covers the
+        // production validation, catalog construction and runtime preview.
+        let body = request["request"].clone();
+        let request: BuildNodePreviewRequest = serde_json::from_value(body).unwrap();
+        let response = build_node_preview_command(request, &state).unwrap();
+        let response = serde_json::to_value(response).unwrap();
+
+        assert_eq!(response["status"], "ready");
+        assert_eq!(response["update"]["snapshot"]["prompt"]["kind"], "choice");
+        let choices = response["update"]["snapshot"]["prompt"]["choices"]
+            .as_array()
+            .unwrap();
+        // ending_seen=false and score=0 filter the conditional geometry/test
+        // options, while the repository's unconditional regression choices
+        // remain in their authored order.
+        let ids: Vec<&str> = choices
+            .iter()
+            .map(|choice| choice["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["algebra", "SANDBOX", "BUTTONTEST", "UIMOTIONTEST"]);
+        assert_eq!(
+            response["update"]["snapshot"]["prompt"]["layout"]["direction"],
+            "vertical"
+        );
     }
 
     #[test]
@@ -4545,5 +4632,28 @@ mod tests {
         let mut assets = std::collections::BTreeSet::new();
         collect_node_assets(&curtain(None), &mut assets);
         assert!(assets.is_empty());
+
+        // A choice icon is a real gui reference, while a button-template id is
+        // not an asset and must never leak into the asset set.
+        let mut assets = std::collections::BTreeSet::new();
+        collect_node_assets(
+            &SceneNode::Choice {
+                presentation: None,
+                choices: vec![vectspace_core::model::ChoiceDefinition {
+                    id: "a".to_owned(),
+                    label: "A".to_owned(),
+                    next: "end".to_owned(),
+                    visible_if: None,
+                    enabled_if: None,
+                    template: Some("choice.primary".to_owned()),
+                    icon: Some("gui.icon".to_owned()),
+                }],
+            },
+            &mut assets,
+        );
+        assert_eq!(
+            assets.into_iter().collect::<Vec<_>>(),
+            vec!["gui.icon".to_owned()]
+        );
     }
 }

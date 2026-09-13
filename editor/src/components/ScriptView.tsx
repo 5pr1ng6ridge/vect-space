@@ -878,7 +878,9 @@ function ScriptRowView({
 function summarize(node: SceneNode): string {
   switch (node.type) {
     case "choice":
-      return `${node.choices.length} 个选项`;
+      return node.presentation == null
+        ? `${node.choices.length} 个选项`
+        : `${node.choices.length} 个选项 · ${node.presentation.template ?? "默认皮肤"} · ${node.presentation.direction === "horizontal" ? "横向" : "纵向"}`;
     case "condition":
       return "条件分支";
     case "jump":

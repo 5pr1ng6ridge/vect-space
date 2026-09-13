@@ -267,11 +267,76 @@ export interface ChoiceSnapshot {
   id: string;
   label: string;
   enabled: boolean;
+  /** Resolved gui asset id; absent when none was authored or resolved. */
+  icon?: string | null;
+  /** Resolved skin; `fallback` renders the built-in CSS choice button. */
+  template: ChoiceTemplateSnapshot;
+  /** Effective item rect in design pixels of the fixed 1920x1080 space. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Direction of the resolved choice button flow around the anchor. */
+export type ChoiceFlowDirection = "vertical" | "horizontal";
+
+/**
+ * Resolved choice flow in the fixed 1920x1080 design space.
+ *
+ * `x`/`y`/`width`/`height` bound the whole visible group; each item carries
+ * its own rect on {@link ChoiceSnapshot}.  `anchor_x`/`anchor_y` are the
+ * effective group centre in design pixels (never normalized fractions): an
+ * explicitly presented node uses its authored anchor (`0..=1920` and
+ * `0..=1080`), while a node without `presentation` reports the centre
+ * equivalent to the shipped `left: 470px; top: 360px` CSS panel placement.
+ */
+export interface ChoiceLayoutSnapshot {
+  stage_width: number;
+  stage_height: number;
+  anchor_x: number;
+  anchor_y: number;
+  direction: ChoiceFlowDirection;
+  gap: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Resolved template identity for one choice item.  `fallback` renders the
+ * built-in CSS button; `button` reuses the canonical button skin model, so
+ * choice skins stay in sync with story buttons.
+ */
+export type ChoiceTemplateSnapshot =
+  { kind: "fallback" } | { kind: "button"; button: ButtonSnapshot };
+
+export type ChoiceDiagnosticCode =
+  | "missing_template"
+  | "missing_icon"
+  | "invalid_icon_kind"
+  | "invalid_dimension"
+  | "invalid_gap"
+  | "invalid_anchor";
+
+/**
+ * A non-fatal presentation problem.  The runtime always falls back to a
+ * documented default, so a diagnostic never blocks the prompt.
+ */
+export interface ChoiceDiagnostic {
+  code: ChoiceDiagnosticCode;
+  message: string;
+  scene_id: string;
+  node_id: string;
+  choice_id?: string | null;
 }
 
 export interface ChoicePrompt {
   kind: "choice";
   prompt_id: string;
+  layout: ChoiceLayoutSnapshot;
+  diagnostics: ChoiceDiagnostic[];
   choices: ChoiceSnapshot[];
 }
 

@@ -572,6 +572,58 @@ async function main() {
       );
       process.exitCode = 1;
     }
+    // The shared ChoiceLayer also gets a real-browser computed-layout probe.
+    // This is intentionally separate from screenshot parity: an image that
+    // happens to look plausible can still be intrinsically sized or stacked
+    // above the label.  Every host/mode pair must report exact button-box
+    // artwork geometry and content above the artwork stack.
+    const choiceLayoutCases = Array.isArray(report.choiceLayout?.cases)
+      ? report.choiceLayout.cases
+      : [];
+    const choiceLayoutProblems = [];
+    const expectedChoiceLayoutCases = new Set([
+      "game/separate",
+      "game/overlay",
+      "editor/separate",
+      "editor/overlay",
+    ]);
+    const actualChoiceLayoutCases = new Set();
+    for (const probe of choiceLayoutCases) {
+      const key = `${probe.host}/${probe.mode}`;
+      if (actualChoiceLayoutCases.has(key)) {
+        choiceLayoutProblems.push(`${key}: 探针结果重复`);
+      }
+      actualChoiceLayoutCases.add(key);
+      if (probe.imageBoxesMatchButton !== true) {
+        choiceLayoutProblems.push(`${key}: artwork 未与按钮解析盒一致`);
+      }
+      if (probe.fallbackHeightMatches !== true) {
+        choiceLayoutProblems.push(
+          `${key}: 80px fallback 高度未按解析按钮盒呈现`,
+        );
+      }
+      if (probe.contentOverlaysArtwork !== true) {
+        choiceLayoutProblems.push(
+          `${key}: icon/KaTeX content 未叠加在 artwork 上`,
+        );
+      }
+    }
+    for (const key of expectedChoiceLayoutCases) {
+      if (!actualChoiceLayoutCases.has(key)) {
+        choiceLayoutProblems.push(
+          `${key}: 缺少真实浏览器 ChoiceLayer 探针结果`,
+        );
+      }
+    }
+    console.log(
+      `Choice 布局：${choiceLayoutCases.length}/${expectedChoiceLayoutCases.size} 个 host/mode 探针通过`,
+    );
+    if (choiceLayoutProblems.length > 0) {
+      console.error(`Choice 布局探针失败：${choiceLayoutProblems.length} 处：`);
+      for (const problem of choiceLayoutProblems)
+        console.error(`  - ${problem}`);
+    }
+
     // A deterministically scrubbed video must land on the time the playhead
     // targets, within the shared 50 ms drift threshold.  Playback-mode seeks
     // are checked by the real-video fixture block below; timelines without a
@@ -708,6 +760,7 @@ async function main() {
       errors.length > 0 ||
       pageErrors.length > 0 ||
       targetProblems.length > 0 ||
+      choiceLayoutProblems.length > 0 ||
       scrubMediaProblems.length > 0 ||
       videoProblems.length > 0 ||
       lifecycleProblems.length > 0

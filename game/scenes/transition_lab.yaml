@@ -282,7 +282,46 @@ nodes:
           decay: 1
           seed: 7
         duration_ms: 400
-    next: closing
+    next: template_choice
+  # —— 模板驱动选择：KaTeX 标签、条件过滤、默认/选项模板、gui 图标、禁用态 ——
+  # 两个可见选项分别使用节点默认模板 demo.separate 与选项覆盖模板 demo.overlay；
+  # hidden 因 score != 99 被过滤，locked 因 score != 0 处于禁用态（重播时 score=0）。
+  # 全部复用已登记的按钮模板与 gui 素材，Tab 可聚焦选项、Enter/空格选择。
+  template_choice:
+    type: choice
+    presentation:
+      template: demo.separate
+      anchor_x: 960
+      anchor_y: 820
+      direction: horizontal
+      gap: 24
+    choices:
+      - id: formula
+        label: "勾股定理 $a^2+b^2=c^2$"
+        icon: gui.dialogue_box
+        next: closing
+      - id: override
+        label: "选项模板 $\\pi r^2$"
+        template: demo.overlay
+        next: closing
+      - id: hidden
+        label: 不应出现的选项
+        visible_if:
+          op: eq
+          left:
+            variable: score
+          right:
+            value: 99
+        next: closing
+      - id: locked
+        label: 条件未满足（禁用）
+        enabled_if:
+          op: ne
+          left:
+            variable: score
+          right:
+            value: 0
+        next: closing
   closing:
     type: say
     speaker: test

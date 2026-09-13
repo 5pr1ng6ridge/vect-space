@@ -193,8 +193,8 @@ fn repository_game_project_validates_including_animations() {
             }
 
             use vectspace_core::model::{
-                BackgroundTransitionSpec, CurtainAction, CurtainFill, CurtainTransitionSpec,
-                ScreenEffectSpec, TransitionDirection,
+                BackgroundTransitionSpec, ChoiceFlowDirection, CurtainAction, CurtainFill,
+                CurtainTransitionSpec, ScreenEffectSpec, TransitionDirection,
             };
             let lab = catalog
                 .scenes
@@ -337,6 +337,37 @@ fn repository_game_project_validates_including_animations() {
                 }),
                 "transition_lab must keep two overlapping shake windows"
             );
+            // The template-driven choice demo: default template, option
+            // override template, gui icon, KaTeX label, condition filtering
+            // and a disabled option, all reusing registered buttons/assets.
+            let choice_node = lab
+                .nodes
+                .get("template_choice")
+                .expect("the template choice demo must stay registered");
+            let vectspace_core::model::SceneNode::Choice {
+                presentation: Some(presentation),
+                choices,
+            } = choice_node
+            else {
+                panic!("template_choice must be a presented choice node");
+            };
+            assert_eq!(presentation.template.as_deref(), Some("demo.separate"));
+            assert_eq!(presentation.direction, ChoiceFlowDirection::Horizontal);
+            assert!(choices.iter().any(|choice| {
+                choice.icon.as_deref() == Some("gui.dialogue_box")
+                    && choice.label.contains("$a^2+b^2=c^2$")
+                    && choice.template.is_none()
+            }));
+            assert!(choices.iter().any(|choice| {
+                choice.template.as_deref() == Some("demo.overlay")
+                    && choice.label.contains("$\\pi r^2$")
+            }));
+            assert!(choices
+                .iter()
+                .any(|choice| { choice.visible_if.is_some() && choice.id == "hidden" }));
+            assert!(choices
+                .iter()
+                .any(|choice| choice.enabled_if.is_some() && choice.id == "locked"));
         }
         // Unresolved LFS pointers mean the fixtures were never downloaded.
         Err(error) if error.to_string().contains("Git LFS") => {}

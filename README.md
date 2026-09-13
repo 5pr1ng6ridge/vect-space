@@ -152,6 +152,24 @@ shared core guarantees:
   and the latest seek wins; listeners, frame callbacks, the `VideoSource` and
   the media element are all released with the session.
 
+`@vectspace/presentation-react` holds the DOM counterparts of the same rules:
+
+```text
+packages/presentation-react/src/
+├── AnimatedImage.tsx      one image element for static or looping artwork
+├── useAnimatedImage.ts    per-instance decorative frame clock
+├── button/TemplateButton.tsx  the only normal/hover/pressed state machine
+├── choice/ChoiceLayer.tsx     the only template-driven choice surface
+└── markup/MarkupLabel.tsx     static KaTeX/markup labels
+```
+
+The player and the editor preview mount the same `TemplateButton` and
+`ChoiceLayer`, so story buttons, choice buttons and the inspector preview cannot
+drift apart in artwork resolution, hover/press cancellation, focus handling or
+animation playback. `AnimatedImage` is shared too, which means “missing image”
+behaves identically in both hosts: the element renders nothing, the failure is
+reported, and a caller may fall back to a text skin instead of locking.
+
 Saves contain only snapshots. The automatic slot and manual slots `1`–`3` use a
 temporary file plus backup. Loading cancels transient presentation state and
 returns an update with no cues, so SFX, flashes, shakes, and transitions are not
@@ -370,6 +388,69 @@ Frame loops are _decorative_ animations:
   resizes an object, and layout measurements (KaTeX, paper pagination, button
   hit areas) are never rebuilt per frame.
 
+## Template-driven choices
+
+A `choice` node may opt into a reusable button skin and an explicit placement.
+Without `presentation` nothing changes: the buttons keep the shipped CSS panel
+at `left: 470px; top: 360px` and the built-in gradient skin, and the runtime
+reports the equivalent group-centre anchor so the resolved rects stay
+reproducible.
+
+```yaml
+route_choice:
+  type: choice
+  presentation:
+    template: choice.primary # reusable ButtonTemplate, optional
+    anchor_x: 960 # group centre, design pixels 0..=1920
+    anchor_y: 780 # group centre, design pixels 0..=1080
+    direction: horizontal # vertical (default) or horizontal
+    gap: 24 # design pixels between items
+    button_width: 400 # optional node-wide override
+    button_height: null # optional node-wide override
+  choices:
+    - id: formula
+      label: "勾股定理 $a^2+b^2=c^2$"
+      icon: gui.dialogue_box # optional `gui` asset
+      next: next_node
+    - id: compact
+      label: 更窄的选项
+      template: choice.secondary # wins over the node template
+      next: next_node
+```
+
+Rules the runtime enforces:
+
+- Filtering and interpolation run before layout, so a hidden option never
+  consumes a flow slot and labels always reflect the current variables.
+- Size priority is node override, then option template, then node template,
+  then the documented `980x92` fallback; every item is centred on the cross
+  axis and the group is centred on the anchor.
+- Anchors are **design pixels**, never normalized fractions: `(960, 540)` is the
+  stage centre, `(0, 0)` touches the top-left corner, and any value outside
+  `0..=1920` / `0..=1080` is reported and replaced by the default.
+- A missing or wrong-kind icon, a missing node or option template, a negative
+  gap and a non-positive size override become structured `diagnostics` on the
+  prompt instead of locking the story. The item falls back to the node template
+  or to the built-in CSS button, and the game surfaces the message once.
+- A save only contributes identity and interaction state: ids, order, labels
+  and enabled flags are kept, while rects, templates, icons and diagnostics are
+  always re-resolved from the current content. Saved ids that no longer exist
+  are dropped, and a loaded prompt that would end up empty or fully disabled is
+  rejected rather than deadlocking the player.
+- Buttons are native DOM buttons: normal, hover, pressed, disabled and
+  keyboard-focus states all work, `:focus-visible` draws the ring, and focus
+  survives a harmless re-render but is released when the prompt changes.
+
+`fixtures/choice-layout-cases.json` is the shared conformance corpus: the Rust
+layout in `crates/vectspace-core/src/choice.rs` and the framework-agnostic
+mirror in `@vectspace/presentation-core/choice-layout` must both reproduce it.
+The layout is a pure function of order, sizes, direction, gap and anchor — it
+never depends on the camera, viewport or frame rate.
+
+`game/scenes/transition_lab.yaml` finishes with a template-driven choice that
+demonstrates a KaTeX label, a `gui` icon, the node default template, an option
+override template, a filtered option, a disabled option and keyboard focus.
+
 Reusable sprite actions are authored in a full-screen workspace that reuses
 the story timeline editor instead of a private keyframe table: the action's
 relative channels are projected onto an editable preview pose, parameter-bound
@@ -431,10 +512,11 @@ action as a small end-to-end fixture.
 
 The runtime includes the fixed viewport, validated Schema v2 content, Pixi
 presentation and timeline cues, video tracks, KaTeX dialogue, BGM/SFX buses,
-character expressions, reusable sprite actions and loop image animations,
-automatic playback, three Ctrl fast-forward policies, forced playback sections,
-profile-level read tracking, a Scene-local 500-entry dialogue history, three
-manual slots plus autosave, and the revealed chapter map page.
+character expressions, reusable sprite actions, loop image animations and
+template-driven choices, automatic playback, three Ctrl fast-forward policies,
+forced playback sections, profile-level read tracking, a Scene-local 500-entry
+dialogue history, three manual slots plus autosave, and the revealed chapter map
+page.
 
 Each Scene is a complete runtime boundary. Crossing into another Scene resets
 its BGM, background, sprites, buttons, camera/effects, dialogue and long-text
@@ -454,6 +536,14 @@ direct Pixi object manipulation, and a manually-authored chapter map workspace.
 Timeline workspaces instantiate the shared `SceneSurface` and `TimelineSession`
 per canvas, so object creation, media lifecycle, effect evaluation and frame
 loops are the same code the player runs. Pixi/ELK workspaces are lazy-loaded.
+The choice inspector edits the default template, anchor, direction, gap and
+optional size overrides plus each option's template and `gui` icon; enabling
+presentation on a legacy node seeds the anchor from the resolved legacy-layout
+centre, so nothing jumps. Its preview calls the Rust preview run and renders the
+returned `PromptSnapshot` through the shared `ChoiceLayer`; it is read-only,
+silent, deterministic, cancellable and Strict Mode safe. Icon and button
+references (including node and option templates) are counted in the asset and
+template lists and protected from deletion.
 Saves validate an in-memory candidate and replace only changed documents;
 recovery data lives under ignored `.vectspace/backups/` and `.vectspace/tmp/`
 directories.

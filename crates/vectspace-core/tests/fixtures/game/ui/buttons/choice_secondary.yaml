@@ -1,0 +1,10 @@
+schema_version: 1
+id: choice.secondary
+width: 240.0
+height: 72.0
+asset_mode: separate
+fit: stretch
+normal: gui.name_box
+hover: gui.name_box
+pressed: gui.name_box
+animations: {}

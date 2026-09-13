@@ -79,3 +79,70 @@ describe("ScriptView branch insertion", () => {
     expect(onInsertAfter).toHaveBeenCalledWith("choice", "choice:right");
   });
 });
+
+describe("ScriptView choice summary", () => {
+  it("shows the legacy option count and the template presentation when set", () => {
+    const legacy: SceneDefinition = {
+      ...scene,
+      nodes: {
+        ...scene.nodes,
+        choice: {
+          type: "choice",
+          choices: [{ id: "left", label: "左分支", next: "left" }],
+        },
+      },
+    };
+    const first = render(
+      <ScriptView
+        manifest={manifest}
+        onChange={() => undefined}
+        onDelete={() => undefined}
+        onInsertAfter={() => undefined}
+        onInsertBatch={() => undefined}
+        onOpenGraph={() => undefined}
+        onSelect={() => undefined}
+        scene={legacy}
+        selectedNodeId={null}
+      />,
+    );
+    expect(screen.getByText("1 个选项")).toBeTruthy();
+    first.unmount();
+
+    const presented: SceneDefinition = {
+      ...scene,
+      nodes: {
+        ...scene.nodes,
+        choice: {
+          type: "choice",
+          presentation: {
+            template: "choice.primary",
+            anchor_x: 960,
+            anchor_y: 540,
+            direction: "horizontal",
+            gap: 20,
+            button_width: null,
+            button_height: null,
+          },
+          choices: [
+            { id: "left", label: "左分支", next: "left" },
+            { id: "right", label: "右分支", next: "right" },
+          ],
+        },
+      },
+    };
+    render(
+      <ScriptView
+        manifest={manifest}
+        onChange={() => undefined}
+        onDelete={() => undefined}
+        onInsertAfter={() => undefined}
+        onInsertBatch={() => undefined}
+        onOpenGraph={() => undefined}
+        onSelect={() => undefined}
+        scene={presented}
+        selectedNodeId={null}
+      />,
+    );
+    expect(screen.getByText("2 个选项 · choice.primary · 横向")).toBeTruthy();
+  });
+});

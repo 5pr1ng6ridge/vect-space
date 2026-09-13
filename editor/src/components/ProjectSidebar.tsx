@@ -8,7 +8,10 @@ import {
 import { isCanonicalIntegerText } from "../scalars";
 import { useAssetFont } from "../useAssetFont";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
-import { findAssetReferences } from "./assetReferences";
+import {
+  findAssetReferences,
+  findButtonTemplateReferences,
+} from "./assetReferences";
 import { FrameSequencePreview } from "./FrameSequencePreview";
 import { ImageAnimationPanel } from "./ImageAnimationPanel";
 import type {
@@ -1401,48 +1404,61 @@ function ProjectPanel({
           剧情节点可创建多个实例；模板被引用或贴图仍被使用时不能删除。
         </p>
         <div className="ui-motion-list">
-          {(project.buttons ?? []).map(({ definition, path }) => (
-            <article className="variable-card" key={definition.id}>
-              <header>
-                <span>
-                  <code>{definition.id}</code>
-                  <small>
-                    {definition.width} × {definition.height} ·{" "}
-                    {definition.asset_mode}
-                  </small>
-                </span>
-                <div>
-                  <button
-                    onClick={() => onEditButtonTemplate(definition.id)}
-                    title="打开按钮模板工作区"
-                    type="button"
-                  >
-                    编辑
-                  </button>
-                  <button
-                    onClick={() => onDuplicateButtonTemplate(definition.id)}
-                    title="复制按钮模板"
-                    type="button"
-                  >
-                    复制
-                  </button>
-                  <button
-                    className="danger-text"
-                    onClick={() => onDeleteButtonTemplate(definition.id)}
-                    type="button"
-                  >
-                    ×
-                  </button>
+          {(project.buttons ?? []).map(({ definition, path }) => {
+            const references = findButtonTemplateReferences(
+              project,
+              definition.id,
+            );
+            return (
+              <article className="variable-card" key={definition.id}>
+                <header>
+                  <span>
+                    <code>{definition.id}</code>
+                    <small>
+                      {definition.width} × {definition.height} ·{" "}
+                      {definition.asset_mode}
+                    </small>
+                  </span>
+                  <div>
+                    <button
+                      onClick={() => onEditButtonTemplate(definition.id)}
+                      title="打开按钮模板工作区"
+                      type="button"
+                    >
+                      编辑
+                    </button>
+                    <button
+                      onClick={() => onDuplicateButtonTemplate(definition.id)}
+                      title="复制按钮模板"
+                      type="button"
+                    >
+                      复制
+                    </button>
+                    <button
+                      className="danger-text"
+                      onClick={() => onDeleteButtonTemplate(definition.id)}
+                      type="button"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </header>
+                <small>{path}</small>
+                <small>
+                  {references.length === 0
+                    ? "尚未被剧情引用"
+                    : `引用 ${references.length} 处：${references
+                        .slice(0, 3)
+                        .join("、")}${references.length > 3 ? "…" : ""}`}
+                </small>
+                <div className="button-template-slots">
+                  <span>正常：{definition.normal ?? "无"}</span>
+                  <span>悬停：{definition.hover ?? "沿用/无"}</span>
+                  <span>按下：{definition.pressed ?? "沿用/无"}</span>
                 </div>
-              </header>
-              <small>{path}</small>
-              <div className="button-template-slots">
-                <span>正常：{definition.normal ?? "无"}</span>
-                <span>悬停：{definition.hover ?? "沿用/无"}</span>
-                <span>按下：{definition.pressed ?? "沿用/无"}</span>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
           {(project.buttons ?? []).length === 0 && (
             <small>还没有按钮模板。创建后可在按钮节点中复用。</small>
           )}

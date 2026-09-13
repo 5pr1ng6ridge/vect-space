@@ -8,9 +8,14 @@ import {
   IMAGE_ANIMATION_MIN_FRAME_MS,
   IMAGE_ANIMATION_SCHEMA_VERSION,
 } from "./imageAnimation";
+import {
+  CHOICE_STAGE_HEIGHT,
+  CHOICE_STAGE_WIDTH,
+} from "@vectspace/presentation-core/choice-layout";
 import type {
   AssetKind,
   BackgroundTransitionSpec,
+  ChoiceNode,
   ConditionExpression,
   EditorDiagnostic,
   EditorProject,
@@ -1152,6 +1157,101 @@ function validateMapRect(
     );
 }
 
+/** A choice option or node template must reference a declared button file. */
+type IssueSink = (code: string, message: string) => void;
+
+function checkChoiceTemplate(
+  project: EditorProject,
+  templateId: string,
+  label: string,
+  issue: IssueSink,
+): void {
+  const known = (project.buttons ?? []).some(
+    (file) => file.definition.id === templateId,
+  );
+  if (!known) {
+    issue(
+      "unknown_choice_template",
+      `${label} 引用了未知按钮模板：${templateId}`,
+    );
+  }
+}
+
+function checkChoiceIcon(
+  project: EditorProject,
+  iconId: string,
+  label: string,
+  issue: IssueSink,
+): void {
+  const asset = project.manifest.assets[iconId];
+  if (asset === undefined) {
+    issue("missing_choice_icon", `${label} 的图标素材未登记：${iconId}`);
+    return;
+  }
+  if (asset.kind !== "gui") {
+    issue(
+      "invalid_choice_icon_kind",
+      `${label} 的图标必须是 gui 素材：${iconId}`,
+    );
+  }
+}
+
+/**
+ * Live diagnostics for an opted-in choice presentation.
+ *
+ * The runtime never locks on an invalid value: it falls back to a documented
+ * default and reports a `ChoiceDiagnostic`.  The editor mirrors those rules so
+ * the author sees the same problem while typing, before a preview is built.
+ */
+function validateChoicePresentation(
+  project: EditorProject,
+  node: ChoiceNode,
+  issue: IssueSink,
+): void {
+  const presentation = node.presentation;
+  if (presentation === null || presentation === undefined) return;
+  if (presentation.template != null && presentation.template !== "") {
+    checkChoiceTemplate(project, presentation.template, "选择节点", issue);
+  }
+  if (
+    !Number.isFinite(presentation.anchor_x) ||
+    presentation.anchor_x < 0 ||
+    presentation.anchor_x > CHOICE_STAGE_WIDTH
+  ) {
+    issue(
+      "invalid_choice_anchor",
+      `anchor_x 必须是 0–${CHOICE_STAGE_WIDTH} 之间的设计像素`,
+    );
+  }
+  if (
+    !Number.isFinite(presentation.anchor_y) ||
+    presentation.anchor_y < 0 ||
+    presentation.anchor_y > CHOICE_STAGE_HEIGHT
+  ) {
+    issue(
+      "invalid_choice_anchor",
+      `anchor_y 必须是 0–${CHOICE_STAGE_HEIGHT} 之间的设计像素`,
+    );
+  }
+  if (
+    presentation.direction !== "vertical" &&
+    presentation.direction !== "horizontal"
+  ) {
+    issue("invalid_choice_direction", "方向必须是 vertical 或 horizontal");
+  }
+  if (!Number.isFinite(presentation.gap) || presentation.gap < 0) {
+    issue("invalid_choice_gap", "选项间距必须是非负数");
+  }
+  for (const [side, value] of [
+    ["width", presentation.button_width],
+    ["height", presentation.button_height],
+  ] as const) {
+    if (value != null && (!Number.isFinite(value) || value <= 0)) {
+      issue("invalid_choice_size", `button_${side} 必须是正数`);
+    }
+  }
+}
+
 function validateNode(
   project: EditorProject,
   sceneId: string,
@@ -1445,8 +1545,20 @@ function validateNode(
           validateCondition(project, choice.visible_if, issue);
         if (choice.enabled_if !== undefined)
           validateCondition(project, choice.enabled_if, issue);
+        if (choice.template != null && choice.template !== "") {
+          checkChoiceTemplate(
+            project,
+            choice.template,
+            `选项 ${choice.id}`,
+            issue,
+          );
+        }
+        if (choice.icon != null && choice.icon !== "") {
+          checkChoiceIcon(project, choice.icon, `选项 ${choice.id}`, issue);
+        }
         ids.add(choice.id);
       }
+      validateChoicePresentation(project, node, issue);
       break;
     }
     case "set":

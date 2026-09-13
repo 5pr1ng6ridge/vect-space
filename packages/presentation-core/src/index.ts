@@ -14,4 +14,5 @@ export * from "./types";
 export * from "./uiMotion";
 export * from "./virtualClock";
 export * from "./chapterMap";
+export * from "./choiceLayout";
 export * from "./imageAnimation";

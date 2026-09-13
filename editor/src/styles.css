@@ -4633,3 +4633,122 @@ body.timeline-resizing {
   flex: 1 1 120px;
   min-width: 80px;
 }
+
+/* ---------- Choice presentation authoring + shared ChoiceLayer preview ---------- */
+
+.choice-presentation-fields {
+  display: grid;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+  gap: 10px;
+}
+
+.choice-presentation-fields .field {
+  margin-bottom: 0;
+}
+
+.choice-presentation-fields .checkbox-field > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.choice-presentation-summary {
+  display: grid;
+  gap: 6px;
+}
+
+.choice-presentation-summary button {
+  justify-self: start;
+}
+
+/* The shared ChoiceLayer is rendered in the 1920x1080 design space and scaled
+   by the preview wrapper.  Its layer/button/artwork skin lives in
+   `@vectspace/presentation-react/choice.css` (imported by the component) so
+   the game and this read-only preview can never drift; only the inspector
+   chrome below is editor-local. */
+.choice-preview {
+  display: grid;
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid #1e2a3d;
+  border-radius: 6px;
+  background: #05090f;
+  gap: 0;
+}
+
+.choice-preview-stage {
+  position: relative;
+  width: 100%;
+  min-height: 120px;
+  overflow: hidden;
+  background: #020307;
+}
+
+.choice-preview-design {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+}
+
+.choice-preview-note {
+  margin: 0;
+  padding: 12px;
+  color: #8da0bb;
+  font-size: 10px;
+}
+
+.choice-preview-meta {
+  display: grid;
+  padding: 6px 8px;
+  border-top: 1px solid #1e2a3d;
+  gap: 2px;
+}
+
+.choice-preview-diagnostics {
+  color: #f0b46a;
+}
+
+.choice-preview-options {
+  display: grid;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border-top: 1px solid #1e2a3d;
+  gap: 4px;
+  list-style: none;
+}
+
+.choice-preview-options li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  color: #9aa4b5;
+  font-size: 9px;
+  gap: 6px;
+}
+
+.choice-preview-options code {
+  color: #d7e6ff;
+}
+
+/* Static markup label units shared with the game surfaces. */
+.markup-unit {
+  visibility: inherit;
+}
+
+.character-unit {
+  white-space: pre-wrap;
+}
+
+.markup-reveal-content {
+  display: inline-block;
+}
+
+.math-unit {
+  display: inline-block;
+  margin: 0 0.12em;
+  color: inherit;
+  vertical-align: -0.08em;
+}

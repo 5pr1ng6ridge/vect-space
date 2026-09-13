@@ -1,0 +1,141 @@
+[
+  {
+    "name": "vertical fallback trio centred on the stage anchor",
+    "direction": "vertical",
+    "anchor_x": 960,
+    "anchor_y": 540,
+    "gap": 20,
+    "items": [
+      { "width": 980, "height": 92 },
+      { "width": 980, "height": 92 },
+      { "width": 980, "height": 92 }
+    ],
+    "expected": {
+      "x": 470,
+      "y": 382,
+      "width": 980,
+      "height": 316,
+      "items": [
+        { "x": 470, "y": 382, "width": 980, "height": 92 },
+        { "x": 470, "y": 494, "width": 980, "height": 92 },
+        { "x": 470, "y": 606, "width": 980, "height": 92 }
+      ]
+    }
+  },
+  {
+    "name": "vertical mixed template sizes keep their own dimensions",
+    "direction": "vertical",
+    "anchor_x": 960,
+    "anchor_y": 540,
+    "gap": 20,
+    "items": [
+      { "width": 240, "height": 72 },
+      { "width": 320, "height": 88 }
+    ],
+    "expected": {
+      "x": 800,
+      "y": 450,
+      "width": 320,
+      "height": 180,
+      "items": [
+        { "x": 840, "y": 450, "width": 240, "height": 72 },
+        { "x": 800, "y": 542, "width": 320, "height": 88 }
+      ]
+    }
+  },
+  {
+    "name": "horizontal mixed sizes advance on the x axis",
+    "direction": "horizontal",
+    "anchor_x": 960,
+    "anchor_y": 540,
+    "gap": 16,
+    "items": [
+      { "width": 200, "height": 80 },
+      { "width": 300, "height": 120 }
+    ],
+    "expected": {
+      "x": 702,
+      "y": 480,
+      "width": 516,
+      "height": 120,
+      "items": [
+        { "x": 702, "y": 500, "width": 200, "height": 80 },
+        { "x": 918, "y": 480, "width": 300, "height": 120 }
+      ]
+    }
+  },
+  {
+    "name": "single item honours an off-centre pixel anchor",
+    "direction": "vertical",
+    "anchor_x": 480,
+    "anchor_y": 810,
+    "gap": 20,
+    "items": [{ "width": 420, "height": 96 }],
+    "expected": {
+      "x": 270,
+      "y": 762,
+      "width": 420,
+      "height": 96,
+      "items": [{ "x": 270, "y": 762, "width": 420, "height": 96 }]
+    }
+  },
+  {
+    "name": "zero gap stacks flush",
+    "direction": "vertical",
+    "anchor_x": 960,
+    "anchor_y": 540,
+    "gap": 0,
+    "items": [
+      { "width": 100, "height": 50 },
+      { "width": 200, "height": 60 },
+      { "width": 150, "height": 40 }
+    ],
+    "expected": {
+      "x": 860,
+      "y": 465,
+      "width": 200,
+      "height": 150,
+      "items": [
+        { "x": 910, "y": 465, "width": 100, "height": 50 },
+        { "x": 860, "y": 515, "width": 200, "height": 60 },
+        { "x": 885, "y": 575, "width": 150, "height": 40 }
+      ]
+    }
+  },
+  {
+    "name": "fractional design-pixel anchor and gap stay exact",
+    "direction": "vertical",
+    "anchor_x": 333.5,
+    "anchor_y": 277.25,
+    "gap": 12.5,
+    "items": [
+      { "width": 100.5, "height": 40.25 },
+      { "width": 200, "height": 60 }
+    ],
+    "expected": {
+      "x": 233.5,
+      "y": 220.875,
+      "width": 200,
+      "height": 112.75,
+      "items": [
+        { "x": 283.25, "y": 220.875, "width": 100.5, "height": 40.25 },
+        { "x": 233.5, "y": 273.625, "width": 200, "height": 60 }
+      ]
+    }
+  },
+  {
+    "name": "no visible items collapse onto the anchor point",
+    "direction": "horizontal",
+    "anchor_x": 480,
+    "anchor_y": 810,
+    "gap": 20,
+    "items": [],
+    "expected": {
+      "x": 480,
+      "y": 810,
+      "width": 0,
+      "height": 0,
+      "items": []
+    }
+  }
+]

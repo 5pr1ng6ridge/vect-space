@@ -59,6 +59,9 @@ ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml
 - ui/motions/dialogue_emphasis.yaml
+buttons:
+- ui/buttons/choice_primary.yaml
+- ui/buttons/choice_secondary.yaml
 ui_motion_defaults:
   dialogue_show: ui.dialogue.slide_in
   dialogue_hide: ui.dialogue.slide_out

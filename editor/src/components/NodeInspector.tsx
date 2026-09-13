@@ -41,12 +41,19 @@ import type {
   ButtonClickAction,
   ButtonPostAction,
   ButtonSetAction,
+  EditorProject,
+  PreviewChoiceDecision,
   SpriteActionEnd,
 } from "../types";
 import { MeasuredMarkup } from "@vectspace/text-react";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import type { ChoicePrompt } from "@vectspace/presentation-core/types";
 import { CuePreview } from "./CuePreview";
 import type { CuePreviewEnvironment } from "./CuePreview";
 import { Field, NumberField } from "./Fields";
+import { ChoicePresentationFields } from "./ChoicePresentationFields";
+import { ChoicePreview } from "./ChoicePreview";
+import { choiceIconOptions } from "../choicePresentation";
 import {
   CurtainFillFields,
   CurtainTransitionFields,
@@ -59,6 +66,16 @@ import {
   buildScreenEffectPreviewRequest,
   storyVisualStateAtNode,
 } from "../presentationPreview";
+
+/** Preview inputs threaded to the Rust-backed Choice inspector preview. */
+interface ChoicePreviewContext {
+  project: EditorProject;
+  animationMap: AnimationMap;
+  importTokens: string[];
+  variableOverrides: Record<string, ScalarValue>;
+  choices: PreviewChoiceDecision[];
+  onResolvedPrompt(prompt: ChoicePrompt | null): void;
+}
 
 const DEFAULT_LONG_TEXT_LAYOUT: LongTextLayout = {
   x: 340,
@@ -97,6 +114,12 @@ interface NodeInspectorProps {
   onError?: (message: string) => void;
   /** Test seam: in-memory render kit for the inspector previews. */
   previewEnvironment?: CuePreviewEnvironment;
+  /** Whole project for the Rust-backed Choice inspector preview. */
+  previewProject?: EditorProject;
+  previewAnimationMap?: AnimationMap;
+  previewImportTokens?: string[];
+  previewVariableOverrides?: Record<string, ScalarValue>;
+  previewChoices?: PreviewChoiceDecision[];
 }
 
 export function NodeInspector({
@@ -121,9 +144,27 @@ export function NodeInspector({
   scenes = [],
   onError,
   previewEnvironment,
+  previewProject,
+  previewAnimationMap = {},
+  previewImportTokens,
+  previewVariableOverrides,
+  previewChoices,
 }: NodeInspectorProps): ReactElement {
   const node = nodeId === null ? undefined : scene.nodes[nodeId];
   const [idDraft, setIdDraft] = useState(nodeId ?? "");
+  const [choicePreviewResolution, setChoicePreviewResolution] = useState<{
+    project: EditorProject;
+    sceneId: string;
+    nodeId: string;
+    prompt: ChoicePrompt | null;
+  } | null>(null);
+  const choicePreviewPrompt =
+    choicePreviewResolution !== null &&
+    choicePreviewResolution.project === previewProject &&
+    choicePreviewResolution.sceneId === scene.id &&
+    choicePreviewResolution.nodeId === nodeId
+      ? choicePreviewResolution.prompt
+      : null;
 
   if (nodeId === null || node === undefined) {
     return (
@@ -211,6 +252,23 @@ export function NodeInspector({
           (offset, text) => onSplitDialogue(nodeId, offset, text),
           (stepIndex) => onSplitLongText(nodeId, stepIndex),
           () => onOpenLongTextWorkspace(nodeId),
+          previewProject === undefined
+            ? undefined
+            : {
+                project: previewProject,
+                animationMap: previewAnimationMap,
+                importTokens: previewImportTokens ?? [],
+                variableOverrides: previewVariableOverrides ?? {},
+                choices: previewChoices ?? [],
+                onResolvedPrompt: (prompt) =>
+                  setChoicePreviewResolution({
+                    project: previewProject,
+                    sceneId: scene.id,
+                    nodeId,
+                    prompt,
+                  }),
+              },
+          choicePreviewPrompt,
         )}
       </section>
 
@@ -282,6 +340,8 @@ function renderFields(
   splitDialogue: (offset: number, text?: string) => void,
   splitLongText: (stepIndex: number) => void,
   openLongTextWorkspace: () => void,
+  preview: ChoicePreviewContext | undefined,
+  choicePreviewPrompt: ChoicePrompt | null,
 ): ReactNode {
   const targets = Object.keys(scene.nodes);
   switch (node.type) {
@@ -1035,6 +1095,76 @@ function renderFields(
                   targets={targets}
                   value={choice.next}
                 />
+                <Field label="按钮模板">
+                  <select
+                    onChange={(event) =>
+                      update({
+                        ...node,
+                        choices: node.choices.map(
+                          (candidate, candidateIndex) =>
+                            candidateIndex === index
+                              ? {
+                                  ...candidate,
+                                  template: event.currentTarget.value || null,
+                                }
+                              : candidate,
+                        ),
+                      })
+                    }
+                    value={choice.template ?? ""}
+                  >
+                    <option value="">继承节点模板 / 内置 CSS 按钮</option>
+                    {choice.template != null &&
+                      choice.template !== "" &&
+                      !buttons.some(
+                        (file) => file.definition.id === choice.template,
+                      ) && (
+                        <option value={choice.template}>
+                          缺失：{choice.template}
+                        </option>
+                      )}
+                    {buttons.map((file) => (
+                      <option
+                        key={file.definition.id}
+                        value={file.definition.id}
+                      >
+                        {file.definition.id}（{file.definition.width}×
+                        {file.definition.height}）
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="图标（gui）">
+                  <select
+                    onChange={(event) =>
+                      update({
+                        ...node,
+                        choices: node.choices.map(
+                          (candidate, candidateIndex) =>
+                            candidateIndex === index
+                              ? {
+                                  ...candidate,
+                                  icon: event.currentTarget.value || null,
+                                }
+                              : candidate,
+                        ),
+                      })
+                    }
+                    value={choice.icon ?? ""}
+                  >
+                    <option value="">无图标</option>
+                    {choice.icon != null &&
+                      choice.icon !== "" &&
+                      manifest.assets[choice.icon] === undefined && (
+                        <option value={choice.icon}>缺失：{choice.icon}</option>
+                      )}
+                    {choiceIconOptions(manifest).map((asset) => (
+                      <option key={asset.id} value={asset.id}>
+                        {asset.id}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
                 <OptionalConditionEditor
                   label="显示条件"
                   manifest={manifest}
@@ -1095,6 +1225,25 @@ function renderFields(
           >
             ＋ 添加选项
           </button>
+          <ChoicePresentationFields
+            buttons={buttons}
+            node={node}
+            onChange={update}
+            previewPrompt={choicePreviewPrompt}
+          />
+          {preview !== undefined && (
+            <ChoicePreview
+              animations={preview.animationMap}
+              assets={assets}
+              choices={preview.choices}
+              importTokens={preview.importTokens}
+              nodeId={nodeId}
+              project={preview.project}
+              sceneId={scene.id}
+              variableOverrides={preview.variableOverrides}
+              onResolvedPrompt={preview.onResolvedPrompt}
+            />
+          )}
         </>
       );
     case "set":

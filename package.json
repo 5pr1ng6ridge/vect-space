@@ -30,6 +30,7 @@
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
     "@vectspace/presentation-core": "0.1.0",
+    "@vectspace/presentation-react": "0.1.0",
     "@vectspace/text": "0.1.0",
     "@vectspace/text-react": "0.1.0",
     "katex": "0.18.4",

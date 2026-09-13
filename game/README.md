@@ -22,7 +22,10 @@ amplitude_y, frequency_hz, decay, seed }`), with a fixed seed so a seek reproduc
 the exact same shake. `curtain` is a persistent layer above the world: `cover`
 draws a colour or `gui` fill, `reveal` lowers the current curtain, and the
 animation is `fade`, a four-direction `wipe`, `split_horizontal` or
-`split_vertical`. `scenes/transition_lab.yaml` walks through all of them.
+`split_vertical`. `scenes/transition_lab.yaml` walks through all of them and
+finishes with a template-driven `choice` node (KaTeX labels, a `gui` icon, the
+node default template, an option override template, a condition-filtered option
+and a disabled option).
 
 Dialogue markup:
 
@@ -40,6 +43,15 @@ $...$ and $$...$$
 HTML and scripts are never interpreted. Keep stable node and choice IDs once
 content production starts, because save snapshots locate the next story node by
 ID.
+
+A `choice` node is a legacy CSS panel by default. Add `presentation` to reuse a
+registered button template and place the group by design-pixel centre
+(`anchor_x` 0–1920, `anchor_y` 0–1080, `direction`, `gap`, optional
+`button_width`/`button_height`); each option may override the template with
+`template:` and add a `gui` `icon:`. Filtering and interpolation run before
+layout, missing templates/icons fall back with a diagnostic instead of locking
+the story, and a loaded save only contributes option ids, order, labels and
+enabled flags. See the root `README.md` for the full rules.
 
 Timeline nodes use an explicit `duration_ms` and contain sprite, camera, video,
 and BGM-volume tracks. Each channel is an ordered list of

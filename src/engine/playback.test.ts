@@ -43,6 +43,19 @@ describe("Ctrl fast-forward policy", () => {
       canFastForwardPrompt(normal, "all", {
         kind: "choice",
         prompt_id: "scene/choice",
+        layout: {
+          stage_width: 1920,
+          stage_height: 1080,
+          anchor_x: 960,
+          anchor_y: 540,
+          direction: "vertical",
+          gap: 20,
+          x: 960,
+          y: 540,
+          width: 0,
+          height: 0,
+        },
+        diagnostics: [],
         choices: [],
       }),
     ).toBe(false);

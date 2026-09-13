@@ -1,5 +1,6 @@
 import type {
   BackgroundTransitionSpec,
+  ButtonFile,
   ConditionExpression,
   ContentManifest,
   CurtainTransitionSpec,
@@ -153,7 +154,9 @@ export function summarizeNode(node: SceneNode): string {
     case "long_text_control":
       return `${node.action === "show" ? "显示" : node.action === "hide" ? "隐藏" : "关闭"} · ${node.document}`;
     case "choice":
-      return `${node.choices.length} 个选项`;
+      return node.presentation == null
+        ? `${node.choices.length} 个选项`
+        : `${node.choices.length} 个选项 · ${node.presentation.direction === "horizontal" ? "横向" : "纵向"} · ${node.presentation.anchor_x},${node.presentation.anchor_y}`;
     case "set":
       return `${node.variable} ${node.op ?? "assign"} ${summarizeMutationValue(node.value)}`;
     case "condition":
@@ -858,11 +861,14 @@ export function preparePastedNode(
   source: SceneNode,
   manifest: ContentManifest,
   sourceCharacterId: string | null = null,
+  buttons: readonly ButtonFile[] = [],
 ): SceneNode {
   const node = structuredClone(source);
   const variables = new Set(Object.keys(manifest.variables));
   const hasAsset = (id: string | null | undefined, kind: string): boolean =>
     id != null && manifest.assets[id]?.kind === kind;
+  const hasButton = (id: string | null | undefined): boolean =>
+    id != null && buttons.some((file) => file.definition.id === id);
   const clearOperand = (
     operand: { variable: string } | { value: ScalarValue },
   ): { variable: string } | { value: ScalarValue } =>
@@ -934,6 +940,8 @@ export function preparePastedNode(
         ...choice,
         label: removeUnknownTemplateVariables(choice.label, variables),
         next: "",
+        ...(hasButton(choice.template) ? {} : { template: null }),
+        ...(hasAsset(choice.icon, "gui") ? {} : { icon: null }),
         ...(choice.visible_if === undefined
           ? {}
           : { visible_if: clearCondition(choice.visible_if) }),
@@ -941,6 +949,9 @@ export function preparePastedNode(
           ? {}
           : { enabled_if: clearCondition(choice.enabled_if) }),
       }));
+      if (node.presentation != null && !hasButton(node.presentation.template)) {
+        node.presentation = { ...node.presentation, template: null };
+      }
       break;
     case "set":
       if (!variables.has(node.variable)) node.variable = "";

@@ -51,6 +51,39 @@ export function findAssetReferences(
   return references;
 }
 
+/**
+ * Every story reference to a reusable button template.
+ *
+ * Story button nodes, the node-wide Choice template and each option template
+ * all resolve to the same `ButtonTemplate`, so deletion protection and the
+ * sidebar's reference stat must count all three.
+ */
+export function findButtonTemplateReferences(
+  project: EditorProject,
+  templateId: string,
+): string[] {
+  const references: string[] = [];
+  for (const scene of project.scenes) {
+    for (const [nodeId, node] of Object.entries(scene.definition.nodes)) {
+      const location = `${scene.definition.id}/${nodeId}`;
+      if (node.type === "button_create" || node.type === "button_update") {
+        if (node.template === templateId) references.push(location);
+        continue;
+      }
+      if (node.type !== "choice") continue;
+      if (node.presentation?.template === templateId) {
+        references.push(`${location} · 节点模板`);
+      }
+      for (const choice of node.choices) {
+        if (choice.template === templateId) {
+          references.push(`${location} · 选项 ${choice.id}`);
+        }
+      }
+    }
+  }
+  return references;
+}
+
 function nodeReferencesAsset(node: SceneNode, assetId: string): boolean {
   switch (node.type) {
     case "background":
@@ -62,6 +95,9 @@ function nodeReferencesAsset(node: SceneNode, assetId: string): boolean {
       );
     case "sprite":
       return node.asset === assetId;
+    case "choice":
+      // A choice icon is a `gui` asset shown next to the option label.
+      return node.choices.some((choice) => choice.icon === assetId);
     case "long_text":
       return node.paper === assetId;
     case "bgm":

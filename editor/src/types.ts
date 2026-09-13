@@ -374,16 +374,41 @@ export interface LongTextLayout {
   page_gap: number;
 }
 
+export type ChoiceFlowDirection = "vertical" | "horizontal";
+
+/**
+ * Optional template-driven presentation for a `choice` node.
+ *
+ * Field names and defaults mirror the Rust `ChoicePresentation`; a node that
+ * never opts in keeps the shipped CSS panel placement and resolves to `null`.
+ * Anchor coordinates are design pixels in the fixed 1920x1080 stage.
+ */
+export interface ChoicePresentation {
+  template: string | null;
+  anchor_x: number;
+  anchor_y: number;
+  direction: ChoiceFlowDirection;
+  gap: number;
+  button_width: number | null;
+  button_height: number | null;
+}
+
 export interface ChoiceDefinition {
   id: string;
   label: string;
   next: string;
   visible_if?: ConditionExpression;
   enabled_if?: ConditionExpression;
+  /** Optional reusable button template that beats the node default. */
+  template?: string | null;
+  /** Optional `gui` asset shown next to the label. */
+  icon?: string | null;
 }
 
 export interface ChoiceNode {
   type: "choice";
+  /** Absent/null keeps the legacy CSS placement. */
+  presentation?: ChoicePresentation | null;
   choices: ChoiceDefinition[];
 }
 

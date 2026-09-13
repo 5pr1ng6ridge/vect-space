@@ -268,6 +268,13 @@
             }
           ]
         },
+        "icon": {
+          "description": "Optional `gui` asset id shown alongside the option label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },
@@ -276,6 +283,13 @@
         },
         "next": {
           "type": "string"
+        },
+        "template": {
+          "description": "Optional per-option template that wins over the node's default\ntemplate before the built-in CSS fallback is used.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "visible_if": {
           "anyOf": [
@@ -294,6 +308,64 @@
         "label",
         "next"
       ]
+    },
+    "ChoiceFlowDirection": {
+      "description": "Direction of the resolved choice button flow around the anchor.",
+      "type": "string",
+      "enum": [
+        "vertical",
+        "horizontal"
+      ]
+    },
+    "ChoicePresentation": {
+      "description": "Optional template-driven presentation for a `choice` node.\n\nEvery field has a documented default, so a node may opt in with only the\nparts it wants to change.  Template and icon references are resolved by\nthe runtime, not the loader: a missing or wrong-kind reference becomes a\nstructured [`ChoiceDiagnostic`] on the snapshot and the item falls back to\nthe node template or to the built-in CSS button instead of locking the\nstory.",
+      "type": "object",
+      "properties": {
+        "anchor_x": {
+          "description": "Horizontal centre of the resolved button group in design pixels.\nValid range: `0..=1920` (see [`CHOICE_STAGE_WIDTH`]).",
+          "type": "number",
+          "format": "float",
+          "default": 960.0
+        },
+        "anchor_y": {
+          "description": "Vertical centre of the resolved button group in design pixels.\nValid range: `0..=1080` (see [`CHOICE_STAGE_HEIGHT`]).",
+          "type": "number",
+          "format": "float",
+          "default": 540.0
+        },
+        "button_height": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "button_width": {
+          "description": "Node-wide width/height override for every resolved button.  When a\nside is omitted the resolved template's own dimension is used, or the\nbuilt-in fallback when no template resolves.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "direction": {
+          "$ref": "#/$defs/ChoiceFlowDirection",
+          "default": "vertical"
+        },
+        "gap": {
+          "type": "number",
+          "format": "float",
+          "default": 20.0
+        },
+        "template": {
+          "description": "Reusable button template id (see [`ButtonTemplate`]).  Used by every\nvisible option that does not name its own template.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "ConditionExpression": {
       "oneOf": [
@@ -1127,6 +1199,16 @@
               "items": {
                 "$ref": "#/$defs/ChoiceDefinition"
               }
+            },
+            "presentation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChoicePresentation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "type": {
               "type": "string",

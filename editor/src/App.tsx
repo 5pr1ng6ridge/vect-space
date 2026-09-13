@@ -17,7 +17,10 @@ import {
 import { editorApi } from "./api";
 import { CommandError } from "../../shared/commandError";
 import { NodeInspector } from "./components/NodeInspector";
-import { findAssetReferences } from "./components/assetReferences";
+import {
+  findAssetReferences,
+  findButtonTemplateReferences,
+} from "./components/assetReferences";
 import {
   animationDefinition,
   animationFilePath,
@@ -351,6 +354,17 @@ export function App(): ReactElement {
   const activeSceneFile =
     project === null ? undefined : findScene(project, activeSceneId);
   const activeScene = activeSceneFile?.definition;
+  // Saved preview-path decisions feed the Rust-backed Choice inspector
+  // preview, exactly like the long-text and timeline workspaces.
+  const choicePreviewSettings = useMemo(() => {
+    const key = `${activeSceneId}/${selectedNodeId ?? ""}`;
+    return (
+      project?.layout.timeline_previews?.[key] ?? {
+        variable_overrides: {},
+        choices: [],
+      }
+    );
+  }, [activeSceneId, project, selectedNodeId]);
 
   const reportCommandError = useCallback((reason: unknown): void => {
     if (reason instanceof CommandError) {
@@ -1386,6 +1400,7 @@ export function App(): ReactElement {
         clipboard.node,
         draft.manifest,
         clipboard.sourceCharacterId,
+        draft.buttons ?? [],
       );
       ensureSceneLayout(draft.layout, activeSceneId).nodes[id] = snapped;
     });
@@ -1868,17 +1883,7 @@ export function App(): ReactElement {
 
   const deleteButtonTemplate = (id: string): void => {
     const currentProject = editorStateRef.current.project ?? project;
-    const references: string[] = [];
-    for (const scene of currentProject.scenes) {
-      for (const [nodeId, node] of Object.entries(scene.definition.nodes)) {
-        if (
-          (node.type === "button_create" || node.type === "button_update") &&
-          node.template === id
-        ) {
-          references.push(`${scene.definition.id}/${nodeId}`);
-        }
-      }
-    }
+    const references = findButtonTemplateReferences(currentProject, id);
     if (references.length > 0) {
       setError(
         `按钮模板 ${id} 仍被 ${references.length} 处剧情引用（${references
@@ -2913,6 +2918,11 @@ export function App(): ReactElement {
           assets={project.assets}
           scenes={project.scenes.map((file) => file.definition)}
           uiMotions={project.ui_motions}
+          previewProject={project}
+          previewAnimationMap={animationMap}
+          previewImportTokens={activeImportTokens}
+          previewVariableOverrides={choicePreviewSettings.variable_overrides}
+          previewChoices={choicePreviewSettings.choices}
           onRename={(previousId, nextId) => {
             if (
               !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||

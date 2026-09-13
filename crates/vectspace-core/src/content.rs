@@ -2036,7 +2036,7 @@ fn validate_scenes(
                     }
                     require_node(scene, next, scene_id, node_id)?;
                 }
-                SceneNode::Choice { choices } => {
+                SceneNode::Choice { choices, .. } => {
                     if choices.is_empty() {
                         return node_error(scene_id, node_id, "选项列表不能为空");
                     }

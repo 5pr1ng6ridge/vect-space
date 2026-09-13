@@ -1,0 +1,21 @@
+{
+  "name": "@vectspace/presentation-react",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./animated-image": "./src/animated-image.ts",
+    "./button": "./src/button/TemplateButton.tsx",
+    "./choice": "./src/choice/ChoiceLayer.tsx",
+    "./choice.css": "./src/choice/choice.css"
+  },
+  "peerDependencies": {
+    "react": "19.2.8"
+  },
+  "dependencies": {
+    "@vectspace/presentation-core": "0.1.0",
+    "@vectspace/text": "0.1.0",
+    "katex": "0.18.4"
+  }
+}

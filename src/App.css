@@ -921,34 +921,6 @@ button:disabled {
   }
 }
 
-.choice-panel {
-  position: absolute;
-  z-index: 16;
-  top: 360px;
-  left: 470px;
-  display: grid;
-  gap: 20px;
-  width: 980px;
-}
-
-.choice-panel button {
-  min-height: 92px;
-  padding: 18px 42px;
-  border: 1px solid rgb(158 231 255 / 38%);
-  color: #f4fbfd;
-  background: linear-gradient(90deg, rgb(9 20 29 / 95%), rgb(19 47 62 / 92%));
-  box-shadow: 0 16px 44px rgb(0 0 0 / 38%);
-  cursor: pointer;
-  font-size: 28px;
-  transition: 140ms ease;
-}
-
-.choice-panel button:hover:not(:disabled) {
-  border-color: #bcecff;
-  background: linear-gradient(90deg, rgb(16 43 57 / 97%), rgb(29 78 97 / 94%));
-  transform: translateX(8px);
-}
-
 .runtime-lock {
   position: absolute;
   z-index: 24;

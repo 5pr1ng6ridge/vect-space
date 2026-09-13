@@ -7,6 +7,10 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Ref } from "react";
+import type {
+  ButtonSnapshot,
+  ResolvedAsset,
+} from "@vectspace/presentation-core/types";
 import type { RuntimeUpdate } from "./engine/types";
 import type { SceneCanvasHandle } from "./components/SceneCanvas";
 
@@ -14,7 +18,9 @@ const host = vi.hoisted(() => {
   const failures: Record<string, number> = {};
   return {
     id: 1,
+    updateId: 1,
     mode: "story",
+    promptId: "choice",
     calls: [] as string[],
     /** Forced one-shot failures per command, consumed on use. */
     failures,
@@ -73,16 +79,20 @@ vi.mock("@tauri-apps/api/core", () => ({
     const update = (end = false): RuntimeUpdate => ({
       session_id: String(host.id),
       mode: host.mode as "story" | "replay",
-      update_id: String(host.id),
+      update_id: String(host.updateId),
       requires_ack: false,
       cues: [],
       snapshot: {
-        revision: String(host.id),
+        revision: String(host.updateId),
         location: { scene_id: "prologue", node_id: "choice" },
         variables: {},
         world: {
           background: null,
           sprites: {},
+          buttons: {
+            same_prompt_update: storyButton("same_prompt_update"),
+            new_prompt: storyButton("new_prompt"),
+          },
           camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
           persistent_effects: [],
           dialogue_ui_visible: true,
@@ -94,20 +104,47 @@ vi.mock("@tauri-apps/api/core", () => ({
           ? { kind: "end", prompt_id: "end" }
           : {
               kind: "choice",
-              prompt_id: "choice",
-              choices: [{ id: "done", label: "结束重演", enabled: true }],
+              prompt_id: host.promptId,
+              layout: {
+                stage_width: 1920,
+                stage_height: 1080,
+                anchor_x: 960,
+                anchor_y: 540,
+                direction: "vertical",
+                gap: 20,
+                x: 470,
+                y: 494,
+                width: 980,
+                height: 92,
+              },
+              diagnostics: [],
+              choices: [
+                {
+                  id: host.promptId === "choice" ? "done" : "next",
+                  label: host.promptId === "choice" ? "结束重演" : "新的选项",
+                  enabled: true,
+                  template: {
+                    kind: "button",
+                    button: animatedChoiceButton(),
+                  },
+                  x: 470,
+                  y: 494,
+                  width: 980,
+                  height: 92,
+                },
+              ],
             },
       },
     });
     if (command === "bootstrap")
       return {
         update: update(),
-        asset_ids: [],
+        asset_ids: ["choice.normal"],
         content_version: "test",
         chapter_map_available: true,
         default_font: null,
       };
-    if (command === "resolve_assets") return [];
+    if (command === "resolve_assets") return resolvedChoiceAssets();
     if (command === "load_settings")
       return {
         master_volume: 1,
@@ -139,7 +176,13 @@ vi.mock("@tauri-apps/api/core", () => ({
     }
     if (command === "clear_dialogue_history") return;
     if (command === "choose") return update(true);
+    if (command === "click_button") {
+      host.updateId++;
+      if (args.instanceId === "new_prompt") host.promptId = "choice-next";
+      return update();
+    }
     host.id++;
+    host.updateId = host.id;
     if (command === "start_scene_replay") host.mode = "replay";
     else host.mode = "story";
     if (command === "invalidate_session" || command === "exit_scene_replay")
@@ -147,6 +190,84 @@ vi.mock("@tauri-apps/api/core", () => ({
     return update();
   },
 }));
+
+function storyButton(id: string): ButtonSnapshot {
+  return {
+    id,
+    template: `test.${id}`,
+    asset_mode: "separate",
+    fit: "stretch",
+    normal: null,
+    hover: null,
+    pressed: null,
+    animations: {},
+    x: 24,
+    y: 24,
+    width: 220,
+    height: 64,
+    rotation_deg: 0,
+    scale_x: 1,
+    scale_y: 1,
+    opacity: 1,
+    z: 0,
+    visible: true,
+    enabled: true,
+    action: { sets: [], next: null },
+  };
+}
+
+function animatedChoiceButton(): ButtonSnapshot {
+  return {
+    id: "choice.animated",
+    template: "choice.animated",
+    asset_mode: "separate",
+    fit: "stretch",
+    normal: "choice.normal",
+    hover: "choice.normal",
+    pressed: "choice.normal",
+    animations: {},
+    x: 470,
+    y: 494,
+    width: 980,
+    height: 92,
+    rotation_deg: 0,
+    scale_x: 1,
+    scale_y: 1,
+    opacity: 1,
+    z: 0,
+    visible: true,
+    enabled: true,
+    action: { sets: [], next: null },
+  };
+}
+
+function resolvedChoiceAssets(): ResolvedAsset[] {
+  return [
+    {
+      id: "choice.normal",
+      kind: "gui",
+      absolute_path: "choice-frame-0.png",
+      animation: {
+        id: "choice.loop",
+        width: 980,
+        height: 92,
+        total_duration_ms: 10_020,
+        frames: [
+          {
+            asset: "choice.frame.0",
+            duration_ms: 20,
+            absolute_path: "choice-frame-0.png",
+          },
+          {
+            asset: "choice.frame.1",
+            duration_ms: 10_000,
+            absolute_path: "choice-frame-1.png",
+          },
+        ],
+      },
+    },
+  ];
+}
 
 import App from "./App";
 afterEach(async () => {
@@ -159,6 +280,8 @@ beforeEach(() => {
   // The App caches its startup payload module-wide, so every test boots from
   // the first bootstrap's session id; keep the mocked runtime in sync.
   host.id = 1;
+  host.updateId = 1;
+  host.promptId = "choice";
   host.calls = [];
   host.failures = {};
   host.alignFailures = 0;
@@ -193,6 +316,84 @@ it("retains host identity across title, load and repeated replay transitions", a
     host.calls.filter((call) => call === "applySessionSnapshot"),
   ).toHaveLength(6);
   expect(screen.queryByText(/bad session/)).toBeNull();
+});
+
+it("preserves the choice layer, focus, and animated resource on a same-prompt update", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "开始演示" }));
+  const choiceButton = await screen.findByRole("button", { name: "结束重演" });
+  const choiceLayer = document.querySelector(".choice-layer");
+  expect(choiceLayer).not.toBeNull();
+  const image = choiceButton.querySelector(".choice-button-image");
+  expect(image).toBeInstanceOf(HTMLImageElement);
+  expect(document.querySelectorAll(".choice-button-image")).toHaveLength(1);
+  choiceButton.focus();
+  expect(document.activeElement).toBe(choiceButton);
+  await waitFor(() =>
+    expect(image?.getAttribute("src")).toBe("choice-frame-1.png"),
+  );
+  const frameBefore = image?.getAttribute("src");
+
+  const samePromptUpdate = screen.getByRole("button", {
+    name: "same_prompt_update",
+  });
+  fireEvent.pointerDown(samePromptUpdate, { button: 0, pointerId: 1 });
+  fireEvent.pointerUp(samePromptUpdate, { button: 0, pointerId: 1 });
+  await waitFor(() =>
+    expect(host.calls.filter((call) => call === "click_button")).toHaveLength(
+      1,
+    ),
+  );
+  const updatedChoiceButton = await screen.findByRole("button", {
+    name: "结束重演",
+  });
+
+  // The runtime changed update_id/revision while preserving prompt_id.  The
+  // App must not remount the shared layer: focus, its animated <img> resource,
+  // and the resource's current frame all survive the update.
+  expect(host.updateId).toBe(3);
+  expect(document.querySelector(".choice-layer")).toBe(choiceLayer);
+  expect(updatedChoiceButton).toBe(choiceButton);
+  expect(document.activeElement).toBe(updatedChoiceButton);
+  expect(updatedChoiceButton.querySelector(".choice-button-image")).toBe(image);
+  expect(
+    updatedChoiceButton
+      .querySelector(".choice-button-image")
+      ?.getAttribute("src"),
+  ).toBe(frameBefore);
+  expect(document.querySelectorAll(".choice-button-image")).toHaveLength(1);
+});
+
+it("resets choice focus and resources when the prompt identity changes", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "开始演示" }));
+  const oldChoiceButton = await screen.findByRole("button", {
+    name: "结束重演",
+  });
+  const oldChoiceLayer = document.querySelector(".choice-layer");
+  const oldImage = oldChoiceButton.querySelector(".choice-button-image");
+  oldChoiceButton.focus();
+  expect(document.activeElement).toBe(oldChoiceButton);
+
+  const newPrompt = screen.getByRole("button", { name: "new_prompt" });
+  fireEvent.pointerDown(newPrompt, { button: 0, pointerId: 1 });
+  fireEvent.pointerUp(newPrompt, { button: 0, pointerId: 1 });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "新的选项" })).toBeDefined(),
+  );
+  const newChoiceButton = screen.getByRole("button", { name: "新的选项" });
+
+  expect(host.updateId).toBe(3);
+  // The host keeps the layer mounted; ChoiceLayer's stable prompt-id effect
+  // performs the reset while its choice child/resource keys replace content.
+  expect(document.querySelector(".choice-layer")).toBe(oldChoiceLayer);
+  expect(newChoiceButton).not.toBe(oldChoiceButton);
+  expect(document.activeElement).not.toBe(oldChoiceButton);
+  expect(document.activeElement).not.toBe(newChoiceButton);
+  expect(newChoiceButton.querySelector(".choice-button-image")).not.toBe(
+    oldImage,
+  );
+  expect(document.querySelectorAll(".choice-button-image")).toHaveLength(1);
 });
 
 /** Title screen, story session, then the chapter map ready for a replay. */
