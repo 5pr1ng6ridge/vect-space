@@ -111,6 +111,21 @@ hotspots:
   replay:
     mode: always
   variable_overrides: {}
+- id: transition_lab
+  scene_id: transition_lab
+  title: transition_lab
+  hover_text: 五种背景转场、幕布 color/gui 与 fade/wipe/split、参数化 flash/shake（固定 seed）与叠加时间线效果。
+  x: 980
+  "y": 140
+  width: 280
+  height: 160
+  z: 10
+  asset: gui.button_pulse
+  reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}
 - id: ch0
   scene_id: ch0
   title: ch0

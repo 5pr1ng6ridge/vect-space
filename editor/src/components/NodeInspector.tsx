@@ -16,6 +16,7 @@ import {
 import { interpolateTemplate } from "../textTemplate";
 import { isCanonicalIntegerText, scalarType } from "../scalars";
 import { assetUrl } from "../api";
+import { defaultCurtainFill } from "../presentationDefaults";
 import { animationSourceId } from "../imageAnimation";
 import { FrameSequencePreview } from "./FrameSequencePreview";
 import type {
@@ -24,6 +25,7 @@ import type {
   AssetKind,
   ConditionExpression,
   ContentManifest,
+  CurtainAction,
   EditorAsset,
   MutationValue,
   LongTextLayout,
@@ -42,6 +44,21 @@ import type {
   SpriteActionEnd,
 } from "../types";
 import { MeasuredMarkup } from "@vectspace/text-react";
+import { CuePreview } from "./CuePreview";
+import type { CuePreviewEnvironment } from "./CuePreview";
+import { Field, NumberField } from "./Fields";
+import {
+  CurtainFillFields,
+  CurtainTransitionFields,
+  ScreenEffectFields,
+  TransitionSpecFields,
+} from "./SpecFields";
+import {
+  buildBackgroundPreviewRequest,
+  buildCurtainPreviewRequest,
+  buildScreenEffectPreviewRequest,
+  storyVisualStateAtNode,
+} from "../presentationPreview";
 
 const DEFAULT_LONG_TEXT_LAYOUT: LongTextLayout = {
   x: 340,
@@ -76,6 +93,10 @@ interface NodeInspectorProps {
   assets?: EditorAsset[];
   /** Scene definitions used to author cross-scene button jumps. */
   scenes?: SceneDefinition[];
+  /** Preview diagnostics (Pixi init, decode and cue failures). */
+  onError?: (message: string) => void;
+  /** Test seam: in-memory render kit for the inspector previews. */
+  previewEnvironment?: CuePreviewEnvironment;
 }
 
 export function NodeInspector({
@@ -98,6 +119,8 @@ export function NodeInspector({
   actions = [],
   assets = [],
   scenes = [],
+  onError,
+  previewEnvironment,
 }: NodeInspectorProps): ReactElement {
   const node = nodeId === null ? undefined : scene.nodes[nodeId];
   const [idDraft, setIdDraft] = useState(nodeId ?? "");
@@ -173,6 +196,7 @@ export function NodeInspector({
       <section className="inspector-section node-fields">
         {renderFields(
           node,
+          nodeId,
           update,
           scene,
           manifest,
@@ -182,6 +206,8 @@ export function NodeInspector({
           animations,
           actions,
           scenes,
+          onError,
+          previewEnvironment,
           (offset, text) => onSplitDialogue(nodeId, offset, text),
           (stepIndex) => onSplitLongText(nodeId, stepIndex),
           () => onOpenLongTextWorkspace(nodeId),
@@ -241,6 +267,7 @@ export function NodeInspector({
 
 function renderFields(
   node: SceneNode,
+  nodeId: string,
   update: (node: SceneNode) => void,
   scene: SceneDefinition,
   manifest: ContentManifest,
@@ -250,6 +277,8 @@ function renderFields(
   animations: readonly AnimationFile[],
   actions: readonly ActionFile[],
   scenes: SceneDefinition[],
+  onError: ((message: string) => void) | undefined,
+  previewEnvironment: CuePreviewEnvironment | undefined,
   splitDialogue: (offset: number, text?: string) => void,
   splitLongText: (stepIndex: number) => void,
   openLongTextWorkspace: () => void,
@@ -269,27 +298,74 @@ function renderFields(
             onChange={(background) => update({ ...node, background })}
             value={node.background}
           />
-          <Field label="转场">
-            <select
-              value={node.transition}
-              onChange={(event) =>
-                update({
-                  ...node,
-                  transition: event.currentTarget
-                    .value as typeof node.transition,
-                })
-              }
-            >
-              <option value="cut">直接切换</option>
-              <option value="cross_fade">交叉淡化</option>
-            </select>
-          </Field>
+          <TransitionSpecFields
+            onChange={(transition) => update({ ...node, transition })}
+            value={node.transition}
+          />
           <AnimationFields node={node} onChange={update} />
           <TargetSelect
             label="下一节点"
             onChange={(next) => update({ ...node, next })}
             targets={targets}
             value={node.next}
+          />
+          <BackgroundPreview
+            assets={assets}
+            environment={previewEnvironment}
+            node={node}
+            nodeId={nodeId}
+            onError={onError}
+            scene={scene}
+          />
+        </>
+      );
+    case "curtain":
+      return (
+        <>
+          <Field label="幕布动作">
+            <select
+              value={node.action}
+              onChange={(event) => {
+                const action = event.currentTarget.value as CurtainAction;
+                update({
+                  ...node,
+                  action,
+                  fill:
+                    action === "cover"
+                      ? (node.fill ?? defaultCurtainFill())
+                      : null,
+                });
+              }}
+            >
+              <option value="cover">落下幕布</option>
+              <option value="reveal">收起幕布</option>
+            </select>
+          </Field>
+          {node.action === "cover" && (
+            <CurtainFillFields
+              manifest={manifest}
+              onChange={(fill) => update({ ...node, fill })}
+              value={node.fill ?? null}
+            />
+          )}
+          <CurtainTransitionFields
+            onChange={(transition) => update({ ...node, transition })}
+            value={node.transition}
+          />
+          <AnimationFields node={node} onChange={update} />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+          <CurtainPreview
+            assets={assets}
+            environment={previewEnvironment}
+            node={node}
+            nodeId={nodeId}
+            onError={onError}
+            scene={scene}
           />
         </>
       );
@@ -1486,26 +1562,24 @@ function renderFields(
     case "screen_effect":
       return (
         <>
-          <Field label="效果">
-            <select
-              value={node.effect}
-              onChange={(event) =>
-                update({
-                  ...node,
-                  effect: event.currentTarget.value as typeof node.effect,
-                })
-              }
-            >
-              <option value="flash">闪光</option>
-              <option value="shake">震动</option>
-            </select>
-          </Field>
+          <ScreenEffectFields
+            onChange={(effect) => update({ ...node, effect })}
+            value={node.effect}
+          />
           <AwaitFields node={node} onChange={update} />
           <TargetSelect
             label="下一节点"
             onChange={(next) => update({ ...node, next })}
             targets={targets}
             value={node.next}
+          />
+          <ScreenEffectPreview
+            assets={assets}
+            environment={previewEnvironment}
+            node={node}
+            nodeId={nodeId}
+            onError={onError}
+            scene={scene}
           />
         </>
       );
@@ -2137,7 +2211,7 @@ function AnimationFields({
 }: {
   node: Extract<
     SceneNode,
-    { type: "background" | "sprite" | "clear" | "camera" }
+    { type: "background" | "curtain" | "sprite" | "clear" | "camera" }
   >;
   onChange(node: SceneNode): void;
 }): ReactElement {
@@ -3016,24 +3090,6 @@ function DialogueTextEditor({
   );
 }
 
-function Field({
-  children,
-  hint,
-  label,
-}: {
-  children: ReactNode;
-  hint?: string;
-  label: string;
-}): ReactElement {
-  return (
-    <label className="field">
-      <span className="field-label">{label}</span>
-      {children}
-      {hint !== undefined && <small>{hint}</small>}
-    </label>
-  );
-}
-
 function RevealAnimationField({
   onChange,
   value,
@@ -3240,56 +3296,6 @@ function TextField({
   );
 }
 
-function NumberField({
-  disabled = false,
-  label,
-  max,
-  min,
-  onChange,
-  step = 1,
-  value,
-}: {
-  disabled?: boolean;
-  label: string;
-  max?: number;
-  min?: number;
-  onChange(value: number): void;
-  step?: number;
-  value: number;
-}): ReactElement {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const commit = (): void => {
-    const raw = inputRef.current?.value ?? String(value);
-    const parsed = Number(raw);
-    if (raw.trim() !== "" && Number.isFinite(parsed)) {
-      if (parsed !== value) onChange(parsed);
-    } else {
-      if (inputRef.current !== null) inputRef.current.value = String(value);
-    }
-  };
-  return (
-    <Field label={label}>
-      <input
-        disabled={disabled}
-        max={max}
-        min={min}
-        step={step}
-        type="number"
-        defaultValue={String(value)}
-        key={String(value)}
-        ref={inputRef}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            commit();
-          }
-        }}
-      />
-    </Field>
-  );
-}
-
 function OptionalNumber({
   label,
   max,
@@ -3392,5 +3398,104 @@ function TargetSelect({
         ))}
       </select>
     </Field>
+  );
+}
+
+function BackgroundPreview({
+  assets,
+  environment,
+  node,
+  nodeId,
+  onError,
+  scene,
+}: {
+  assets: readonly EditorAsset[];
+  environment: CuePreviewEnvironment | undefined;
+  node: Extract<SceneNode, { type: "background" }>;
+  nodeId: string;
+  onError: ((message: string) => void) | undefined;
+  scene: SceneDefinition;
+}): ReactElement {
+  const request = useMemo(
+    () =>
+      buildBackgroundPreviewRequest(
+        node,
+        storyVisualStateAtNode(scene, nodeId),
+      ),
+    [node, nodeId, scene],
+  );
+  return (
+    <CuePreview
+      assets={assets}
+      environment={environment}
+      label="背景转场预览"
+      onError={onError}
+      request={request}
+    />
+  );
+}
+
+function CurtainPreview({
+  assets,
+  environment,
+  node,
+  nodeId,
+  onError,
+  scene,
+}: {
+  assets: readonly EditorAsset[];
+  environment: CuePreviewEnvironment | undefined;
+  node: Extract<SceneNode, { type: "curtain" }>;
+  nodeId: string;
+  onError: ((message: string) => void) | undefined;
+  scene: SceneDefinition;
+}): ReactElement {
+  const request = useMemo(
+    () =>
+      buildCurtainPreviewRequest(node, storyVisualStateAtNode(scene, nodeId)),
+    [node, nodeId, scene],
+  );
+  return (
+    <CuePreview
+      assets={assets}
+      environment={environment}
+      label="幕布预览"
+      onError={onError}
+      request={request}
+    />
+  );
+}
+
+function ScreenEffectPreview({
+  assets,
+  environment,
+  node,
+  nodeId,
+  onError,
+  scene,
+}: {
+  assets: readonly EditorAsset[];
+  environment: CuePreviewEnvironment | undefined;
+  node: Extract<SceneNode, { type: "screen_effect" }>;
+  nodeId: string;
+  onError: ((message: string) => void) | undefined;
+  scene: SceneDefinition;
+}): ReactElement {
+  const request = useMemo(
+    () =>
+      buildScreenEffectPreviewRequest(
+        node,
+        storyVisualStateAtNode(scene, nodeId),
+      ),
+    [node, nodeId, scene],
+  );
+  return (
+    <CuePreview
+      assets={assets}
+      environment={environment}
+      label="屏幕效果预览"
+      onError={onError}
+      request={request}
+    />
   );
 }

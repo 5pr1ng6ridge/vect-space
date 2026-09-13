@@ -56,6 +56,23 @@ editor/src-tauri/target/release/bundle/nsis/
    坐标吸附到 20px 网格，并以左上角为原点直接对应游戏 1920×1080 地图页面的
    世界坐标。地图不会从剧情 Jump 自动生成。
 
+## 画面节点与实时预览
+
+- 检查器只编辑 Rust 规范化后的规范形状：背景转场是
+  `{ type: cut|cross_fade|fade_through_color|wipe|push, ... }`（wipe/push 带四向
+  `direction` 与 `softness`，`fade_through_color` 带颜色），屏幕效果是
+  `{ type: flash, color, peak_alpha }` 或
+  `{ type: shake, amplitude_x, amplitude_y, frequency_hz, decay, seed }`。
+  旧的一词 YAML 仍可加载，保存时会写回规范形状。
+- 「背景」「幕布」「屏幕效果」检查器都内嵌一个共享 `SceneSurface` 预览：真实纹理缓存、
+  共享求值器与共享动画时钟，静音、可取消，并在 React Strict Mode 下复用同一个 Pixi
+  应用与帧源。播放/暂停/继续之外还有「转场前 / 转场后」与进度滑杆，定位是确定性的：
+  同一组参数与同一虚拟时刻总是产生同一帧。
+- 幕布节点支持 `cover`/`reveal`、颜色或 `gui` 素材填充、`fade`、四向 `wipe`、
+  `split_horizontal`/`split_vertical`、时长、缓动与 `await`；预览画布是 1920×1080。
+- 素材引用统计、重命名与删除保护覆盖幕布的 `gui` 填充；`transition_lab` 演示场景可在
+  游戏中手工走查全部五种背景转场、幕布组合与参数化效果。
+
 素材导入会先经过 Rust 检查，确认格式、尺寸/时长、大小和哈希后才进入不透明的
 暂存会话。导入清单中的 ID、类型和目标文件名可在提交前修改；保存项目时素材与
 manifest、Scene 和地图一起进入可恢复事务，未保存或撤销的导入不会写入正式

@@ -10,11 +10,13 @@ import {
 } from "./imageAnimation";
 import type {
   AssetKind,
+  BackgroundTransitionSpec,
   ConditionExpression,
   EditorDiagnostic,
   EditorProject,
   ScalarValue,
   SceneNode,
+  ScreenEffectSpec,
   TimelineTrack,
   UiMotionPreset,
   ValueOperand,
@@ -1198,6 +1200,21 @@ function validateNode(
     case "background":
       checkAsset(node.background, "background", false);
       checkDuration(node.duration_ms);
+      validateBackgroundTransition(node.transition, issue);
+      break;
+    case "curtain":
+      if (node.action === "cover") {
+        if (node.fill == null) {
+          issue("missing_curtain_fill", "cover 幕布必须填写颜色或 gui 素材");
+        } else if ("asset" in node.fill) {
+          checkAsset(node.fill.asset, "gui", true);
+        } else {
+          validateColorValue(node.fill.color, "幕布颜色", issue);
+        }
+      } else if (node.fill != null) {
+        issue("invalid_curtain_fill", "reveal 幕布不能指定 fill");
+      }
+      checkDuration(node.duration_ms);
       break;
     case "sprite":
       if (!ID_PATTERN.test(node.sprite_id))
@@ -1521,6 +1538,7 @@ function validateNode(
       break;
     case "screen_effect":
       checkDuration(node.duration_ms);
+      validateScreenEffect(node.effect, issue);
       break;
     case "dialogue_ui":
       if (node.duration_ms !== null) checkDuration(node.duration_ms);
@@ -1736,6 +1754,7 @@ function validateNode(
           checkVolume(event.volume);
         } else {
           checkDuration(event.duration_ms);
+          validateScreenEffect(event.effect, issue);
           if (event.at_ms + event.duration_ms > node.duration_ms) {
             issue(
               "invalid_timeline_event_time",
@@ -1751,6 +1770,87 @@ function validateNode(
     case "jump":
     case "end":
       break;
+  }
+}
+
+const COLOR_PATTERN = /^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$/;
+
+/** `#RRGGBB`/`#RRGGBBAA`, matching the Rust loader's accepted colors. */
+function validateColorValue(
+  color: string,
+  label: string,
+  issue: (code: string, message: string) => void,
+): void {
+  if (!COLOR_PATTERN.test(color)) {
+    issue("invalid_color", `${label}必须是 #RRGGBB 或 #RRGGBBAA`);
+  }
+}
+
+/** Mirrors `validate_background_transition` in the Rust content model. */
+function validateBackgroundTransition(
+  transition: BackgroundTransitionSpec,
+  issue: (code: string, message: string) => void,
+): void {
+  switch (transition.type) {
+    case "cut":
+    case "cross_fade":
+      return;
+    case "fade_through_color":
+      validateColorValue(transition.color, "转场颜色", issue);
+      return;
+    case "wipe":
+    case "push":
+      if (
+        !Number.isFinite(transition.softness) ||
+        transition.softness < 0 ||
+        transition.softness > 1
+      ) {
+        issue("invalid_transition_softness", "转场柔边必须在 0–1 之间");
+      }
+      return;
+  }
+}
+
+/** Mirrors `validate_screen_effect` in the Rust content model. */
+function validateScreenEffect(
+  effect: ScreenEffectSpec,
+  issue: (code: string, message: string) => void,
+): void {
+  if (effect.type === "flash") {
+    validateColorValue(effect.color, "闪光颜色", issue);
+    if (
+      !Number.isFinite(effect.peak_alpha) ||
+      effect.peak_alpha < 0 ||
+      effect.peak_alpha > 1
+    ) {
+      issue("invalid_flash_peak", "闪光峰值透明度必须在 0–1 之间");
+    }
+    return;
+  }
+  for (const [label, value] of [
+    ["横向振幅", effect.amplitude_x],
+    ["纵向振幅", effect.amplitude_y],
+  ] as const) {
+    if (!Number.isFinite(value) || value < 0 || value > 256) {
+      issue("invalid_shake_amplitude", `${label}必须在 0–256 之间`);
+    }
+  }
+  if (
+    !Number.isFinite(effect.frequency_hz) ||
+    effect.frequency_hz < 0.1 ||
+    effect.frequency_hz > 60
+  ) {
+    issue("invalid_shake_frequency", "震动频率必须在 0.1–60 Hz 之间");
+  }
+  if (!Number.isFinite(effect.decay) || effect.decay < 0 || effect.decay > 1) {
+    issue("invalid_shake_decay", "震动衰减必须在 0–1 之间");
+  }
+  if (
+    !Number.isInteger(effect.seed) ||
+    effect.seed < 0 ||
+    effect.seed > 0xffff_ffff
+  ) {
+    issue("invalid_shake_seed", "震动 seed 必须是 0–4294967295 的整数");
   }
 }
 

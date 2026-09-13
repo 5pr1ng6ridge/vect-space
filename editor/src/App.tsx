@@ -2906,6 +2906,7 @@ export function App(): ReactElement {
             setUiMotionTarget(null);
             setLongTextTarget({ sceneId: activeSceneId, nodeId });
           }}
+          onError={setError}
           buttons={project.buttons ?? []}
           animations={project.animations ?? []}
           actions={project.actions ?? []}

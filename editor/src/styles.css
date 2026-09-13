@@ -4597,3 +4597,39 @@ body.timeline-resizing {
   grid-template-columns: auto auto auto minmax(120px, 1fr);
   gap: 8px;
 }
+
+/* Inspector cue preview: one shared SceneSurface canvas per edited cue. */
+.cue-preview {
+  display: grid;
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid #1e2a3d;
+  border-radius: 6px;
+  background: #05090f;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.cue-preview-stage {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  background: #020307;
+  container-type: size;
+  place-items: center;
+}
+.cue-preview-transport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 4px 8px;
+  border-top: 1px solid #1e2a3d;
+  gap: 6px;
+}
+.cue-preview-transport button {
+  padding: 2px 8px;
+}
+.cue-preview-transport input[type="range"] {
+  flex: 1 1 120px;
+  min-width: 80px;
+}

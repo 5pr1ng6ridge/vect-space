@@ -15,7 +15,9 @@ import {
   setPortTarget,
   splitLongTextAt,
   splitDialogueAt,
+  summarizeNode,
 } from "./story";
+import { findAssetReferences } from "./components/assetReferences";
 import type { EditorProject, SceneNode } from "./types";
 import { validateLive } from "./validation";
 import { buildScriptChainOptions } from "./components/scriptChains";
@@ -378,7 +380,7 @@ describe("story graph mapping", () => {
     expect(
       convertToTimeline({
         type: "screen_effect",
-        effect: "flash",
+        effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
         duration_ms: 200,
         await: false,
         next: "after",
@@ -388,7 +390,7 @@ describe("story graph mapping", () => {
         type: "screen_effect",
         id: "quick_effect",
         at_ms: 0,
-        effect: "flash",
+        effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
         duration_ms: 200,
       },
     ]);
@@ -804,7 +806,7 @@ describe("story graph mapping", () => {
           type: "screen_effect",
           id: "bad-event",
           at_ms: Number.NaN,
-          effect: "flash",
+          effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
           duration_ms: 60_001,
         },
       ],
@@ -974,5 +976,294 @@ describe("chapter map reachability", () => {
     expect(unreachable(projectWithMap("always", "completed"))).toEqual([
       "extras/start",
     ]);
+  });
+});
+
+describe("canonical presentation authoring", () => {
+  it("creates a curtain node whose default cover is visible", () => {
+    const node = defaultNode("curtain", "end");
+    expect(node).toEqual({
+      type: "curtain",
+      action: "cover",
+      fill: { color: "#000000" },
+      transition: { type: "fade" },
+      duration_ms: 500,
+      easing: "ease_in_out",
+      await: false,
+      next: "end",
+    });
+    expect(outputPorts(node)).toEqual([
+      { id: "next", label: "下一步", target: "end", targetScene: null },
+    ]);
+  });
+
+  it("summarises the canonical specs instead of raw objects", () => {
+    expect(
+      summarizeNode({
+        type: "background",
+        background: "bg.a",
+        transition: { type: "push", direction: "bottom_to_top", softness: 0.1 },
+        duration_ms: 500,
+        easing: "linear",
+        await: false,
+        next: "end",
+      }),
+    ).toBe("bg.a");
+    expect(
+      summarizeNode({
+        type: "curtain",
+        action: "cover",
+        fill: { asset: "gui.curtain" },
+        transition: { type: "split_vertical" },
+        duration_ms: 500,
+        easing: "linear",
+        await: false,
+        next: "end",
+      }),
+    ).toContain("gui.curtain");
+    expect(
+      summarizeNode({
+        type: "screen_effect",
+        effect: {
+          type: "shake",
+          amplitude_x: 16,
+          amplitude_y: 9.6,
+          frequency_hz: 18,
+          decay: 1,
+          seed: 7,
+        },
+        duration_ms: 200,
+        await: false,
+        next: "end",
+      }),
+    ).toContain("seed 7");
+  });
+
+  it("clears a pasted curtain fill that no longer resolves to a gui asset", () => {
+    const manifest = project().manifest;
+    const source: SceneNode = {
+      type: "curtain",
+      action: "cover",
+      fill: { asset: "gui.missing" },
+      transition: { type: "wipe", direction: "left_to_right" },
+      duration_ms: 400,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    expect(preparePastedNode(source, manifest)).toMatchObject({
+      type: "curtain",
+      fill: null,
+    });
+    manifest.assets["gui.curtain"] = { kind: "gui", path: "gui/curtain.png" };
+    expect(
+      preparePastedNode(
+        { ...source, fill: { asset: "gui.curtain" } },
+        manifest,
+      ),
+    ).toMatchObject({ fill: { asset: "gui.curtain" } });
+  });
+
+  it("counts a curtain gui fill as an asset reference", () => {
+    const fixture = project();
+    fixture.manifest.assets["gui.curtain"] = {
+      kind: "gui",
+      path: "gui/curtain.png",
+    };
+    fixture.scenes[0].definition.nodes.curtain = {
+      type: "curtain",
+      action: "cover",
+      fill: { asset: "gui.curtain" },
+      transition: { type: "fade" },
+      duration_ms: 500,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    expect(findAssetReferences(fixture, "gui.curtain")).toEqual([
+      "main/curtain",
+    ]);
+    // A colour fill never references an asset, so it must not block deletion.
+    fixture.scenes[0].definition.nodes.curtain = {
+      type: "curtain",
+      action: "cover",
+      fill: { color: "#000000" },
+      transition: { type: "fade" },
+      duration_ms: 500,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    expect(findAssetReferences(fixture, "gui.curtain")).toEqual([]);
+  });
+
+  it("validates canonical transition, effect and curtain parameters", () => {
+    const fixture = project();
+    const scene = fixture.scenes[0].definition;
+    scene.nodes.bad_bg = {
+      type: "background",
+      background: null,
+      transition: {
+        type: "wipe",
+        direction: "left_to_right",
+        softness: 2,
+      },
+      duration_ms: 0,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    scene.nodes.bad_color = {
+      type: "background",
+      background: null,
+      transition: { type: "fade_through_color", color: "red" },
+      duration_ms: 0,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    scene.nodes.bad_fx = {
+      type: "screen_effect",
+      effect: {
+        type: "shake",
+        amplitude_x: 300,
+        amplitude_y: -1,
+        frequency_hz: 0,
+        decay: 2,
+        seed: -1,
+      },
+      duration_ms: 200,
+      await: false,
+      next: "end",
+    };
+    scene.nodes.bad_flash = {
+      type: "screen_effect",
+      effect: { type: "flash", color: "#GGGGGG", peak_alpha: 2 },
+      duration_ms: 200,
+      await: false,
+      next: "end",
+    };
+    scene.nodes.bad_curtain = {
+      type: "curtain",
+      action: "cover",
+      fill: null,
+      transition: { type: "fade" },
+      duration_ms: 500,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    scene.nodes.reveal_fill = {
+      type: "curtain",
+      action: "reveal",
+      fill: { color: "#000000" },
+      transition: { type: "fade" },
+      duration_ms: 500,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    scene.nodes.bad_event = {
+      type: "timeline",
+      duration_ms: 500,
+      await: true,
+      skippable: false,
+      tracks: [],
+      events: [
+        {
+          type: "screen_effect",
+          id: "bad",
+          at_ms: 0,
+          effect: {
+            type: "shake",
+            amplitude_x: 0,
+            amplitude_y: 0,
+            frequency_hz: 90,
+            decay: 0,
+            seed: 1,
+          },
+          duration_ms: 200,
+        },
+      ],
+      next: "end",
+    };
+    const codes = validateLive(fixture).map((diagnostic) => diagnostic.code);
+    expect(codes).toContain("invalid_transition_softness");
+    expect(codes).toContain("invalid_color");
+    expect(codes).toContain("invalid_shake_amplitude");
+    expect(codes).toContain("invalid_shake_frequency");
+    expect(codes).toContain("invalid_shake_decay");
+    expect(codes).toContain("invalid_shake_seed");
+    expect(codes).toContain("invalid_flash_peak");
+    expect(codes).toContain("missing_curtain_fill");
+    expect(codes).toContain("invalid_curtain_fill");
+    // The timeline event shares the same canonical validation.
+    expect(
+      validateLive(fixture).filter(
+        (diagnostic) =>
+          diagnostic.node_id === "bad_event" &&
+          diagnostic.code === "invalid_shake_frequency",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("accepts every new canonical parameter within its range", () => {
+    const fixture = project();
+    fixture.manifest.assets["gui.curtain"] = {
+      kind: "gui",
+      path: "gui/curtain.png",
+    };
+    const scene = fixture.scenes[0].definition;
+    scene.nodes.bg = {
+      type: "background",
+      background: null,
+      transition: {
+        type: "push",
+        direction: "bottom_to_top",
+        softness: 1,
+      },
+      duration_ms: 0,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    scene.nodes.curtain = {
+      type: "curtain",
+      action: "cover",
+      fill: { asset: "gui.curtain" },
+      transition: { type: "wipe", direction: "right_to_left" },
+      duration_ms: 500,
+      easing: "linear",
+      await: false,
+      next: "end",
+    };
+    scene.nodes.fx = {
+      type: "screen_effect",
+      effect: {
+        type: "shake",
+        amplitude_x: 256,
+        amplitude_y: 0,
+        frequency_hz: 0.1,
+        decay: 0,
+        seed: 0xffff_ffff,
+      },
+      duration_ms: 200,
+      await: false,
+      next: "end",
+    };
+    expect(
+      validateLive(fixture).filter((diagnostic) =>
+        [
+          "invalid_transition_softness",
+          "invalid_color",
+          "invalid_shake_amplitude",
+          "invalid_shake_frequency",
+          "invalid_shake_decay",
+          "invalid_shake_seed",
+          "missing_curtain_fill",
+          "invalid_curtain_fill",
+        ].includes(diagnostic.code),
+      ),
+    ).toEqual([]);
   });
 });

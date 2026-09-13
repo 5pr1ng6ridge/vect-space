@@ -1,20 +1,31 @@
 import type {
+  BackgroundTransitionSpec,
   ConditionExpression,
   ContentManifest,
+  CurtainTransitionSpec,
   EditorLayout,
   EditorProject,
   EditorSceneFile,
   LongTextNode,
   NodeType,
   NodePosition,
+  MutationValue,
   ScalarValue,
   SceneDefinition,
   SceneNode,
+  ScreenEffectSpec,
   TimelineChannels,
+  TransitionDirection,
   TimelineNode,
   TimelinePreviewSettings,
 } from "./types";
 import { scalarText } from "./scalars";
+import {
+  defaultBackgroundTransition,
+  defaultCurtainFill,
+  defaultCurtainTransition,
+  defaultFlashEffect,
+} from "./presentationDefaults";
 import {
   countTemplateVariable,
   removeUnknownTemplateVariables,
@@ -32,6 +43,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "set", label: "设置变量", group: "逻辑" },
   { type: "jump", label: "跳转", group: "逻辑" },
   { type: "background", label: "背景", group: "画面" },
+  { type: "curtain", label: "幕布", group: "画面" },
   { type: "sprite", label: "立绘", group: "画面" },
   { type: "clear", label: "清除画面", group: "画面" },
   { type: "camera", label: "镜头", group: "画面" },
@@ -154,6 +166,16 @@ export function summarizeNode(node: SceneNode): string {
       return `${node.scene ?? "本场景"} / ${node.target}`;
     case "background":
       return node.background ?? "清除背景";
+    case "curtain": {
+      const action = node.action === "cover" ? "落下" : "收起";
+      const fill =
+        node.fill == null
+          ? "当前幕布"
+          : "color" in node.fill
+            ? node.fill.color
+            : node.fill.asset;
+      return `${action}幕布 · ${fill} · ${summarizeTransitionSpec(node.transition)}`;
+    }
     case "sprite":
       return `${node.action} ${node.sprite_id}`;
     case "clear":
@@ -167,7 +189,7 @@ export function summarizeNode(node: SceneNode): string {
     case "camera":
       return `(${node.x}, ${node.y}) ×${node.zoom}`;
     case "screen_effect":
-      return node.effect;
+      return summarizeScreenEffect(node.effect);
     case "dialogue_ui":
       return `${node.visible ? "显示" : "隐藏"} · ${node.motion ?? "默认动效"}`;
     case "ui_motion_set":
@@ -187,13 +209,70 @@ export function summarizeNode(node: SceneNode): string {
   }
 }
 
+/** `#RRGGBB` or `#RRGGBBAA`, matching the Rust loader's accepted colors. */
+export const COLOR_PATTERN = /^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$/;
+
+/** Short author-facing description of one canonical background transition. */
+export function summarizeTransitionSpec(
+  transition: BackgroundTransitionSpec | CurtainTransitionSpec,
+): string {
+  switch (transition.type) {
+    case "cut":
+      return "直接切换";
+    case "cross_fade":
+      return "交叉淡化";
+    case "fade":
+      return "淡入淡出";
+    case "fade_through_color":
+      return `淡过 ${transition.color}`;
+    case "wipe":
+      return `划像 ${directionLabel(transition.direction)}`;
+    case "push":
+      return `推入 ${directionLabel(transition.direction)}`;
+    case "split_horizontal":
+      return "水平对开";
+    case "split_vertical":
+      return "垂直对开";
+  }
+}
+
+/** Short author-facing description of one canonical screen effect. */
+export function summarizeScreenEffect(effect: ScreenEffectSpec): string {
+  if (effect.type === "flash") return `闪光 ${effect.color}`;
+  return `震动 ${effect.amplitude_x}×${effect.amplitude_y} · ${effect.frequency_hz}Hz · seed ${effect.seed}`;
+}
+
+export function directionLabel(direction: TransitionDirection): string {
+  switch (direction) {
+    case "left_to_right":
+      return "从左到右";
+    case "right_to_left":
+      return "从右到左";
+    case "top_to_bottom":
+      return "从上到下";
+    case "bottom_to_top":
+      return "从下到上";
+  }
+}
+
 export function defaultNode(type: NodeType, fallback: string): SceneNode {
   switch (type) {
     case "background":
       return {
         type,
         background: null,
-        transition: "cross_fade",
+        transition: defaultBackgroundTransition(),
+        duration_ms: 500,
+        easing: "ease_in_out",
+        await: false,
+        next: fallback,
+      };
+    case "curtain":
+      return {
+        type,
+        action: "cover",
+        fill: defaultCurtainFill(),
+        transition: defaultCurtainTransition(),
         duration_ms: 500,
         easing: "ease_in_out",
         await: false,
@@ -339,7 +418,7 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
     case "screen_effect":
       return {
         type,
-        effect: "flash",
+        effect: defaultFlashEffect(),
         duration_ms: 200,
         await: false,
         next: fallback,
@@ -821,6 +900,21 @@ export function preparePastedNode(
     case "background":
       if (node.background !== null && !hasAsset(node.background, "background"))
         node.background = null;
+      if (
+        node.transition.type === "fade_through_color" &&
+        !COLOR_PATTERN.test(node.transition.color)
+      ) {
+        node.transition = defaultBackgroundTransition();
+      }
+      break;
+    case "curtain":
+      if (
+        node.fill != null &&
+        "asset" in node.fill &&
+        !hasAsset(node.fill.asset, "gui")
+      ) {
+        node.fill = null;
+      }
       break;
     case "sprite":
       if (node.asset != null && !hasAsset(node.asset, "sprite"))
@@ -1269,9 +1363,7 @@ export function countCharacterReferences(
   return count;
 }
 
-function summarizeMutationValue(
-  value: import("./types").MutationValue | undefined,
-): string {
+function summarizeMutationValue(value: MutationValue | undefined): string {
   if (value === undefined) return "";
   return typeof value === "object" && value !== null
     ? value.variable

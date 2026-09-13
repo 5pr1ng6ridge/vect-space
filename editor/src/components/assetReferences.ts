@@ -55,6 +55,11 @@ function nodeReferencesAsset(node: SceneNode, assetId: string): boolean {
   switch (node.type) {
     case "background":
       return node.background === assetId;
+    case "curtain":
+      // Only a `gui` fill references an asset; a colour fill never does.
+      return (
+        node.fill != null && "asset" in node.fill && node.fill.asset === assetId
+      );
     case "sprite":
       return node.asset === assetId;
     case "long_text":

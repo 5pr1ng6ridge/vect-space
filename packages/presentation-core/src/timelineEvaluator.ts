@@ -1,5 +1,5 @@
 import { evaluateChannel, type SharedTimelineChannels } from "./timeline";
-import type { TimelineEvent } from "./types";
+import type { ScreenEffectSpec, TimelineEvent } from "./types";
 
 export interface TimelineBaseSprite {
   asset: string;
@@ -75,6 +75,8 @@ export interface TimelineFrame {
 export interface ActiveScreenEffect {
   startMs: number;
   durationMs: number;
+  /** Canonical spec of the winning event for this channel. */
+  effect: ScreenEffectSpec;
 }
 
 export interface ActiveScreenEffects {
@@ -104,10 +106,14 @@ export function evaluateActiveScreenEffects(
     if (event.type !== "screen_effect") continue;
     const durationMs = Math.max(1, event.duration_ms);
     if (event.at_ms <= elapsed && elapsed < event.at_ms + durationMs) {
-      const active = { startMs: event.at_ms, durationMs };
+      const active = {
+        startMs: event.at_ms,
+        durationMs,
+        effect: event.effect,
+      };
       // The latest start wins; an equal start keeps the later array entry,
       // which is the authored order the runtime stream also uses.
-      if (event.effect === "flash") {
+      if (event.effect.type === "flash") {
         if (event.at_ms >= flashStart) {
           flash = active;
           flashStart = event.at_ms;

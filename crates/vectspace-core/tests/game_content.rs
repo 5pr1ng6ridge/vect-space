@@ -122,7 +122,7 @@ fn repository_game_project_validates_including_animations() {
                     vectspace_core::model::TimelineEvent::ScreenEffect {
                         id,
                         at_ms: 320,
-                        effect: vectspace_core::model::ScreenEffectKind::Flash,
+                        effect: vectspace_core::model::ScreenEffectSpec::Flash { .. },
                         duration_ms: 120,
                     } if id == "parity_flash"
                 )) && events.iter().any(|event| matches!(
@@ -130,7 +130,7 @@ fn repository_game_project_validates_including_animations() {
                     vectspace_core::model::TimelineEvent::ScreenEffect {
                         id,
                         at_ms: 320,
-                        effect: vectspace_core::model::ScreenEffectKind::Shake,
+                        effect: vectspace_core::model::ScreenEffectSpec::Shake { .. },
                         duration_ms: 200,
                     } if id == "parity_shake"
                 ))
@@ -181,7 +181,162 @@ fn repository_game_project_validates_including_animations() {
                         .any(|hotspot| hotspot.scene_id == "surface_parity"),
                     "the parity fixture must not become a chapter-map hotspot"
                 );
+                // The transition lab is the manual acceptance scene for the
+                // canonical transition/curtain/effect work; keep it reachable
+                // while asserting the whole feature set stays demonstrated.
+                assert!(
+                    map.hotspots
+                        .iter()
+                        .any(|hotspot| hotspot.scene_id == "transition_lab"),
+                    "the transition lab must stay a chapter-map hotspot"
+                );
             }
+
+            use vectspace_core::model::{
+                BackgroundTransitionSpec, CurtainAction, CurtainFill, CurtainTransitionSpec,
+                ScreenEffectSpec, TransitionDirection,
+            };
+            let lab = catalog
+                .scenes
+                .get("transition_lab")
+                .expect("the transition lab fixture must be registered");
+            let transitions: Vec<&BackgroundTransitionSpec> = lab
+                .nodes
+                .values()
+                .filter_map(|node| match node {
+                    vectspace_core::model::SceneNode::Background { transition, .. } => {
+                        Some(transition)
+                    }
+                    _ => None,
+                })
+                .collect();
+            for name in ["cut", "cross_fade", "fade_through_color"] {
+                assert!(
+                    transitions.iter().any(|transition| matches!(
+                        (name, transition),
+                        ("cut", BackgroundTransitionSpec::Cut)
+                            | ("cross_fade", BackgroundTransitionSpec::CrossFade)
+                            | (
+                                "fade_through_color",
+                                BackgroundTransitionSpec::FadeThroughColor { .. }
+                            )
+                    )),
+                    "transition_lab must demonstrate {name}"
+                );
+            }
+            for (kind, direction) in [
+                ("wipe", TransitionDirection::LeftToRight),
+                ("wipe", TransitionDirection::RightToLeft),
+                ("push", TransitionDirection::TopToBottom),
+                ("push", TransitionDirection::BottomToTop),
+            ] {
+                assert!(
+                    transitions.iter().any(|transition| matches!(
+                        (kind, transition),
+                        ("wipe", BackgroundTransitionSpec::Wipe { direction: found, .. })
+                            | ("push", BackgroundTransitionSpec::Push { direction: found, .. })
+                            if *found == direction
+                    )),
+                    "transition_lab must demonstrate {kind} {direction:?}"
+                );
+            }
+            let curtains: Vec<&vectspace_core::model::SceneNode> = lab
+                .nodes
+                .values()
+                .filter(|node| matches!(node, vectspace_core::model::SceneNode::Curtain { .. }))
+                .collect();
+            assert!(curtains.iter().any(|node| matches!(
+                node,
+                vectspace_core::model::SceneNode::Curtain {
+                    action: CurtainAction::Cover,
+                    fill: Some(CurtainFill::Color { .. }),
+                    transition: CurtainTransitionSpec::Fade,
+                    ..
+                }
+            )));
+            assert!(curtains.iter().any(|node| matches!(
+                node,
+                vectspace_core::model::SceneNode::Curtain {
+                    action: CurtainAction::Cover,
+                    fill: Some(CurtainFill::Asset { asset }),
+                    ..
+                } if asset == "gui.dialogue_box"
+            )));
+            for direction in [
+                TransitionDirection::LeftToRight,
+                TransitionDirection::RightToLeft,
+                TransitionDirection::TopToBottom,
+                TransitionDirection::BottomToTop,
+            ] {
+                assert!(curtains.iter().any(|node| matches!(
+                    node,
+                    vectspace_core::model::SceneNode::Curtain {
+                        transition: CurtainTransitionSpec::Wipe { direction: found },
+                        ..
+                    } if *found == direction
+                )));
+            }
+            assert!(curtains.iter().any(|node| matches!(
+                node,
+                vectspace_core::model::SceneNode::Curtain {
+                    action: CurtainAction::Reveal,
+                    transition: CurtainTransitionSpec::SplitHorizontal,
+                    ..
+                }
+            )));
+            assert!(curtains.iter().any(|node| matches!(
+                node,
+                vectspace_core::model::SceneNode::Curtain {
+                    action: CurtainAction::Cover,
+                    transition: CurtainTransitionSpec::SplitVertical,
+                    ..
+                }
+            )));
+            let effects: Vec<&ScreenEffectSpec> = lab
+                .nodes
+                .values()
+                .filter_map(|node| match node {
+                    vectspace_core::model::SceneNode::ScreenEffect { effect, .. } => Some(effect),
+                    _ => None,
+                })
+                .collect();
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                ScreenEffectSpec::Flash { peak_alpha, .. } if (*peak_alpha - 0.55).abs() < f32::EPSILON
+            )));
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                ScreenEffectSpec::Shake { seed: 42, amplitude_x, .. } if (*amplitude_x - 18.0).abs() < f32::EPSILON
+            )));
+            let timeline = lab
+                .nodes
+                .get("effects_timeline")
+                .expect("the effects timeline must stay registered");
+            let events = match timeline {
+                vectspace_core::model::SceneNode::Timeline { events, .. } => events,
+                _ => panic!("effects_timeline must stay a timeline"),
+            };
+            let shake_windows: Vec<(u64, u64, u32)> = events
+                .iter()
+                .filter_map(|event| match event {
+                    vectspace_core::model::TimelineEvent::ScreenEffect {
+                        at_ms,
+                        effect: ScreenEffectSpec::Shake { seed, .. },
+                        duration_ms,
+                        ..
+                    } => Some((*at_ms, *duration_ms, *seed)),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                shake_windows.iter().any(|(at, duration, seed)| {
+                    *seed == 42
+                        && shake_windows.iter().any(|(later_at, _, later_seed)| {
+                            *later_seed != 42 && *later_at > *at && *later_at < at + duration
+                        })
+                }),
+                "transition_lab must keep two overlapping shake windows"
+            );
         }
         // Unresolved LFS pointers mean the fixtures were never downloaded.
         Err(error) if error.to_string().contains("Git LFS") => {}

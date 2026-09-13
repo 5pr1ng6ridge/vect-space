@@ -887,6 +887,10 @@ function summarize(node: SceneNode): string {
       return "剧情终点";
     case "background":
       return `背景 · ${node.background ?? "清除"}`;
+    case "curtain":
+      return `幕布 · ${node.action === "cover" ? "落下" : "收起"}`;
+    case "screen_effect":
+      return node.effect.type === "flash" ? "闪光" : "震动";
     case "sprite":
       return `立绘 · ${node.action} ${node.sprite_id}`;
     case "long_text":

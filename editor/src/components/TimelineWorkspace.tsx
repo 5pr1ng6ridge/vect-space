@@ -9,6 +9,7 @@ import {
   type ReactElement,
 } from "react";
 import { assetUrl, editorApi } from "../api";
+import { defaultFlashEffect } from "../presentationDefaults";
 import { projectRequest } from "../story";
 import { stringifyScalarJson } from "../scalars";
 import type {
@@ -46,6 +47,7 @@ import {
 } from "./timelinePreview";
 import { buildAnimationMap } from "../imageAnimationMap";
 import { editorImageSource } from "../imageAnimationMap";
+import { ScreenEffectFields } from "./SpecFields";
 import { AnimatedImage } from "./AnimatedImage";
 
 interface TimelineWorkspaceProps {
@@ -384,6 +386,9 @@ export function TimelineWorkspace({
       if (timelineCue === undefined) return;
       timelineCue.duration_ms = nextNode.duration_ms;
       timelineCue.tracks = nextNode.tracks;
+      // The editor authors the same canonical cue shapes the Rust loader
+      // normalises YAML into, so editor events enter the shared preview
+      // unchanged (no boundary normalisation).
       timelineCue.events = nextNode.events;
       const desiredPlayhead = playheadRef.current;
       // Ordinary keyframe edits only re-evaluate what is already prepared; a
@@ -853,7 +858,7 @@ export function TimelineWorkspace({
             type: "screen_effect",
             id: `${prefix}_${index}`,
             at_ms: atMs,
-            effect: "flash",
+            effect: defaultFlashEffect(),
             duration_ms: Math.max(1, Math.min(200, current.duration_ms - atMs)),
           };
     commitNode({
@@ -1900,21 +1905,10 @@ function TimelineEventInspector({
         </>
       ) : (
         <>
-          <label>
-            效果
-            <select
-              value={event.effect}
-              onChange={(input) =>
-                onChange({
-                  ...event,
-                  effect: input.currentTarget.value as typeof event.effect,
-                })
-              }
-            >
-              <option value="flash">flash</option>
-              <option value="shake">shake</option>
-            </select>
-          </label>
+          <ScreenEffectFields
+            onChange={(effect) => onChange({ ...event, effect })}
+            value={event.effect}
+          />
           <label>
             时长
             <input

@@ -291,6 +291,7 @@ scenes:
 - scenes/presentation_showcase.yaml
 - scenes/ch0.yaml
 - scenes/character_action_showcase.yaml
+- scenes/transition_lab.yaml
 - scenes/surface_parity.yaml
 animations:
 - animations/scan.yaml

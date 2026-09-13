@@ -41,7 +41,6 @@ import {
   ENTRY_TWEEN_SCALE,
   composeWorldTransform,
   entryTweenPose,
-  flashAlpha,
   hitTestSceneFrame,
   mergeSceneOverrides,
   shakeOffset,
@@ -62,12 +61,31 @@ import {
   type ImageAssetSource,
 } from "./imageAnimation";
 import type { ActiveScreenEffect } from "./timelineEvaluator";
+import {
+  evaluateFlashAlpha,
+  evaluateScreenEffectFrame,
+  evaluateShakeOffset,
+} from "./sceneEffects";
+import {
+  evaluateBackgroundTransition,
+  evaluateCurtainTransition,
+  featherSteps,
+  featherStepRect,
+  fullStageRect,
+  maskOpaqueRect,
+  type CurtainTransitionFrame,
+  type StageMask,
+} from "./sceneTransitions";
 import type {
   AssetUrlMap,
   ButtonSnapshot,
   CameraSnapshot,
+  CurtainAction,
+  CurtainFill,
+  CurtainSnapshot,
   Easing,
   PresentationCue,
+  ScreenEffectSpec,
   SpriteSnapshot,
   TimelineTrack,
 } from "./types";
@@ -77,6 +95,20 @@ export const MIN_SESSION_TEXTURES = 512;
 /** Headroom for backgrounds, sprites, GUI art and buttons beside the frames. */
 export const TEXTURE_BUDGET_HEADROOM = 128;
 const IMAGE_LOAD_TIMEOUT_MS = 8_000;
+/** Duration of the host-only session curtain's cover and reveal fades. */
+export const SESSION_CURTAIN_MS = 250;
+/**
+ * Upper bound on the session curtain's wait for rendering.
+ *
+ * A hidden or suspended host may stop pumping frames at all; the reveal
+ * falls back to one best-effort render instead of holding the host busy
+ * forever, and the cover/reveal fades are bounded by their duration plus this
+ * grace so a suspended host still reaches a fully covered / fully revealed
+ * state.
+ */
+export const SESSION_CURTAIN_FRAME_TIMEOUT_MS = 250;
+/** Label suffix of the deterministic feather strips, for diagnostics/tests. */
+const FEATHER_STRIP_LABEL = "#feather";
 
 // ---------------------------------------------------------------------------
 // Renderer ports
@@ -110,6 +142,8 @@ export interface SceneNodeLike {
   width: number;
   height: number;
   sortableChildren: boolean;
+  /** Render mask; every host object supports it, the memory kit mirrors Pixi. */
+  mask: SceneNodeLike | null;
   position: ScenePointLike;
   pivot: ScenePointLike;
   scale: ScenePointLike;
@@ -128,6 +162,8 @@ export interface SceneSpriteLike extends SceneNodeLike {
 export interface SceneGraphicsLike extends SceneNodeLike {
   rect(x: number, y: number, width: number, height: number): SceneGraphicsLike;
   fill(color: number): SceneGraphicsLike;
+  /** Drops every accumulated shape so a mask can be rebuilt per frame. */
+  clear(): SceneGraphicsLike;
 }
 
 export interface SceneVideoSourceLike {
@@ -328,6 +364,8 @@ export interface SceneWorldSnapshot {
   background: string | null;
   sprites: Record<string, SpriteSnapshot>;
   camera: CameraSnapshot;
+  /** Stable curtain state restored by a hard reconcile (never a cue). */
+  curtain?: CurtainSnapshot | null;
 }
 
 export interface ScenePreparationRequest {
@@ -361,6 +399,8 @@ export interface ScenePreparation {
   readonly resourceId: number;
   readonly resources: Map<string, PreparedAsset>;
   readonly background: PreparedAsset | null;
+  /** Prepared pixels for a `gui`-asset curtain fill, when one is covered. */
+  readonly curtain: PreparedAsset | null;
 }
 
 export interface SceneFrameApplyOptions {
@@ -407,7 +447,8 @@ export type SceneVisualCue = Extract<
       | "sprite_tween"
       | "clear_scene"
       | "camera_tween"
-      | "screen_effect";
+      | "screen_effect"
+      | "curtain_transition";
   }
 >;
 
@@ -435,8 +476,18 @@ type VideoTrack = Extract<TimelineTrack, { type: "video" }>;
 const BACKGROUND_ID = "__background__";
 /** Cue-conflict key for background transitions; the newest one owns the view. */
 const BACKGROUND_CUE = "background";
+/** Cue-conflict key for the persistent curtain layer. */
+const CURTAIN_CUE = "curtain";
 /** Cue-conflict key prefix for one sprite instance. */
 const SPRITE_CUE = "sprite:";
+
+/** Screen-space z-order: world < curtain < screen effects < session curtain. */
+const CAMERA_LAYER_Z = 0;
+const TRANSITION_LAYER_Z = 5;
+const CURTAIN_LAYER_Z = 10;
+const EFFECTS_LAYER_Z = 20;
+/** The host-only session curtain covers every story layer while it is up. */
+const SESSION_CURTAIN_LAYER_Z = 30;
 
 interface SceneSpriteView {
   id: string;
@@ -460,6 +511,19 @@ interface SceneVideoState {
   track: VideoTrack;
 }
 
+/**
+ * One deterministic strip of a soft wipe/push feather.
+ *
+ * Pixi's stencil mask is binary, so a soft edge is drawn as a fixed number of
+ * strips whose alpha steps through the pure ramp; the strip sprite shares the
+ * incoming view's texture and pose (no extra decode) and is clipped to its own
+ * stage-space rectangle.
+ */
+interface SceneFeatherStrip {
+  sprite: SceneSpriteLike;
+  mask: SceneGraphicsLike;
+}
+
 export class SceneSurface {
   readonly #kit: SceneKit;
   readonly #canvas: HTMLCanvasElement;
@@ -470,6 +534,12 @@ export class SceneSurface {
   readonly #characters: SceneNodeLike;
   readonly #videos: SceneNodeLike;
   readonly #effects: SceneNodeLike;
+  /** Screen-space background-transition overlay (fade-through-colour). */
+  readonly #transition: SceneNodeLike;
+  /** Persistent curtain layer, above the world and below screen effects. */
+  readonly #curtainLayer: SceneNodeLike;
+  /** Host-only session curtain, above every story layer. */
+  readonly #sessionCurtainLayer: SceneNodeLike;
   readonly #loops = new FrameLoopRegistry();
   readonly #sprites = new Map<string, SceneSpriteView>();
   readonly #store: SceneTextureStore;
@@ -477,8 +547,61 @@ export class SceneSurface {
   #background: SceneSpriteView | null = null;
   #video: SceneVideoState | null = null;
   #flash: SceneGraphicsLike | null = null;
+  #flashColor: number | null = null;
+  /** Alpha multiplier carried by the flash colour (`#RRGGBBAA`). */
+  #flashColorAlpha = 1;
   #effectsState: SceneActiveEffects | null = null;
   #cueShake = { x: 0, y: 0 };
+  /** Current curtain fill descriptor, so a cue only rebuilds on a real change. */
+  #curtainFillKey: string | null = null;
+  #curtainFill: SceneNodeLike | null = null;
+  /** Alpha multiplier carried by a colour fill (`#RRGGBBAA`). */
+  #curtainFillAlpha = 1;
+  #curtainFillRefs: string[] = [];
+  #curtainMask: SceneGraphicsLike | null = null;
+  /** Fade-through-colour overlay in the transition layer. */
+  #transitionOverlay: SceneGraphicsLike | null = null;
+  /** Alpha multiplier carried by the overlay colour (`#RRGGBBAA`). */
+  #transitionOverlayAlpha = 1;
+  #backgroundMask: SceneGraphicsLike | null = null;
+  #backgroundMaskOwner: SceneSpriteView | null = null;
+  /** Deterministic stepped strips of the live soft wipe/push feather. */
+  #featherStrips: SceneFeatherStrip[] = [];
+  /** Host-only session curtain: true while it fully covers the canvas. */
+  #sessionCovered = false;
+  /** Black full-stage fill of the session curtain layer. */
+  #sessionCurtainFill: SceneNodeLike | null = null;
+  /** Newest session-curtain transition; repeated calls coalesce onto it. */
+  #sessionCurtainToken = 0;
+  #sessionCurtainAction: CurtainAction | null = null;
+  #sessionCurtainPromise: Promise<void> | null = null;
+  /** In-flight reveal (including its wait for a drawn frame). */
+  #sessionCurtainReveal: Promise<void> | null = null;
+  /**
+   * Identity of the current reveal operation.  A newer reveal request (or a
+   * reset/dispose) advances it, so a replaced operation stops at its next
+   * checkpoint instead of running a second reveal.
+   */
+  #sessionCurtainRevealToken = 0;
+  /**
+   * Epoch the parked reveal currently follows, or `-1` when no reveal is
+   * parked.  A newer transition advances `#sessionCurtainEpoch`, so the two
+   * differ exactly while a superseded reveal is still parked: a reveal call in
+   * that window must start a fresh operation instead of sharing the doomed
+   * no-op promise.
+   */
+  #sessionCurtainRevealEpoch = -1;
+  /**
+   * Ownership epoch of the session curtain.
+   *
+   * Every transition and every reset/dispose bumps it.  A parked reveal
+   * captured the epoch when it became the newest request; once the epoch has
+   * moved on, a newer cover (or a session boundary) owns the curtain and the
+   * parked reveal must stop instead of adopting the newer operation.
+   */
+  #sessionCurtainEpoch = 0;
+  /** Callbacks waiting for the next drawn frame (reveal-after-stable-frame). */
+  #frameWaiters: (() => void)[] = [];
   #camera: CameraSnapshot = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
   #evaluated: SceneFrame | null = null;
   #current: SceneFrame | null = null;
@@ -532,6 +655,9 @@ export class SceneSurface {
     this.#characters = this.#kit.container();
     this.#videos = this.#kit.container();
     this.#effects = this.#kit.container();
+    this.#transition = this.#kit.container();
+    this.#curtainLayer = this.#kit.container();
+    this.#sessionCurtainLayer = this.#kit.container();
     this.#store = new SceneTextureStore({
       load: options.textureLoader ?? ((url) => this.#loadTexture(url)),
       budget:
@@ -597,12 +723,28 @@ export class SceneSurface {
       this.#cameraLayer.addChild(this.#backgrounds);
       this.#cameraLayer.addChild(this.#characters);
       this.#cameraLayer.addChild(this.#videos);
+      // Screen-space stack: world < background-transition overlay < curtain <
+      // screen effects.  `sortableChildren` keeps the render order explicit
+      // even though the DOM/dialogue layer lives outside this surface.
+      this.#application.stage.sortableChildren = true;
+      this.#cameraLayer.zIndex = CAMERA_LAYER_Z;
+      this.#transition.zIndex = TRANSITION_LAYER_Z;
+      this.#curtainLayer.zIndex = CURTAIN_LAYER_Z;
+      this.#effects.zIndex = EFFECTS_LAYER_Z;
+      this.#sessionCurtainLayer.zIndex = SESSION_CURTAIN_LAYER_Z;
       this.#application.stage.addChild(this.#cameraLayer);
+      // Insertion order keeps the historic array indices stable (the test kit
+      // reads `stage.children[1]` for screen effects); `zIndex` decides the
+      // actual render order, so the curtain still draws below the effects and
+      // the host session curtain covers everything.
       this.#application.stage.addChild(this.#effects);
+      this.#application.stage.addChild(this.#transition);
+      this.#application.stage.addChild(this.#curtainLayer);
+      this.#application.stage.addChild(this.#sessionCurtainLayer);
       this.#applyCamera();
       this.#application.render();
       const loop = new SceneRenderLoop({
-        render: () => this.#application.render(),
+        render: () => this.#renderFrame(),
         tick: (deltaMs) => this.#tickDecorations(deltaMs),
         ...(this.#requestFrame === undefined
           ? {}
@@ -653,6 +795,7 @@ export class SceneSurface {
       resourceId,
       resources: new Map<string, PreparedAsset>(),
       background: null,
+      curtain: null,
       get stale(): boolean {
         return isStale();
       },
@@ -674,6 +817,8 @@ export class SceneSurface {
       const spriteAssets = new Set(wanted);
       if (request.world.background !== null)
         wanted.add(request.world.background);
+      const curtainAsset = curtainAssetOf(request.world.curtain ?? null);
+      if (curtainAsset !== null) wanted.add(curtainAsset);
       for (const asset of wanted) {
         if (aborted()) {
           releaseAcquired();
@@ -692,6 +837,9 @@ export class SceneSurface {
         if (request.world.background === asset) {
           (preparation as { background: PreparedAsset | null }).background =
             prepared;
+        }
+        if (curtainAsset === asset) {
+          (preparation as { curtain: PreparedAsset | null }).curtain = prepared;
         }
       }
     } catch (error) {
@@ -753,6 +901,7 @@ export class SceneSurface {
       this.#sprites.set(id, next);
     }
     this.#camera = { ...world.camera };
+    this.#commitCurtain(preparation.curtain, world.curtain ?? null);
     this.discardPreparation(preparation);
     this.#applyCamera();
     this.#applyZOrder();
@@ -772,6 +921,7 @@ export class SceneSurface {
     const assets = [
       ...preparation.resources.values(),
       ...(preparation.background === null ? [] : [preparation.background]),
+      ...(preparation.curtain === null ? [] : [preparation.curtain]),
     ];
     for (const asset of assets) this.#releasePrepared(asset);
     preparation.resources.clear();
@@ -793,6 +943,8 @@ export class SceneSurface {
     }
     this.#releaseVideo();
     this.#clearBackground();
+    this.#destroyCurtainFill();
+    this.#clearTransitionOverlay();
     for (const view of this.#sprites.values()) this.#releaseView(view);
     this.#sprites.clear();
     this.#loops.clear();
@@ -801,9 +953,24 @@ export class SceneSurface {
     this.#evaluated = null;
     this.#current = null;
     this.#camera = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
+    // A reset is a session boundary: the host curtain never survives the
+    // world it was covering, and neither does the operation that was running
+    // it (a later cover must never coalesce onto the aborted promise).
+    this.#destroySessionCurtainFill();
+    this.#sessionCovered = false;
+    this.#abortSessionCurtainOperations();
+    this.#flushFrameWaiters();
     this.#applyCamera();
     this.#applyZOrder();
     this.#requestRender();
+  }
+
+  /** Releases every pending "next drawn frame" waiter. */
+  #flushFrameWaiters(): void {
+    const waiters = this.#frameWaiters;
+    if (waiters.length === 0) return;
+    this.#frameWaiters = [];
+    for (const waiter of waiters) waiter();
   }
 
   // -- frames ----------------------------------------------------------------
@@ -908,6 +1075,9 @@ export class SceneSurface {
         return;
       case "screen_effect":
         await this.#screenEffect(cue.effect, cue.duration_ms, context);
+        return;
+      case "curtain_transition":
+        await this.#transitionCurtain(cue, context);
         return;
       default:
         cue satisfies never;
@@ -1055,6 +1225,236 @@ export class SceneSurface {
     this.#decorativeRunning = running;
   }
 
+  // -- host-only session curtain ---------------------------------------------
+
+  /** True while the host-only session curtain fully covers the canvas. */
+  get sessionCovered(): boolean {
+    return this.#sessionCovered;
+  }
+
+  /**
+   * Covers the canvas with the host-only session curtain.
+   *
+   * The host uses this before it replaces the whole world (new game, load,
+   * replay start, controller reset).  It shares the pure curtain evaluator and
+   * the persistent curtain render primitive with the story `curtain_transition`
+   * cue, but it never enters `WorldSnapshot` or a story cue, so a later hard
+   * snapshot alignment can never replay it.  Repeated calls while a cover is
+   * already in flight share that one transition — React Strict Mode's double
+   * setup therefore performs no duplicate work.  A cover that interrupts a
+   * running reveal continues from the alpha that is on screen instead of
+   * snapping the curtain transparent.  A cover issued while a reveal is parked
+   * waiting for its stable frame supersedes that reveal: the newest request
+   * owns the curtain, so the cover is never swallowed as redundant.
+   */
+  coverSession(durationMs: number = SESSION_CURTAIN_MS): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    if (this.#sessionCurtainAction === "cover") {
+      return this.#sessionCurtainPromise ?? Promise.resolve();
+    }
+    if (
+      this.#sessionCovered &&
+      this.#sessionCurtainAction === null &&
+      this.#sessionCurtainReveal === null
+    ) {
+      return Promise.resolve();
+    }
+    return this.#runSessionCurtain("cover", durationMs);
+  }
+
+  /**
+   * Reveals the session curtain again.
+   *
+   * Waits one drawn frame first, so the replacement is on screen before the
+   * cover starts fading.  The curtain is released even when the reveal is
+   * superseded, cancelled or the surface is reset/destroyed, and duplicate
+   * calls share the one reveal.  A reveal requested while a cover is still in
+   * flight waits for that cover instead of being silently dropped.  A reveal
+   * requested after a newer cover has already superseded a parked reveal does
+   * not reuse that parked no-op: it starts a fresh operation that observes the
+   * newest cover.
+   */
+  revealSession(durationMs: number = SESSION_CURTAIN_MS): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    if (this.#sessionCurtainReveal !== null) {
+      // A parked reveal still following the newest transition is the shared
+      // promise every duplicate call receives.  Once a newer cover (or a
+      // session boundary) has moved the epoch on, that promise is a doomed
+      // no-op for this newer request, so fall through and start a fresh one.
+      if (this.#sessionCurtainRevealEpoch === this.#sessionCurtainEpoch) {
+        return this.#sessionCurtainReveal;
+      }
+    } else {
+      if (this.#sessionCurtainAction === "reveal") {
+        return this.#sessionCurtainPromise ?? Promise.resolve();
+      }
+      if (!this.#sessionCovered && this.#sessionCurtainAction !== "cover") {
+        return Promise.resolve();
+      }
+    }
+    const token = ++this.#sessionCurtainRevealToken;
+    const operation = (async (): Promise<void> => {
+      while (!this.#disposed) {
+        // A cover in flight owns the curtain, but a reveal requested during it
+        // must not be dropped: wait for the cover and keep asking.  Waiting
+        // still follows the newest request, so duplicate calls keep sharing
+        // this operation.
+        const action = this.#sessionCurtainAction;
+        if (action === "cover") {
+          this.#sessionCurtainRevealEpoch = this.#sessionCurtainEpoch;
+          await (this.#sessionCurtainPromise ?? Promise.resolve());
+          // A newer reveal request replaced this operation while it waited;
+          // the replacement owns the caller's promise now.
+          if (token !== this.#sessionCurtainRevealToken) return;
+          continue;
+        }
+        // Nothing is running, so this request is the newest owner of the
+        // curtain.  Remember the ownership epoch: a cover that starts (or a
+        // reset/dispose that aborts the session) before this reveal fades is a
+        // newer request and supersedes the parked reveal.
+        const epoch = this.#sessionCurtainEpoch;
+        this.#sessionCurtainRevealEpoch = epoch;
+        // The replacement must be on screen before the cover starts fading.
+        await this.#nextFrame();
+        if (this.#disposed) return;
+        if (token !== this.#sessionCurtainRevealToken) return;
+        if (epoch !== this.#sessionCurtainEpoch) return;
+        if (!this.#sessionCovered) return;
+        const run = this.#runSessionCurtain("reveal", durationMs);
+        // The running fade owns the newest epoch; callers arriving during it
+        // share this operation instead of starting a second reveal.
+        this.#sessionCurtainRevealEpoch = this.#sessionCurtainEpoch;
+        await run;
+        return;
+      }
+    })().finally(() => {
+      if (this.#sessionCurtainRevealToken === token) {
+        this.#sessionCurtainReveal = null;
+      }
+    });
+    this.#sessionCurtainReveal = operation;
+    return operation;
+  }
+
+  /**
+   * Runs one cover/reveal transition of the host curtain.
+   *
+   * A newer request (or a reset/dispose that aborts the cue generation)
+   * supersedes this one; the superseded run never writes a frame and the
+   * curtain stays owned by whoever superseded it.
+   */
+  #runSessionCurtain(action: CurtainAction, durationMs: number): Promise<void> {
+    const token = ++this.#sessionCurtainToken;
+    // Every transition opens a new ownership epoch; a reveal parked on an
+    // older epoch stops as soon as it resumes.
+    this.#sessionCurtainEpoch += 1;
+    const generation = this.#sceneGeneration;
+    this.#sessionCurtainAction = action;
+    const operation = (async (): Promise<void> => {
+      if (action === "cover") {
+        // The host curtain is always a fixed opaque black on its own layer, so
+        // a story curtain's colour/asset fill and the world's curtain state
+        // are never touched by a session switch.
+        this.#ensureSessionCurtainFill();
+      } else if (this.#sessionCurtainFill === null) {
+        this.#sessionCovered = false;
+        return;
+      }
+      // A newer transition supersedes a running fade; it continues from the
+      // alpha that is actually on screen instead of snapping transparent (a
+      // cover that interrupts a reveal must not flash the world through).
+      const from = this.#sessionCurtainFill?.alpha ?? 0;
+      const applyFrame = (progress: number): void => {
+        if (!this.#isCurrent(generation) || token !== this.#sessionCurtainToken)
+          return;
+        const frame = evaluateCurtainTransition(
+          { type: "fade" },
+          action,
+          progress,
+        );
+        const fill = this.#sessionCurtainFill;
+        if (fill === null) return;
+        const alpha =
+          action === "cover"
+            ? from + (1 - from) * frame.alpha
+            : from * frame.alpha;
+        fill.visible = alpha > 0;
+        fill.alpha = alpha;
+        this.#requestRender();
+      };
+      if (durationMs > 0) {
+        // The fade clock is frame-driven, so a hidden or suspended host would
+        // otherwise leave it (and any host command awaiting the cover)
+        // pending forever.  Once the duration plus grace has passed the fade
+        // snaps to its final state instead of hanging the host.
+        const fade = new AbortController();
+        const watchdog = setTimeout(
+          () => fade.abort(),
+          durationMs + SESSION_CURTAIN_FRAME_TIMEOUT_MS,
+        );
+        try {
+          await this.#runAnimation(durationMs, "linear", applyFrame, {
+            assets: this.#assets,
+            signal: fade.signal,
+            getRate: () => 1,
+          });
+        } finally {
+          clearTimeout(watchdog);
+        }
+      }
+      if (!this.#isCurrent(generation) || token !== this.#sessionCurtainToken) {
+        return;
+      }
+      applyFrame(1);
+      if (action === "cover") {
+        this.#sessionCovered = true;
+      } else {
+        this.#destroySessionCurtainFill();
+        this.#sessionCovered = false;
+      }
+    })().finally(() => {
+      if (token === this.#sessionCurtainToken) {
+        this.#sessionCurtainAction = null;
+        this.#sessionCurtainPromise = null;
+      }
+    });
+    this.#sessionCurtainPromise = operation;
+    return operation;
+  }
+
+  /** Drops the session-curtain operation state after a reset/dispose. */
+  #abortSessionCurtainOperations(): void {
+    // Bumping the token also stops the superseded run's `finally` from
+    // clearing the state of a newer operation, and bumping the epoch stops a
+    // parked reveal from surviving the session boundary (reset/dispose).
+    this.#sessionCurtainToken += 1;
+    this.#sessionCurtainEpoch += 1;
+    this.#sessionCurtainAction = null;
+    this.#sessionCurtainPromise = null;
+    this.#sessionCurtainReveal = null;
+    this.#sessionCurtainRevealToken += 1;
+    this.#sessionCurtainRevealEpoch = -1;
+  }
+
+  /** Creates the fixed black full-stage cover of the session curtain. */
+  #ensureSessionCurtainFill(): void {
+    if (this.#sessionCurtainFill !== null) return;
+    const fill = this.#kit.graphics();
+    fill.rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT).fill(0x000000);
+    fill.alpha = 0;
+    this.#sessionCurtainLayer.addChild(fill);
+    this.#sessionCurtainFill = fill;
+  }
+
+  /** Drops the session curtain cover and its layer contents, exactly once. */
+  #destroySessionCurtainFill(): void {
+    const fill = this.#sessionCurtainFill;
+    this.#sessionCurtainFill = null;
+    if (fill === null) return;
+    this.#sessionCurtainLayer.removeChild(fill);
+    fill.destroy();
+  }
+
   captureThumbnail(): string | null {
     try {
       const thumbnail = document.createElement("canvas");
@@ -1089,10 +1489,16 @@ export class SceneSurface {
     }
     this.#releaseVideo();
     this.#clearBackground();
+    this.#destroyCurtainFill();
+    this.#clearTransitionOverlay();
     for (const view of this.#sprites.values()) this.#releaseView(view);
     this.#sprites.clear();
     this.#loops.clear();
     this.#clearEffects();
+    this.#destroySessionCurtainFill();
+    this.#sessionCovered = false;
+    this.#abortSessionCurtainOperations();
+    this.#flushFrameWaiters();
     this.#loop?.dispose();
     this.#loop = null;
     this.#store.destroy();
@@ -1300,6 +1706,13 @@ export class SceneSurface {
       if (view === null) continue;
       const player = this.#loops.player(id);
       this.#applyFrameTexture(view, player?.frameIndex() ?? 0);
+      // A soft edge on an animated incoming background draws copies of it;
+      // keep them on the same frame the view now shows.
+      if (view === this.#backgroundMaskOwner) {
+        for (const strip of this.#featherStrips) {
+          strip.sprite.texture = view.sprite.texture;
+        }
+      }
     }
   }
 
@@ -1328,6 +1741,14 @@ export class SceneSurface {
     this.#cueAbort.abort();
     this.#cueAbort = new AbortController();
     this.#releaseStagedViews();
+    // Cue-owned visuals belong to the generation that started them: a reset, a
+    // world commit or a clear must not leave a half-drawn transition mask, a
+    // fade-through overlay or a sampled shake offset behind.  A background cue
+    // that is still in flight gives up its cleanup (its token is stale once
+    // the generation moves on), so this is the only place that releases them.
+    this.#cueShake = { x: 0, y: 0 };
+    this.#clearTransitionOverlay();
+    this.#clearBackgroundMask();
     return this.#sceneGeneration;
   }
 
@@ -1395,10 +1816,322 @@ export class SceneSurface {
   }
 
   #clearBackground(): void {
+    // Detach the wipe/soft-push mask before the view it clips is destroyed;
+    // a released Pixi object must not be written to afterwards.
+    this.#clearBackgroundMask();
     const previous = this.#background;
     this.#background = null;
     if (previous !== null) this.#releaseView(previous);
     this.#releaseStagedViewsFor(BACKGROUND_ID);
+    // A background that is gone cannot be covered by a transition overlay.
+    this.#clearTransitionOverlay();
+  }
+
+  // -- internals: persistent curtain -----------------------------------------
+
+  /**
+   * Applies a curtain snapshot without replaying a cue.
+   *
+   * This is the hard-reconcile path used by `applyWorld`, so a restored save
+   * shows exactly the curtain it stored.
+   */
+  #commitCurtain(
+    prepared: PreparedAsset | null,
+    snapshot: CurtainSnapshot | null,
+  ): void {
+    const fill = snapshot?.covered ? (snapshot.fill ?? null) : null;
+    if (fill === null) {
+      this.#destroyCurtainFill();
+      return;
+    }
+    if (!this.#ensureCurtainFill(fill, prepared)) {
+      // Missing pixels must never reveal the world behind a covered curtain;
+      // fall back to an opaque cover so the stable state stays trustworthy.
+      // The fallback is silent to the player, so it is reported here.
+      this.#diagnostic(
+        `幕布素材缺失或加载失败，已回退为纯色幕布：${describeCurtainFill(fill)}`,
+      );
+      this.#ensureCurtainFill({ color: "#000000" }, null);
+    }
+    this.#applyCurtainFrame({ alpha: 1, rects: [fullStageRect()] });
+  }
+
+  /**
+   * Ensures the curtain fill view matches `fill`.
+   *
+   * Returns `false` when an asset fill has no prepared pixels yet, so the
+   * caller can fall back instead of showing an empty layer.
+   */
+  #ensureCurtainFill(
+    fill: CurtainFill,
+    prepared: PreparedAsset | null,
+  ): boolean {
+    // The asset revision is part of the identity: an edited `gui` asset keeps
+    // its id but changes its pixels, and the curtain must follow it.
+    const key =
+      "asset" in fill
+        ? `asset:${fill.asset}:${prepared?.version ?? ""}`
+        : `color:${fill.color}`;
+    if (this.#curtainFillKey === key && this.#curtainFill !== null) return true;
+    this.#destroyCurtainFill();
+    if (!("asset" in fill)) {
+      const parsed = parseColor(fill.color);
+      const graphics = this.#kit.graphics();
+      graphics.rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT).fill(parsed.color);
+      this.#curtainLayer.addChild(graphics);
+      this.#curtainFill = graphics;
+      this.#curtainFillKey = key;
+      this.#curtainFillAlpha = parsed.alpha;
+      return true;
+    }
+    const texture = prepared?.textures[0];
+    if (texture === undefined) return false;
+    const sprite = this.#kit.sprite(texture);
+    const width = texture.width;
+    const height = texture.height;
+    const scale = Math.max(DESIGN_WIDTH / width, DESIGN_HEIGHT / height);
+    sprite.anchor.set(0, 0);
+    sprite.scale.set(scale);
+    sprite.position.set(
+      (DESIGN_WIDTH - width * scale) / 2,
+      (DESIGN_HEIGHT - height * scale) / 2,
+    );
+    this.#curtainLayer.addChild(sprite);
+    this.#curtainFill = sprite;
+    this.#curtainFillKey = key;
+    this.#curtainFillAlpha = 1;
+    if (prepared !== null) this.#curtainFillRefs = this.#claim(prepared);
+    return true;
+  }
+
+  /** Applies one pure curtain frame (alpha + covered rectangles). */
+  #applyCurtainFrame(frame: CurtainTransitionFrame): void {
+    const fill = this.#curtainFill;
+    const visibleRects = frame.rects.filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    );
+    if (fill === null || frame.alpha <= 0 || visibleRects.length === 0) {
+      if (fill !== null) fill.visible = false;
+      return;
+    }
+    fill.visible = true;
+    // The authored colour may carry its own `#RRGGBBAA` alpha; the transition
+    // frame scales it rather than replacing it.
+    fill.alpha = frame.alpha * this.#curtainFillAlpha;
+    const mask = this.#curtainMask ?? this.#kit.graphics();
+    if (this.#curtainMask === null) {
+      this.#curtainLayer.addChild(mask);
+      this.#curtainMask = mask;
+    }
+    mask.clear();
+    for (const rect of visibleRects) {
+      mask.rect(rect.x, rect.y, rect.width, rect.height);
+    }
+    mask.fill(0xffffff);
+    fill.mask = mask;
+  }
+
+  /**
+   * Drops the curtain fill, its mask and the texture references it owns.
+   */
+  #destroyCurtainFill(): void {
+    const fill = this.#curtainFill;
+    this.#curtainFill = null;
+    this.#curtainFillKey = null;
+    this.#curtainFillAlpha = 1;
+    if (fill !== null) {
+      fill.mask = null;
+      this.#curtainLayer.removeChild(fill);
+      fill.destroy({ children: true });
+    }
+    const mask = this.#curtainMask;
+    this.#curtainMask = null;
+    if (mask !== null) {
+      this.#curtainLayer.removeChild(mask);
+      mask.destroy();
+    }
+    this.#store.releaseAll(this.#curtainFillRefs);
+    this.#curtainFillRefs = [];
+  }
+
+  /** Destroys the fade-through-colour overlay of an in-flight transition. */
+  #clearTransitionOverlay(): void {
+    const overlay = this.#transitionOverlay;
+    this.#transitionOverlay = null;
+    this.#transitionOverlayAlpha = 1;
+    if (overlay === null) return;
+    this.#transition.removeChild(overlay);
+    overlay.destroy();
+  }
+
+  /**
+   * Releases the transient resources of the previous background transition.
+   *
+   * A newer cue takes the background layer over before it installs its own
+   * mask/overlay, so the old owner must be detached here: otherwise a
+   * superseded wipe keeps masking the view a later push/cross-fade is sliding
+   * out, and a later soft wipe would inherit the older cue's strips.  The
+   * overlay belongs to one cue as well, so it is destroyed instead of
+   * recoloured while the new cue owns it.
+   */
+  #resetBackgroundTransition(): void {
+    this.#clearBackgroundMask();
+    this.#clearTransitionOverlay();
+  }
+
+  /** Detaches and destroys the background mask and its feather strips. */
+  #clearBackgroundMask(): void {
+    const owner = this.#backgroundMaskOwner;
+    this.#backgroundMaskOwner = null;
+    if (owner !== null) owner.sprite.mask = null;
+    this.#clearFeatherStrips();
+    const mask = this.#backgroundMask;
+    this.#backgroundMask = null;
+    if (mask === null) return;
+    this.#backgrounds.removeChild(mask);
+    mask.destroy();
+  }
+
+  /** Destroys every feather strip (sprites and their rect masks) once. */
+  #clearFeatherStrips(): void {
+    for (const strip of this.#featherStrips) {
+      strip.sprite.mask = null;
+      strip.sprite.destroy();
+      strip.mask.destroy();
+    }
+    this.#featherStrips.length = 0;
+  }
+
+  /** Creates (or recolours) the fade-through-colour overlay. */
+  #ensureTransitionOverlay(color: string): void {
+    const parsed = parseColor(color);
+    if (this.#transitionOverlay !== null) {
+      this.#transition.removeChild(this.#transitionOverlay);
+      this.#transitionOverlay.destroy();
+      this.#transitionOverlay = null;
+    }
+    const overlay = this.#kit.graphics();
+    overlay.rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT).fill(parsed.color);
+    overlay.alpha = 0;
+    this.#transition.addChild(overlay);
+    this.#transitionOverlay = overlay;
+    this.#transitionOverlayAlpha = parsed.alpha;
+  }
+
+  #setTransitionOverlay(alpha: number): void {
+    const overlay = this.#transitionOverlay;
+    if (overlay === null) return;
+    const scaled = alpha * this.#transitionOverlayAlpha;
+    overlay.visible = scaled > 0;
+    overlay.alpha = scaled;
+  }
+
+  /**
+   * Attaches the wipe/soft-push mask to the incoming background.
+   *
+   * The mask is a sibling of the background view inside the camera layer, so
+   * its design-space rectangles line up with the background and follow camera
+   * transforms.  It is attached to the incoming view only, so the seam never
+   * touches any other object, the curtain/effect layers or the DOM.  A new
+   * owner detaches the previous one first: a shared mask must never clip a
+   * view that belongs to a newer cue.
+   */
+  #attachBackgroundMask(view: SceneSpriteView): void {
+    if (this.#backgroundMask === null) {
+      this.#backgroundMask = this.#kit.graphics();
+      this.#backgrounds.addChild(this.#backgroundMask);
+    }
+    const previous = this.#backgroundMaskOwner;
+    if (previous !== null && previous !== view) previous.sprite.mask = null;
+    this.#backgroundMaskOwner = view;
+    view.sprite.mask = this.#backgroundMask;
+  }
+
+  /**
+   * Rebuilds the background mask geometry from one pure frame.
+   *
+   * `null` means the transition has no mask at all (cross-fade, cut, push
+   * without softness).  A mask without a ramp is the exact hard edge: the
+   * binary stencil draws the authored wipe rectangle, so `softness 0` is the
+   * historic hard-edge path.  A ramped mask draws the fully revealed region
+   * with the same stencil and overlays the deterministic stepped feather
+   * strips derived from the pure evaluator, which is how a Pixi stencil mask
+   * renders a soft edge without an alpha-mask port.
+   */
+  #applyBackgroundMask(mask: StageMask | null, view: SceneSpriteView): void {
+    if (mask === null) {
+      // Only this view's own mask is transient here; the take-over release
+      // already cleared anything that belonged to a previous cue.
+      if (this.#backgroundMaskOwner === view) this.#clearBackgroundMask();
+      return;
+    }
+    this.#attachBackgroundMask(view);
+    const graphics = this.#backgroundMask;
+    if (graphics === null) return;
+    graphics.clear();
+    const rect = maskOpaqueRect(mask);
+    if (rect.width > 0 && rect.height > 0) {
+      graphics.rect(rect.x, rect.y, rect.width, rect.height);
+    }
+    graphics.fill(0xffffff);
+    this.#applyFeatherStrips(mask, view);
+    this.#requestRender();
+  }
+
+  /**
+   * Draws (or clears) the stepped feather strips of one mask frame.
+   *
+   * The strips are copies of the incoming view sharing its texture and pose,
+   * clipped to their own stage-space rectangles; only their alpha steps
+   * through the pure ramp, so no extra texture is decoded and nothing leaks
+   * when the cue settles, is superseded, or the surface resets.
+   */
+  #applyFeatherStrips(mask: StageMask, view: SceneSpriteView): void {
+    const steps = featherSteps(mask);
+    if (steps.length === 0) {
+      this.#clearFeatherStrips();
+      return;
+    }
+    this.#ensureFeatherStrips(view, steps.length);
+    for (const [index, strip] of this.#featherStrips.entries()) {
+      const step = steps[index];
+      if (step === undefined) continue;
+      const node = strip.sprite;
+      // An animated incoming background keeps ticking during the transition;
+      // copying the current texture keeps every strip on the same frame.
+      node.texture = view.sprite.texture;
+      node.anchor.set(view.sprite.anchor.x, view.sprite.anchor.y);
+      node.position.set(view.sprite.position.x, view.sprite.position.y);
+      node.scale.set(view.sprite.scale.x, view.sprite.scale.y);
+      node.rotation = view.sprite.rotation;
+      node.alpha = step.alpha;
+      const rect = featherStepRect(mask, step);
+      strip.mask.clear();
+      if (rect.width > 0 && rect.height > 0) {
+        strip.mask.rect(rect.x, rect.y, rect.width, rect.height);
+      }
+      strip.mask.fill(0xffffff);
+      node.mask = strip.mask;
+    }
+  }
+
+  /** Creates/reuses the fixed strip sprites and their rect masks. */
+  #ensureFeatherStrips(view: SceneSpriteView, count: number): void {
+    while (this.#featherStrips.length > count) {
+      const strip = this.#featherStrips.pop();
+      if (strip === undefined) break;
+      strip.sprite.mask = null;
+      strip.sprite.destroy();
+      strip.mask.destroy();
+    }
+    while (this.#featherStrips.length < count) {
+      const sprite = this.#kit.sprite(view.sprite.texture);
+      sprite.label = `${view.label}${FEATHER_STRIP_LABEL}`;
+      const stripMask = this.#kit.graphics();
+      this.#backgrounds.addChild(stripMask);
+      this.#backgrounds.addChild(sprite);
+      this.#featherStrips.push({ sprite, mask: stripMask });
+    }
   }
 
   #assetLabel(asset: string, assets: AssetUrlMap): string {
@@ -1530,19 +2263,39 @@ export class SceneSurface {
 
   #applyEffects(): void {
     const effects = this.#effectsState;
-    const alpha =
-      effects === null ? 0 : flashAlpha(effects.elapsedMs, effects.flash);
+    const frame =
+      effects === null
+        ? null
+        : evaluateScreenEffectFrame(
+            effects.elapsedMs,
+            effects.flash,
+            effects.shake,
+          );
+    const alpha = frame?.flash?.alpha ?? 0;
+    const parsed =
+      frame?.flash === null || frame?.flash === undefined
+        ? null
+        : parseColor(frame.flash.color);
+    const color = parsed?.color ?? null;
     if (alpha <= 0) {
       this.#flash?.destroy();
       this.#flash = null;
+      this.#flashColor = null;
       return;
     }
-    if (this.#flash === null) {
+    if (this.#flash === null || this.#flashColor !== color) {
+      this.#flash?.destroy();
       this.#flash = this.#kit.graphics();
-      this.#flash.rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT).fill(0xffffff);
+      this.#flash
+        .rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT)
+        .fill(color ?? 0xffffff);
+      this.#flashColor = color ?? 0xffffff;
       this.#effects.addChild(this.#flash);
     }
-    this.#flash.alpha = alpha;
+    // The evaluator owns the decay; the colour's own alpha only scales it.
+    // Reading it on every frame keeps an alpha-only colour edit visible.
+    this.#flashColorAlpha = parsed?.alpha ?? 1;
+    this.#flash.alpha = alpha * this.#flashColorAlpha;
   }
 
   #clearEffects(): void {
@@ -1550,6 +2303,7 @@ export class SceneSurface {
     this.#cueShake = { x: 0, y: 0 };
     this.#flash?.destroy();
     this.#flash = null;
+    this.#flashColorAlpha = 1;
     this.#releaseCueFlashes();
   }
 
@@ -1586,10 +2340,52 @@ export class SceneSurface {
   #requestRender(): void {
     if (this.#disposed) return;
     if (this.#loop === null) {
-      if (this.#initialization !== null) this.#application.render();
+      if (this.#initialization !== null) this.#renderFrame();
       return;
     }
     this.#loop.schedule();
+  }
+
+  /** Draws one frame and releases callers waiting for a stable picture. */
+  #renderFrame(): void {
+    if (this.#disposed) return;
+    this.#application.render();
+    const waiters = this.#frameWaiters;
+    if (waiters.length === 0) return;
+    this.#frameWaiters = [];
+    for (const waiter of waiters) waiter();
+  }
+
+  /**
+   * Resolves after the next frame is actually drawn.
+   *
+   * The session-curtain reveal waits for this so the replacement world is on
+   * screen before the cover starts fading, and a test/pump host observes the
+   * same ordering.  The wait is bounded: a hidden or suspended host can stop
+   * drawing frames altogether, so after `SESSION_CURTAIN_FRAME_TIMEOUT_MS` the
+   * surface renders once best-effort and stops waiting instead of holding the
+   * host busy indefinitely.
+   */
+  #nextFrame(): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    return new Promise((resolve) => {
+      const settle = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        if (!this.#disposed) {
+          try {
+            this.#renderFrame();
+          } catch (error) {
+            this.#diagnostic(`停帧兜底渲染失败：${errorMessage(error)}`);
+          }
+        }
+        settle();
+      }, SESSION_CURTAIN_FRAME_TIMEOUT_MS);
+      this.#frameWaiters.push(settle);
+      this.#requestRender();
+    });
   }
 
   #runAnimation(
@@ -1672,37 +2468,128 @@ export class SceneSurface {
       return;
     }
     const token = this.#beginCue(BACKGROUND_CUE);
+    // A newer cue takes the layer over: release the previous cue's transient
+    // mask/overlay *before* this cue creates its own resources, so the shared
+    // nodes can never be inherited (or torn down) across cue kinds.
+    this.#resetBackgroundTransition();
     const next = this.#createBackgroundView(prepared);
     if (next === null) {
       this.#releasePrepared(prepared);
       return;
     }
     const previous = this.#background;
-    next.sprite.alpha = cue.transition === "cut" ? 1 : 0;
     this.#background = next;
     if (previous !== null) this.#stageView(previous);
-    if (cue.transition !== "cut") {
+    const spec = cue.transition;
+    const settle = (): void => {
+      if (
+        this.#isLatestCue(generation, BACKGROUND_CUE, token) &&
+        this.#background === next
+      ) {
+        // The incoming instance owns the pixels; a cancelled cue settles the
+        // visible transition instead of leaving a half-drawn mask behind.
+        next.sprite.alpha = 1;
+        next.sprite.mask = null;
+        this.#requestRender();
+      }
+    };
+    if (spec.type === "cut" || cue.duration_ms === 0) {
+      next.sprite.alpha = 1;
+      if (previous !== null) previous.sprite.alpha = 0;
+    } else if (
+      spec.type === "cross_fade" ||
+      spec.type === "fade_through_color"
+    ) {
+      next.sprite.alpha = 0;
+      if (spec.type === "fade_through_color") {
+        this.#ensureTransitionOverlay(spec.color);
+      }
+      // The pure evaluator owns the authored easing; the animation only drives
+      // raw progress, so the curve is applied exactly once (like every other
+      // timed cue, where `#runAnimation` eases and the callback consumes it).
       await this.#runAnimation(
         cue.duration_ms,
-        "ease_in_out",
+        "linear",
         (progress) => {
           if (!this.#isLatestCue(generation, BACKGROUND_CUE, token)) return;
           if (this.#background !== next) return;
-          next.sprite.alpha = progress;
-          if (previous !== null) previous.sprite.alpha = 1 - progress;
+          const frame = evaluateBackgroundTransition(
+            spec,
+            progress,
+            cue.easing,
+          );
+          next.sprite.alpha = frame.incomingAlpha;
+          if (previous !== null) previous.sprite.alpha = frame.outgoingAlpha;
+          if (frame.overlay !== null)
+            this.#setTransitionOverlay(frame.overlay.alpha);
         },
         context,
       );
-    }
-    if (
-      this.#isLatestCue(generation, BACKGROUND_CUE, token) &&
-      this.#background === next
-    ) {
-      // The incoming instance already owns the pixels; a cue that was
-      // cancelled half-way settles the visible transition instead of leaving
-      // a half-transparent background behind.
+    } else if (spec.type === "wipe") {
       next.sprite.alpha = 1;
-      this.#requestRender();
+      this.#attachBackgroundMask(next);
+      await this.#runAnimation(
+        cue.duration_ms,
+        "linear",
+        (progress) => {
+          if (!this.#isLatestCue(generation, BACKGROUND_CUE, token)) return;
+          if (this.#background !== next) return;
+          const frame = evaluateBackgroundTransition(
+            spec,
+            progress,
+            cue.easing,
+          );
+          this.#applyBackgroundMask(frame.mask, next);
+        },
+        context,
+      );
+    } else {
+      next.sprite.alpha = 1;
+      const nextBase = { x: next.sprite.position.x, y: next.sprite.position.y };
+      const previousBase =
+        previous === null
+          ? null
+          : { x: previous.sprite.position.x, y: previous.sprite.position.y };
+      await this.#runAnimation(
+        cue.duration_ms,
+        "linear",
+        (progress) => {
+          if (!this.#isLatestCue(generation, BACKGROUND_CUE, token)) return;
+          if (this.#background !== next) return;
+          const frame = evaluateBackgroundTransition(
+            spec,
+            progress,
+            cue.easing,
+          );
+          next.sprite.position.set(
+            nextBase.x + frame.incomingOffset.x,
+            nextBase.y + frame.incomingOffset.y,
+          );
+          if (previous !== null && previousBase !== null) {
+            previous.sprite.position.set(
+              previousBase.x + frame.outgoingOffset.x,
+              previousBase.y + frame.outgoingOffset.y,
+            );
+          }
+          // A push without softness carries no mask (the exact hard-edge
+          // slide); a soft push feathers the incoming's leading edge.
+          this.#applyBackgroundMask(frame.mask, next);
+        },
+        context,
+      );
+      next.sprite.position.set(nextBase.x, nextBase.y);
+      if (previous !== null && previousBase !== null) {
+        previous.sprite.position.set(previousBase.x, previousBase.y);
+      }
+    }
+    settle();
+    // Only the newest background cue owns the shared overlay/mask; a
+    // superseded cue must not tear down the resources the newer one installed
+    // after it took over.  A generation change releases them itself (see
+    // `#startVisualGeneration`), so a stale cue can safely leave them alone.
+    if (this.#isLatestCue(generation, BACKGROUND_CUE, token)) {
+      this.#clearTransitionOverlay();
+      this.#clearBackgroundMask();
     }
     if (previous !== null) this.#releaseStagedView(previous);
   }
@@ -1900,6 +2787,8 @@ export class SceneSurface {
     }
     if (context.signal.aborted || !this.#isCurrent(generation)) return;
     this.#clearBackground();
+    this.#destroyCurtainFill();
+    this.#clearTransitionOverlay();
     for (const view of sprites) {
       if (this.#sprites.get(view.id) !== view) continue;
       this.#sprites.delete(view.id);
@@ -1935,24 +2824,30 @@ export class SceneSurface {
   }
 
   async #screenEffect(
-    effect: "shake" | "flash",
+    effect: ScreenEffectSpec,
     durationMs: number,
     context: SceneCueContext,
   ): Promise<void> {
     const generation = this.#sceneGeneration;
-    if (effect === "flash") {
+    if (effect.type === "flash") {
+      const parsed = parseColor(effect.color);
       const flash = this.#kit.graphics();
-      flash.rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT).fill(0xffffff);
-      flash.alpha = 0.88;
+      flash.rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT).fill(parsed.color);
+      flash.alpha = effect.peak_alpha * parsed.alpha;
       this.#effects.addChild(flash);
       this.#cueFlashes.add(flash);
       try {
+        // `evaluateFlashAlpha` owns the shipped ease-out decay, so the
+        // animation drives raw progress only and the cue path matches the
+        // timeline path exactly at the same elapsed time.
         await this.#runAnimation(
           durationMs,
-          "ease_out",
+          "linear",
           (progress) => {
             if (!this.#isCurrent(generation)) return;
-            flash.alpha = 0.88 * (1 - progress);
+            flash.alpha =
+              evaluateFlashAlpha(effect, progress * durationMs, 0, durationMs) *
+              parsed.alpha;
           },
           context,
         );
@@ -1970,11 +2865,12 @@ export class SceneSurface {
         "linear",
         (progress) => {
           if (!this.#isCurrent(generation)) return;
-          const strength = (1 - progress) * 16;
-          this.#cueShake = {
-            x: Math.sin(progress * Math.PI * 18) * strength,
-            y: Math.cos(progress * Math.PI * 22) * strength * 0.6,
-          };
+          this.#cueShake = evaluateShakeOffset(
+            effect,
+            progress * durationMs,
+            0,
+            durationMs,
+          );
           this.#applyCamera();
         },
         context,
@@ -1986,6 +2882,75 @@ export class SceneSurface {
         this.#requestRender();
       }
     }
+  }
+
+  /**
+   * Covers or reveals the persistent curtain layer.
+   *
+   * The transition geometry comes from the pure evaluator; this method only
+   * owns the fill view and the cue lifetime.  Re-revealing an already revealed
+   * curtain is a no-op the runtime never emits, so a stray cue cannot leave a
+   * half-drawn layer behind either.
+   */
+  async #transitionCurtain(
+    cue: Extract<SceneVisualCue, { type: "curtain_transition" }>,
+    context: SceneCueContext,
+  ): Promise<void> {
+    const generation = this.#sceneGeneration;
+    const token = this.#beginCue(CURTAIN_CUE);
+    let prepared: PreparedAsset | null = null;
+    // `fill` is optional on the wire (the runtime omits it for a reveal), so an
+    // absent field means "no new fill", never an `undefined` lookup.
+    const fill = cue.fill ?? null;
+    if (fill !== null && "asset" in fill) {
+      try {
+        prepared = await this.#acquireAsset(fill.asset, context.assets);
+      } catch (error) {
+        this.#diagnostic(`幕布素材加载失败：${errorMessage(error)}`);
+        prepared = null;
+      }
+      if (
+        context.signal.aborted ||
+        !this.#isLatestCue(generation, CURTAIN_CUE, token)
+      ) {
+        if (prepared !== null) this.#releasePrepared(prepared);
+        return;
+      }
+    }
+    if (cue.action === "cover") {
+      const cover = fill ?? { color: "#000000" };
+      if (!this.#ensureCurtainFill(cover, prepared)) {
+        // The fallback keeps the world hidden; make it discoverable.
+        this.#diagnostic(
+          `幕布素材缺失或加载失败，已回退为纯色幕布：${describeCurtainFill(cover)}`,
+        );
+        this.#ensureCurtainFill({ color: "#000000" }, null);
+      }
+    } else if (this.#curtainFill === null) {
+      if (prepared !== null) this.#releasePrepared(prepared);
+      return;
+    }
+    const applyFrame = (progress: number): void => {
+      if (!this.#isCurrent(generation)) return;
+      if (!this.#isLatestCue(generation, CURTAIN_CUE, token)) return;
+      this.#applyCurtainFrame(
+        evaluateCurtainTransition(cue.transition, cue.action, progress),
+      );
+      this.#requestRender();
+    };
+    if (cue.duration_ms > 0) {
+      await this.#runAnimation(
+        cue.duration_ms,
+        cue.easing,
+        applyFrame,
+        context,
+      );
+    }
+    if (this.#isLatestCue(generation, CURTAIN_CUE, token)) {
+      applyFrame(1);
+      if (cue.action === "reveal") this.#destroyCurtainFill();
+    }
+    if (prepared !== null) this.#releasePrepared(prepared);
   }
 
   // -- internals: media ------------------------------------------------------
@@ -2124,4 +3089,45 @@ export function readSprite(
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
+}
+
+/** `gui` asset a curtain snapshot covers with, or `null` for colour/hidden. */
+function curtainAssetOf(curtain: CurtainSnapshot | null): string | null {
+  if (curtain === null || !curtain.covered) return null;
+  const fill = curtain.fill;
+  if (fill === undefined || fill === null) return null;
+  return "asset" in fill ? fill.asset : null;
+}
+
+/** Human-readable identity of a curtain fill, for diagnostics. */
+function describeCurtainFill(fill: CurtainFill): string {
+  return "asset" in fill ? fill.asset : fill.color;
+}
+
+export interface ParsedColor {
+  /** `0xRRGGBB`; invalid input falls back to opaque white. */
+  color: number;
+  /** `0..1`; `#RRGGBB` (and invalid input) is fully opaque. */
+  alpha: number;
+}
+
+/**
+ * Parses `#RRGGBB`/`#RRGGBBAA`.
+ *
+ * The content validator accepts both lengths, so every renderer path that
+ * consumes an authored colour must keep the alpha instead of silently drawing
+ * an 8-digit colour fully opaque.
+ */
+export function parseColor(color: string): ParsedColor {
+  const hex = color.startsWith("#") ? color.slice(1) : color;
+  if (hex.length !== 6 && hex.length !== 8)
+    return { color: 0xffffff, alpha: 1 };
+  const parsed = Number.parseInt(hex.slice(0, 6), 16);
+  if (Number.isNaN(parsed)) return { color: 0xffffff, alpha: 1 };
+  if (hex.length === 6) return { color: parsed, alpha: 1 };
+  const parsedAlpha = Number.parseInt(hex.slice(6, 8), 16);
+  return {
+    color: parsed,
+    alpha: Number.isNaN(parsedAlpha) ? 1 : parsedAlpha / 255,
+  };
 }

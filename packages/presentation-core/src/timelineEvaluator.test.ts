@@ -260,14 +260,21 @@ describe("evaluateTimelineFrame", () => {
         type: "screen_effect",
         id: "flash-a",
         at_ms: 100,
-        effect: "flash",
+        effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
         duration_ms: 400,
       },
       {
         type: "screen_effect",
         id: "shake-a",
         at_ms: 200,
-        effect: "shake",
+        effect: {
+          type: "shake",
+          amplitude_x: 16,
+          amplitude_y: 9.6,
+          frequency_hz: 18,
+          decay: 1,
+          seed: 0,
+        },
         duration_ms: 500,
       },
       // The later flash wins while both flash intervals overlap.
@@ -275,20 +282,20 @@ describe("evaluateTimelineFrame", () => {
         type: "screen_effect",
         id: "flash-b",
         at_ms: 300,
-        effect: "flash",
+        effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
         duration_ms: 400,
       },
     ] as const;
 
-    expect(evaluateActiveScreenEffects(events, 50)).toEqual({
+    expect(evaluateActiveScreenEffects(events, 50)).toMatchObject({
       flash: null,
       shake: null,
     });
-    expect(evaluateActiveScreenEffects(events, 350)).toEqual({
+    expect(evaluateActiveScreenEffects(events, 350)).toMatchObject({
       flash: { startMs: 300, durationMs: 400 },
       shake: { startMs: 200, durationMs: 500 },
     });
-    expect(evaluateActiveScreenEffects(events, 701)).toEqual({
+    expect(evaluateActiveScreenEffects(events, 701)).toMatchObject({
       flash: null,
       shake: null,
     });
@@ -301,29 +308,36 @@ describe("evaluateActiveScreenEffects overlap rules", () => {
       type: "screen_effect",
       id: "early-flash",
       at_ms: 100,
-      effect: "flash",
+      effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
       duration_ms: 900,
     },
     {
       type: "screen_effect",
       id: "early-shake",
       at_ms: 150,
-      effect: "shake",
+      effect: {
+        type: "shake",
+        amplitude_x: 16,
+        amplitude_y: 9.6,
+        frequency_hz: 18,
+        decay: 1,
+        seed: 0,
+      },
       duration_ms: 900,
     },
     {
       type: "screen_effect",
       id: "late-flash",
       at_ms: 500,
-      effect: "flash",
+      effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
       duration_ms: 400,
     },
   ] as const;
 
   it("lets the latest start win and keeps flash and shake independent", () => {
     const active = evaluateActiveScreenEffects(events, 600);
-    expect(active.flash).toEqual({ startMs: 500, durationMs: 400 });
-    expect(active.shake).toEqual({ startMs: 150, durationMs: 900 });
+    expect(active.flash).toMatchObject({ startMs: 500, durationMs: 400 });
+    expect(active.shake).toMatchObject({ startMs: 150, durationMs: 900 });
   });
 
   it("keeps the later array entry when timestamps are equal", () => {
@@ -332,18 +346,18 @@ describe("evaluateActiveScreenEffects overlap rules", () => {
         type: "screen_effect",
         id: "first",
         at_ms: 100,
-        effect: "flash",
+        effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
         duration_ms: 500,
       },
       {
         type: "screen_effect",
         id: "second",
         at_ms: 100,
-        effect: "flash",
+        effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
         duration_ms: 600,
       },
     ] as const;
-    expect(evaluateActiveScreenEffects(sameTime, 200).flash).toEqual({
+    expect(evaluateActiveScreenEffects(sameTime, 200).flash).toMatchObject({
       startMs: 100,
       durationMs: 600,
     });
@@ -355,36 +369,57 @@ describe("evaluateActiveScreenEffects overlap rules", () => {
         type: "screen_effect",
         id: "shake-a",
         at_ms: 100,
-        effect: "shake",
+        effect: {
+          type: "shake",
+          amplitude_x: 16,
+          amplitude_y: 9.6,
+          frequency_hz: 18,
+          decay: 1,
+          seed: 0,
+        },
         duration_ms: 900,
       },
       {
         type: "screen_effect",
         id: "shake-b",
         at_ms: 100,
-        effect: "shake",
+        effect: {
+          type: "shake",
+          amplitude_x: 16,
+          amplitude_y: 9.6,
+          frequency_hz: 18,
+          decay: 1,
+          seed: 0,
+        },
         duration_ms: 600,
       },
       {
         type: "screen_effect",
         id: "shake-c",
         at_ms: 500,
-        effect: "shake",
+        effect: {
+          type: "shake",
+          amplitude_x: 16,
+          amplitude_y: 9.6,
+          frequency_hz: 18,
+          decay: 1,
+          seed: 0,
+        },
         duration_ms: 100,
       },
     ] as const;
     // Equal starts: the later array entry owns the interval.
-    expect(evaluateActiveScreenEffects(shakes, 300).shake).toEqual({
+    expect(evaluateActiveScreenEffects(shakes, 300).shake).toMatchObject({
       startMs: 100,
       durationMs: 600,
     });
     // A later start supersedes both, regardless of duration.
-    expect(evaluateActiveScreenEffects(shakes, 550).shake).toEqual({
+    expect(evaluateActiveScreenEffects(shakes, 550).shake).toMatchObject({
       startMs: 500,
       durationMs: 100,
     });
     // When the later intervals end, the still-running early one is active.
-    expect(evaluateActiveScreenEffects(shakes, 800).shake).toEqual({
+    expect(evaluateActiveScreenEffects(shakes, 800).shake).toMatchObject({
       startMs: 100,
       durationMs: 900,
     });
@@ -393,9 +428,9 @@ describe("evaluateActiveScreenEffects overlap rules", () => {
   it("falls back to the still-running effect and then drops both", () => {
     // Once the later flash interval ends, the earlier one is active again.
     const active = evaluateActiveScreenEffects(events, 950);
-    expect(active.flash).toEqual({ startMs: 100, durationMs: 900 });
-    expect(active.shake).toEqual({ startMs: 150, durationMs: 900 });
-    expect(evaluateActiveScreenEffects(events, 1_050)).toEqual({
+    expect(active.flash).toMatchObject({ startMs: 100, durationMs: 900 });
+    expect(active.shake).toMatchObject({ startMs: 150, durationMs: 900 });
+    expect(evaluateActiveScreenEffects(events, 1_050)).toMatchObject({
       flash: null,
       shake: null,
     });

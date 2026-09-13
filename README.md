@@ -143,6 +143,10 @@ shared core guarantees:
 - **one effect derivation** — flash and shake are evaluated from the playhead
   (latest start wins, equal starts keep array order), shake is composed into the
   camera transform once, and both can be active together.
+- **one transition derivation** — background transitions, the persistent
+  curtain and parameterised flash/shake are pure functions of the playhead;
+  `SceneSurface` only applies the returned alpha/offset/mask/rect geometry, so
+  the game, the editor preview and a manual seek all agree on the same pixels.
 - **one video policy** — continuous playback corrects drift above 50 ms,
   scrubbing waits for `seeked` plus a presented frame with a diagnostic timeout,
   and the latest seek wins; listeners, frame callbacks, the `VideoSource` and
@@ -168,9 +172,39 @@ camera motion, screen effects, Runtime gates, and snapshot-only saves. Supported
 node types are:
 
 ```text
-background  sprite  say  long_text  long_text_control  choice  set  condition  jump  wait
+background  curtain  sprite  say  long_text  long_text_control  choice  set  condition  jump  wait
 playback  bgm  sfx  camera  screen_effect  dialogue_ui  timeline  end
 ```
+
+Background transitions and screen effects have one canonical wire shape. The
+loader still accepts the original one-word YAML (`transition: cut`,
+`transition: cross_fade`, `effect: flash`, `effect: shake`) and normalises it
+into the object form, so old content keeps loading and the WebView only ever
+sees one shape:
+
+```yaml
+transition:
+  type: wipe # cut | cross_fade | fade_through_color | wipe | push
+  direction: left_to_right # four edge directions
+  softness: 0.08 # 0..1, wipe/push feather
+duration_ms: 700
+easing: ease_in_out
+```
+
+`fade_through_color` carries a `#RRGGBB(AA)` colour. A `cross_fade` honours its
+authored easing. `screen_effect` nodes and timeline events share the same
+`{ type: flash, color, peak_alpha }` / `{ type: shake, amplitude_x,
+amplitude_y, frequency_hz, decay, seed }` spec; the seed is a fixed integer, so
+the game, the editor preview and any seek position derive exactly the same
+shake. `curtain` is a persistent layer above the world and below screen
+effects: `cover` draws a colour or `gui` fill, `reveal` lowers whatever the
+current curtain shows, and the animation is `fade`, a four-direction `wipe`,
+`split_horizontal` or `split_vertical`. Only the stable cover/fill is saved;
+the transition parameters travel exclusively in the cue.
+
+`game/scenes/transition_lab.yaml` is the manual acceptance fixture: it walks
+through all five background transitions, the curtain fill/animation matrix and
+parameterised, overlapping timeline effects.
 
 Schema v2 declares every variable in `manifest.yaml` with an explicit type,
 default, and `save` or `profile` scope. Save variables live in slot snapshots;

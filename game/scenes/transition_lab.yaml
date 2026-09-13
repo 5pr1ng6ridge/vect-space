@@ -1,0 +1,294 @@
+schema_version: 2
+id: transition_lab
+entry: intro
+# 开发夹具：一次走完「转场 / 幕布 / 参数化屏幕效果」的全部新表现。
+#
+# 本场景刻意使用规范化对象写法（transition/effect 的 `{ type, ... }` 形式），
+# 旧的一词写法仍由 Rust 加载器兼容，并且继续由 surface_parity 夹具冻结。
+# 素材全部来自已登记的测试素材，因此不会产生缺素材诊断。
+nodes:
+  intro:
+    type: say
+    speaker: test
+    text: |-
+      转场实验室：五种背景转场、幕布的 color/gui 填充与 fade/wipe/split 组合、
+      参数化 flash/shake（固定 seed）以及可叠加的时间线效果都会依次演示。
+    mode: start
+    speed_cps: null
+    next: cut
+  # —— 五种背景转场（含四个方向） ——
+  cut:
+    type: background
+    background: bg.test_1
+    transition:
+      type: cut
+    duration_ms: 0
+    easing: linear
+    await: false
+    next: say_transitions
+  say_transitions:
+    type: say
+    speaker: test
+    text: |-
+      1/5 直接切换：cut 不占时长，背景立即替换。
+      接下来是 cross_fade、fade_through_color，以及四个方向的 wipe 与 push。
+    mode: start
+    speed_cps: null
+    next: cross_fade
+  cross_fade:
+    type: background
+    background: bg.test_2
+    transition:
+      type: cross_fade
+    duration_ms: 600
+    easing: ease_in_out
+    await: true
+    next: fade_through_color
+  fade_through_color:
+    type: background
+    background: bg.test_3
+    transition:
+      type: fade_through_color
+      color: "#00000080"
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: wipe_ltr
+  wipe_ltr:
+    type: background
+    background: bg.vector_space
+    transition:
+      type: wipe
+      direction: left_to_right
+      softness: 0.08
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: wipe_rtl
+  wipe_rtl:
+    type: background
+    background: bg.test_1
+    transition:
+      type: wipe
+      direction: right_to_left
+      softness: 0.08
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: push_ttb
+  push_ttb:
+    type: background
+    background: bg.test_2
+    transition:
+      type: push
+      direction: top_to_bottom
+      softness: 0
+    duration_ms: 800
+    easing: ease_in_out
+    await: true
+    next: push_btt
+  push_btt:
+    type: background
+    background: bg.test_3
+    transition:
+      type: push
+      direction: bottom_to_top
+      softness: 0.12
+    duration_ms: 800
+    easing: ease_in_out
+    await: true
+    next: say_curtain
+  # —— 幕布：color 与 gui 填充，fade / 四向 wipe / 双向 split 的 cover+reveal ——
+  say_curtain:
+    type: say
+    speaker: test
+    text: |-
+      幕布演示：先落下纯色幕布再收起，然后用 gui 素材作为幕布贴图，
+      最后分别演示水平对开与垂直对开的 cover/reveal。
+    mode: start
+    speed_cps: null
+    next: curtain_color_cover
+  curtain_color_cover:
+    type: curtain
+    action: cover
+    fill:
+      color: "#0B1020DD"
+    transition:
+      type: fade
+    duration_ms: 600
+    easing: ease_in_out
+    await: true
+    next: curtain_color_reveal
+  curtain_color_reveal:
+    type: curtain
+    action: reveal
+    transition:
+      type: fade
+    duration_ms: 600
+    easing: ease_in_out
+    await: true
+    next: curtain_gui_wipe_ltr_cover
+  curtain_gui_wipe_ltr_cover:
+    type: curtain
+    action: cover
+    fill:
+      asset: gui.dialogue_box
+    transition:
+      type: wipe
+      direction: left_to_right
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: curtain_gui_wipe_rtl_reveal
+  curtain_gui_wipe_rtl_reveal:
+    type: curtain
+    action: reveal
+    transition:
+      type: wipe
+      direction: right_to_left
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: curtain_wipe_ttb_cover
+  curtain_wipe_ttb_cover:
+    type: curtain
+    action: cover
+    fill:
+      color: "#3A1E12"
+    transition:
+      type: wipe
+      direction: top_to_bottom
+    duration_ms: 650
+    easing: ease_in_out
+    await: true
+    next: curtain_wipe_btt_reveal
+  curtain_wipe_btt_reveal:
+    type: curtain
+    action: reveal
+    transition:
+      type: wipe
+      direction: bottom_to_top
+    duration_ms: 650
+    easing: ease_in_out
+    await: true
+    next: curtain_split_h_cover
+  curtain_split_h_cover:
+    type: curtain
+    action: cover
+    fill:
+      color: "#101A2B"
+    transition:
+      type: split_horizontal
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: curtain_split_h_reveal
+  curtain_split_h_reveal:
+    type: curtain
+    action: reveal
+    transition:
+      type: split_horizontal
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: curtain_split_v_cover
+  curtain_split_v_cover:
+    type: curtain
+    action: cover
+    fill:
+      asset: gui.name_box
+    transition:
+      type: split_vertical
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: curtain_split_v_reveal
+  curtain_split_v_reveal:
+    type: curtain
+    action: reveal
+    transition:
+      type: split_vertical
+    duration_ms: 700
+    easing: ease_in_out
+    await: true
+    next: say_effects
+  # —— 参数化屏幕效果：节点与时间线事件使用同一结构，固定 seed 保证可复现 ——
+  say_effects:
+    type: say
+    speaker: test
+    text: |-
+      屏幕效果：闪光使用自定义颜色与峰值透明度，震动使用固定 seed=42，
+      同一 seed 在游戏、编辑器与任意 seek 位置都会得到完全一致的结果。
+    mode: start
+    speed_cps: null
+    next: effect_flash
+  effect_flash:
+    type: screen_effect
+    effect:
+      type: flash
+      color: "#FFF2CC"
+      peak_alpha: 0.55
+    duration_ms: 260
+    await: true
+    next: effect_shake
+  effect_shake:
+    type: screen_effect
+    effect:
+      type: shake
+      amplitude_x: 18
+      amplitude_y: 8
+      frequency_hz: 22
+      decay: 0.75
+      seed: 42
+    duration_ms: 400
+    await: true
+    next: effects_timeline
+  effects_timeline:
+    type: timeline
+    duration_ms: 1200
+    await: true
+    skippable: true
+    tracks: []
+    events:
+      - type: screen_effect
+        id: lab_flash
+        at_ms: 0
+        effect:
+          type: flash
+          color: "#FFE9B0"
+          peak_alpha: 0.6
+        duration_ms: 300
+      - type: screen_effect
+        id: lab_shake
+        at_ms: 120
+        effect:
+          type: shake
+          amplitude_x: 24
+          amplitude_y: 12
+          frequency_hz: 22
+          decay: 0.75
+          seed: 42
+        duration_ms: 500
+      # 与 lab_shake 在 500–620ms 重叠：时间线规则是「更晚开始者胜」，
+      # 因此 seek 到 500ms 之后一定取这一条，而不会叠加两次位移。
+      - type: screen_effect
+        id: lab_shake_overlap
+        at_ms: 500
+        effect:
+          type: shake
+          amplitude_x: 8
+          amplitude_y: 4
+          frequency_hz: 12
+          decay: 1
+          seed: 7
+        duration_ms: 400
+    next: closing
+  closing:
+    type: say
+    speaker: test
+    text: 转场实验室结束。读完这一页后返回章节地图即可重播。
+    mode: start
+    speed_cps: null
+    next: end
+  end:
+    type: end

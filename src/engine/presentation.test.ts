@@ -34,6 +34,7 @@ import {
 import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 
 import { PresentationController } from "./presentation";
+import { SceneSurface } from "@vectspace/presentation-core/scene-surface";
 import type {
   AssetUrlMap,
   PresentationOutcome,
@@ -522,5 +523,278 @@ describe("PresentationController timeline wiring", () => {
     expect(kit.renderCount()).toBe(rendersAfterCancel);
     controller.destroy();
     expect(textures.loaded.every((texture) => texture.destroyed)).toBe(true);
+  });
+});
+
+/**
+ * Host-only session curtain.
+ *
+ * The controller covers the canvas before a session switch, hard-aligns the
+ * replacement world while it is fully black (no cue is replayed) and reveals
+ * again after the replacement's first stable frame.
+ */
+describe("PresentationController session curtain", () => {
+  const SWITCH_ASSETS: AssetUrlMap = {
+    ...ASSETS,
+    "bg.other": "/bg/other.png",
+  };
+
+  function worldSnapshot(background: string): RuntimeSnapshot {
+    const base = snapshot();
+    return { ...base, world: { ...base.world, background } };
+  }
+
+  function sessionLayer(kit: MemoryKit): { alpha: number }[] {
+    return kit.applications[0]?.stage.children[4]?.children ?? [];
+  }
+
+  function backgroundUrls(kit: MemoryKit): string[] {
+    const children = (kit.applications[0]?.stage.children[0]?.children[0]
+      ?.children ?? []) as { texture?: { url?: string } }[];
+    return children
+      .map((child) => child.texture?.url ?? "")
+      .filter((url) => url.length > 0);
+  }
+
+  async function pump(harness: HostHarness, frames: number): Promise<void> {
+    for (let frame = 0; frame < frames; frame += 1) {
+      harness.pump.step(16);
+      await settle();
+    }
+  }
+
+  it("covers before the replacement and reveals after its first frame", async () => {
+    const harness = createHost();
+    const { controller, kit } = harness;
+    await controller.init();
+    await controller.applySnapshotImmediately(worldSnapshot("bg.room"), ASSETS);
+    await pump(harness, 2);
+    expect(backgroundUrls(kit)).toContain("/bg/room.png");
+
+    let settled = false;
+    const pending = controller
+      .applySessionSnapshot(worldSnapshot("bg.other"), SWITCH_ASSETS)
+      .then(() => {
+        settled = true;
+      });
+    const samples: { alpha: number; switched: boolean }[] = [];
+    for (let frame = 0; frame < 90; frame += 1) {
+      harness.pump.step(16);
+      await settle();
+      samples.push({
+        alpha: sessionLayer(kit)[0]?.alpha ?? 0,
+        switched: backgroundUrls(kit).includes("/bg/other.png"),
+      });
+    }
+    await pending;
+    expect(settled).toBe(true);
+
+    // 1. The cover fades in before the world changes: the first sample is not
+    //    yet opaque and the replacement is not on screen.
+    expect(samples[0]?.alpha).toBeLessThan(1);
+    expect(samples[0]?.switched).toBe(false);
+    // 2. The hard alignment happens while the cover is fully black: no sample
+    //    shows the replacement before the cover was opaque.
+    const switchIndex = samples.findIndex((sample) => sample.switched);
+    expect(switchIndex).toBeGreaterThan(0);
+    expect(samples[switchIndex]?.alpha).toBe(1);
+    // 3. The reveal only starts after the replacement was drawn once, and the
+    //    curtain is gone at the end.
+    expect(
+      samples.find((sample) => sample.alpha < 1 && sample.switched),
+    ).toBeDefined();
+    expect(controller.sessionCovered).toBe(false);
+    expect(sessionLayer(kit)).toHaveLength(0);
+    expect(backgroundUrls(kit)).toContain("/bg/other.png");
+    expect(backgroundUrls(kit)).not.toContain("/bg/room.png");
+    controller.destroy();
+  });
+
+  it("hard-aligns the snapshot without replaying cues", async () => {
+    const harness = createHost();
+    const { controller, kit } = harness;
+    await controller.init();
+    const runCue = vi.spyOn(SceneSurface.prototype, "runCue");
+    await controller.applySnapshotImmediately(worldSnapshot("bg.room"), ASSETS);
+    const base = worldSnapshot("bg.other");
+    const covered: RuntimeSnapshot = {
+      ...base,
+      world: {
+        ...base.world,
+        curtain: { covered: true, fill: { color: "#000000" } },
+      },
+    };
+    const pending = controller.applySessionSnapshot(covered, SWITCH_ASSETS);
+    await pump(harness, 80);
+    await pending;
+    // The alignment never enters the cue executor: it is a hard reconcile, so
+    // no transition/sprite/effect cue is replayed for the old snapshot.
+    expect(runCue).not.toHaveBeenCalled();
+    // The stable curtain of the snapshot is committed directly ...
+    const storyCurtain = kit.applications[0]?.stage.children[3]?.children ?? [];
+    expect(storyCurtain.length).toBeGreaterThanOrEqual(1);
+    // ... and no cue-owned transient node exists: no fade-through overlay, no
+    // wipe mask and no stepped feather strips were created by a replay.
+    expect(kit.applications[0]?.stage.children[2]?.children ?? []).toHaveLength(
+      0,
+    );
+    const backgrounds = (kit.applications[0]?.stage.children[0]?.children[0]
+      ?.children ?? []) as { label: string; mask: unknown }[];
+    expect(backgrounds.every((child) => child.mask === null)).toBe(true);
+    expect(backgrounds.some((child) => child.label.endsWith("#feather"))).toBe(
+      false,
+    );
+    controller.destroy();
+  });
+
+  it("clears the curtain when the switch is cancelled mid-cover", async () => {
+    const harness = createHost();
+    const { controller, kit } = harness;
+    await controller.init();
+    const pending = controller.applySessionSnapshot(
+      worldSnapshot("bg.other"),
+      SWITCH_ASSETS,
+    );
+    await pump(harness, 4);
+    expect(controller.sessionCovered).toBe(false);
+    expect(sessionLayer(kit).length).toBeGreaterThan(0);
+
+    controller.cancelCurrentPresentation();
+    await pending;
+    expect(controller.sessionCovered).toBe(false);
+    expect(sessionLayer(kit)).toHaveLength(0);
+    // The reset frame flushes once, then the released scheduler stops drawing.
+    await pump(harness, 3);
+    const renders = kit.renderCount();
+    await pump(harness, 3);
+    expect(kit.renderCount()).toBe(renders);
+    controller.destroy();
+  });
+
+  it("clears the curtain when the replacement itself fails", async () => {
+    const harness = createHost();
+    const { controller, kit } = harness;
+    await controller.init();
+    // The snapshot names an asset that cannot be resolved, so the hard
+    // alignment rejects; the curtain must still be released.
+    const outcome = controller
+      .applySessionSnapshot(worldSnapshot("bg.missing"), ASSETS)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    await pump(harness, 80);
+    expect(await outcome).toBeInstanceOf(Error);
+    expect(controller.sessionCovered).toBe(false);
+    expect(sessionLayer(kit)).toHaveLength(0);
+    controller.destroy();
+  });
+
+  it("releases the curtain and the scheduler on destroy", async () => {
+    const harness = createHost();
+    const { controller, kit, pump: rawPump } = harness;
+    await controller.init();
+    const pending = controller.applySessionSnapshot(
+      worldSnapshot("bg.other"),
+      SWITCH_ASSETS,
+    );
+    await pump(harness, 4);
+    expect(sessionLayer(kit).length).toBeGreaterThan(0);
+
+    // A reveal that is waiting for a drawn frame must be released by destroy
+    // instead of hanging on a frame the disposed surface will never draw.
+    const reveal = controller.revealSession();
+    controller.destroy();
+    await reveal;
+    await pending;
+    expect(controller.sessionCovered).toBe(false);
+    expect(kit.applications[0]?.destroyed).toBe(true);
+    const renders = kit.renderCount();
+    for (let frame = 0; frame < 3; frame += 1) {
+      rawPump.step(16);
+    }
+    expect(kit.renderCount()).toBe(renders);
+  });
+
+  it("starts a rebuilt controller on the same canvas with no residual curtain", async () => {
+    const first = createHost();
+    await first.controller.init();
+    const pending = first.controller.applySessionSnapshot(
+      worldSnapshot("bg.other"),
+      SWITCH_ASSETS,
+    );
+    await pump(first, 4);
+    first.controller.destroy();
+    await pending;
+    expect(first.controller.sessionCovered).toBe(false);
+
+    // Rebuild: a fresh controller/session on the same canvas must start with
+    // no curtain object and its own scheduler.
+    vi.restoreAllMocks();
+    const second = createHost();
+    await second.controller.init();
+    expect(second.controller.sessionCovered).toBe(false);
+    expect(second.kit.applications[0]?.destroyed).toBe(false);
+    expect(sessionLayer(second.kit)).toHaveLength(0);
+    const pendingSecond = second.controller.applySessionSnapshot(
+      worldSnapshot("bg.other"),
+      SWITCH_ASSETS,
+    );
+    await pump(second, 80);
+    await pendingSecond;
+    expect(second.controller.sessionCovered).toBe(false);
+    expect(sessionLayer(second.kit)).toHaveLength(0);
+    second.controller.destroy();
+  });
+
+  it("coalesces duplicate covers and reveals (React Strict Mode)", async () => {
+    const harness = createHost();
+    const { controller, kit } = harness;
+    await controller.init();
+    const first = controller.coverSession();
+    const second = controller.coverSession();
+    expect(second).toBe(first);
+    await pump(harness, 40);
+    await first;
+    expect(controller.sessionCovered).toBe(true);
+    expect(sessionLayer(kit)).toHaveLength(1);
+
+    const reveal = controller.revealSession();
+    const duplicate = controller.revealSession();
+    expect(duplicate).toBe(reveal);
+    await pump(harness, 40);
+    await Promise.all([reveal, duplicate]);
+    expect(controller.sessionCovered).toBe(false);
+    expect(sessionLayer(kit)).toHaveLength(0);
+    controller.destroy();
+  });
+
+  it("completes a switch within a bounded time when frames are suspended", async () => {
+    const harness = createHost();
+    const { controller, kit } = harness;
+    await controller.init();
+    await controller.applySnapshotImmediately(worldSnapshot("bg.room"), ASSETS);
+    await pump(harness, 2);
+
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const pending = controller
+        .applySessionSnapshot(worldSnapshot("bg.other"), SWITCH_ASSETS)
+        .then(() => {
+          settled = true;
+        });
+      // A hidden host never pumps another frame.  The cover/reveal fades and
+      // the reveal's frame wait all fall back to bounded watchdogs, so the
+      // switch (and the host's busy lock) cannot stay pending forever.
+      await vi.advanceTimersByTimeAsync(2_000);
+      await pending;
+      expect(settled).toBe(true);
+      expect(controller.sessionCovered).toBe(false);
+      expect(sessionLayer(kit)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    controller.destroy();
   });
 });

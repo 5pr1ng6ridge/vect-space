@@ -2,6 +2,8 @@ export * from "./audio";
 export * from "./ledger";
 export * from "./timeline";
 export * from "./timelineEvaluator";
+export * from "./sceneEffects";
+export * from "./sceneTransitions";
 export * from "./sceneFrame";
 export * from "./sceneSurface";
 export * from "./sceneTextures";

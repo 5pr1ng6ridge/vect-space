@@ -40,6 +40,7 @@ import {
   type EditorState,
 } from "../editorHistory";
 import { findScene } from "../story";
+import { TimelineSession } from "@vectspace/presentation-core/timeline-session";
 import type { SceneTextureLike } from "@vectspace/presentation-core/scene-textures";
 import {
   createFramePump,
@@ -497,6 +498,86 @@ afterEach(() => {
 });
 
 describe("TimelineWorkspace preview context", () => {
+  it("passes the canonical screen effects to the preview unchanged", async () => {
+    const renderKit = createRenderKit();
+    const canonicalFlash = {
+      type: "screen_effect" as const,
+      id: "fx-flash",
+      at_ms: 100,
+      effect: { type: "flash" as const, color: "#FFEEDD", peak_alpha: 0.5 },
+      duration_ms: 200,
+    };
+    const canonicalShake = {
+      type: "screen_effect" as const,
+      id: "fx-shake",
+      at_ms: 400,
+      effect: {
+        type: "shake" as const,
+        amplitude_x: 24,
+        amplitude_y: 12,
+        frequency_hz: 22,
+        decay: 0.75,
+        seed: 42,
+      },
+      duration_ms: 200,
+    };
+    const node = timelineNode({ events: [canonicalFlash, canonicalShake] });
+    previewApi.handler = () => Promise.resolve(readyPreview(node));
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const project = makeProject({ [NODE_ID]: node });
+    const view = render(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={project}
+      />,
+    );
+    await waitForReady();
+
+    // Editing the timeline is the production path that hands the editor's own
+    // authoring model to the shared preview.  The editor now authors the same
+    // canonical specs the Rust loader normalises YAML into, so the boundary
+    // must pass them through without any rewrite.
+    const applyEdit = vi.spyOn(TimelineSession.prototype, "applyTimelineEdit");
+    const load = vi.spyOn(TimelineSession.prototype, "load");
+    const edited = timelineNode({
+      duration_ms: 2000,
+      events: [canonicalFlash, canonicalShake],
+    });
+    view.rerender(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        nodeOverride={edited}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={project}
+      />,
+    );
+    await waitFor(() => expect(applyEdit).toHaveBeenCalled());
+
+    const updates = [
+      ...applyEdit.mock.calls.map((call) => call[0]),
+      ...load.mock.calls.map((call) => call[0].update),
+    ];
+    expect(updates.length).toBeGreaterThan(0);
+    for (const update of updates) {
+      const cue = update.cues.find(
+        (candidate) => candidate.type === "timeline",
+      );
+      if (cue?.type !== "timeline") throw new Error("缺少时间轴 Cue");
+      expect(cue.events).toEqual([canonicalFlash, canonicalShake]);
+    }
+  });
+
   it("re-evaluates a keyframe-only edit without preparing, and prepares a resource change", async () => {
     const renderKit = createRenderKit();
     const node = timelineNode();

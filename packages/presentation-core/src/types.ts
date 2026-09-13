@@ -110,6 +110,53 @@ export interface WorldSnapshot {
   dialogue_ui_visible: boolean;
   ui_motion_bindings: UiMotionBindings;
   persistent_effects: string[];
+  /** Stable curtain state; absent only in pre-curtain fixtures. */
+  curtain?: CurtainSnapshot | null;
+}
+
+/**
+ * Canonical background transition.  Legacy one-word transitions are normalised
+ * by the Rust loader, so the frontend only ever sees this shape.
+ */
+export type TransitionDirection =
+  "left_to_right" | "right_to_left" | "top_to_bottom" | "bottom_to_top";
+
+export type BackgroundTransitionSpec =
+  | { type: "cut" }
+  | { type: "cross_fade" }
+  | { type: "fade_through_color"; color: string }
+  | { type: "wipe"; direction: TransitionDirection; softness: number }
+  | { type: "push"; direction: TransitionDirection; softness: number };
+
+/** Canonical, parameterised screen effect shared by nodes and timeline events. */
+export type ScreenEffectSpec =
+  | { type: "flash"; color: string; peak_alpha: number }
+  | {
+      type: "shake";
+      amplitude_x: number;
+      amplitude_y: number;
+      frequency_hz: number;
+      decay: number;
+      /** JavaScript-safe integer (mirrors the Rust `u32` seed). */
+      seed: number;
+    };
+
+export type CurtainAction = "cover" | "reveal";
+
+/** Curtain fill: a solid colour or a `gui` asset reference. */
+export type CurtainFill = { color: string } | { asset: string };
+
+/** Open/close animation of a curtain; parameters live only in the cue. */
+export type CurtainTransitionSpec =
+  | { type: "fade" }
+  | { type: "wipe"; direction: TransitionDirection }
+  | { type: "split_horizontal" }
+  | { type: "split_vertical" };
+
+/** Persisted curtain: the stable cover/fill, never the transition params. */
+export interface CurtainSnapshot {
+  covered: boolean;
+  fill?: CurtainFill | null;
 }
 
 export interface UiMotionBindings {
@@ -305,7 +352,7 @@ export type TimelineEvent =
       type: "screen_effect";
       id: string;
       at_ms: number;
-      effect: "shake" | "flash";
+      effect: ScreenEffectSpec;
       duration_ms: number;
     };
 
@@ -314,7 +361,7 @@ export type PresentationCue = CueBase &
     | {
         type: "background_transition";
         background: string | null;
-        transition: "cut" | "cross_fade";
+        transition: BackgroundTransitionSpec;
         duration_ms: number;
         easing: Easing;
       }
@@ -341,8 +388,16 @@ export type PresentationCue = CueBase &
       }
     | {
         type: "screen_effect";
-        effect: "shake" | "flash";
+        effect: ScreenEffectSpec;
         duration_ms: number;
+      }
+    | {
+        type: "curtain_transition";
+        action: CurtainAction;
+        fill: CurtainFill | null;
+        transition: CurtainTransitionSpec;
+        duration_ms: number;
+        easing: Easing;
       }
     | {
         type: "dialogue_reveal";

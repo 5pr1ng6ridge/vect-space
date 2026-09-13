@@ -8,6 +8,7 @@ import {
   type ReactElement,
 } from "react";
 import { assetUrl } from "../api";
+import { defaultFlashEffect } from "../presentationDefaults";
 import {
   copyTimelineKeyframes,
   evaluateChannel,
@@ -719,7 +720,7 @@ export function TimelineEditor({
                 type: "screen_effect" as const,
                 id: uniqueEventId(draft, "flash"),
                 at_ms: Math.round(playhead / snap) * snap,
-                effect: "flash" as const,
+                effect: defaultFlashEffect(),
                 duration_ms: Math.min(200, draft.duration_ms - playhead),
               };
               commit({

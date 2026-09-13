@@ -12,6 +12,18 @@ their transition cue. Set `await: true` when the next node must not run before t
 cue finishes. Non-blocking cues in one update begin concurrently. Use a `wait` or
 another awaited node to create an explicit sequence boundary.
 
+Background transitions accept the original one-word form
+(`transition: cut|cross_fade`) and the canonical object form
+(`{ type: cut|cross_fade|fade_through_color|wipe|push, ... }`); Rust normalises
+both into one wire shape. Screen effects are parameterised and shared between
+`screen_effect` nodes and timeline events
+(`{ type: flash, color, peak_alpha }` / `{ type: shake, amplitude_x,
+amplitude_y, frequency_hz, decay, seed }`), with a fixed seed so a seek reproduces
+the exact same shake. `curtain` is a persistent layer above the world: `cover`
+draws a colour or `gui` fill, `reveal` lowers the current curtain, and the
+animation is `fade`, a four-direction `wipe`, `split_horizontal` or
+`split_vertical`. `scenes/transition_lab.yaml` walks through all of them.
+
 Dialogue markup:
 
 ```text

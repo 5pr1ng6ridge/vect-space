@@ -17,6 +17,8 @@
     "./virtual-clock": "./src/virtualClock.ts",
     "./browser-guards": "./src/browserGuards.ts",
     "./scene-frame": "./src/sceneFrame.ts",
+    "./scene-effects": "./src/sceneEffects.ts",
+    "./scene-transitions": "./src/sceneTransitions.ts",
     "./scene-textures": "./src/sceneTextures.ts",
     "./timeline-session": "./src/timelineSession.ts",
     "./deferred-session": "./src/deferredSession.ts",

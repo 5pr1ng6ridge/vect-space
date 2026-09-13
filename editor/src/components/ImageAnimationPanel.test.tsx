@@ -237,7 +237,7 @@ describe("inspector asset selector", () => {
       start: {
         type: "background",
         background: "bg.blink",
-        transition: "cut",
+        transition: { type: "cut" },
         easing: "linear",
         duration_ms: 0,
         await: false,

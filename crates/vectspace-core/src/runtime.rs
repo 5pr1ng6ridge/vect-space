@@ -3,18 +3,19 @@
 use crate::{
     content::ContentCatalog,
     model::{
-        AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, ButtonClickAction,
+        AdvanceSource, AssetKind, AudioAction, AudioSnapshot, BootstrapPayload, ButtonClickAction,
         ButtonPostAction, ButtonSnapshot, ButtonTemplate, CameraSnapshot,
         ChapterMapDecorationSnapshot, ChapterMapHotspotSnapshot, ChapterMapReveal,
         ChapterMapSnapshot, ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate,
-        DialogueHistoryEntry, DialogueMode, DialoguePageSnapshot, LongTextControlAction,
-        LongTextExit, LongTextMode, LongTextPageSnapshot, LongTextStepSnapshot,
-        LoopingAudioSnapshot, MutationValue, PlaybackAutoMode, PlaybackSnapshot, PresentationCue,
-        PresentationCueKind, PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot,
-        RuntimeUpdate, ScalarValue, SceneNode, SpriteAction, SpriteActionDefinition,
-        SpriteActionEnd, SpriteSnapshot, StoryLocation, TimelineChannels, TimelineEasing,
-        TimelineKeyframe, TimelineKeyframeValue, TimelineTrack, UiMotionPreset, UiMotionSlot,
-        ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType, WorldSnapshot,
+        CurtainAction, CurtainFill, CurtainSnapshot, DialogueHistoryEntry, DialogueMode,
+        DialoguePageSnapshot, LongTextControlAction, LongTextExit, LongTextMode,
+        LongTextPageSnapshot, LongTextStepSnapshot, LoopingAudioSnapshot, MutationValue,
+        PlaybackAutoMode, PlaybackSnapshot, PresentationCue, PresentationCueKind,
+        PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate,
+        ScalarValue, SceneNode, SpriteAction, SpriteActionDefinition, SpriteActionEnd,
+        SpriteSnapshot, StoryLocation, TimelineChannels, TimelineEasing, TimelineKeyframe,
+        TimelineKeyframeValue, TimelineTrack, UiMotionPreset, UiMotionSlot, ValueOperand,
+        VariableMap, VariableOperation, VariableScope, VariableType, WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
@@ -1713,6 +1714,55 @@ impl RuntimeEngine {
                         return Ok(cues);
                     }
                 }
+                SceneNode::Curtain {
+                    action,
+                    fill,
+                    transition,
+                    duration_ms,
+                    easing,
+                    await_completion,
+                    next,
+                } => {
+                    self.snapshot.location.node_id = next;
+                    let applied_fill = match action {
+                        CurtainAction::Cover => {
+                            let fill = fill.clone().ok_or_else(|| {
+                                RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: curtain cover 缺少 fill"
+                                ))
+                            })?;
+                            self.snapshot.world.curtain = CurtainSnapshot {
+                                covered: true,
+                                fill: Some(fill.clone()),
+                            };
+                            Some(fill)
+                        }
+                        CurtainAction::Reveal => {
+                            // Re-revealing an already revealed curtain is a safe
+                            // no-op: it must never emit a cue the host would wait
+                            // on, which is what would deadlock an `await` node.
+                            if !self.snapshot.world.curtain.covered {
+                                continue;
+                            }
+                            let previous = self.snapshot.world.curtain.fill.clone();
+                            self.snapshot.world.curtain = CurtainSnapshot::default();
+                            previous
+                        }
+                    };
+                    cues.push(self.cue(
+                        gate(await_completion),
+                        PresentationCueKind::CurtainTransition {
+                            action,
+                            fill: applied_fill,
+                            transition,
+                            duration_ms,
+                            easing,
+                        },
+                    ));
+                    if await_completion {
+                        return Ok(cues);
+                    }
+                }
                 SceneNode::DialogueUi {
                     visible,
                     motion,
@@ -2152,6 +2202,7 @@ impl RuntimeEngine {
         self.snapshot.world.buttons.clear();
         self.snapshot.world.camera = CameraSnapshot::default();
         self.snapshot.world.persistent_effects.clear();
+        self.snapshot.world.curtain = CurtainSnapshot::default();
         self.snapshot.dialogue_page = None;
         self.snapshot.long_text_page = None;
     }
@@ -2385,6 +2436,7 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::Sfx { next, .. }
         | SceneNode::Camera { next, .. }
         | SceneNode::ScreenEffect { next, .. }
+        | SceneNode::Curtain { next, .. }
         | SceneNode::DialogueUi { next, .. }
         | SceneNode::UiMotionSet { next, .. }
         | SceneNode::UiMotionPlay { next, .. }
@@ -3059,6 +3111,35 @@ fn hydrate_legacy_dialogue_page(snapshot: &mut RuntimeSnapshot) {
     });
 }
 
+fn validate_snapshot_curtain(
+    content: &ContentCatalog,
+    snapshot: &RuntimeSnapshot,
+) -> Result<(), RuntimeError> {
+    let curtain = &snapshot.world.curtain;
+    match (curtain.covered, &curtain.fill) {
+        (false, None) => Ok(()),
+        (false, Some(_)) => Err(RuntimeError::InvalidSnapshot(
+            "幕布未覆盖时不能保留 fill".to_owned(),
+        )),
+        (true, None) => Err(RuntimeError::InvalidSnapshot(
+            "幕布覆盖时必须保留 fill".to_owned(),
+        )),
+        (true, Some(CurtainFill::Color { color })) => crate::content::validate_color(color)
+            .map_err(|message| RuntimeError::InvalidSnapshot(format!("幕布颜色无效: {message}"))),
+        (true, Some(CurtainFill::Asset { asset })) => {
+            let definition = content.manifest.assets.get(asset).ok_or_else(|| {
+                RuntimeError::InvalidSnapshot(format!("幕布引用了未知素材 {asset}"))
+            })?;
+            if definition.kind != AssetKind::Gui {
+                return Err(RuntimeError::InvalidSnapshot(format!(
+                    "幕布素材 {asset} 必须是 gui 类型"
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
 fn validate_snapshot(
     content: &ContentCatalog,
     snapshot: &RuntimeSnapshot,
@@ -3115,6 +3196,7 @@ fn validate_snapshot(
             )));
         }
     }
+    validate_snapshot_curtain(content, snapshot)?;
     if let Some(page) = &snapshot.dialogue_page {
         if page.page_id.is_empty()
             || page.segments.is_empty()
@@ -4689,7 +4771,13 @@ mod tests {
         scene.nodes.insert(
             "segment_effect".to_owned(),
             SceneNode::ScreenEffect {
-                effect: crate::model::ScreenEffectKind::Shake,
+                effect: crate::model::ScreenEffectSpec::Shake {
+                    amplitude_x: crate::model::SHAKE_AMPLITUDE_X_DEFAULT,
+                    amplitude_y: crate::model::SHAKE_AMPLITUDE_Y_DEFAULT,
+                    frequency_hz: crate::model::SHAKE_FREQUENCY_HZ_DEFAULT,
+                    decay: crate::model::SHAKE_DECAY_DEFAULT,
+                    seed: crate::model::SHAKE_SEED_DEFAULT,
+                },
                 duration_ms: 200,
                 await_completion: true,
                 next: "segment_append".to_owned(),
@@ -5547,6 +5635,17 @@ mod tests {
     }
 
     #[test]
+    fn old_runtime_snapshots_default_to_no_curtain() {
+        let content = catalog();
+        let snapshot = initial_snapshot(&content).unwrap();
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        assert!(value["world"]["curtain"].is_object());
+        value["world"].as_object_mut().unwrap().remove("curtain");
+        let decoded: RuntimeSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.world.curtain, CurtainSnapshot::default());
+    }
+
+    #[test]
     fn narrator_temporary_names_and_resolved_snapshot_text_are_stable() {
         let mut content = catalog();
         let scene = content.scenes.get_mut("prologue").unwrap();
@@ -6000,5 +6099,129 @@ mod tests {
         runtime.start_new_game(&content).unwrap();
         assert!(runtime.dialogue_history().is_empty());
         assert!(runtime.completed_scenes.contains("prologue"));
+    }
+
+    #[test]
+    fn curtain_cover_and_reveal_track_stable_state_without_deadlocking() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "curtain_cover".to_owned();
+        scene.nodes.insert(
+            "curtain_cover".to_owned(),
+            SceneNode::Curtain {
+                action: CurtainAction::Cover,
+                fill: Some(crate::model::CurtainFill::Color {
+                    color: "#000000".to_owned(),
+                }),
+                transition: crate::model::CurtainTransitionSpec::SplitHorizontal,
+                duration_ms: 600,
+                easing: crate::model::Easing::EaseInOut,
+                await_completion: true,
+                next: "curtain_reveal".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "curtain_reveal".to_owned(),
+            SceneNode::Curtain {
+                action: CurtainAction::Reveal,
+                fill: None,
+                transition: crate::model::CurtainTransitionSpec::Fade,
+                duration_ms: 400,
+                easing: crate::model::Easing::EaseInOut,
+                await_completion: true,
+                next: "curtain_reveal_again".to_owned(),
+            },
+        );
+        // Re-revealing an already revealed curtain must advance immediately
+        // instead of emitting an awaited cue that nobody resolves.
+        scene.nodes.insert(
+            "curtain_reveal_again".to_owned(),
+            SceneNode::Curtain {
+                action: CurtainAction::Reveal,
+                fill: None,
+                transition: crate::model::CurtainTransitionSpec::Fade,
+                duration_ms: 400,
+                easing: crate::model::Easing::EaseInOut,
+                await_completion: true,
+                next: "curtain_end".to_owned(),
+            },
+        );
+        scene.nodes.insert("curtain_end".to_owned(), SceneNode::End);
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let cover = runtime.start_new_game(&content).unwrap();
+        assert_eq!(cover.snapshot.location.node_id, "curtain_reveal");
+        assert!(cover.requires_ack);
+        assert!(cover.snapshot.world.curtain.covered);
+        assert_eq!(
+            cover.snapshot.world.curtain.fill,
+            Some(crate::model::CurtainFill::Color {
+                color: "#000000".to_owned(),
+            })
+        );
+        assert!(cover.cues.iter().any(|cue| matches!(
+            &cue.kind,
+            PresentationCueKind::CurtainTransition {
+                action: CurtainAction::Cover,
+                fill: Some(crate::model::CurtainFill::Color { color }),
+                transition: crate::model::CurtainTransitionSpec::SplitHorizontal,
+                duration_ms: 600,
+                easing: crate::model::Easing::EaseInOut,
+            } if color == "#000000"
+        )));
+
+        let reveal = runtime
+            .presentation_complete(&content, cover.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert_eq!(reveal.snapshot.location.node_id, "curtain_reveal_again");
+        assert!(reveal.requires_ack);
+        assert!(!reveal.snapshot.world.curtain.covered);
+        assert_eq!(reveal.snapshot.world.curtain.fill, None);
+        assert!(reveal.cues.iter().any(|cue| matches!(
+            &cue.kind,
+            PresentationCueKind::CurtainTransition {
+                action: CurtainAction::Reveal,
+                fill: Some(crate::model::CurtainFill::Color { color }),
+                transition: crate::model::CurtainTransitionSpec::Fade,
+                duration_ms: 400,
+                easing: crate::model::Easing::EaseInOut,
+            } if color == "#000000"
+        )));
+
+        let repeated = runtime
+            .presentation_complete(&content, reveal.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert_eq!(repeated.snapshot.location.node_id, "curtain_end");
+        assert!(!repeated.requires_ack);
+        assert!(!repeated
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::CurtainTransition { .. })));
+    }
+
+    #[test]
+    fn clear_node_hides_the_curtain() {
+        let mut content = catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.nodes.insert(
+            "clear_curtain".to_owned(),
+            SceneNode::Clear {
+                duration_ms: 700,
+                easing: crate::model::Easing::EaseOut,
+                await_completion: false,
+                next: "introduction".to_owned(),
+            },
+        );
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.snapshot.location.node_id = "clear_curtain".to_owned();
+        runtime.snapshot.world.curtain = CurtainSnapshot {
+            covered: true,
+            fill: Some(crate::model::CurtainFill::Asset {
+                asset: "gui.dialogue_box".to_owned(),
+            }),
+        };
+        runtime.run_until_boundary(&content).unwrap();
+        assert!(!runtime.snapshot.world.curtain.covered);
+        assert_eq!(runtime.snapshot.world.curtain.fill, None);
     }
 }

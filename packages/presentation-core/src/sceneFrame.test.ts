@@ -246,7 +246,11 @@ describe("camera helpers", () => {
 
 describe("screen effects", () => {
   it("fades a flash with the shipped ease-out curve and peak", () => {
-    const flash = { startMs: 0, durationMs: 400 };
+    const flash = {
+      startMs: 0,
+      durationMs: 400,
+      effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 } as const,
+    };
     expect(flashAlpha(0, flash)).toBeCloseTo(0.88);
     expect(flashAlpha(200, flash)).toBeLessThan(0.88);
     expect(flashAlpha(400, flash)).toBeCloseTo(0);
@@ -254,15 +258,41 @@ describe("screen effects", () => {
   });
 
   it("offsets the camera while a shake is active", () => {
-    const shake = { startMs: 100, durationMs: 400 };
+    const shake = {
+      startMs: 100,
+      durationMs: 400,
+      effect: {
+        type: "shake",
+        amplitude_x: 16,
+        amplitude_y: 9.6,
+        frequency_hz: 18,
+        decay: 1,
+        seed: 0,
+      } as const,
+    };
     expect(shakeOffset(0, shake)).toEqual({ x: 0, y: 0 });
     const active = shakeOffset(200, shake);
     expect(Math.abs(active.x) + Math.abs(active.y)).toBeGreaterThan(0);
   });
 
   it("keeps flash and shake independent", () => {
-    const flash = { startMs: 0, durationMs: 100 };
-    const shake = { startMs: 0, durationMs: 100 };
+    const flash = {
+      startMs: 0,
+      durationMs: 100,
+      effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 } as const,
+    };
+    const shake = {
+      startMs: 0,
+      durationMs: 100,
+      effect: {
+        type: "shake",
+        amplitude_x: 16,
+        amplitude_y: 9.6,
+        frequency_hz: 18,
+        decay: 1,
+        seed: 0,
+      } as const,
+    };
     expect(flashAlpha(50, flash)).toBeGreaterThan(0);
     expect(shakeOffset(50, shake).x).not.toBe(0);
   });

@@ -287,6 +287,44 @@ export class PresentationController {
     await this.#reconcile(snapshot, assets, this.#abort.signal);
   }
 
+  /**
+   * Covers the canvas with the host-only session curtain.
+   *
+   * The host calls this before it replaces the whole world; the cover is a
+   * fixed opaque black fade owned by the presentation surface, never a cue and
+   * never part of `WorldSnapshot`, so a hard snapshot alignment can never
+   * replay it.  Duplicate calls while a cover is in flight share the one
+   * transition (React Strict Mode performs no duplicate work).
+   */
+  coverSession(): Promise<void> {
+    return this.#surface.coverSession();
+  }
+
+  /** Reveals the session curtain after the replacement is on screen. */
+  revealSession(): Promise<void> {
+    return this.#surface.revealSession();
+  }
+
+  /**
+   * Replaces the whole world behind the host-only session curtain.
+   *
+   * Covers (250 ms), hard aligns the snapshot while the cover is fully black —
+   * no cue is replayed — and reveals (250 ms) after the replacement's first
+   * stable frame.  A failure, cancellation or destroy always releases the
+   * curtain, so a failed session switch cannot leave the player in the dark.
+   */
+  async applySessionSnapshot(
+    snapshot: RuntimeSnapshot,
+    assets: AssetUrlMap,
+  ): Promise<void> {
+    try {
+      await this.coverSession();
+      await this.applySnapshotImmediately(snapshot, assets);
+    } finally {
+      await this.revealSession();
+    }
+  }
+
   captureThumbnail(): string | null {
     return this.#surface.captureThumbnail();
   }
@@ -298,6 +336,11 @@ export class PresentationController {
    */
   get videoState(): TimelineVideoState | null {
     return this.#session.videoState;
+  }
+
+  /** True while the host-only session curtain fully covers the canvas. */
+  get sessionCovered(): boolean {
+    return this.#surface.sessionCovered;
   }
 
   readFrame(): SceneFrame {
@@ -326,6 +369,7 @@ export class PresentationController {
       case "clear_scene":
       case "camera_tween":
       case "screen_effect":
+      case "curtain_transition":
         await this.#surface.runCue(cue satisfies SceneVisualCue, {
           assets,
           signal,

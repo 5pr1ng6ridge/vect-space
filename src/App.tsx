@@ -259,6 +259,43 @@ export default function App(): ReactElement {
     if (panelCue !== undefined) setPanel(panelCue.panel);
   }, []);
 
+  /**
+   * Restores the previous authoritative update after a same-session failure.
+   *
+   * Recovery is instant: the world is hard-aligned without replaying cues and
+   * any session curtain left behind by a superseded switch is forced down, so
+   * a retryable failure never adds a cover/reveal fade for a switch that did
+   * not happen.
+   */
+  const restoreRetainedUpdate = useCallback(
+    async (retained: RuntimeUpdate): Promise<void> => {
+      setUpdate(retained);
+      let alignmentError: unknown;
+      try {
+        await sceneRef.current?.applySnapshotImmediately(retained.snapshot);
+      } catch (error) {
+        alignmentError = error;
+      } finally {
+        // The curtain is always forced down, even when the hard alignment
+        // failed; the alignment error stays the one the caller handles.
+        try {
+          await sceneRef.current?.revealSession();
+        } catch (error) {
+          if (alignmentError === undefined) throw error;
+        }
+      }
+      if (alignmentError !== undefined) {
+        // The original alignment error is preserved (same Error instance) and
+        // never replaced by a curtain error.  A non-Error throw still fails
+        // loudly instead of silently succeeding.
+        throw alignmentError instanceof Error
+          ? alignmentError
+          : new Error("Failed to restore the retained update");
+      }
+    },
+    [],
+  );
+
   const runStoryCommand = useCallback(
     async (
       command: () => Promise<RuntimeUpdate>,
@@ -266,6 +303,8 @@ export default function App(): ReactElement {
       expectedSessionId = activeSessionId.current,
       allowSessionChange = false,
       expectedMode?: "story" | "replay",
+      /** Session switch: align the new world behind the host curtain. */
+      sessionBoundary = false,
     ): Promise<boolean> => {
       if (busyRef.current) {
         return false;
@@ -302,6 +341,21 @@ export default function App(): ReactElement {
               sessionGenerationRef.current,
             ) && activeSessionId.current === expectedSessionId;
           if (current) {
+            if (sessionBoundary) {
+              // Cover the canvas, hard-align the new world while it is fully
+              // black (no cue is replayed) and reveal again after the first
+              // stable frame.  A newer transition may supersede this command
+              // while the cover is up; if so it owns the world and the UI.
+              await sceneRef.current?.applySessionSnapshot(next.snapshot);
+              if (
+                !transitionControllerRef.current.isCurrentGeneration(
+                  token,
+                  sessionGenerationRef.current,
+                )
+              ) {
+                return false;
+              }
+            }
             activeSessionId.current = returnedSessionId;
             applyUpdate(next);
           }
@@ -470,10 +524,7 @@ export default function App(): ReactElement {
             )
           ) {
             if (retainedUpdate !== null) {
-              setUpdate(retainedUpdate);
-              await sceneRef.current?.applySnapshotImmediately(
-                retainedUpdate.snapshot,
-              );
+              await restoreRetainedUpdate(retainedUpdate);
             }
             setError(errorMessage(reason));
             finishSessionTransition(token);
@@ -499,6 +550,7 @@ export default function App(): ReactElement {
         expectedSessionId,
         true,
         "story",
+        true,
       );
       // A failed boundary command must not leave the title screen in a
       // half-entered story session. Only the transition that started this
@@ -608,6 +660,7 @@ export default function App(): ReactElement {
       expectedSessionId,
       true,
       "story",
+      true,
     ).then((loaded) => {
       // Keep the title page when loading fails. The generation/session guard
       // prevents an older load from undoing a newer boundary transition.
@@ -684,10 +737,7 @@ export default function App(): ReactElement {
             // The presentation was cancelled before the host call, but the
             // authoritative update remains visible so the user can retry.
             if (retainedUpdate !== null) {
-              setUpdate(retainedUpdate);
-              await sceneRef.current?.applySnapshotImmediately(
-                retainedUpdate.snapshot,
-              );
+              await restoreRetainedUpdate(retainedUpdate);
             }
             setError(errorMessage(reason));
             finishSessionTransition(token);
@@ -738,10 +788,7 @@ export default function App(): ReactElement {
           transitionControllerRef.current.isCurrentGeneration(token, generation)
         ) {
           if (retainedUpdate !== null) {
-            setUpdate(retainedUpdate);
-            await sceneRef.current?.applySnapshotImmediately(
-              retainedUpdate.snapshot,
-            );
+            await restoreRetainedUpdate(retainedUpdate);
           }
           setError(errorMessage(reason));
           finishSessionTransition(token);
@@ -840,6 +887,7 @@ export default function App(): ReactElement {
           expectedSessionId,
           true,
           "replay",
+          true,
         );
         if (generation !== sessionGenerationRef.current || started) return;
         // Keep a failed replay from leaving the game controls over a stale
@@ -917,10 +965,7 @@ export default function App(): ReactElement {
         ) {
           if (exitedSessionId === null) {
             if (retainedUpdate !== null) {
-              setUpdate(retainedUpdate);
-              await sceneRef.current?.applySnapshotImmediately(
-                retainedUpdate.snapshot,
-              );
+              await restoreRetainedUpdate(retainedUpdate);
             }
           } else {
             // The host is already back in story mode.  Do not leave replay
@@ -948,6 +993,7 @@ export default function App(): ReactElement {
   }, [
     beginSessionTransition,
     finishSessionTransition,
+    restoreRetainedUpdate,
     stopTransientPlayback,
     update,
   ]);

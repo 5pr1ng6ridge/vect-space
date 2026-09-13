@@ -292,3 +292,33 @@ headless=new + SwiftShader，`WebGL 2.0 (OpenGL ES 3.0 Chromium)`）：3 个目�
 2. 收敛一条差异时：在本文件 §7 删除该条、把对应断言写进入口（或新增单测），并在提交信息里
    引用该条编号。
 3. 若新增对比目标：改 `parity/targets.json` 并在 `game_content.rs` 同步断言。
+
+## 12. 规范化 wire 形状变更：转场 / 幕布 / 参数化屏幕效果
+
+本节记录转场 / 幕布 / 参数化效果提交对**冻结夹具与 wire 契约**的影响。基线夹具本身没有
+改动，仍然逐字保留迁移前的一词写法（`transition: cross_fade`、`effect: flash|shake`），
+以便兼容路径继续被真实运行时覆盖。
+
+- **内容层兼容**：Rust 加载器接受旧的一词 `transition: cut|cross_fade` 与
+  `effect: flash|shake`，并在进入运行时之前把它们规范化成对象形状
+  （`BackgroundTransitionSpec` / `ScreenEffectSpec`）。WebView、编辑器与协议只看到一种形状；
+  旧存档与旧 YAML 不需要迁移。反向不成立：对象形状不会再被写回成一词字符串。
+- **参数与包络兼容（震动波形有意变更）**：旧写法规范化后的参数值与迁移前硬编码常量一致
+  （flash `#FFFFFF` / `0.88`，shake `16 / 9.6 / 18Hz / decay 1 / seed 0`），振幅上下界（0–256）
+  与衰减包络（`decay 1` = 线性衰减、窗口末尾归零）保持不变；夹具使用的 `cross_fade` 仍按
+  `ease_in_out` 求值。但震动**波形本身是有意变更**：新求值器是
+  `sin(2π·frequency_hz·t_seconds + seedPhase(seed, axis))`，即按作者填写的绝对 Hz 对实际经过
+  秒数求值（窗口时长决定周期数），每轴相位由固定整数 `seed` 确定性导出；迁移前是
+  `sin(progress·π·18)` / `cos(progress·π·22)·0.6`，按窗口进度归一化、无 seed、x/y 固定相位。
+  旧 `effect: shake` 规范化为 `seed 0`（稳定且合法的 seed），但旧场景的震动像素不保证与旧
+  渲染器逐像素一致。
+- **parity 的证明边界**：`parity:check` 比较的是**游戏端与编辑器端**在同一份共享求值器下运行
+  同一夹具的结果；它不比较迁移前/后的旧、新实现，因此不能作为“新震动 = 旧震动”的像素回归门。
+  基线 §6 的旧 SHA 只是迁移前现状快照（§8 第 1 条），不是必须保持的期望值。
+- **新契约**：`WorldSnapshot.curtain` 只保存稳定幕布状态（是否覆盖、颜色或 `gui` 素材），
+  转场参数只存在于 cue；屏幕效果在节点与时间线事件之间共享同一个规范结构，`seed` 是固定
+  整数，保证游戏、编辑器与任意 seek 位置结果一致。
+- **新演示夹具**：`game/scenes/transition_lab.yaml` 覆盖五种背景转场、幕布 color/gui 与
+  fade/wipe/split 的 cover/reveal 组合、参数化 flash/shake（固定 seed）以及重叠的时间线
+  效果；它已接入 `chapter-map.yaml`。`game_content.rs` 对上述形状追加断言，防止演示场景
+  静默退化。`surface_parity` 夹具保持不可达、不接入章节地图的既有约束不变。

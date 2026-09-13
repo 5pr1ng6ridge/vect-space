@@ -10,17 +10,20 @@ use thiserror::Error;
 
 use crate::image_header::{probe, ImageSize};
 use crate::model::{
-    AssetDefinition, AssetKind, AudioAction, ButtonClickAction, ButtonPanel, ButtonPostAction,
-    ButtonTemplate, ChapterMapDefinition, ChapterMapReveal, CharacterDefinition,
-    CharacterExpression, ConditionExpression, ContentManifest, DialogueMode,
-    ImageAnimationDefinition, LongTextMode, LongTextPagination, MutationValue, ResolvedAnimation,
-    ResolvedAnimationFrame, ResolvedAsset, ScalarValue, SceneDefinition, SceneNode, SpriteAction,
-    SpriteActionDefinition, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack,
-    UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation,
-    VariableScope, VariableType, IMAGE_ANIMATION_MAX_DECODED_BYTES, IMAGE_ANIMATION_MAX_EDGE,
-    IMAGE_ANIMATION_MAX_FRAMES, IMAGE_ANIMATION_MAX_FRAME_MS, IMAGE_ANIMATION_MIN_FRAME_MS,
-    IMAGE_ANIMATION_SCHEMA_VERSION, LONG_TEXT_FONT_SIZE_MAX, LONG_TEXT_FONT_SIZE_MIN,
-    SPRITE_ACTION_SCHEMA_VERSION,
+    AssetDefinition, AssetKind, AudioAction, BackgroundTransitionSpec, ButtonClickAction,
+    ButtonPanel, ButtonPostAction, ButtonTemplate, ChapterMapDefinition, ChapterMapReveal,
+    CharacterDefinition, CharacterExpression, ConditionExpression, ContentManifest, CurtainAction,
+    CurtainFill, DialogueMode, ImageAnimationDefinition, LongTextMode, LongTextPagination,
+    MutationValue, ResolvedAnimation, ResolvedAnimationFrame, ResolvedAsset, ScalarValue,
+    SceneDefinition, SceneNode, ScreenEffectSpec, SpriteAction, SpriteActionDefinition,
+    TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings,
+    UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation, VariableScope,
+    VariableType, FLASH_PEAK_ALPHA_MAX, FLASH_PEAK_ALPHA_MIN, IMAGE_ANIMATION_MAX_DECODED_BYTES,
+    IMAGE_ANIMATION_MAX_EDGE, IMAGE_ANIMATION_MAX_FRAMES, IMAGE_ANIMATION_MAX_FRAME_MS,
+    IMAGE_ANIMATION_MIN_FRAME_MS, IMAGE_ANIMATION_SCHEMA_VERSION, LONG_TEXT_FONT_SIZE_MAX,
+    LONG_TEXT_FONT_SIZE_MIN, SHAKE_AMPLITUDE_MAX, SHAKE_DECAY_MAX, SHAKE_DECAY_MIN,
+    SHAKE_FREQUENCY_HZ_MAX, SHAKE_FREQUENCY_HZ_MIN, SPRITE_ACTION_SCHEMA_VERSION,
+    TRANSITION_SOFTNESS_MAX,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -1772,6 +1775,7 @@ fn validate_scenes(
             match node {
                 SceneNode::Background {
                     background,
+                    transition,
                     duration_ms,
                     next,
                     ..
@@ -1779,6 +1783,7 @@ fn validate_scenes(
                     if let Some(id) = background {
                         require_asset(assets, id, AssetKind::Background, scene_id, node_id)?;
                     }
+                    validate_background_transition(transition, scene_id, node_id)?;
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
@@ -2214,8 +2219,41 @@ fn validate_scenes(
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::ScreenEffect {
-                    duration_ms, next, ..
+                    effect,
+                    duration_ms,
+                    next,
+                    ..
                 } => {
+                    validate_screen_effect(effect, scene_id, node_id)?;
+                    validate_duration(*duration_ms, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::Curtain {
+                    action,
+                    fill,
+                    duration_ms,
+                    next,
+                    ..
+                } => {
+                    match action {
+                        CurtainAction::Cover => {
+                            let fill = fill.as_ref().ok_or_else(|| {
+                                ContentError::Validation(format!(
+                                    "{scene_id}/{node_id} 的 curtain cover 必须提供 fill"
+                                ))
+                            })?;
+                            validate_curtain_fill(fill, assets, scene_id, node_id)?;
+                        }
+                        CurtainAction::Reveal => {
+                            if fill.is_some() {
+                                return node_error(
+                                    scene_id,
+                                    node_id,
+                                    "curtain reveal 不能指定 fill，将使用当前幕布",
+                                );
+                            }
+                        }
+                    }
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
@@ -2562,9 +2600,10 @@ fn validate_timeline(
             TimelineEvent::ScreenEffect {
                 id,
                 at_ms,
+                effect,
                 duration_ms: effect_duration,
-                ..
             } => {
+                validate_screen_effect(effect, scene_id, node_id)?;
                 validate_duration(*effect_duration, scene_id, node_id)?;
                 if at_ms.saturating_add(*effect_duration) > duration_ms {
                     return node_error(scene_id, node_id, "屏幕效果事件超出时间线时长");
@@ -3010,6 +3049,110 @@ fn validate_volume(value: f32, scene_id: &str, node_id: &str) -> Result<(), Cont
     Ok(())
 }
 
+fn validate_background_transition(
+    transition: &BackgroundTransitionSpec,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    match transition {
+        BackgroundTransitionSpec::Cut | BackgroundTransitionSpec::CrossFade => Ok(()),
+        BackgroundTransitionSpec::FadeThroughColor { color } => {
+            validate_color(color).map_err(|message| {
+                ContentError::Validation(format!("{scene_id}/{node_id}: {message}"))
+            })
+        }
+        BackgroundTransitionSpec::Wipe {
+            direction: _,
+            softness,
+        }
+        | BackgroundTransitionSpec::Push {
+            direction: _,
+            softness,
+        } => {
+            if !softness.is_finite() || !(0.0..=TRANSITION_SOFTNESS_MAX).contains(softness) {
+                return node_error(
+                    scene_id,
+                    node_id,
+                    &format!("转场 softness 必须在 0 到 {TRANSITION_SOFTNESS_MAX} 之间"),
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_screen_effect(
+    effect: &ScreenEffectSpec,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    match effect {
+        ScreenEffectSpec::Flash { color, peak_alpha } => {
+            validate_color(color).map_err(|message| {
+                ContentError::Validation(format!("{scene_id}/{node_id}: {message}"))
+            })?;
+            if !peak_alpha.is_finite()
+                || !(FLASH_PEAK_ALPHA_MIN..=FLASH_PEAK_ALPHA_MAX).contains(peak_alpha)
+            {
+                return node_error(scene_id, node_id, "flash peak_alpha 必须在 0 到 1 之间");
+            }
+            Ok(())
+        }
+        ScreenEffectSpec::Shake {
+            amplitude_x,
+            amplitude_y,
+            frequency_hz,
+            decay,
+            seed: _,
+        } => {
+            for (label, value) in [("amplitude_x", *amplitude_x), ("amplitude_y", *amplitude_y)] {
+                if !value.is_finite() || !(0.0..=SHAKE_AMPLITUDE_MAX).contains(&value) {
+                    return node_error(
+                        scene_id,
+                        node_id,
+                        &format!("shake {label} 必须在 0 到 {SHAKE_AMPLITUDE_MAX} 之间"),
+                    );
+                }
+            }
+            if !frequency_hz.is_finite()
+                || !(SHAKE_FREQUENCY_HZ_MIN..=SHAKE_FREQUENCY_HZ_MAX).contains(frequency_hz)
+            {
+                return node_error(
+                    scene_id,
+                    node_id,
+                    &format!(
+                        "shake frequency_hz 必须在 {SHAKE_FREQUENCY_HZ_MIN} 到 {SHAKE_FREQUENCY_HZ_MAX} 之间"
+                    ),
+                );
+            }
+            if !decay.is_finite() || !(SHAKE_DECAY_MIN..=SHAKE_DECAY_MAX).contains(decay) {
+                return node_error(
+                    scene_id,
+                    node_id,
+                    &format!("shake decay 必须在 {SHAKE_DECAY_MIN} 到 {SHAKE_DECAY_MAX} 之间"),
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_curtain_fill(
+    fill: &CurtainFill,
+    assets: &BTreeMap<String, AssetDefinition>,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    match fill {
+        CurtainFill::Color { color } => validate_color(color).map_err(|message| {
+            ContentError::Validation(format!("{scene_id}/{node_id}: {message}"))
+        }),
+        CurtainFill::Asset { asset } => {
+            require_asset(assets, asset, AssetKind::Gui, scene_id, node_id)
+        }
+    }
+}
+
 fn validate_text_markup(
     text: &str,
     variables: &BTreeMap<String, VariableDefinition>,
@@ -3307,7 +3450,7 @@ fn validate_display_name(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_color(value: &str) -> Result<(), String> {
+pub(crate) fn validate_color(value: &str) -> Result<(), String> {
     let valid_length = value.len() == 7 || value.len() == 9;
     if !valid_length
         || !value.starts_with('#')
@@ -4544,7 +4687,10 @@ mod tests {
             &[TimelineEvent::ScreenEffect {
                 id: "too_long".to_owned(),
                 at_ms: 1,
-                effect: crate::model::ScreenEffectKind::Flash,
+                effect: crate::model::ScreenEffectSpec::Flash {
+                    color: crate::model::FLASH_COLOR_DEFAULT.to_owned(),
+                    peak_alpha: crate::model::FLASH_PEAK_ALPHA_DEFAULT,
+                },
                 duration_ms: 60_001,
             }],
             &catalog.manifest.assets,
@@ -4856,5 +5002,213 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("未知参数"));
+    }
+
+    fn fixture_catalog() -> ContentCatalog {
+        ContentCatalog::from_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game"),
+        )
+        .expect("fixture content must be valid")
+    }
+
+    fn validate_fixture_scenes(
+        catalog: &ContentCatalog,
+        scenes: &BTreeMap<String, SceneDefinition>,
+    ) -> Result<(), ContentError> {
+        validate_scenes(
+            scenes,
+            &catalog.manifest.assets,
+            &catalog.manifest.variables,
+            &catalog.manifest.characters,
+            &catalog.ui_motions,
+            &catalog.buttons,
+            &catalog.actions,
+        )
+    }
+
+    fn prologue_with_node(
+        catalog: &ContentCatalog,
+        node_id: &str,
+        node: SceneNode,
+    ) -> BTreeMap<String, SceneDefinition> {
+        let mut scenes = catalog.scenes.clone();
+        scenes
+            .get_mut("prologue")
+            .unwrap()
+            .nodes
+            .insert(node_id.to_owned(), node);
+        scenes
+    }
+
+    #[test]
+    fn transition_and_effect_parameters_are_range_checked() {
+        let catalog = fixture_catalog();
+        let background = |transition| SceneNode::Background {
+            background: None,
+            transition,
+            duration_ms: 300,
+            easing: crate::model::Easing::EaseInOut,
+            await_completion: false,
+            next: "introduction".to_owned(),
+        };
+        let effect = |effect| SceneNode::ScreenEffect {
+            effect,
+            duration_ms: 200,
+            await_completion: false,
+            next: "introduction".to_owned(),
+        };
+        let cases = vec![
+            (
+                "bad_transition_color",
+                background(BackgroundTransitionSpec::FadeThroughColor {
+                    color: "red".to_owned(),
+                }),
+                "颜色",
+            ),
+            (
+                "bad_transition_softness",
+                background(BackgroundTransitionSpec::Wipe {
+                    direction: crate::model::TransitionDirection::LeftToRight,
+                    softness: 1.5,
+                }),
+                "softness",
+            ),
+            (
+                "bad_flash_color",
+                effect(ScreenEffectSpec::Flash {
+                    color: "#FFF".to_owned(),
+                    peak_alpha: 0.5,
+                }),
+                "颜色",
+            ),
+            (
+                "bad_flash_alpha",
+                effect(ScreenEffectSpec::Flash {
+                    color: "#FFFFFF".to_owned(),
+                    peak_alpha: 1.5,
+                }),
+                "peak_alpha",
+            ),
+            (
+                "bad_shake_amplitude",
+                effect(ScreenEffectSpec::Shake {
+                    amplitude_x: 300.0,
+                    amplitude_y: 0.0,
+                    frequency_hz: 10.0,
+                    decay: 1.0,
+                    seed: 0,
+                }),
+                "amplitude_x",
+            ),
+            (
+                "bad_shake_frequency",
+                effect(ScreenEffectSpec::Shake {
+                    amplitude_x: 0.0,
+                    amplitude_y: 0.0,
+                    frequency_hz: 0.0,
+                    decay: 1.0,
+                    seed: 0,
+                }),
+                "frequency_hz",
+            ),
+            (
+                "bad_shake_decay",
+                effect(ScreenEffectSpec::Shake {
+                    amplitude_x: 0.0,
+                    amplitude_y: 0.0,
+                    frequency_hz: 10.0,
+                    decay: 1.5,
+                    seed: 0,
+                }),
+                "decay",
+            ),
+        ];
+        for (node_id, node, expected) in cases {
+            let scenes = prologue_with_node(&catalog, node_id, node);
+            let error = validate_fixture_scenes(&catalog, &scenes)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{node_id}: {error}");
+        }
+    }
+
+    #[test]
+    fn curtain_nodes_require_a_cover_fill_and_reject_one_on_reveal() {
+        let catalog = fixture_catalog();
+        let curtain = |action, fill| SceneNode::Curtain {
+            action,
+            fill,
+            transition: crate::model::CurtainTransitionSpec::SplitHorizontal,
+            duration_ms: 600,
+            easing: crate::model::Easing::EaseInOut,
+            await_completion: true,
+            next: "introduction".to_owned(),
+        };
+        let cases = vec![
+            (
+                "cover_without_fill",
+                curtain(CurtainAction::Cover, None),
+                "必须提供 fill",
+            ),
+            (
+                "reveal_with_fill",
+                curtain(
+                    CurtainAction::Reveal,
+                    Some(CurtainFill::Color {
+                        color: "#000000".to_owned(),
+                    }),
+                ),
+                "不能指定 fill",
+            ),
+            (
+                "cover_with_bad_color",
+                curtain(
+                    CurtainAction::Cover,
+                    Some(CurtainFill::Color {
+                        color: "#00".to_owned(),
+                    }),
+                ),
+                "颜色",
+            ),
+            (
+                "cover_with_unknown_asset",
+                curtain(
+                    CurtainAction::Cover,
+                    Some(CurtainFill::Asset {
+                        asset: "gui.missing".to_owned(),
+                    }),
+                ),
+                "未知素材",
+            ),
+            (
+                "cover_with_wrong_kind",
+                curtain(
+                    CurtainAction::Cover,
+                    Some(CurtainFill::Asset {
+                        asset: "sprite.jelly".to_owned(),
+                    }),
+                ),
+                "类型不正确",
+            ),
+        ];
+        for (node_id, node, expected) in cases {
+            let scenes = prologue_with_node(&catalog, node_id, node);
+            let error = validate_fixture_scenes(&catalog, &scenes)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{node_id}: {error}");
+        }
+
+        let scenes = prologue_with_node(
+            &catalog,
+            "valid_cover",
+            curtain(
+                CurtainAction::Cover,
+                Some(CurtainFill::Asset {
+                    asset: "gui.dialogue_box".to_owned(),
+                }),
+            ),
+        );
+        assert!(validate_fixture_scenes(&catalog, &scenes).is_ok());
     }
 }

@@ -1,9 +1,12 @@
 //! Stable content, runtime and persistence models shared by both desktop hosts.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub type VariableMap = BTreeMap<String, ScalarValue>;
 
@@ -782,7 +785,8 @@ pub enum SceneNode {
     Background {
         background: Option<String>,
         #[serde(default)]
-        transition: BackgroundTransition,
+        #[schemars(with = "BackgroundTransitionSchema")]
+        transition: BackgroundTransitionSpec,
         #[serde(default = "default_medium_duration")]
         duration_ms: u64,
         #[serde(default)]
@@ -971,9 +975,27 @@ pub enum SceneNode {
         next: String,
     },
     ScreenEffect {
-        effect: ScreenEffectKind,
+        #[schemars(with = "ScreenEffectSchema")]
+        effect: ScreenEffectSpec,
         #[serde(default = "default_short_duration")]
         duration_ms: u64,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    /// A persistent curtain layer drawn above the world and below screen
+    /// effects.  `cover` requires a fill; `reveal` closes the current curtain.
+    /// Only the stable cover/fill land in the snapshot, the transition
+    /// parameters travel exclusively in the emitted cue.
+    Curtain {
+        action: CurtainAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<CurtainFill>,
+        transition: CurtainTransitionSpec,
+        #[serde(default = "default_medium_duration")]
+        duration_ms: u64,
+        #[serde(default)]
+        easing: Easing,
         #[serde(default, rename = "await")]
         await_completion: bool,
         next: String,
@@ -1266,12 +1288,219 @@ pub enum AudioAction {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum BackgroundTransition {
+/// Canonical background transition.
+///
+/// Legacy one-word transitions keep working: the loader accepts
+/// `transition: cut` / `transition: cross_fade` and normalises them into this
+/// shape, so cues, hosts and generated schemas only ever observe the canonical
+/// form and never need a compatibility branch.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BackgroundTransitionSpec {
     Cut,
     #[default]
     CrossFade,
+    FadeThroughColor {
+        /// `#RRGGBB` or `#RRGGBBAA`.
+        color: String,
+    },
+    Wipe {
+        direction: TransitionDirection,
+        #[serde(default = "default_transition_softness")]
+        softness: f32,
+    },
+    Push {
+        direction: TransitionDirection,
+        #[serde(default = "default_transition_softness")]
+        softness: f32,
+    },
+}
+
+/// Object-only mirror used by the custom deserializer.
+///
+/// Keeping a mirror means an invalid object reports serde's precise message
+/// ("missing field `direction`", "unknown variant `foo`") instead of the
+/// opaque one an `untagged` enum would produce, while the public type stays the
+/// single canonical shape.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum BackgroundTransitionObject {
+    Cut,
+    CrossFade,
+    FadeThroughColor {
+        color: String,
+    },
+    Wipe {
+        direction: TransitionDirection,
+        #[serde(default = "default_transition_softness")]
+        softness: f32,
+    },
+    Push {
+        direction: TransitionDirection,
+        #[serde(default = "default_transition_softness")]
+        softness: f32,
+    },
+}
+
+impl BackgroundTransitionObject {
+    fn into_spec(self) -> BackgroundTransitionSpec {
+        match self {
+            Self::Cut => BackgroundTransitionSpec::Cut,
+            Self::CrossFade => BackgroundTransitionSpec::CrossFade,
+            Self::FadeThroughColor { color } => {
+                BackgroundTransitionSpec::FadeThroughColor { color }
+            }
+            Self::Wipe {
+                direction,
+                softness,
+            } => BackgroundTransitionSpec::Wipe {
+                direction,
+                softness,
+            },
+            Self::Push {
+                direction,
+                softness,
+            } => BackgroundTransitionSpec::Push {
+                direction,
+                softness,
+            },
+        }
+    }
+}
+
+struct BackgroundTransitionVisitor;
+
+impl<'de> Visitor<'de> for BackgroundTransitionVisitor {
+    type Value = BackgroundTransitionSpec;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "a background transition name (`cut` or `cross_fade`) or a `{ type, ... }` object",
+        )
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match value {
+            "cut" => Ok(BackgroundTransitionSpec::Cut),
+            "cross_fade" => Ok(BackgroundTransitionSpec::CrossFade),
+            other => Err(E::unknown_variant(other, &["cut", "cross_fade"])),
+        }
+    }
+
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        BackgroundTransitionObject::deserialize(MapAccessDeserializer::new(map))
+            .map(BackgroundTransitionObject::into_spec)
+    }
+}
+
+impl<'de> Deserialize<'de> for BackgroundTransitionSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BackgroundTransitionVisitor)
+    }
+}
+
+/// Schema-only view used on fields so the generated JSON Schema accepts both
+/// the already-authored one-word form and the canonical object.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(untagged)]
+enum BackgroundTransitionSchema {
+    Legacy(LegacyBackgroundTransitionName),
+    Canonical(BackgroundTransitionSpec),
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum LegacyBackgroundTransitionName {
+    Cut,
+    CrossFade,
+}
+
+/// One of the four edge directions shared by `wipe` and `push` transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionDirection {
+    LeftToRight,
+    RightToLeft,
+    TopToBottom,
+    BottomToTop,
+}
+
+/// Normalised fraction of the screen used to feather a `wipe`/`push` edge.
+pub const TRANSITION_SOFTNESS_DEFAULT: f32 = 0.0;
+pub const TRANSITION_SOFTNESS_MAX: f32 = 1.0;
+
+fn default_transition_softness() -> f32 {
+    TRANSITION_SOFTNESS_DEFAULT
+}
+
+/// Presentation action of a persistent curtain layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CurtainAction {
+    Cover,
+    Reveal,
+}
+
+/// Fill of a curtain: either a solid colour or a `gui` asset.
+///
+/// The custom deserializer rejects an object that names both fills (ambiguous)
+/// or neither, instead of silently accepting the first untagged variant.  The
+/// schema mirrors that rule through `deny_unknown_fields`, so a schema-only
+/// validator rejects `{color, asset}` exactly like the loader does.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(deny_unknown_fields)]
+pub enum CurtainFill {
+    Color { color: String },
+    Asset { asset: String },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurtainFillObject {
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    asset: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CurtainFill {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let object = CurtainFillObject::deserialize(deserializer)?;
+        match (object.color, object.asset) {
+            (Some(color), None) => Ok(Self::Color { color }),
+            (None, Some(asset)) => Ok(Self::Asset { asset }),
+            (Some(_), Some(_)) => Err(de::Error::custom(
+                "curtain fill 只能指定 color 或 asset 之一",
+            )),
+            (None, None) => Err(de::Error::custom("curtain fill 必须指定 color 或 asset")),
+        }
+    }
+}
+
+/// Open/close animation of a curtain.  These parameters only ever travel in a
+/// presentation cue; the saved curtain state stores the stable cover/fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CurtainTransitionSpec {
+    Fade,
+    Wipe { direction: TransitionDirection },
+    SplitHorizontal,
+    SplitVertical,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1284,11 +1513,207 @@ pub enum Easing {
     EaseInOut,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Canonical, parameterised screen effect shared by `screen_effect` nodes and
+/// timeline events.  Legacy one-word effects (`effect: flash` / `effect: shake`)
+/// are normalised into this shape with the shipped defaults.
+pub const FLASH_COLOR_DEFAULT: &str = "#FFFFFF";
+pub const FLASH_PEAK_ALPHA_DEFAULT: f32 = 0.88;
+pub const FLASH_PEAK_ALPHA_MIN: f32 = 0.0;
+pub const FLASH_PEAK_ALPHA_MAX: f32 = 1.0;
+/// Peak horizontal amplitude in design pixels of the shipped shake.
+pub const SHAKE_AMPLITUDE_X_DEFAULT: f32 = 16.0;
+/// Peak vertical amplitude of the shipped shake (`0.6 * x`).
+pub const SHAKE_AMPLITUDE_Y_DEFAULT: f32 = 9.6;
+pub const SHAKE_AMPLITUDE_MAX: f32 = 256.0;
+pub const SHAKE_FREQUENCY_HZ_DEFAULT: f32 = 18.0;
+pub const SHAKE_FREQUENCY_HZ_MIN: f32 = 0.1;
+pub const SHAKE_FREQUENCY_HZ_MAX: f32 = 60.0;
+/// `1.0` reproduces the shipped linear fade-out; `0.0` never decays.
+pub const SHAKE_DECAY_DEFAULT: f32 = 1.0;
+pub const SHAKE_DECAY_MIN: f32 = 0.0;
+pub const SHAKE_DECAY_MAX: f32 = 1.0;
+/// Stable seed carried by the spec.  The evaluator converts it into a stable
+/// per-axis phase offset, so an old `effect: shake` (normalised to `0`) stays a
+/// valid deterministic seed instead of inventing randomness.
+///
+/// The seed crosses the WebView IPC boundary as a JSON number, so it stays well
+/// inside the JavaScript safe integer range (`<= 2^53 - 1`); `u32` keeps that
+/// guarantee in the type and in the generated schema.
+pub const SHAKE_SEED_DEFAULT: u32 = 0;
+pub const SHAKE_SEED_MAX: u32 = u32::MAX;
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScreenEffectSpec {
+    Flash {
+        #[serde(default = "default_flash_color")]
+        color: String,
+        #[serde(default = "default_flash_peak_alpha")]
+        peak_alpha: f32,
+    },
+    Shake {
+        #[serde(default = "default_shake_amplitude_x")]
+        amplitude_x: f32,
+        #[serde(default = "default_shake_amplitude_y")]
+        amplitude_y: f32,
+        #[serde(default = "default_shake_frequency_hz")]
+        frequency_hz: f32,
+        #[serde(default = "default_shake_decay")]
+        decay: f32,
+        #[serde(default = "default_shake_seed")]
+        seed: u32,
+    },
+}
+
+impl ScreenEffectSpec {
+    /// The shipped flash, used when content only wrote `effect: flash`.
+    pub fn legacy_flash() -> Self {
+        Self::Flash {
+            color: FLASH_COLOR_DEFAULT.to_owned(),
+            peak_alpha: FLASH_PEAK_ALPHA_DEFAULT,
+        }
+    }
+
+    /// The shipped shake, used when content only wrote `effect: shake`.
+    pub fn legacy_shake() -> Self {
+        Self::Shake {
+            amplitude_x: SHAKE_AMPLITUDE_X_DEFAULT,
+            amplitude_y: SHAKE_AMPLITUDE_Y_DEFAULT,
+            frequency_hz: SHAKE_FREQUENCY_HZ_DEFAULT,
+            decay: SHAKE_DECAY_DEFAULT,
+            seed: SHAKE_SEED_DEFAULT,
+        }
+    }
+}
+
+fn default_flash_color() -> String {
+    FLASH_COLOR_DEFAULT.to_owned()
+}
+
+fn default_flash_peak_alpha() -> f32 {
+    FLASH_PEAK_ALPHA_DEFAULT
+}
+
+fn default_shake_amplitude_x() -> f32 {
+    SHAKE_AMPLITUDE_X_DEFAULT
+}
+
+fn default_shake_amplitude_y() -> f32 {
+    SHAKE_AMPLITUDE_Y_DEFAULT
+}
+
+fn default_shake_frequency_hz() -> f32 {
+    SHAKE_FREQUENCY_HZ_DEFAULT
+}
+
+fn default_shake_decay() -> f32 {
+    SHAKE_DECAY_DEFAULT
+}
+
+fn default_shake_seed() -> u32 {
+    SHAKE_SEED_DEFAULT
+}
+
+/// Object-only mirror used by the custom effect deserializer; see
+/// [`BackgroundTransitionObject`] for why the mirror exists.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ScreenEffectObject {
+    Flash {
+        #[serde(default = "default_flash_color")]
+        color: String,
+        #[serde(default = "default_flash_peak_alpha")]
+        peak_alpha: f32,
+    },
+    Shake {
+        #[serde(default = "default_shake_amplitude_x")]
+        amplitude_x: f32,
+        #[serde(default = "default_shake_amplitude_y")]
+        amplitude_y: f32,
+        #[serde(default = "default_shake_frequency_hz")]
+        frequency_hz: f32,
+        #[serde(default = "default_shake_decay")]
+        decay: f32,
+        #[serde(default = "default_shake_seed")]
+        seed: u32,
+    },
+}
+
+impl ScreenEffectObject {
+    fn into_spec(self) -> ScreenEffectSpec {
+        match self {
+            Self::Flash { color, peak_alpha } => ScreenEffectSpec::Flash { color, peak_alpha },
+            Self::Shake {
+                amplitude_x,
+                amplitude_y,
+                frequency_hz,
+                decay,
+                seed,
+            } => ScreenEffectSpec::Shake {
+                amplitude_x,
+                amplitude_y,
+                frequency_hz,
+                decay,
+                seed,
+            },
+        }
+    }
+}
+
+struct ScreenEffectVisitor;
+
+impl<'de> Visitor<'de> for ScreenEffectVisitor {
+    type Value = ScreenEffectSpec;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a screen effect name (`flash` or `shake`) or a `{ type, ... }` object")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match value {
+            "flash" => Ok(ScreenEffectSpec::legacy_flash()),
+            "shake" => Ok(ScreenEffectSpec::legacy_shake()),
+            other => Err(E::unknown_variant(other, &["flash", "shake"])),
+        }
+    }
+
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        ScreenEffectObject::deserialize(MapAccessDeserializer::new(map))
+            .map(ScreenEffectObject::into_spec)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScreenEffectSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(ScreenEffectVisitor)
+    }
+}
+
+/// Schema-only view used on fields so the generated JSON Schema accepts both
+/// the already-authored one-word effect and the canonical object.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(untagged)]
+enum ScreenEffectSchema {
+    Legacy(LegacyScreenEffectName),
+    Canonical(ScreenEffectSpec),
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ScreenEffectKind {
-    Shake,
+enum LegacyScreenEffectName {
     Flash,
+    Shake,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1422,7 +1847,8 @@ pub enum TimelineEvent {
     ScreenEffect {
         id: String,
         at_ms: u64,
-        effect: ScreenEffectKind,
+        #[schemars(with = "ScreenEffectSchema")]
+        effect: ScreenEffectSpec,
         #[serde(default = "default_short_duration")]
         duration_ms: u64,
     },
@@ -1546,6 +1972,10 @@ pub struct WorldSnapshot {
     #[serde(default)]
     pub ui_motion_bindings: UiMotionBindings,
     pub persistent_effects: Vec<String>,
+    /// Stable curtain state.  Defaulted so every save written before the
+    /// curtain existed still deserialises as "no curtain".
+    #[serde(default)]
+    pub curtain: CurtainSnapshot,
 }
 
 impl Default for WorldSnapshot {
@@ -1558,8 +1988,21 @@ impl Default for WorldSnapshot {
             dialogue_ui_visible: true,
             ui_motion_bindings: UiMotionBindings::default(),
             persistent_effects: Vec::new(),
+            curtain: CurtainSnapshot::default(),
         }
     }
+}
+
+/// Persisted curtain: whether a curtain currently covers the world and with
+/// which fill.  Transition/duration/easing are deliberately absent because
+/// they are one-shot cue parameters, not saved state.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CurtainSnapshot {
+    #[serde(default)]
+    pub covered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<CurtainFill>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1693,10 +2136,13 @@ pub struct RuntimeUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct PresentationCue {
     pub cue_id: u64,
     pub gate: CueGate,
+    /// Flattened tagged kind.  `deny_unknown_fields` is deliberately absent:
+    /// serde does not support it together with a flattened field, and without
+    /// this the whole cue (including the legacy-string round-trip) could not be
+    /// deserialized at all.
     #[serde(flatten)]
     pub kind: PresentationCueKind,
 }
@@ -1714,7 +2160,8 @@ pub enum CueGate {
 pub enum PresentationCueKind {
     BackgroundTransition {
         background: Option<String>,
-        transition: BackgroundTransition,
+        #[serde(default)]
+        transition: BackgroundTransitionSpec,
         duration_ms: u64,
         easing: Easing,
     },
@@ -1740,8 +2187,19 @@ pub enum PresentationCueKind {
         easing: Easing,
     },
     ScreenEffect {
-        effect: ScreenEffectKind,
+        effect: ScreenEffectSpec,
         duration_ms: u64,
+    },
+    /// Cover or reveal the persistent curtain layer.  `fill` is the fill being
+    /// animated (the new fill on cover, the current fill on reveal) and is the
+    /// only part of a curtain cue the host needs to rebuild the layer.
+    CurtainTransition {
+        action: CurtainAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<CurtainFill>,
+        transition: CurtainTransitionSpec,
+        duration_ms: u64,
+        easing: Easing,
     },
     DialogueReveal {
         prompt_id: String,
@@ -1906,4 +2364,290 @@ impl Default for Settings {
 pub struct SaveSlotRequest {
     pub slot: String,
     pub thumbnail_data_url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_scene_node(yaml: &str) -> SceneNode {
+        let options = serde_saphyr::options! { strict_booleans: true };
+        serde_saphyr::from_str_with_options(yaml, options).expect("scene node must parse")
+    }
+
+    fn parse_timeline_event(yaml: &str) -> TimelineEvent {
+        let options = serde_saphyr::options! { strict_booleans: true };
+        serde_saphyr::from_str_with_options(yaml, options).expect("timeline event must parse")
+    }
+
+    #[test]
+    fn legacy_background_transitions_normalise_to_the_canonical_spec() {
+        let default = parse_scene_node("type: background\nnext: end\n");
+        assert!(matches!(
+            default,
+            SceneNode::Background {
+                transition: BackgroundTransitionSpec::CrossFade,
+                ..
+            }
+        ));
+
+        let cut = parse_scene_node("type: background\ntransition: cut\nnext: end\n");
+        assert!(matches!(
+            cut,
+            SceneNode::Background {
+                transition: BackgroundTransitionSpec::Cut,
+                ..
+            }
+        ));
+
+        let cross_fade = parse_scene_node("type: background\ntransition: cross_fade\nnext: end\n");
+        assert!(matches!(
+            cross_fade,
+            SceneNode::Background {
+                transition: BackgroundTransitionSpec::CrossFade,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn canonical_background_transition_objects_parse_with_defaults() {
+        let wipe = parse_scene_node(
+            "type: background\ntransition:\n  type: wipe\n  direction: left_to_right\nnext: end\n",
+        );
+        assert!(matches!(
+            wipe,
+            SceneNode::Background {
+                transition: BackgroundTransitionSpec::Wipe {
+                    direction: TransitionDirection::LeftToRight,
+                    softness,
+                },
+                ..
+            } if softness == TRANSITION_SOFTNESS_DEFAULT
+        ));
+
+        let push = parse_scene_node(
+            "type: background\ntransition: {type: push, direction: bottom_to_top, softness: 0.25}\nnext: end\n",
+        );
+        assert!(matches!(
+            push,
+            SceneNode::Background {
+                transition: BackgroundTransitionSpec::Push {
+                    direction: TransitionDirection::BottomToTop,
+                    softness,
+                },
+                ..
+            } if softness == 0.25
+        ));
+
+        let fade = parse_scene_node(
+            "type: background\ntransition: {type: fade_through_color, color: \"#11223344\"}\nnext: end\n",
+        );
+        assert!(matches!(
+            fade,
+            SceneNode::Background {
+                transition: BackgroundTransitionSpec::FadeThroughColor { color },
+                ..
+            } if color == "#11223344"
+        ));
+    }
+
+    #[test]
+    fn legacy_screen_effects_normalise_to_the_shipped_defaults() {
+        let flash = parse_scene_node("type: screen_effect\neffect: flash\nnext: end\n");
+        assert!(matches!(
+            flash,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Flash { color, peak_alpha },
+                ..
+            } if color == FLASH_COLOR_DEFAULT && peak_alpha == FLASH_PEAK_ALPHA_DEFAULT
+        ));
+
+        let shake = parse_scene_node("type: screen_effect\neffect: shake\nnext: end\n");
+        assert!(matches!(
+            shake,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Shake {
+                    amplitude_x,
+                    amplitude_y,
+                    frequency_hz,
+                    decay,
+                    seed,
+                },
+                ..
+            } if amplitude_x == SHAKE_AMPLITUDE_X_DEFAULT
+                && amplitude_y == SHAKE_AMPLITUDE_Y_DEFAULT
+                && frequency_hz == SHAKE_FREQUENCY_HZ_DEFAULT
+                && decay == SHAKE_DECAY_DEFAULT
+                && seed == SHAKE_SEED_DEFAULT
+        ));
+    }
+
+    #[test]
+    fn canonical_screen_effect_objects_parse_with_defaults() {
+        let flash = parse_scene_node(
+            "type: screen_effect\neffect: {type: flash, color: \"#FF0000\"}\nnext: end\n",
+        );
+        assert!(matches!(
+            flash,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Flash { color, peak_alpha },
+                ..
+            } if color == "#FF0000" && peak_alpha == FLASH_PEAK_ALPHA_DEFAULT
+        ));
+
+        let shake = parse_scene_node(
+            "type: screen_effect\neffect: {type: shake, amplitude_x: 18.0, amplitude_y: 8.0, frequency_hz: 22.0, decay: 0.75, seed: 42}\nnext: end\n",
+        );
+        assert!(matches!(
+            shake,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Shake {
+                    amplitude_x,
+                    amplitude_y,
+                    frequency_hz,
+                    decay,
+                    seed,
+                },
+                ..
+            } if amplitude_x == 18.0
+                && amplitude_y == 8.0
+                && frequency_hz == 22.0
+                && decay == 0.75
+                && seed == 42
+        ));
+    }
+
+    #[test]
+    fn timeline_events_share_the_canonical_screen_effect_spec() {
+        let legacy = parse_timeline_event(
+            "type: screen_effect\nid: parity_flash\nat_ms: 320\neffect: flash\nduration_ms: 120\n",
+        );
+        assert!(matches!(
+            legacy,
+            TimelineEvent::ScreenEffect {
+                at_ms: 320,
+                effect: ScreenEffectSpec::Flash { color, peak_alpha },
+                duration_ms: 120,
+                ..
+            } if color == FLASH_COLOR_DEFAULT && peak_alpha == FLASH_PEAK_ALPHA_DEFAULT
+        ));
+
+        let canonical = parse_timeline_event(
+            "type: screen_effect\nid: parity_shake\nat_ms: 320\neffect: {type: shake, seed: 42}\nduration_ms: 200\n",
+        );
+        assert!(matches!(
+            canonical,
+            TimelineEvent::ScreenEffect {
+                effect: ScreenEffectSpec::Shake { amplitude_x, seed, .. },
+                ..
+            } if amplitude_x == SHAKE_AMPLITUDE_X_DEFAULT && seed == 42
+        ));
+    }
+
+    #[test]
+    fn legacy_world_snapshots_default_to_no_curtain() {
+        let yaml = "background: null\nsprites: {}\ncamera: {x: 0.0, y: 0.0, zoom: 1.0}\ndialogue_ui_visible: true\npersistent_effects: []\n";
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let world: WorldSnapshot =
+            serde_saphyr::from_str_with_options(yaml, options).expect("legacy world must load");
+        assert!(!world.curtain.covered);
+        assert_eq!(world.curtain.fill, None);
+        assert_eq!(world.curtain, CurtainSnapshot::default());
+    }
+
+    #[test]
+    fn curtain_snapshots_keep_only_stable_state() {
+        let snapshot = CurtainSnapshot {
+            covered: true,
+            fill: Some(CurtainFill::Color {
+                color: "#000000".to_owned(),
+            }),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert_eq!(json, r##"{"covered":true,"fill":{"color":"#000000"}}"##);
+        assert_eq!(
+            serde_json::from_str::<CurtainSnapshot>(&json).unwrap(),
+            snapshot
+        );
+
+        let asset = CurtainSnapshot {
+            covered: true,
+            fill: Some(CurtainFill::Asset {
+                asset: "gui.dialogue_box".to_owned(),
+            }),
+        };
+        let json = serde_json::to_string(&asset).unwrap();
+        assert_eq!(
+            json,
+            r#"{"covered":true,"fill":{"asset":"gui.dialogue_box"}}"#
+        );
+    }
+
+    #[test]
+    fn curtain_fill_rejects_ambiguous_and_empty_objects() {
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let both: Result<SceneNode, _> = serde_saphyr::from_str_with_options(
+            "type: curtain\naction: cover\nfill: {color: \"#000000\", asset: gui.dialogue_box}\ntransition: {type: fade}\nnext: end\n",
+            options,
+        );
+        assert!(both.unwrap_err().to_string().contains("只能"));
+
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let empty: Result<SceneNode, _> = serde_saphyr::from_str_with_options(
+            "type: curtain\naction: cover\nfill: {}\ntransition: {type: fade}\nnext: end\n",
+            options,
+        );
+        assert!(empty.unwrap_err().to_string().contains("必须"));
+
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let unknown: Result<SceneNode, _> = serde_saphyr::from_str_with_options(
+            "type: curtain\naction: cover\nfill: {tint: \"#000000\"}\ntransition: {type: fade}\nnext: end\n",
+            options,
+        );
+        assert!(unknown.unwrap_err().to_string().contains("color"));
+
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let asset: SceneNode = serde_saphyr::from_str_with_options(
+            "type: curtain\naction: cover\nfill: {asset: gui.dialogue_box}\ntransition: {type: split_vertical}\nnext: end\n",
+            options,
+        )
+        .unwrap();
+        assert!(matches!(
+            asset,
+            SceneNode::Curtain {
+                fill: Some(CurtainFill::Asset { .. }),
+                transition: CurtainTransitionSpec::SplitVertical,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shake_seed_stays_in_the_javascript_safe_integer_range() {
+        // Number.MAX_SAFE_INTEGER; the wire is JSON, so the seed must never
+        // exceed what a WebView can represent exactly.
+        assert!(u64::from(SHAKE_SEED_MAX) < 9_007_199_254_740_991);
+
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let max: SceneNode = serde_saphyr::from_str_with_options(
+            "type: screen_effect\neffect: {type: shake, seed: 4294967295}\nnext: end\n",
+            options,
+        )
+        .unwrap();
+        assert!(matches!(
+            max,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Shake { seed, .. },
+                ..
+            } if seed == SHAKE_SEED_MAX
+        ));
+
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let overflow: Result<SceneNode, _> = serde_saphyr::from_str_with_options(
+            "type: screen_effect\neffect: {type: shake, seed: 4294967296}\nnext: end\n",
+            options,
+        );
+        assert!(overflow.is_err());
+    }
 }

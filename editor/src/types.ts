@@ -4,6 +4,22 @@ export type AssetKind =
 import type { WireAssetInspection } from "../../shared/generated/WireAssetInspection";
 import type { WireAssetMetadata } from "../../shared/generated/WireAssetMetadata";
 
+export type {
+  BackgroundTransitionSpec,
+  CurtainAction,
+  CurtainFill,
+  CurtainTransitionSpec,
+  ScreenEffectSpec,
+  TransitionDirection,
+} from "@vectspace/presentation-core/types";
+import type {
+  BackgroundTransitionSpec,
+  CurtainAction,
+  CurtainFill,
+  CurtainTransitionSpec,
+  ScreenEffectSpec,
+} from "@vectspace/presentation-core/types";
+
 /** Host-verified metadata returned before an import is staged. */
 export type AssetInspection = WireAssetInspection;
 export type AssetMetadata = WireAssetMetadata;
@@ -259,7 +275,23 @@ interface AwaitedNode extends NextNode {
 export interface BackgroundNode extends AwaitedNode {
   type: "background";
   background: string | null;
-  transition: "cut" | "cross_fade";
+  /** Canonical transition normalised by the Rust loader. */
+  transition: BackgroundTransitionSpec;
+  easing: Easing;
+}
+
+/**
+ * Persistent curtain layer above the world and below screen effects.
+ *
+ * `cover` draws the authored fill; `reveal` hides whatever the current
+ * curtain shows.  Only the stable cover/fill are saved in the snapshot, so
+ * `fill` is authored on `cover` nodes and must stay absent on `reveal`.
+ */
+export interface CurtainNode extends AwaitedNode {
+  type: "curtain";
+  action: CurtainAction;
+  fill?: CurtainFill | null;
+  transition: CurtainTransitionSpec;
   easing: Easing;
 }
 
@@ -434,7 +466,7 @@ export type TimelineEvent =
       type: "screen_effect";
       id: string;
       at_ms: number;
-      effect: "shake" | "flash";
+      effect: ScreenEffectSpec;
       duration_ms: number;
     };
 
@@ -463,7 +495,8 @@ export interface CameraNode extends AwaitedNode {
 
 export interface ScreenEffectNode extends AwaitedNode {
   type: "screen_effect";
-  effect: "shake" | "flash";
+  /** Canonical parameterised effect normalised by the Rust loader. */
+  effect: ScreenEffectSpec;
 }
 
 export interface DialogueUiNode extends NextNode {
@@ -532,6 +565,7 @@ export interface EndNode {
 
 export type SceneNode =
   | BackgroundNode
+  | CurtainNode
   | SpriteNode
   | ClearNode
   | SayNode

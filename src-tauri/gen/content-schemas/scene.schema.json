@@ -36,11 +36,108 @@
         "stop"
       ]
     },
-    "BackgroundTransition": {
-      "type": "string",
-      "enum": [
-        "cut",
-        "cross_fade"
+    "BackgroundTransitionSchema": {
+      "description": "Schema-only view used on fields so the generated JSON Schema accepts both\nthe already-authored one-word form and the canonical object.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LegacyBackgroundTransitionName"
+        },
+        {
+          "$ref": "#/$defs/BackgroundTransitionSpec"
+        }
+      ]
+    },
+    "BackgroundTransitionSpec": {
+      "description": "Canonical background transition.\n\nLegacy one-word transitions keep working: the loader accepts\n`transition: cut` / `transition: cross_fade` and normalises them into this\nshape, so cues, hosts and generated schemas only ever observe the canonical\nform and never need a compatibility branch.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cut"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cross_fade"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "color": {
+              "description": "`#RRGGBB` or `#RRGGBBAA`.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "fade_through_color"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "color"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/TransitionDirection"
+            },
+            "softness": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "wipe"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/TransitionDirection"
+            },
+            "softness": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "push"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction"
+          ]
+        }
       ]
     },
     "ButtonClickAction": {
@@ -392,6 +489,104 @@
         "block"
       ]
     },
+    "CurtainAction": {
+      "description": "Presentation action of a persistent curtain layer.",
+      "type": "string",
+      "enum": [
+        "cover",
+        "reveal"
+      ]
+    },
+    "CurtainFill": {
+      "description": "Fill of a curtain: either a solid colour or a `gui` asset.\n\nThe custom deserializer rejects an object that names both fills (ambiguous)\nor neither, instead of silently accepting the first untagged variant.  The\nschema mirrors that rule through `deny_unknown_fields`, so a schema-only\nvalidator rejects `{color, asset}` exactly like the loader does.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "color": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "color"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "asset"
+          ]
+        }
+      ]
+    },
+    "CurtainTransitionSpec": {
+      "description": "Open/close animation of a curtain.  These parameters only ever travel in a\npresentation cue; the saved curtain state stores the stable cover/fill.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fade"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/TransitionDirection"
+            },
+            "type": {
+              "type": "string",
+              "const": "wipe"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "split_horizontal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "split_vertical"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
     "DialogueMode": {
       "type": "string",
       "enum": [
@@ -406,6 +601,20 @@
         "ease_in",
         "ease_out",
         "ease_in_out"
+      ]
+    },
+    "LegacyBackgroundTransitionName": {
+      "type": "string",
+      "enum": [
+        "cut",
+        "cross_fade"
+      ]
+    },
+    "LegacyScreenEffectName": {
+      "type": "string",
+      "enum": [
+        "flash",
+        "shake"
       ]
     },
     "LiteralOperand": {
@@ -581,8 +790,10 @@
               "type": "string"
             },
             "transition": {
-              "$ref": "#/$defs/BackgroundTransition",
-              "default": "cross_fade"
+              "$ref": "#/$defs/BackgroundTransitionSchema",
+              "default": {
+                "type": "cross_fade"
+              }
             },
             "type": {
               "type": "string",
@@ -1311,7 +1522,7 @@
               "minimum": 0
             },
             "effect": {
-              "$ref": "#/$defs/ScreenEffectKind"
+              "$ref": "#/$defs/ScreenEffectSchema"
             },
             "next": {
               "type": "string"
@@ -1325,6 +1536,56 @@
           "required": [
             "type",
             "effect",
+            "next"
+          ]
+        },
+        {
+          "description": "A persistent curtain layer drawn above the world and below screen\neffects.  `cover` requires a fill; `reveal` closes the current curtain.\nOnly the stable cover/fill land in the snapshot, the transition\nparameters travel exclusively in the emitted cue.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/CurtainAction"
+            },
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 500,
+              "minimum": 0
+            },
+            "easing": {
+              "$ref": "#/$defs/Easing",
+              "default": "ease_in_out"
+            },
+            "fill": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CurtainFill"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "next": {
+              "type": "string"
+            },
+            "transition": {
+              "$ref": "#/$defs/CurtainTransitionSpec"
+            },
+            "type": {
+              "type": "string",
+              "const": "curtain"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "action",
+            "transition",
             "next"
           ]
         },
@@ -1702,11 +1963,80 @@
         }
       ]
     },
-    "ScreenEffectKind": {
-      "type": "string",
-      "enum": [
-        "shake",
-        "flash"
+    "ScreenEffectSchema": {
+      "description": "Schema-only view used on fields so the generated JSON Schema accepts both\nthe already-authored one-word effect and the canonical object.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LegacyScreenEffectName"
+        },
+        {
+          "$ref": "#/$defs/ScreenEffectSpec"
+        }
+      ]
+    },
+    "ScreenEffectSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "color": {
+              "type": "string",
+              "default": "#FFFFFF"
+            },
+            "peak_alpha": {
+              "type": "number",
+              "format": "float",
+              "default": 0.8799999952316284
+            },
+            "type": {
+              "type": "string",
+              "const": "flash"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amplitude_x": {
+              "type": "number",
+              "format": "float",
+              "default": 16.0
+            },
+            "amplitude_y": {
+              "type": "number",
+              "format": "float",
+              "default": 9.600000381469727
+            },
+            "decay": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0
+            },
+            "frequency_hz": {
+              "type": "number",
+              "format": "float",
+              "default": 18.0
+            },
+            "seed": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 0,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "shake"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
       ]
     },
     "SpriteAction": {
@@ -1816,7 +2146,7 @@
               "minimum": 0
             },
             "effect": {
-              "$ref": "#/$defs/ScreenEffectKind"
+              "$ref": "#/$defs/ScreenEffectSchema"
             },
             "id": {
               "type": "string"
@@ -2041,6 +2371,16 @@
             "type"
           ]
         }
+      ]
+    },
+    "TransitionDirection": {
+      "description": "One of the four edge directions shared by `wipe` and `push` transitions.",
+      "type": "string",
+      "enum": [
+        "left_to_right",
+        "right_to_left",
+        "top_to_bottom",
+        "bottom_to_top"
       ]
     },
     "UiMotionSlot": {

@@ -25,6 +25,12 @@ export interface SceneCanvasHandle {
   skipCurrentPresentation(): boolean;
   cancelCurrentPresentation(): void;
   applySnapshotImmediately(snapshot: RuntimeSnapshot): Promise<void>;
+  /** Covers the canvas with the host-only session curtain. */
+  coverSession(): Promise<void>;
+  /** Reveals the session curtain after the replacement is on screen. */
+  revealSession(): Promise<void>;
+  /** Covers, hard-aligns the snapshot and reveals again (session switch). */
+  applySessionSnapshot(snapshot: RuntimeSnapshot): Promise<void>;
   isPresentationCurrent(updateId: string): boolean;
 }
 
@@ -213,6 +219,11 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
           controller?.cancelCurrentPresentation(),
         applySnapshotImmediately: (snapshot) =>
           controller?.applySnapshotImmediately(snapshot, assets) ??
+          Promise.resolve(),
+        coverSession: () => controller?.coverSession() ?? Promise.resolve(),
+        revealSession: () => controller?.revealSession() ?? Promise.resolve(),
+        applySessionSnapshot: (snapshot) =>
+          controller?.applySessionSnapshot(snapshot, assets) ??
           Promise.resolve(),
         isPresentationCurrent: (updateId) =>
           controller?.isPresentationCurrent(updateId) ?? false,

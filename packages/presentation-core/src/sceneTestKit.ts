@@ -41,6 +41,7 @@ export class MemoryNode implements SceneNodeLike {
   width = 0;
   height = 0;
   sortableChildren = false;
+  mask: SceneNodeLike | null = null;
   readonly position = new MemoryPoint();
   readonly pivot = new MemoryPoint();
   readonly scale = new MemoryPoint();
@@ -144,6 +145,12 @@ export class MemoryGraphics extends MemoryNode implements SceneGraphicsLike {
 
   fill(color: number): SceneGraphicsLike {
     this.fills.push(color);
+    return this;
+  }
+
+  clear(): SceneGraphicsLike {
+    this.fills = [];
+    this.rects = [];
     return this;
   }
 }

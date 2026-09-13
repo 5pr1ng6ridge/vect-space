@@ -976,14 +976,21 @@ describe("TimelineSession events", () => {
             type: "screen_effect",
             id: "flash",
             at_ms: 100,
-            effect: "flash",
+            effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
             duration_ms: 400,
           },
           {
             type: "screen_effect",
             id: "shake",
             at_ms: 200,
-            effect: "shake",
+            effect: {
+              type: "shake",
+              amplitude_x: 16,
+              amplitude_y: 9.6,
+              frequency_hz: 18,
+              decay: 1,
+              seed: 0,
+            },
             duration_ms: 400,
           },
         ],
@@ -1009,14 +1016,14 @@ describe("TimelineSession events", () => {
             type: "screen_effect",
             id: "early",
             at_ms: 100,
-            effect: "flash",
+            effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
             duration_ms: 900,
           },
           {
             type: "screen_effect",
             id: "late",
             at_ms: 500,
-            effect: "flash",
+            effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
             duration_ms: 400,
           },
         ],
@@ -1039,21 +1046,42 @@ describe("TimelineSession events", () => {
             type: "screen_effect",
             id: "shake-a",
             at_ms: 100,
-            effect: "shake",
+            effect: {
+              type: "shake",
+              amplitude_x: 16,
+              amplitude_y: 9.6,
+              frequency_hz: 18,
+              decay: 1,
+              seed: 0,
+            },
             duration_ms: 900,
           },
           {
             type: "screen_effect",
             id: "shake-b",
             at_ms: 100,
-            effect: "shake",
+            effect: {
+              type: "shake",
+              amplitude_x: 16,
+              amplitude_y: 9.6,
+              frequency_hz: 18,
+              decay: 1,
+              seed: 0,
+            },
             duration_ms: 600,
           },
           {
             type: "screen_effect",
             id: "shake-c",
             at_ms: 500,
-            effect: "shake",
+            effect: {
+              type: "shake",
+              amplitude_x: 16,
+              amplitude_y: 9.6,
+              frequency_hz: 18,
+              decay: 1,
+              seed: 0,
+            },
             duration_ms: 100,
           },
         ],
@@ -1063,18 +1091,18 @@ describe("TimelineSession events", () => {
     });
     // Equal starts: the later array entry reaches the surface.
     await harness.session.seek(300, "scrub");
-    expect(harness.surface.effects.at(-1)?.shake).toEqual({
+    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({
       startMs: 100,
       durationMs: 600,
     });
     // A later start supersedes; when it ends the early one is active again.
     await harness.session.seek(550, "scrub");
-    expect(harness.surface.effects.at(-1)?.shake).toEqual({
+    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({
       startMs: 500,
       durationMs: 100,
     });
     await harness.session.seek(800, "scrub");
-    expect(harness.surface.effects.at(-1)?.shake).toEqual({
+    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({
       startMs: 100,
       durationMs: 900,
     });

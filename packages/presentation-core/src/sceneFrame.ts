@@ -8,7 +8,7 @@
  * makes scrubbing deterministic.
  */
 
-import { applyEasing } from "./timeline";
+import { evaluateFlashAlpha, evaluateShakeOffset } from "./sceneEffects";
 import {
   evaluateTimelineFrame,
   type ActiveScreenEffect,
@@ -383,25 +383,23 @@ export function composeWorldTransform(
   };
 }
 
-/** Peak alpha of a screen flash, kept from the shipped game visuals. */
-export const FLASH_PEAK_ALPHA = 0.88;
-const SHAKE_STRENGTH = 16;
-
 /**
  * Flash alpha at one playhead position.
  *
- * Screen effects are events rather than world state, so playback and scrubbing
- * share one derivation: the same timeline position always yields the same
- * alpha, and the shipped `ease_out` decay is preserved.
+ * The formula lives in the shared pure effect evaluator, so both hosts derive
+ * the same alpha from the same playhead and the authored spec.
  */
 export function flashAlpha(
   elapsedMs: number,
   flash: ActiveScreenEffect | null,
 ): number {
-  if (flash === null) return 0;
-  const progress = progressOf(elapsedMs, flash);
-  if (isNeutral(progress)) return 0;
-  return FLASH_PEAK_ALPHA * (1 - applyEasing(progress, "ease_out"));
+  if (flash === null || flash.effect.type !== "flash") return 0;
+  return evaluateFlashAlpha(
+    flash.effect,
+    elapsedMs,
+    flash.startMs,
+    flash.durationMs,
+  );
 }
 
 /** Shake offset at one playhead position, composed into the camera transform. */
@@ -409,32 +407,13 @@ export function shakeOffset(
   elapsedMs: number,
   shake: ActiveScreenEffect | null,
 ): { x: number; y: number } {
-  if (shake === null) return { x: 0, y: 0 };
-  const progress = progressOf(elapsedMs, shake);
-  if (isNeutral(progress)) return { x: 0, y: 0 };
-  const strength = (1 - progress) * SHAKE_STRENGTH;
-  return {
-    x: Math.sin(progress * Math.PI * 18) * strength,
-    y: Math.cos(progress * Math.PI * 22) * strength * 0.6,
-  };
-}
-
-/**
- * Progress of an active effect.
- *
- * A position outside the effect's window is neutral, so a caller that passes a
- * stale position can never apply an out-of-window flash or shake.
- */
-function progressOf(elapsedMs: number, effect: ActiveScreenEffect): number {
-  if (elapsedMs < effect.startMs) return Number.NaN;
-  const duration = Math.max(1, effect.durationMs);
-  const progress = (elapsedMs - effect.startMs) / duration;
-  if (progress >= 1) return Number.NaN;
-  return Math.max(0, progress);
-}
-
-function isNeutral(progress: number): boolean {
-  return Number.isNaN(progress);
+  if (shake === null || shake.effect.type !== "shake") return { x: 0, y: 0 };
+  return evaluateShakeOffset(
+    shake.effect,
+    elapsedMs,
+    shake.startMs,
+    shake.durationMs,
+  );
 }
 
 /**

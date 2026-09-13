@@ -20,9 +20,9 @@ use vectspace_core::{
     content::ContentCatalog,
     model::{
         AssetKind, ButtonTemplate, ChapterMapDefinition, ChapterMapReplay, ChapterMapReveal,
-        ChoiceSnapshot, ContentManifest, ImageAnimationDefinition, ResolvedAsset, SceneDefinition,
-        SceneNode, SpriteActionDefinition, StoryLocation, TimelineEvent, TimelineTrack,
-        UiMotionPreset, VariableMap,
+        ChoiceSnapshot, ContentManifest, CurtainFill, ImageAnimationDefinition, ResolvedAsset,
+        SceneDefinition, SceneNode, SpriteActionDefinition, StoryLocation, TimelineEvent,
+        TimelineTrack, UiMotionPreset, VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
@@ -3756,6 +3756,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::Sfx { next, .. }
         | SceneNode::Camera { next, .. }
         | SceneNode::ScreenEffect { next, .. }
+        | SceneNode::Curtain { next, .. }
         | SceneNode::DialogueUi { next, .. }
         | SceneNode::UiMotionSet { next, .. }
         | SceneNode::UiMotionPlay { next, .. }
@@ -3800,6 +3801,9 @@ fn is_immediate(node: &SceneNode) -> bool {
             await_completion, ..
         }
         | SceneNode::ScreenEffect {
+            await_completion, ..
+        }
+        | SceneNode::Curtain {
             await_completion, ..
         }
         | SceneNode::DialogueUi {
@@ -3902,6 +3906,12 @@ fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
             paper: Some(id), ..
         } => {
             output.insert(id.clone());
+        }
+        SceneNode::Curtain {
+            fill: Some(CurtainFill::Asset { asset }),
+            ..
+        } => {
+            output.insert(asset.clone());
         }
         SceneNode::Action { .. } => {}
         SceneNode::Timeline { tracks, events, .. } => {
@@ -4491,5 +4501,49 @@ mod tests {
 
         assert!(recover_pending_transactions(root).is_err());
         assert!(transaction_root.exists());
+    }
+
+    #[test]
+    fn curtain_gui_fill_assets_are_collected() {
+        use vectspace_core::model::{CurtainAction, CurtainFill, CurtainTransitionSpec, Easing};
+
+        let curtain = |fill: Option<CurtainFill>| SceneNode::Curtain {
+            action: CurtainAction::Cover,
+            fill,
+            transition: CurtainTransitionSpec::Fade,
+            duration_ms: 300,
+            easing: Easing::EaseInOut,
+            await_completion: true,
+            next: "end".to_owned(),
+        };
+
+        // A gui fill is a real asset reference; the unused-asset diagnostic
+        // and the editor's delete protection must see it.
+        let mut assets = std::collections::BTreeSet::new();
+        collect_node_assets(
+            &curtain(Some(CurtainFill::Asset {
+                asset: "gui.curtain".to_owned(),
+            })),
+            &mut assets,
+        );
+        assert_eq!(
+            assets.into_iter().collect::<Vec<_>>(),
+            vec!["gui.curtain".to_owned()]
+        );
+
+        // A colour fill references no asset at all.
+        let mut assets = std::collections::BTreeSet::new();
+        collect_node_assets(
+            &curtain(Some(CurtainFill::Color {
+                color: "#000000".to_owned(),
+            })),
+            &mut assets,
+        );
+        assert!(assets.is_empty());
+
+        // A reveal carries no fill and therefore no reference either.
+        let mut assets = std::collections::BTreeSet::new();
+        collect_node_assets(&curtain(None), &mut assets);
+        assert!(assets.is_empty());
     }
 }
