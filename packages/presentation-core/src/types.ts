@@ -442,6 +442,12 @@ export interface ChapterMapHotspotSnapshot {
   z: number;
   asset: string | null;
   completed: boolean;
+  /**
+   * Resolved enterability.  A hotspot the author marked as always replayable
+   * stays enterable before the chapter is reached, so the room page must not
+   * present it as unreached.
+   */
+  replayable?: boolean;
 }
 
 export interface ChapterMapSnapshot {

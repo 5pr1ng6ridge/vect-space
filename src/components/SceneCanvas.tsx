@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { PresentationController } from "../engine/presentation";
+import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
 import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import type {
@@ -43,11 +44,6 @@ interface SceneCanvasProps {
   uiMotionHost: UiMotionHost;
 }
 
-interface PresentationSession {
-  controller: PresentationController;
-  initialized: Promise<PresentationController>;
-}
-
 export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
   function SceneCanvas(
     {
@@ -70,39 +66,50 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const initialSettingsRef = useRef(settings);
     const diagnosticRef = useRef(onDiagnostic);
-    const sessionRef = useRef<PresentationSession | null>(null);
-    const destroyTimerRef = useRef<number | null>(null);
+    const uiMotionHostRef = useRef(uiMotionHost);
+    const lifecycleRef = useRef<DeferredSession<PresentationController> | null>(
+      null,
+    );
     const [controller, setController] = useState<PresentationController | null>(
       null,
     );
     const [initializationFailed, setInitializationFailed] = useState(false);
 
     useEffect(() => {
-      if (destroyTimerRef.current !== null) {
-        window.clearTimeout(destroyTimerRef.current);
-        destroyTimerRef.current = null;
-      }
+      diagnosticRef.current = onDiagnostic;
+      uiMotionHostRef.current = uiMotionHost;
+    }, [onDiagnostic, uiMotionHost]);
+
+    useEffect(() => {
       const canvas = canvasRef.current;
       if (canvas === null) {
         return;
       }
-      let session = sessionRef.current;
-      if (session === null) {
-        const next = new PresentationController(
-          canvas,
-          initialSettingsRef.current,
-          (message) => diagnosticRef.current(message),
-          uiMotionHost,
-        );
-        session = {
-          controller: next,
-          initialized: next.init().then(() => next),
-        };
-        sessionRef.current = session;
+      const existing = lifecycleRef.current;
+      if (existing === null) {
+        lifecycleRef.current = new DeferredSession<PresentationController>({
+          create: () => {
+            const controller = new PresentationController(
+              canvas,
+              initialSettingsRef.current,
+              (message: string) => diagnosticRef.current(message),
+              uiMotionHostRef.current,
+            );
+            return { session: controller, initialized: controller.init() };
+          },
+          dispose: (controller) => controller.destroy(),
+        });
       }
-      const currentSession = session;
+      const lifecycle = lifecycleRef.current;
+      if (lifecycle === null) {
+        return;
+      }
+      // Strict Mode immediately re-runs this effect: the shared lifecycle
+      // defers destruction by one task so that second setup reclaims the same
+      // initialized WebGL application instead of tearing it down.
+      const handle = lifecycle.acquire();
       let active = true;
-      void currentSession.initialized
+      void handle.initialized
         .then((initializedController) => {
           if (active) {
             setController(initializedController);
@@ -120,23 +127,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       return () => {
         active = false;
         setController(null);
-        // Strict Mode immediately re-runs this effect. Deferring destruction lets
-        // that second setup reclaim the same initialized WebGL application.
-        destroyTimerRef.current = window.setTimeout(() => {
-          if (sessionRef.current !== currentSession) {
-            return;
-          }
-          void currentSession.initialized
-            .then(
-              (initializedController) => initializedController.destroy(),
-              () => undefined,
-            )
-            .finally(() => {
-              if (sessionRef.current === currentSession) {
-                sessionRef.current = null;
-              }
-            });
-        }, 0);
+        lifecycle.release();
       };
     }, [uiMotionHost]);
 

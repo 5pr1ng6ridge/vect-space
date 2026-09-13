@@ -32,10 +32,18 @@ import {
 import {
   DESIGN_HEIGHT,
   DESIGN_WIDTH,
-  type PreviewObjectFrame,
-  type TimelinePreviewFrame,
-} from "@vectspace/presentation-core/timeline-preview";
-import { SceneSurface } from "@vectspace/presentation-core/scene-surface";
+  type SceneObjectFrame,
+  type SceneFrame,
+} from "@vectspace/presentation-core/scene-frame";
+import type { SceneSurface } from "@vectspace/presentation-core/scene-surface";
+import type { TimelineSession } from "@vectspace/presentation-core/timeline-session";
+import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
+import {
+  createEditorTimelinePreview,
+  disposeEditorTimelinePreview,
+  type EditorPreviewEnvironment,
+  type EditorTimelinePreview,
+} from "./timelinePreview";
 import { buildAnimationMap } from "../imageAnimationMap";
 import { editorImageSource } from "../imageAnimationMap";
 import { AnimatedImage } from "./AnimatedImage";
@@ -58,6 +66,11 @@ interface TimelineWorkspaceProps {
   onError(message: string): void;
   /** Opaque imports that are still staged, forwarded to the Rust preview. */
   importTokens: string[];
+  /**
+   * Test seam forwarded to the shared editor preview factory; production
+   * mounts leave it undefined and get the real Pixi kit and media adapter.
+   */
+  previewEnvironment?: EditorPreviewEnvironment;
 }
 
 type Tool = "select" | "camera";
@@ -86,6 +99,7 @@ export function TimelineWorkspace({
   onRedo,
   onError,
   importTokens,
+  previewEnvironment,
 }: TimelineWorkspaceProps): ReactElement {
   const [localNode, setLocalNode] = useState(node);
   const [playhead, setPlayhead] = useState(0);
@@ -103,7 +117,7 @@ export function TimelineWorkspace({
     useState<TimelineSelection | null>(null);
   const [selectedEvent, setSelectedEvent] =
     useState<TimelineEventSelection | null>(null);
-  const [frame, setFrame] = useState<TimelinePreviewFrame | null>(null);
+  const [frame, setFrame] = useState<SceneFrame | null>(null);
   const [preview, setPreview] = useState<Extract<
     BuildNodePreviewResult,
     { status: "ready" }
@@ -116,7 +130,7 @@ export function TimelineWorkspace({
     { status: "needs_choice" }
   > | null>(null);
   const [pendingTransforms, setPendingTransforms] = useState<
-    Record<string, Partial<PreviewObjectFrame>>
+    Record<string, Partial<SceneObjectFrame>>
   >({});
   const [pendingCamera, setPendingCamera] = useState<{
     x: number;
@@ -128,12 +142,11 @@ export function TimelineWorkspace({
   const [timelineHeight, setTimelineHeight] = useState(320);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const surfaceRef = useRef<SceneSurface | null>(null);
+  const sessionRef = useRef<TimelineSession | null>(null);
   const surfaceReadyRef = useRef<Promise<void>>(Promise.resolve());
-  const surfaceSessionRef = useRef<{
-    surface: SceneSurface;
-    initialized: Promise<void>;
-  } | null>(null);
-  const surfaceDestroyTimerRef = useRef<number | null>(null);
+  const diagnosticRef = useRef<(message: string) => void>(() => undefined);
+  const previewLifecycleRef =
+    useRef<DeferredSession<EditorTimelinePreview> | null>(null);
   const contextRequestRef = useRef(0);
   const gestureCancelRef = useRef<(() => void) | null>(null);
   const parentNodeCommitRef = useRef<TimelineNode | null>(null);
@@ -163,7 +176,7 @@ export function TimelineWorkspace({
     ? newButtonInstanceId
     : (buttonInstanceIds[0] ?? "");
 
-  const handlePreviewFrame = useCallback((next: TimelinePreviewFrame): void => {
+  const handlePreviewFrame = useCallback((next: SceneFrame): void => {
     // The Pixi preview owns the running clock. Mirror every emitted frame so
     // the visible ruler, keyboard playback and authoring operations all use
     // the exact same playhead.
@@ -213,29 +226,50 @@ export function TimelineWorkspace({
   );
 
   useEffect(() => {
+    diagnosticRef.current = handleDiagnostic;
+  }, [handleDiagnostic]);
+
+  useEffect(() => {
+    // Frame lists are a context dependency: re-resolving assets never restarts
+    // a loop whose asset did not change.
+    sessionRef.current?.setAnimations(animationMap);
+  }, [animationMap]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (canvas === null) return;
-    if (surfaceDestroyTimerRef.current !== null) {
-      window.clearTimeout(surfaceDestroyTimerRef.current);
-      surfaceDestroyTimerRef.current = null;
+    const existing = previewLifecycleRef.current;
+    if (existing === null) {
+      previewLifecycleRef.current = new DeferredSession<EditorTimelinePreview>({
+        create: () => {
+          const created = createEditorTimelinePreview(
+            canvas,
+            (message: string) => diagnosticRef.current(message),
+            previewEnvironment,
+          );
+          return {
+            session: created.preview,
+            initialized: created.initialized,
+          };
+        },
+        dispose: (preview) => disposeEditorTimelinePreview(preview),
+      });
     }
-    let session = surfaceSessionRef.current;
-    if (session === null) {
-      const next = new SceneSurface(
-        canvas,
-        handleDiagnostic,
-        handlePreviewFrame,
-      );
-      session = { surface: next, initialized: next.init() };
-      surfaceSessionRef.current = session;
-    }
-    const currentSession = session;
-    const surface = currentSession.surface;
-    surface.setOnFrame(handlePreviewFrame);
-    surface.setOnPlayingChange(setPlaying);
-    surfaceRef.current = surface;
+    const lifecycle = previewLifecycleRef.current;
+    if (lifecycle === null) return;
+    // One shared surface + session per canvas. React Strict Mode immediately
+    // probes effects with a setup/cleanup/setup cycle, so disposal is deferred
+    // by one task and the second setup reclaims the same initialized WebGL
+    // application instead of tearing it down; on a real unmount the deferred
+    // disposal releases objects, media, listeners and audio.
+    const handle = lifecycle.acquire();
+    const preview = handle.session;
+    preview.session.setFrameListener(handlePreviewFrame);
+    preview.session.setPlayingListener(setPlaying);
+    surfaceRef.current = preview.surface;
+    sessionRef.current = preview.session;
     let active = true;
-    const ready = currentSession.initialized;
+    const ready = handle.initialized.then(() => undefined);
     surfaceReadyRef.current = ready;
     void ready.catch((error: unknown) => {
       if (active)
@@ -244,28 +278,13 @@ export function TimelineWorkspace({
     return () => {
       active = false;
       contextRequestRef.current += 1;
-      surface.setOnFrame(null);
-      surface.setOnPlayingChange(null);
+      preview.session.setFrameListener(null);
+      preview.session.setPlayingListener(null);
       surfaceRef.current = null;
-      // React Strict Mode immediately probes effects with a setup/cleanup/setup
-      // cycle. Delay disposal by one task so the second setup can reclaim the
-      // same asynchronously initialized Pixi application. On a real unmount,
-      // destruction waits for init() and therefore never calls Pixi's plugins
-      // while they are only partially installed.
-      surfaceDestroyTimerRef.current = window.setTimeout(() => {
-        if (surfaceSessionRef.current !== currentSession) return;
-        void currentSession.initialized
-          .then(
-            () => currentSession.surface.destroy(),
-            () => undefined,
-          )
-          .finally(() => {
-            if (surfaceSessionRef.current === currentSession)
-              surfaceSessionRef.current = null;
-          });
-      }, 0);
+      sessionRef.current = null;
+      lifecycle.release();
     };
-  }, [handleDiagnostic, handlePreviewFrame]);
+  }, [handleDiagnostic, handlePreviewFrame, previewEnvironment]);
 
   const buildContext = useCallback(
     async (nextSettings = settings): Promise<void> => {
@@ -295,16 +314,27 @@ export function TimelineWorkspace({
           setPreview(null);
         } else {
           const surface = surfaceRef.current;
-          if (surface !== null) {
+          const session = sessionRef.current;
+          if (surface !== null && session !== null) {
             const desiredPlayhead = playheadRef.current;
             await surfaceReadyRef.current;
-            if (surfaceRef.current !== surface) return;
+            if (sessionRef.current !== session) return;
             // Set the requested audio policy before restoring a snapshot: the
             // snapshot can already contain a looping BGM from the story path.
-            surface.setMuted(muted);
-            surface.setAnimationAssets(animationMap);
-            await surface.load(result.start_snapshot, result.update, urls);
-            await surface.seek(desiredPlayhead, false);
+            session.setMuted(muted);
+            await session.load({
+              update: result.update,
+              assets: urls,
+              snapshot: result.start_snapshot,
+              world: "restore",
+              animations: animationMap,
+            });
+            // A newer context request supersedes this one while its
+            // preparation was still decoding.  Its stale result must not
+            // seek the replacement timeline or replace the newer preview.
+            if (requestId !== contextRequestRef.current) return;
+            await session.seek(desiredPlayhead, "scrub");
+            if (requestId !== contextRequestRef.current) return;
           }
           setPreview(result);
           setContextStatus(
@@ -338,8 +368,8 @@ export function TimelineWorkspace({
   const patchLoadedCue = useCallback(
     (nextNode: TimelineNode): void => {
       const current = preview;
-      const surface = surfaceRef.current;
-      if (current === null || surface === null) return;
+      const session = sessionRef.current;
+      if (current === null || session === null) return;
       const update = structuredClone(current.update);
       const timelineCue = update.cues.find(
         (cue) => (cue as { type?: string }).type === "timeline",
@@ -352,16 +382,32 @@ export function TimelineWorkspace({
           }
         | undefined;
       if (timelineCue === undefined) return;
-      surface.setAnimationAssets(animationMap);
       timelineCue.duration_ms = nextNode.duration_ms;
       timelineCue.tracks = nextNode.tracks;
       timelineCue.events = nextNode.events;
       const desiredPlayhead = playheadRef.current;
-      void surface
-        .load(current.start_snapshot, update, urls)
-        .then(() => surface.seek(desiredPlayhead, false))
+      // Ordinary keyframe edits only re-evaluate what is already prepared; a
+      // change of artwork or video is a resource dependency and reloads the
+      // context so the replacement pixels are prepared before they commit.
+      if (session.applyTimelineEdit(update)) {
+        void session
+          .seek(desiredPlayhead, "scrub")
+          .catch((error: unknown) =>
+            onError(`时间轴预览刷新失败：${errorMessage(error)}`),
+          );
+        return;
+      }
+      void session
+        .load({
+          update,
+          assets: urls,
+          snapshot: current.start_snapshot,
+          world: "restore",
+          animations: animationMap,
+        })
+        .then(() => session.seek(desiredPlayhead, "scrub"))
         .catch((error: unknown) => {
-          if (surfaceRef.current === surface)
+          if (sessionRef.current === session)
             onError(`时间轴预览刷新失败：${errorMessage(error)}`);
         });
     },
@@ -412,7 +458,7 @@ export function TimelineWorkspace({
       const next = Math.max(0, Math.min(localNode.duration_ms, value));
       playheadRef.current = next;
       setPlayhead(next);
-      await surfaceRef.current?.seek(next, false);
+      await sessionRef.current?.seek(next, "scrub");
     },
     [localNode.duration_ms],
   );
@@ -427,16 +473,16 @@ export function TimelineWorkspace({
     const next = Math.max(0, Math.min(localNode.duration_ms, value));
     playbackStartRef.current = next;
     setPlaybackStart(next);
-    if (playing) surfaceRef.current?.pause();
+    if (playing) sessionRef.current?.pause();
     setPlaying(false);
     void setPosition(next);
   };
 
   const togglePlayback = (): void => {
-    const surface = surfaceRef.current;
-    if (surface === null || preview === null) return;
+    const session = sessionRef.current;
+    if (session === null || preview === null) return;
     if (playing) {
-      surface.pause();
+      session.pause();
       setPlaying(false);
     } else {
       void (async (): Promise<void> => {
@@ -444,7 +490,7 @@ export function TimelineWorkspace({
         // paused or completed playhead. This makes one timing range easy to
         // inspect repeatedly while authoring.
         await setPosition(playbackStartRef.current);
-        if (surfaceRef.current === surface) await surface.play();
+        if (sessionRef.current === session) await session.play();
       })();
     }
   };
@@ -483,8 +529,8 @@ export function TimelineWorkspace({
 
   const writeObjectTransform = useCallback(
     (
-      object: PreviewObjectFrame,
-      transform: Partial<PreviewObjectFrame>,
+      object: SceneObjectFrame,
+      transform: Partial<SceneObjectFrame>,
       force = false,
     ): void => {
       let next = structuredClone(nodeRef.current);
@@ -539,7 +585,7 @@ export function TimelineWorkspace({
                 "z",
               ];
       for (const channel of channels) {
-        const value = transform[channel as keyof PreviewObjectFrame];
+        const value = transform[channel as keyof SceneObjectFrame];
         if (typeof value === "number")
           next = upsertKeyframe(next, trackIndex, channel, value);
       }
@@ -555,14 +601,14 @@ export function TimelineWorkspace({
 
   const beginObjectDrag = (
     event: ReactPointerEvent<HTMLElement>,
-    object: PreviewObjectFrame,
+    object: SceneObjectFrame,
     handle: TransformHandle,
   ): void => {
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     setSelectedId(object.id);
-    if (playing) surfaceRef.current?.pause();
+    if (playing) sessionRef.current?.pause();
     setPlaying(false);
     const stage = event.currentTarget.closest(".timeline-gizmo-layer");
     const rect = stage?.getBoundingClientRect();
@@ -575,7 +621,7 @@ export function TimelineWorkspace({
       const dx = ((moveEvent.clientX - startX) / rect.width) * DESIGN_WIDTH;
       const dy = ((moveEvent.clientY - startY) / rect.height) * DESIGN_HEIGHT;
       moved = moved || Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5;
-      const transform: Partial<PreviewObjectFrame> =
+      const transform: Partial<SceneObjectFrame> =
         handle === "move"
           ? { x: initial.x + dx, y: initial.y + dy }
           : handle === "rotate"
@@ -631,7 +677,7 @@ export function TimelineWorkspace({
       cleanup();
       const surface = surfaceRef.current;
       surface?.clearOverrides();
-      void surface?.seek(playheadRef.current, false);
+      void sessionRef.current?.seek(playheadRef.current, "scrub");
       setPendingTransforms((current) => {
         const next = { ...current };
         Reflect.deleteProperty(next, object.id);
@@ -640,7 +686,7 @@ export function TimelineWorkspace({
     };
     const up = (): void => {
       cleanup();
-      const finalObject = surfaceRef.current
+      const finalObject = sessionRef.current
         ?.frameAt(playheadRef.current)
         .objects.find((candidate) => candidate.id === object.id);
       if (moved && finalObject !== undefined) {
@@ -720,7 +766,7 @@ export function TimelineWorkspace({
 
   const discardPending = (): void => {
     surfaceRef.current?.clearOverrides();
-    void surfaceRef.current?.seek(playheadRef.current, false);
+    void sessionRef.current?.seek(playheadRef.current, "scrub");
     setPendingTransforms({});
     setPendingCamera(null);
     setExitPrompt(false);
@@ -872,7 +918,7 @@ export function TimelineWorkspace({
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
-    if (playing) surfaceRef.current?.pause();
+    if (playing) sessionRef.current?.pause();
     setPlaying(false);
     const layer = event.currentTarget.closest(".timeline-gizmo-layer");
     const rect = layer?.getBoundingClientRect();
@@ -921,7 +967,7 @@ export function TimelineWorkspace({
       cleanup();
       const surface = surfaceRef.current;
       surface?.clearOverrides();
-      void surface?.seek(playheadRef.current, false);
+      void sessionRef.current?.seek(playheadRef.current, "scrub");
       setPendingCamera(null);
     };
     const up = (): void => {
@@ -1006,12 +1052,12 @@ export function TimelineWorkspace({
     return () => cancelAnimationFrame(frame);
   }, [selectedId, selectedObject]);
   const editObjectChannel = (
-    object: PreviewObjectFrame,
-    channel: keyof PreviewObjectFrame,
+    object: SceneObjectFrame,
+    channel: keyof SceneObjectFrame,
     value: number,
   ): void => {
     if (!Number.isFinite(value)) return;
-    const transform: Partial<PreviewObjectFrame> = { [channel]: value };
+    const transform: Partial<SceneObjectFrame> = { [channel]: value };
     surfaceRef.current?.setObjectOverride(object.id, transform);
     setFrame((current) =>
       current === null
@@ -1117,7 +1163,7 @@ export function TimelineWorkspace({
           onClick={() => {
             const next = !muted;
             setMuted(next);
-            surfaceRef.current?.setMuted(next);
+            sessionRef.current?.setMuted(next);
           }}
           type="button"
         >
@@ -1913,8 +1959,8 @@ function selectedObjectAssetChanged(
 }
 
 function gizmoStyle(
-  object: PreviewObjectFrame,
-  camera: TimelinePreviewFrame["camera"] | undefined,
+  object: SceneObjectFrame,
+  camera: SceneFrame["camera"] | undefined,
 ): React.CSSProperties {
   // Buttons live in the DOM overlay in the game, above the camera-transformed
   // Pixi world. Keep their editor gizmos in design coordinates as well.
@@ -1949,7 +1995,7 @@ function gizmoStyle(
 function projectPoint(
   x: number,
   y: number,
-  camera: TimelinePreviewFrame["camera"] | undefined,
+  camera: SceneFrame["camera"] | undefined,
 ): { x: number; y: number } {
   if (camera === undefined) return { x, y };
   const angle = (camera.rotation_deg * Math.PI) / 180;

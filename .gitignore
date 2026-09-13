@@ -23,6 +23,8 @@ editor/src-tauri/target
 # Story editor recovery data is local and must never become game content.
 game/.vectspace/backups/
 game/.vectspace/tmp/
+# Browser parity artifacts (screenshots + report) are regenerated on every run.
+.parity-output/
 # Keep recovery data ignored for projects opened directly at the repository
 # root as well; the tracked layout-v1.json remains visible to Git.
 .vectspace/backups/

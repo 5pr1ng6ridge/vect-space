@@ -39,3 +39,5 @@ Videos are registered as `kind: video` under `assets/videos` and must be MP4
 files encoded as H.264 video with AAC audio. Video timelines are always awaited.
 Neither video playback position nor transient timeline events are saved: loading
 a slot applies the final world snapshot without replaying the presentation.
+
+此game作开发阶段调试用而不公开发行或作引擎样例项目。

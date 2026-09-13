@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "id": "stage-timeline",
+      "scene_id": "surface_parity",
+      "node_id": "stage_timeline"
+    },
+    {
+      "id": "frames-timeline",
+      "scene_id": "surface_parity",
+      "node_id": "frames_timeline"
+    },
+    {
+      "id": "video-timeline",
+      "scene_id": "surface_parity",
+      "node_id": "video_timeline"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:," />
+    <title>VECTSPACE SceneSurface parity harness</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #05070c;
+      }
+      canvas.surface {
+        display: block;
+        width: 1920px;
+        height: 1080px;
+      }
+      canvas.surface + canvas.surface {
+        margin-top: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" class="surface" width="1920" height="1080"></canvas>
+    <canvas id="editor" class="surface" width="1920" height="1080"></canvas>
+    <script type="module" src="./harness.ts"></script>
+  </body>
+</html>

@@ -425,7 +425,7 @@ fn start_scene_replay(
                 "该 Scene 尚未揭示，不能重演",
             )
         })?;
-    if !hotspot.completed {
+    if !hotspot.replayable {
         return Err(WireCommandError::new(
             WireCommandErrorCode::Validation,
             "该 Scene 尚未完成，不能重演",

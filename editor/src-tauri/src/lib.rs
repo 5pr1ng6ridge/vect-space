@@ -19,9 +19,9 @@ use ttf_parser::Face;
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AssetKind, ButtonTemplate, ChapterMapDefinition, ChoiceSnapshot, ContentManifest,
-        ImageAnimationDefinition, ResolvedAsset, SceneDefinition, SceneNode,
-        SpriteActionDefinition, StoryLocation, TimelineEvent, TimelineTrack,
+        AssetKind, ButtonTemplate, ChapterMapDefinition, ChapterMapReplay, ChapterMapReveal,
+        ChoiceSnapshot, ContentManifest, ImageAnimationDefinition, ResolvedAsset, SceneDefinition,
+        SceneNode, SpriteActionDefinition, StoryLocation, TimelineEvent, TimelineTrack,
         UiMotionPreset, VariableMap,
     },
     runtime::{
@@ -3639,6 +3639,23 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
         None => return diagnostics,
     };
     let mut queue = VecDeque::from([(entry_scene.id.clone(), entry_scene.entry.clone())]);
+    // A chapter that is both unconditionally visible and unconditionally
+    // replayable is a second, author-declared entry point.  It is intentionally
+    // allowed to be disconnected from the main story graph, so analysing only
+    // `manifest.entry_scene` produces a false unreachable warning for every
+    // node in that chapter.
+    if let Some(map) = &catalog.chapter_map {
+        for hotspot in &map.hotspots {
+            if !matches!(hotspot.reveal, ChapterMapReveal::Always)
+                || !matches!(hotspot.replay, ChapterMapReplay::Always)
+            {
+                continue;
+            }
+            if let Some(scene) = catalog.scenes.get(&hotspot.scene_id) {
+                queue.push_back((scene.id.clone(), scene.entry.clone()));
+            }
+        }
+    }
     while let Some((scene_id, node_id)) = queue.pop_front() {
         if !reachable.insert((scene_id.clone(), node_id.clone())) {
             continue;
@@ -4051,13 +4068,9 @@ mod tests {
                 )
             })
             .collect();
-        let error = ContentCatalog::from_documents(
-            root,
-            catalog.manifest.clone(),
-            scenes,
-            ui_motions,
-        )
-        .unwrap_err();
+        let error =
+            ContentCatalog::from_documents(root, catalog.manifest.clone(), scenes, ui_motions)
+                .unwrap_err();
         assert!(error.to_string().contains("目标节点不存在"));
     }
 
@@ -4135,16 +4148,24 @@ mod tests {
                 )
             })
             .collect();
-        let candidate = ContentCatalog::from_documents(
-            root,
-            catalog.manifest.clone(),
-            scenes,
-            ui_motions,
-        )
-        .unwrap();
+        let candidate =
+            ContentCatalog::from_documents(root, catalog.manifest.clone(), scenes, ui_motions)
+                .unwrap();
         assert!(analyze_catalog(&candidate)
             .iter()
             .any(|diagnostic| diagnostic.code == "immediate_cycle"));
+    }
+
+    #[test]
+    fn always_replayable_chapter_map_scenes_are_reachability_roots() {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root).unwrap();
+        let diagnostics = analyze_catalog(&catalog);
+
+        assert!(!diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unreachable_node"
+                && diagnostic.scene_id.as_deref() == Some("character_action_showcase")
+        }));
     }
 
     #[test]

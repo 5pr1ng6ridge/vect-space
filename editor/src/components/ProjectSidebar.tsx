@@ -64,6 +64,8 @@ interface ProjectSidebarProps {
   onRenameAction(previousId: string, nextId: string): boolean;
   onDuplicateAction(id: string): void;
   onDeleteAction(id: string): void;
+  /** Open the shared keyframe workspace for one reusable action. */
+  onEditActionKeyframes(id: string): void;
   onNavigate(
     sceneId: string | null,
     nodeId: string | null,
@@ -110,6 +112,7 @@ export function ProjectSidebar({
   onRenameAction,
   onDuplicateAction,
   onDeleteAction,
+  onEditActionKeyframes,
   onNavigate,
   onTabChange,
 }: ProjectSidebarProps): ReactElement {
@@ -211,6 +214,7 @@ export function ProjectSidebar({
           onRenameAction={onRenameAction}
           onDuplicateAction={onDuplicateAction}
           onDeleteAction={onDeleteAction}
+          onEditActionKeyframes={onEditActionKeyframes}
           project={project}
         />
       )}
@@ -1226,6 +1230,7 @@ function ProjectPanel({
   onRenameAction,
   onDuplicateAction,
   onDeleteAction,
+  onEditActionKeyframes,
   project,
 }: {
   manifest: ContentManifest;
@@ -1250,6 +1255,7 @@ function ProjectPanel({
   onRenameAction(previousId: string, nextId: string): boolean;
   onDuplicateAction(id: string): void;
   onDeleteAction(id: string): void;
+  onEditActionKeyframes(id: string): void;
   project: EditorProject;
 }): ReactElement {
   const [dialog, setDialog] = useState<{
@@ -1477,6 +1483,7 @@ function ProjectPanel({
               definition={definition}
               key={definition.id}
               onChange={(next) => onChangeAction(definition.id, next)}
+              onEditKeyframes={() => onEditActionKeyframes(definition.id)}
               onRename={() =>
                 setDialog({
                   title: "新的动作 ID",
@@ -1844,6 +1851,7 @@ function ActionDefinitionEditor({
   onDuplicate,
   onChange,
   onDelete,
+  onEditKeyframes,
   path,
 }: {
   definition: SpriteActionDefinition;
@@ -1851,6 +1859,7 @@ function ActionDefinitionEditor({
   onDuplicate(): void;
   onChange(definition: SpriteActionDefinition): void;
   onDelete(): void;
+  onEditKeyframes(): void;
   path: string;
 }): ReactElement {
   const channels = definition.channels ?? {};
@@ -1872,13 +1881,24 @@ function ActionDefinitionEditor({
     onChange({ ...definition, channels: nextChannels });
   };
   return (
-    <article className="variable-card action-card">
+    <article
+      className="variable-card action-card"
+      onDoubleClick={onEditKeyframes}
+      title="双击打开关键帧工作区"
+    >
       <header>
         <span>
           <code>{definition.id}</code>
           <small>{definition.duration_ms} ms</small>
         </span>
         <div>
+          <button
+            onClick={onEditKeyframes}
+            title="打开关键帧工作区"
+            type="button"
+          >
+            关键帧
+          </button>
           <button onClick={onRename} title="重命名动作" type="button">
             ✎
           </button>

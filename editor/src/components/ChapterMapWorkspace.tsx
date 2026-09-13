@@ -151,15 +151,41 @@ export function ChapterMapWorkspace({
   undoAvailable,
   redoAvailable,
 }: ChapterMapWorkspaceProps): ReactElement {
-  const [selection, setSelection] = useState<Selection>(() =>
-    selectionId === null
-      ? null
-      : map.hotspots.some((item) => item.id === selectionId)
-        ? { kind: "hotspot", id: selectionId }
-        : map.decorations.some((item) => item.id === selectionId)
-          ? { kind: "decoration", id: selectionId }
-          : null,
+  // Selection is a single derived value, not a mirrored pair of states.
+  //
+  // An earlier design kept a local `selection` state *and* mirrored it to the
+  // parent `selectionId` in two opposing effects.  Creating a hotspot updated
+  // the local value first, the mirror-to-parent effect pushed the new id up,
+  // and the mirror-from-parent effect cleared the local value in the same
+  // commit because its `map` prop had not rendered yet.  That ping-ponged
+  // forever ("selection jumps between background settings and the node").
+  // The component is now controlled: pointer interactions call
+  // `select()`, which only notifies the parent, and the rendered selection is
+  // derived from `selectionId` plus the current map.
+  const [uncontrolledSelectionId, setUncontrolledSelectionId] = useState<
+    string | null
+  >(null);
+  const controlledSelection = onSelectionChange !== undefined;
+  const activeSelectionId = controlledSelection
+    ? selectionId
+    : uncontrolledSelectionId;
+  const select = useCallback(
+    (next: Selection | null): void => {
+      if (controlledSelection) onSelectionChange?.(next?.id ?? null);
+      else setUncontrolledSelectionId(next?.id ?? null);
+    },
+    [controlledSelection, onSelectionChange],
   );
+  const selection = useMemo<Selection>(() => {
+    if (activeSelectionId === null) return null;
+    if (map.hotspots.some((item) => item.id === activeSelectionId))
+      return { kind: "hotspot", id: activeSelectionId };
+    if (map.decorations.some((item) => item.id === activeSelectionId))
+      return { kind: "decoration", id: activeSelectionId };
+    // A deleted object, a stale diagnostic target or a remapped id simply has
+    // no selection instead of leaving an inspector for something gone.
+    return null;
+  }, [activeSelectionId, map.decorations, map.hotspots]);
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -245,37 +271,6 @@ export function ChapterMapWorkspace({
   }, [map]);
 
   useEffect(() => {
-    if (selectionId === null) {
-      // Diagnostics and scene deletion can explicitly clear the parent
-      // selection. Keep the local canvas in sync instead of leaving an
-      // inspector for an object that no longer exists.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSelection(null);
-      return;
-    }
-    // The selection is controlled by the parent when a diagnostic or sidebar
-    // navigation targets an object.  Synchronizing this local canvas state is
-    // intentional; subsequent pointer selections remain local.
-    setSelection(
-      map.hotspots.some((item) => item.id === selectionId)
-        ? { kind: "hotspot", id: selectionId }
-        : map.decorations.some((item) => item.id === selectionId)
-          ? { kind: "decoration", id: selectionId }
-          : null,
-    );
-  }, [map.decorations, map.hotspots, selectionId]);
-
-  useEffect(() => {
-    // Keep the parent selection in lockstep with canvas/layer selection so a
-    // diagnostic navigation or a workspace round-trip opens the same object
-    // the author was just inspecting.  The callback is intentionally
-    // notification-only; the canvas remains the source of truth for pointer
-    // interactions and the parent remains the source of truth for explicit
-    // navigation.
-    onSelectionChange?.(selection?.id ?? null);
-  }, [onSelectionChange, selection]);
-
-  useEffect(() => {
     const element = canvasRef.current;
     if (element === null) return;
     const update = (): void => {
@@ -338,8 +333,8 @@ export function ChapterMapWorkspace({
     setResizeDrag(null);
     setViewDrag(null);
     panDrag.current = null;
-    setSelection(null);
-  }, [drag, objectAssetTokens, onCancelEdit, selection]);
+    select(null);
+  }, [drag, objectAssetTokens, onCancelEdit, select, selection]);
 
   const unplacedScenes = sceneIds.filter(
     (sceneId) => !map.hotspots.some((hotspot) => hotspot.scene_id === sceneId),
@@ -617,7 +612,7 @@ export function ChapterMapWorkspace({
       variable_overrides: {},
     };
     updateMap((next) => next.hotspots.push(hotspot));
-    setSelection({ kind: "hotspot", id });
+    select({ kind: "hotspot", id });
   };
 
   const addDecoration = (
@@ -645,7 +640,7 @@ export function ChapterMapWorkspace({
       z: 1,
     };
     updateMap((next) => next.decorations.push(decoration));
-    setSelection({ kind: "decoration", id });
+    select({ kind: "decoration", id });
   };
 
   const pointerDown = (
@@ -660,7 +655,7 @@ export function ChapterMapWorkspace({
     // Select before requesting capture.  A synthetic/test pointer or a
     // pointer that was cancelled by the browser may not be capturable, but a
     // click on the object must still update the inspector.
-    setSelection({ kind, id });
+    select({ kind, id });
     captureMapPointer(event.currentTarget, event.pointerId);
     onBeginEdit?.(
       `map:${kind}:${id}`,
@@ -689,7 +684,7 @@ export function ChapterMapWorkspace({
     event.stopPropagation();
     event.preventDefault();
     captureMapPointer(event.currentTarget, event.pointerId);
-    setSelection({ kind, id });
+    select({ kind, id });
     onBeginEdit?.(`map:resize:${kind}:${id}`, "调整地图对象大小");
     setResizeDrag({
       pointerId: event.pointerId,
@@ -964,7 +959,7 @@ export function ChapterMapWorkspace({
         );
       }
     });
-    setSelection(null);
+    select(null);
   };
 
   const displayedObject = (
@@ -1184,7 +1179,7 @@ export function ChapterMapWorkspace({
             <div className="map-layer-row" key={item.id}>
               <button
                 className={`map-list-button${selection?.id === item.id ? " active" : ""}`}
-                onClick={() => setSelection({ kind: item.kind, id: item.id })}
+                onClick={() => select({ kind: item.kind, id: item.id })}
                 type="button"
               >
                 {item.label}
@@ -1222,7 +1217,7 @@ export function ChapterMapWorkspace({
               // selection robust when the target is a child/handle or when a
               // browser retargets a captured pointer event.
               if (isMapInteractiveTarget(event.target)) return;
-              setSelection(null);
+              select(null);
             }}
             style={{
               height: `${map.height * scale}px`,
@@ -1294,7 +1289,7 @@ export function ChapterMapWorkspace({
                     key={`${kind}:${item.id}:${item.asset ?? ""}:${source?.absolute_path ?? ""}`}
                     onClick={(event) => {
                       event.stopPropagation();
-                      setSelection({ kind, id: item.id });
+                      select({ kind, id: item.id });
                     }}
                     onPointerEnter={() => setHoveredObjectId(item.id)}
                     onPointerDown={(event) =>
@@ -1600,6 +1595,33 @@ export function ChapterMapWorkspace({
                       </option>
                     </select>
                   </label>
+                  <label>
+                    重演策略
+                    <select
+                      onChange={(event) =>
+                        updateSelected({
+                          replay: {
+                            mode: event.currentTarget.value as
+                              "completed" | "always",
+                          },
+                        })
+                      }
+                      value={
+                        (
+                          selectedObject as ChapterMapDefinition["hotspots"][number]
+                        ).replay?.mode ?? "completed"
+                      }
+                    >
+                      <option value="completed">完成后可重演</option>
+                      <option value="always">始终可重演</option>
+                    </select>
+                  </label>
+                  {(selectedObject as ChapterMapDefinition["hotspots"][number])
+                    .replay?.mode === "always" && (
+                    <p className="field-note">
+                      未到达的章节也可以直接进入；若同时“始终显示”，编辑器不会再把它报为不可到达。
+                    </p>
+                  )}
                   {Object.keys(manifest.variables).length > 0 && (
                     <details className="map-overrides">
                       <summary>重演变量覆盖</summary>

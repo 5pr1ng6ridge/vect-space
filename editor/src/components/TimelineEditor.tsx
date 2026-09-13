@@ -91,6 +91,7 @@ export function TimelineEditor({
   assets,
   onChange,
   hidePreview = false,
+  hideStagePreview = false,
   hideTransport = false,
   playheadOverride,
   playbackStartOverride,
@@ -104,6 +105,8 @@ export function TimelineEditor({
   assets: EditorAsset[];
   onChange(node: TimelineNode): void;
   hidePreview?: boolean;
+  /** Keep the numeric/keyframe inspector but omit the legacy HTML media stage. */
+  hideStagePreview?: boolean;
   hideTransport?: boolean;
   playheadOverride?: number;
   playbackStartOverride?: number;
@@ -546,35 +549,39 @@ export function TimelineEditor({
       tabIndex={-1}
     >
       {!hidePreview && (
-        <div className="timeline-preview-pane">
-          <div className="timeline-preview-stage">
-            {draft.tracks.map((track, index) =>
-              track.type === "sprite" && track.asset !== null ? (
-                <img
-                  alt={track.sprite_id}
-                  key={`sprite-${index}`}
-                  src={urls[track.asset]}
-                  style={spriteStyle(track, playhead)}
+        <div
+          className={`timeline-preview-pane${hideStagePreview ? " timeline-preview-pane-properties-only" : ""}`}
+        >
+          {!hideStagePreview && (
+            <div className="timeline-preview-stage">
+              {draft.tracks.map((track, index) =>
+                track.type === "sprite" && track.asset !== null ? (
+                  <img
+                    alt={track.sprite_id}
+                    key={`sprite-${index}`}
+                    src={urls[track.asset]}
+                    style={spriteStyle(track, playhead)}
+                  />
+                ) : null,
+              )}
+              {videoTrack !== undefined && (
+                <video
+                  className="timeline-video-preview"
+                  muted
+                  onLoadedMetadata={(event) => {
+                    const element = event.currentTarget;
+                    setVideoDuration(element.duration * 1000);
+                    element.currentTime = videoTrack.clip_start_ms / 1000;
+                  }}
+                  preload="metadata"
+                  ref={videoRef}
+                  src={urls[videoTrack.asset]}
+                  style={videoStyle(videoTrack, playhead)}
                 />
-              ) : null,
-            )}
-            {videoTrack !== undefined && (
-              <video
-                className="timeline-video-preview"
-                muted
-                onLoadedMetadata={(event) => {
-                  const element = event.currentTarget;
-                  setVideoDuration(element.duration * 1000);
-                  element.currentTime = videoTrack.clip_start_ms / 1000;
-                }}
-                preload="metadata"
-                ref={videoRef}
-                src={urls[videoTrack.asset]}
-                style={videoStyle(videoTrack, playhead)}
-              />
-            )}
-            <div className="timeline-safe-frame">1920 × 1080</div>
-          </div>
+              )}
+              <div className="timeline-safe-frame">1920 × 1080</div>
+            </div>
+          )}
           <div className="timeline-properties">
             <strong>时间线属性</strong>
             <label>

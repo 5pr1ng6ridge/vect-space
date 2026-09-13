@@ -5,17 +5,16 @@ use crate::{
     model::{
         AdvanceSource, AudioAction, AudioSnapshot, BootstrapPayload, ButtonClickAction,
         ButtonPostAction, ButtonSnapshot, ButtonTemplate, CameraSnapshot,
-        ChapterMapDecorationSnapshot, ChapterMapHotspotSnapshot, ChapterMapSnapshot,
-        ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate, DialogueHistoryEntry,
-        DialogueMode, DialoguePageSnapshot, LongTextControlAction, LongTextExit, LongTextMode,
-        LongTextPageSnapshot, LongTextStepSnapshot, LoopingAudioSnapshot, MutationValue,
-        PlaybackAutoMode, PlaybackSnapshot, PresentationCue, PresentationCueKind,
-        PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate,
-        ScalarValue, SceneNode, SpriteAction, SpriteActionDefinition, SpriteActionEnd,
-        ChapterMapReveal, SpriteSnapshot, StoryLocation, TimelineChannels,
-        TimelineEasing, TimelineKeyframe, TimelineKeyframeValue, TimelineTrack, UiMotionPreset,
-        UiMotionSlot, ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType,
-        WorldSnapshot,
+        ChapterMapDecorationSnapshot, ChapterMapHotspotSnapshot, ChapterMapReveal,
+        ChapterMapSnapshot, ChoiceSnapshot, ConditionExpression, CtrlFastForwardMode, CueGate,
+        DialogueHistoryEntry, DialogueMode, DialoguePageSnapshot, LongTextControlAction,
+        LongTextExit, LongTextMode, LongTextPageSnapshot, LongTextStepSnapshot,
+        LoopingAudioSnapshot, MutationValue, PlaybackAutoMode, PlaybackSnapshot, PresentationCue,
+        PresentationCueKind, PresentationOutcome, ProfileState, PromptSnapshot, RuntimeSnapshot,
+        RuntimeUpdate, ScalarValue, SceneNode, SpriteAction, SpriteActionDefinition,
+        SpriteActionEnd, SpriteSnapshot, StoryLocation, TimelineChannels, TimelineEasing,
+        TimelineKeyframe, TimelineKeyframeValue, TimelineTrack, UiMotionPreset, UiMotionSlot,
+        ValueOperand, VariableMap, VariableOperation, VariableScope, VariableType, WorldSnapshot,
     },
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
@@ -852,6 +851,8 @@ impl RuntimeEngine {
         let mut hotspots = Vec::new();
         for hotspot in &map.hotspots {
             let completed = self.completed_scenes.contains(&hotspot.scene_id);
+            let replayable =
+                completed || matches!(hotspot.replay, crate::model::ChapterMapReplay::Always);
             let visible = match &hotspot.reveal {
                 ChapterMapReveal::Completed => completed,
                 ChapterMapReveal::Always => true,
@@ -872,6 +873,7 @@ impl RuntimeEngine {
                     z: hotspot.z,
                     asset: hotspot.asset.clone(),
                     completed,
+                    replayable,
                 });
             }
         }
@@ -2347,7 +2349,7 @@ fn resolve_character_asset(
         .transpose()?;
     if explicit_asset.is_none() && selected_expression.is_none() {
         return Err(RuntimeError::Content(format!(
-            "{scene_id}/{node_id}: 角色 {character_id} 没有默认表情"
+            "{scene_id}/{node_id}: 角色 {character_id} 没有可用表情或素材"
         )));
     }
     if let Some(expression) = selected_expression {
@@ -3440,6 +3442,7 @@ mod tests {
                     z: 1,
                     asset: None,
                     reveal: ChapterMapReveal::Completed,
+                    replay: crate::model::ChapterMapReplay::Completed,
                     variable_overrides: VariableMap::new(),
                 },
                 ChapterMapHotspot {
@@ -3454,6 +3457,7 @@ mod tests {
                     z: 1,
                     asset: None,
                     reveal: ChapterMapReveal::Always,
+                    replay: crate::model::ChapterMapReplay::Completed,
                     variable_overrides: VariableMap::new(),
                 },
             ],
@@ -3972,6 +3976,47 @@ mod tests {
             panic!("expected dialogue")
         };
         assert_eq!(text, "9223372036854775807/author/true");
+    }
+
+    #[test]
+    fn chapter_map_marks_always_replayable_hotspots_as_enterable_before_completion() {
+        let mut content = catalog_with_chapter_map();
+        let runtime = RuntimeEngine::new(&content).unwrap();
+        // The fixture's visible hotspot is not completed yet and keeps the
+        // historical locked policy.
+        let map = runtime.chapter_map(&content).unwrap().unwrap();
+        let always = map
+            .hotspots
+            .iter()
+            .find(|item| item.scene_id == "test_scene")
+            .expect("visible hotspot");
+        assert!(!always.completed);
+        assert!(
+            !always.replayable,
+            "a completed-only hotspot must stay locked before completion"
+        );
+
+        // Switching the authored policy opens it without any story progress.
+        content
+            .chapter_map
+            .as_mut()
+            .expect("chapter map")
+            .hotspots
+            .iter_mut()
+            .find(|item| item.scene_id == "test_scene")
+            .expect("fixture hotspot")
+            .replay = crate::model::ChapterMapReplay::Always;
+        let map = runtime.chapter_map(&content).unwrap().unwrap();
+        let opened = map
+            .hotspots
+            .iter()
+            .find(|item| item.scene_id == "test_scene")
+            .expect("visible hotspot");
+        assert!(!opened.completed, "progress is still untouched");
+        assert!(
+            opened.replayable,
+            "an always replayable hotspot is enterable before completion"
+        );
     }
 
     #[test]

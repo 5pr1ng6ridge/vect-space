@@ -2,7 +2,9 @@ import type {
   ActionNode,
   SpriteActionDefinition,
   SpriteActionEnd,
+  SpriteActionKeyframe,
   SpriteSnapshot,
+  TimelineChannels,
   TimelineEasing,
   TimelineKeyframe,
   TimelineNode,
@@ -161,6 +163,177 @@ export function expandSpriteActionTrack(
     remove_at_end: false,
     channels,
   };
+}
+
+/**
+ * Preview pose an action is authored against.
+ *
+ * An action stores *relative* channels (position/rotation offsets, scale and
+ * opacity multipliers) because its start pose is whatever the sprite looks
+ * like when the node runs.  The keyframe editor works with absolute values, so
+ * the action workspace converts against one explicit, visible base pose.  The
+ * default matches the runtime's own default sprite pose, which keeps
+ * round-tripping lossless and predictable.
+ */
+export const SPRITE_ACTION_PREVIEW_BASE: SpriteSnapshot = {
+  asset: "",
+  x: 960,
+  y: 1080,
+  scale: 1,
+  scale_x: 1,
+  scale_y: 1,
+  rotation_deg: 0,
+  flip_x: false,
+  anchor_x: 0.5,
+  anchor_y: 1,
+  opacity: 1,
+  z: 0,
+};
+
+/** Channels an action may drive, in the order the editor lists them. */
+export const SPRITE_ACTION_CHANNELS = [
+  "x",
+  "y",
+  "scale",
+  "scale_x",
+  "scale_y",
+  "rotation_deg",
+  "opacity",
+] as const;
+
+export interface SpriteActionConversionOptions {
+  definition: SpriteActionDefinition;
+  base?: SpriteSnapshot;
+  /** Sprite instance id and artwork used only by the keyframe preview. */
+  previewSpriteId?: string;
+  previewAsset?: string | null;
+}
+
+/**
+ * Project a reusable action into the ordinary single-sprite timeline the
+ * keyframe editor understands.  Parameter references are resolved with their
+ * declared defaults so the preview shows concrete numbers; the binding itself
+ * is preserved by {@link timelineNodeToSpriteAction}.
+ */
+export function spriteActionToTimelineNode(
+  options: SpriteActionConversionOptions,
+): TimelineNode {
+  const {
+    definition,
+    base = SPRITE_ACTION_PREVIEW_BASE,
+    previewSpriteId = definition.id,
+    previewAsset = null,
+  } = options;
+  const channels: TimelineChannels = {};
+  for (const [channel, keyframes] of Object.entries(
+    definition.channels ?? {},
+  )) {
+    channels[channel] = keyframes.map((keyframe) => ({
+      at_ms: keyframe.at_ms,
+      value: actionAbsoluteValue(channel, keyframe, definition, base),
+      easing: keyframe.easing ?? "linear",
+    }));
+  }
+  return {
+    type: "timeline",
+    duration_ms: definition.duration_ms,
+    await: true,
+    skippable: true,
+    tracks: [
+      {
+        type: "sprite",
+        sprite_id: previewSpriteId,
+        asset: previewAsset,
+        remove_at_end: false,
+        channels,
+      },
+    ],
+    events: [],
+    next: "continue",
+  };
+}
+
+/**
+ * Fold an edited single-sprite timeline back into the action definition.
+ *
+ * Values are converted back to relative form against the same base pose used
+ * for projection.  A keyframe that still evaluates to its parameter's default
+ * keeps its parameter binding; editing the number detaches that keyframe so
+ * the author's intent stays explicit instead of silently discarded.
+ */
+export function timelineNodeToSpriteAction(
+  node: TimelineNode,
+  definition: SpriteActionDefinition,
+  base: SpriteSnapshot = SPRITE_ACTION_PREVIEW_BASE,
+): SpriteActionDefinition {
+  const track = node.tracks.find(
+    (candidate): candidate is Extract<TimelineTrack, { type: "sprite" }> =>
+      candidate.type === "sprite",
+  );
+  if (track === undefined) {
+    throw new Error("动作时间线缺少立绘轨道");
+  }
+  const previous = definition.channels ?? {};
+  const channels: Record<string, SpriteActionKeyframe[]> = {};
+  for (const [channel, keyframes] of Object.entries(track.channels)) {
+    const baseValue = actionBaseChannelValue(channel, base);
+    channels[channel] = keyframes.map((keyframe, index) => {
+      const value = keyframe.value;
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new Error(`动作通道 ${channel} 的关键帧必须是数值`);
+      }
+      const relative = ["x", "y", "rotation_deg"].includes(channel)
+        ? value - baseValue
+        : baseValue === 0
+          ? value
+          : value / baseValue;
+      const binding = previous[channel]?.[index];
+      // A parameter-bound keyframe evaluates to the parameter's value, not to
+      // its authored fallback, so the binding survives exactly while the
+      // folded number still equals the parameter default.  Any other number
+      // means the author edited the keyframe itself, which detaches it.
+      const parameterDefault =
+        binding?.parameter == null
+          ? undefined
+          : definition.parameters?.[binding.parameter]?.default;
+      const keepParameter =
+        parameterDefault !== undefined &&
+        Math.abs(parameterDefault - relative) < 1e-6;
+      return {
+        at_ms: keyframe.at_ms,
+        value: relative,
+        easing: keyframe.easing ?? "linear",
+        ...(keepParameter && binding?.parameter != null
+          ? { parameter: binding.parameter }
+          : {}),
+      };
+    });
+  }
+  const next: SpriteActionDefinition = {
+    ...definition,
+    duration_ms: node.duration_ms,
+    channels,
+  };
+  if (Object.keys(channels).length === 0) {
+    throw new Error("动作至少需要一个变换通道");
+  }
+  return next;
+}
+
+function actionAbsoluteValue(
+  channel: string,
+  keyframe: SpriteActionKeyframe,
+  definition: SpriteActionDefinition,
+  base: SpriteSnapshot,
+): number {
+  const relative =
+    (keyframe.parameter == null
+      ? undefined
+      : definition.parameters?.[keyframe.parameter]?.default) ?? keyframe.value;
+  const baseValue = actionBaseChannelValue(channel, base);
+  return ["x", "y", "rotation_deg"].includes(channel)
+    ? baseValue + relative
+    : baseValue * relative;
 }
 
 function actionBaseChannelValue(channel: string, base: SpriteSnapshot): number {

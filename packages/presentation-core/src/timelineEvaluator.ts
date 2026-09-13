@@ -86,9 +86,10 @@ export interface ActiveScreenEffects {
  * Reconstruct persistent screen-effect state from a timeline position.
  *
  * Screen effects are presentation events rather than world state, so seeking
- * must derive them from the playhead instead of a wall clock.  The last event
- * of each kind wins when authored intervals overlap, matching the order used
- * by the runtime event stream.
+ * must derive them from the playhead instead of a wall clock.  When authored
+ * intervals of one kind overlap, the latest start wins and an equal start
+ * keeps the later array entry; flash and shake are independent, so both can be
+ * active at the same playhead position.
  */
 export function evaluateActiveScreenEffects(
   events: readonly TimelineEvent[],
@@ -97,13 +98,24 @@ export function evaluateActiveScreenEffects(
   const elapsed = Math.max(0, elapsedMs);
   let flash: ActiveScreenEffect | null = null;
   let shake: ActiveScreenEffect | null = null;
+  let flashStart = Number.NEGATIVE_INFINITY;
+  let shakeStart = Number.NEGATIVE_INFINITY;
   for (const event of events) {
     if (event.type !== "screen_effect") continue;
     const durationMs = Math.max(1, event.duration_ms);
     if (event.at_ms <= elapsed && elapsed < event.at_ms + durationMs) {
       const active = { startMs: event.at_ms, durationMs };
-      if (event.effect === "flash") flash = active;
-      else shake = active;
+      // The latest start wins; an equal start keeps the later array entry,
+      // which is the authored order the runtime stream also uses.
+      if (event.effect === "flash") {
+        if (event.at_ms >= flashStart) {
+          flash = active;
+          flashStart = event.at_ms;
+        }
+      } else if (event.at_ms >= shakeStart) {
+        shake = active;
+        shakeStart = event.at_ms;
+      }
     }
   }
   return { flash, shake };

@@ -336,7 +336,8 @@ export function ChapterMapPage({
                     suppressClick.current = false;
                     return;
                   }
-                  if (hotspot.completed) onReplay(hotspot.scene_id);
+                  if (hotspot.replayable ?? hotspot.completed)
+                    onReplay(hotspot.scene_id);
                 }}
                 onFocusChange={(focused) =>
                   setFocusedHotspotId(focused ? hotspot.id : null)
@@ -388,12 +389,22 @@ function HotspotButton({
   const frame = useAnimatedImage(image, paused);
   const artwork = frame.url ?? image?.url;
   const isHovering = hovering || focused;
+  // An author may open a chapter before the story reaches it.  Such a hotspot
+  // is enterable, so it must never be presented as unreached: only a hotspot
+  // that is both unreached and locked still says so.
+  const replayable = hotspot.replayable ?? hotspot.completed;
+  const statusText = hotspot.completed ? "重演" : "可直接进入";
+  const ariaStatus = hotspot.completed
+    ? "，可重演"
+    : replayable
+      ? "，尚未到达但可直接进入"
+      : "，尚未完成";
   return (
     <button
-      aria-label={`${hotspot.title}${hotspot.completed ? "，可重演" : "，尚未完成"}`}
-      className={`chapter-map-hotspot${artwork === undefined ? "" : " has-artwork"}${hotspot.completed ? " is-completed" : " is-locked"}`}
+      aria-label={`${hotspot.title}${ariaStatus}`}
+      className={`chapter-map-hotspot${artwork === undefined ? "" : " has-artwork"}${hotspot.completed ? " is-completed" : replayable ? "" : " is-locked"}`}
       data-hotspot-id={hotspot.id}
-      disabled={!hotspot.completed}
+      disabled={!replayable}
       onBlur={() => onFocusChange(false)}
       onClick={onClick}
       onFocus={() => onFocusChange(true)}
@@ -414,7 +425,7 @@ function HotspotButton({
       {artwork === undefined && (
         <>
           <span>{hotspot.title}</span>
-          <small>{hotspot.completed ? "重演" : "未完成"}</small>
+          <small>{replayable ? statusText : "未完成"}</small>
         </>
       )}
       {hoverText !== null && isHovering && (

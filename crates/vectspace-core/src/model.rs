@@ -479,6 +479,11 @@ pub struct ChapterMapHotspot {
     pub asset: Option<String>,
     #[serde(default)]
     pub reveal: ChapterMapReveal,
+    /// Replay policy for this chapter.  Kept separate from `reveal` on
+    /// purpose: visibility and enterability are different questions, so a
+    /// hotspot may be shown but locked (default) or shown and enterable.
+    #[serde(default)]
+    pub replay: ChapterMapReplay,
     #[serde(default)]
     pub variable_overrides: VariableMap,
 }
@@ -537,6 +542,12 @@ pub struct ChapterMapHotspotSnapshot {
     pub z: i32,
     pub asset: Option<String>,
     pub completed: bool,
+    /// True when the hotspot may be entered right now.
+    ///
+    /// The room page must not report a hotspot as unreached while the author
+    /// configured it as always replayable, so the resolved policy is sent to
+    /// the WebView instead of letting it re-derive the rule.
+    pub replayable: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -548,6 +559,20 @@ pub enum ChapterMapReveal {
     Condition {
         condition: ConditionExpression,
     },
+}
+
+/// When the chapter may be entered from the room map.
+///
+/// `completed` is the historical behaviour: a chapter becomes replayable only
+/// after the player finished it once.  `always` opens the hotspot before the
+/// story ever reaches it, which is what makes an unreached chapter (a
+/// showcase, an appendix, a debugging scene) enterable on purpose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChapterMapReplay {
+    #[default]
+    Completed,
+    Always,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

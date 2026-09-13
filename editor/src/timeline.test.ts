@@ -7,6 +7,8 @@ import {
   expandSpriteActionTrack,
   pasteTimelineKeyframes,
   snapTimelineTime,
+  spriteActionToTimelineNode,
+  timelineNodeToSpriteAction,
 } from "./timeline";
 import type {
   SpriteActionDefinition,
@@ -326,5 +328,128 @@ describe("reusable sprite action expansion", () => {
         parameters: { distance: 3 },
       }),
     ).toThrow("超出");
+  });
+});
+
+describe("sprite action keyframe conversion", () => {
+  const action: SpriteActionDefinition = {
+    schema_version: 1,
+    id: "sprite.bounce",
+    name: "小跳",
+    duration_ms: 600,
+    end: "restore",
+    parameters: { height: { default: 40, min: 0, max: 200 } },
+    channels: {
+      y: [
+        { at_ms: 0, value: 0, easing: "linear" },
+        { at_ms: 300, value: -1, easing: "ease_in_out", parameter: "height" },
+        { at_ms: 600, value: 0, easing: "linear" },
+      ],
+      opacity: [
+        { at_ms: 0, value: 1, easing: "linear" },
+        { at_ms: 600, value: 0.5, easing: "linear" },
+      ],
+    },
+  };
+
+  it("projects relative channels onto an absolute single-sprite timeline", () => {
+    const node = spriteActionToTimelineNode({ definition: action });
+    expect(node.duration_ms).toBe(600);
+    expect(node.tracks).toHaveLength(1);
+    const track = node.tracks[0];
+    expect(track.type).toBe("sprite");
+    // Position offsets are added to the base pose, multipliers are applied.
+    // A parameter-bound keyframe resolves to the *parameter default*, so the
+    // authored fallback (`-1`) is intentionally not used.
+    expect(track.channels.y.map((frame) => frame.value)).toEqual([
+      1080, 1120, 1080,
+    ]);
+    expect(track.channels.opacity.map((frame) => frame.value)).toEqual([
+      1, 0.5,
+    ]);
+    // The parameter default is resolved for display, not baked into the file.
+    expect(action.channels.y[1].parameter).toBe("height");
+  });
+
+  it("keeps the parameter binding while the value still matches its default", () => {
+    const node = spriteActionToTimelineNode({ definition: action });
+    const folded = timelineNodeToSpriteAction(node, action);
+    expect(folded.channels.y[1]).toEqual({
+      at_ms: 300,
+      value: 40,
+      easing: "ease_in_out",
+      parameter: "height",
+    });
+    expect(folded.duration_ms).toBe(600);
+    expect(folded.parameters).toEqual(action.parameters);
+    expect(folded.end).toBe("restore");
+  });
+
+  it("detaches a keyframe from its parameter once the author edits the number", () => {
+    const node = spriteActionToTimelineNode({ definition: action });
+    const track = node.tracks[0];
+    const edited = {
+      ...node,
+      tracks: [
+        {
+          ...track,
+          channels: {
+            ...track.channels,
+            y: track.channels.y.map((frame, index) =>
+              index === 1 ? { ...frame, value: 1000 } : frame,
+            ),
+          },
+        },
+      ],
+    };
+    const folded = timelineNodeToSpriteAction(edited, action);
+    expect(folded.channels.y[1].value).toBe(-80);
+    expect(folded.channels.y[1].parameter).toBeUndefined();
+  });
+
+  it("round-trips a channel edit through both representations", () => {
+    const node = spriteActionToTimelineNode({ definition: action });
+    const track = node.tracks[0];
+    const moved = {
+      ...node,
+      duration_ms: 900,
+      tracks: [
+        {
+          ...track,
+          channels: {
+            ...track.channels,
+            opacity: [
+              { at_ms: 0, value: 1, easing: "linear" as const },
+              { at_ms: 900, value: 0.25, easing: "linear" as const },
+            ],
+          },
+        },
+      ],
+    };
+    const folded = timelineNodeToSpriteAction(moved, action);
+    expect(folded.duration_ms).toBe(900);
+    expect(folded.channels.opacity.map((frame) => frame.value)).toEqual([
+      1, 0.25,
+    ]);
+    expect(folded.channels.opacity.map((frame) => frame.at_ms)).toEqual([
+      0, 900,
+    ]);
+  });
+
+  it("refuses a timeline without a sprite track", () => {
+    expect(() =>
+      timelineNodeToSpriteAction(
+        {
+          type: "timeline",
+          duration_ms: 100,
+          await: true,
+          skippable: true,
+          tracks: [{ type: "camera", channels: {} }],
+          events: [],
+          next: "continue",
+        },
+        action,
+      ),
+    ).toThrow(/立绘轨道/);
   });
 });

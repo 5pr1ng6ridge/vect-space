@@ -206,6 +206,8 @@ export type ChapterMapReveal =
   | { mode: "completed" }
   | { mode: "always" }
   | { mode: "condition"; condition: ConditionExpression };
+/** Replay policy: `always` lets a hotspot be entered before the story reaches it. */
+export type ChapterMapReplay = { mode: "completed" } | { mode: "always" };
 export interface ChapterMapDecoration {
   id: string;
   asset: string;
@@ -227,6 +229,7 @@ export interface ChapterMapHotspot {
   z: number;
   asset?: string | null;
   reveal?: ChapterMapReveal;
+  replay?: ChapterMapReplay;
   variable_overrides: Record<string, ScalarValue>;
 }
 export interface ChapterMapDefinition {
@@ -264,7 +267,12 @@ export interface SpriteNode extends AwaitedNode {
   type: "sprite";
   sprite_id: string;
   action: "show" | "move" | "hide";
-  asset: string | null;
+  /**
+   * Optional in YAML when a character/expression supplies the artwork. Rust
+   * omits null optionals while serializing, so the editor must accept both
+   * null and an absent field after loading a scene.
+   */
+  asset?: string | null;
   character?: string | null;
   expression?: string | null;
   flip_x?: boolean;

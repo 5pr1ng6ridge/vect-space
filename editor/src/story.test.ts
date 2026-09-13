@@ -16,7 +16,7 @@ import {
   splitLongTextAt,
   splitDialogueAt,
 } from "./story";
-import type { EditorProject } from "./types";
+import type { EditorProject, SceneNode } from "./types";
 import { validateLive } from "./validation";
 import { buildScriptChainOptions } from "./components/scriptChains";
 
@@ -392,6 +392,63 @@ describe("story graph mapping", () => {
         duration_ms: 200,
       },
     ]);
+  });
+
+  it("resolves a character expression when a sprite omits its direct asset", () => {
+    const source = project();
+    source.manifest.assets["sprite.alice"] = {
+      kind: "sprite",
+      path: "sprites/alice.png",
+    };
+    source.manifest.characters.alice.default_expression = "neutral";
+    source.manifest.characters.alice.expressions = {
+      neutral: { asset: "sprite.alice" },
+    };
+    const node: SceneNode = {
+      type: "sprite",
+      sprite_id: "alice",
+      action: "show",
+      character: "alice",
+      expression: "neutral",
+      x: 960,
+      y: 1080,
+      scale: 1,
+      opacity: 1,
+      z: 0,
+      duration_ms: 300,
+      easing: "linear",
+      await: false,
+      next: "after",
+    };
+
+    const timeline = convertToTimeline(node, source.manifest);
+    expect(timeline.tracks[0]).toMatchObject({
+      type: "sprite",
+      sprite_id: "alice",
+      asset: "sprite.alice",
+    });
+    expect(
+      validateLive({
+        ...source,
+        scenes: [
+          {
+            ...source.scenes[0],
+            definition: {
+              ...source.scenes[0].definition,
+              nodes: {
+                sprite: node,
+                after: { type: "end" },
+              },
+            },
+          },
+        ],
+      }).filter(
+        (diagnostic) =>
+          diagnostic.scene_id === "main" &&
+          diagnostic.node_id === "sprite" &&
+          diagnostic.code === "missing_asset",
+      ),
+    ).toHaveLength(0);
   });
 
   it("pastes nodes without carrying story connections", () => {
@@ -843,5 +900,79 @@ describe("story graph mapping", () => {
     expect(renamedPortrait.type === "sprite" && renamedPortrait.character).toBe(
       "alicia",
     );
+  });
+});
+
+describe("chapter map reachability", () => {
+  function projectWithMap(
+    reveal: "completed" | "always",
+    replay: "completed" | "always",
+  ): EditorProject {
+    const base = project();
+    return {
+      ...base,
+      manifest: { ...base.manifest, chapter_map: "chapter-map.yaml" },
+      chapter_map: {
+        path: "chapter-map.yaml",
+        definition: {
+          schema_version: 1,
+          width: 1920,
+          height: 1080,
+          view_x: 960,
+          view_y: 540,
+          background: null,
+          decorations: [],
+          hotspots: [
+            {
+              id: "extras",
+              scene_id: "extras",
+              title: "附录",
+              hover_text: null,
+              x: 240,
+              y: 460,
+              width: 280,
+              height: 160,
+              z: 10,
+              asset: null,
+              reveal: { mode: reveal },
+              replay: { mode: replay },
+              variable_overrides: {},
+            },
+          ],
+        },
+      },
+      scenes: [
+        ...base.scenes,
+        {
+          path: "scenes/extras.yaml",
+          definition: {
+            schema_version: 2,
+            id: "extras",
+            entry: "start",
+            nodes: { start: { type: "end" } },
+          },
+        },
+      ],
+    };
+  }
+
+  const unreachable = (project: EditorProject): string[] =>
+    validateLive(project)
+      .filter((diagnostic) => diagnostic.code === "unreachable_node")
+      .map((diagnostic) => `${diagnostic.scene_id}/${diagnostic.node_id}`);
+
+  it("does not report an always-shown, always-replayable chapter as unreachable", () => {
+    // The room map is a real entry point, so a chapter reachable only through
+    // it must not be flagged as unreachable from the story entry.
+    expect(unreachable(projectWithMap("always", "always"))).toEqual([]);
+  });
+
+  it("still reports a chapter that is hidden or locked behind completion", () => {
+    expect(unreachable(projectWithMap("completed", "always"))).toEqual([
+      "extras/start",
+    ]);
+    expect(unreachable(projectWithMap("always", "completed"))).toEqual([
+      "extras/start",
+    ]);
   });
 });

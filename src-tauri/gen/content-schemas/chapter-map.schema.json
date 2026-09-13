@@ -123,6 +123,13 @@
         "id": {
           "type": "string"
         },
+        "replay": {
+          "description": "Replay policy for this chapter.  Kept separate from `reveal` on\npurpose: visibility and enterability are different questions, so a\nhotspot may be shown but locked (default) or shown and enterable.",
+          "$ref": "#/$defs/ChapterMapReplay",
+          "default": {
+            "mode": "completed"
+          }
+        },
         "reveal": {
           "$ref": "#/$defs/ChapterMapReveal",
           "default": {
@@ -170,6 +177,37 @@
         "y",
         "width",
         "height"
+      ]
+    },
+    "ChapterMapReplay": {
+      "description": "When the chapter may be entered from the room map.\n\n`completed` is the historical behaviour: a chapter becomes replayable only\nafter the player finished it once.  `always` opens the hotspot before the\nstory ever reaches it, which is what makes an unreached chapter (a\nshowcase, an appendix, a debugging scene) enterable on purpose.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "completed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "always"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        }
       ]
     },
     "ChapterMapReveal": {

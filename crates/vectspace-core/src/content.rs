@@ -11,16 +11,16 @@ use thiserror::Error;
 use crate::image_header::{probe, ImageSize};
 use crate::model::{
     AssetDefinition, AssetKind, AudioAction, ButtonClickAction, ButtonPanel, ButtonPostAction,
-    ButtonTemplate, ChapterMapDefinition, CharacterDefinition, CharacterExpression,
-    ConditionExpression, ContentManifest, DialogueMode, ImageAnimationDefinition, LongTextMode,
-    LongTextPagination, MutationValue, ResolvedAnimation, ResolvedAnimationFrame, ResolvedAsset,
-    ScalarValue, SceneDefinition, SceneNode, SpriteAction, SpriteActionDefinition,
-    ChapterMapReveal, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack,
-    UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition,
-    VariableOperation, VariableScope, VariableType, IMAGE_ANIMATION_MAX_DECODED_BYTES,
-    IMAGE_ANIMATION_MAX_EDGE, IMAGE_ANIMATION_MAX_FRAMES, IMAGE_ANIMATION_MAX_FRAME_MS,
-    IMAGE_ANIMATION_MIN_FRAME_MS, IMAGE_ANIMATION_SCHEMA_VERSION, LONG_TEXT_FONT_SIZE_MAX,
-    LONG_TEXT_FONT_SIZE_MIN, SPRITE_ACTION_SCHEMA_VERSION,
+    ButtonTemplate, ChapterMapDefinition, ChapterMapReveal, CharacterDefinition,
+    CharacterExpression, ConditionExpression, ContentManifest, DialogueMode,
+    ImageAnimationDefinition, LongTextMode, LongTextPagination, MutationValue, ResolvedAnimation,
+    ResolvedAnimationFrame, ResolvedAsset, ScalarValue, SceneDefinition, SceneNode, SpriteAction,
+    SpriteActionDefinition, TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack,
+    UiMotionBindings, UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation,
+    VariableScope, VariableType, IMAGE_ANIMATION_MAX_DECODED_BYTES, IMAGE_ANIMATION_MAX_EDGE,
+    IMAGE_ANIMATION_MAX_FRAMES, IMAGE_ANIMATION_MAX_FRAME_MS, IMAGE_ANIMATION_MIN_FRAME_MS,
+    IMAGE_ANIMATION_SCHEMA_VERSION, LONG_TEXT_FONT_SIZE_MAX, LONG_TEXT_FONT_SIZE_MIN,
+    SPRITE_ACTION_SCHEMA_VERSION,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -202,13 +202,7 @@ impl ContentCatalog {
         } else {
             None
         };
-        Self::from_documents_with_chapter_map(
-            root,
-            manifest,
-            scenes,
-            ui_motion_files,
-            chapter_map,
-        )
+        Self::from_documents_with_chapter_map(root, manifest, scenes, ui_motion_files, chapter_map)
     }
 
     /// In-memory project construction with an optional room map.  The
@@ -1826,10 +1820,10 @@ fn validate_scenes(
                             }
                         } else if character_definition.default_expression.is_none()
                             && asset.is_none()
-                            && *action == SpriteAction::Show
+                            && *action != SpriteAction::Hide
                         {
                             return Err(ContentError::Validation(format!(
-                                "{scene_id}/{node_id}: 角色 {character_id} 没有默认表情"
+                                "{scene_id}/{node_id}: 角色 {character_id} 没有可用表情或素材"
                             )));
                         }
                     } else if expression.is_some() {
@@ -3412,8 +3406,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        ChapterMapHotspot, ImageAnimationFrame, LiteralOperand, SpriteActionDefinition,
-        ChapterMapReveal, SpriteActionEnd, SpriteActionKeyframe, SpriteActionParameter,
+        ChapterMapHotspot, ChapterMapReveal, ImageAnimationFrame, LiteralOperand,
+        SpriteActionDefinition, SpriteActionEnd, SpriteActionKeyframe, SpriteActionParameter,
         TimelineEasingPreset, TimelineKeyframe, TimelineKeyframeKeyword, TimelineKeyframeValue,
         VariableMap, VariableOperand,
     };
@@ -4107,6 +4101,7 @@ mod tests {
                 z: 1,
                 asset: None,
                 reveal: ChapterMapReveal::Completed,
+                replay: crate::model::ChapterMapReplay::Completed,
                 variable_overrides: VariableMap::new(),
             }],
         };
@@ -4329,13 +4324,9 @@ mod tests {
             panic!("fixture must contain long_text")
         };
         steps[0].page_break_before = true;
-        let error = ContentCatalog::from_documents(
-            root,
-            catalog.manifest.clone(),
-            scenes,
-            ui_motion_files,
-        )
-        .unwrap_err();
+        let error =
+            ContentCatalog::from_documents(root, catalog.manifest.clone(), scenes, ui_motion_files)
+                .unwrap_err();
         assert!(error.to_string().contains("第一步骤"));
     }
 
@@ -4426,13 +4417,9 @@ mod tests {
                 next: "introduction".to_owned(),
             },
         );
-        let break_error = ContentCatalog::from_documents(
-            root,
-            catalog.manifest,
-            with_break,
-            ui_motion_files,
-        )
-        .unwrap_err();
+        let break_error =
+            ContentCatalog::from_documents(root, catalog.manifest, with_break, ui_motion_files)
+                .unwrap_err();
         assert!(break_error.to_string().contains("连续长文本"));
     }
 

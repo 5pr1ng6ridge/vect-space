@@ -17,6 +17,7 @@
     "test:watch": "vitest --configLoader runner",
     "lint": "eslint .",
     "format:check": "prettier --check .",
+    "parity:check": "node scripts/check-scene-parity.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "editor:dev": "npm --prefix editor run tauri dev",

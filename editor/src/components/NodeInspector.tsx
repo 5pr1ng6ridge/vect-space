@@ -11,6 +11,7 @@ import {
   defaultCondition,
   defaultNode,
   nodeLabel,
+  resolveSpriteAsset,
 } from "../story";
 import { interpolateTemplate } from "../textTemplate";
 import { isCanonicalIntegerText, scalarType } from "../scalars";
@@ -363,16 +364,30 @@ function renderFields(
               </select>
             </Field>
           )}
-          <AssetSelect
-            allowNone={node.action !== "show" || node.character != null}
-            animations={animations}
-            assets={assets}
-            kind="sprite"
-            label="立绘素材"
-            manifest={manifest}
-            onChange={(asset) => update({ ...node, asset })}
-            value={node.asset}
-          />
+          {node.character != null &&
+          node.asset == null &&
+          node.action !== "hide" ? (
+            <Field
+              hint="已绑定角色表情，运行时会自动使用角色表中登记的素材。"
+              label="立绘素材"
+            >
+              <output>
+                {resolveSpriteAsset(node, manifest) ??
+                  "未解析：请选择表情或设置默认表情"}
+              </output>
+            </Field>
+          ) : (
+            <AssetSelect
+              allowNone={node.action !== "show" || node.character != null}
+              animations={animations}
+              assets={assets}
+              kind="sprite"
+              label={node.character == null ? "立绘素材" : "素材覆盖（可选）"}
+              manifest={manifest}
+              onChange={(asset) => update({ ...node, asset })}
+              value={node.asset}
+            />
+          )}
           <div className="field-grid">
             <OptionalNumber
               label="X"
@@ -2264,7 +2279,7 @@ function AssetSelect({
   label: string;
   manifest: ContentManifest;
   onChange(value: string | null): void;
-  value: string | null;
+  value: string | null | undefined;
 }): ReactElement {
   const assets = useMemo(
     () =>
@@ -2273,8 +2288,7 @@ function AssetSelect({
       ),
     [kind, manifest.assets],
   );
-  const selectedDefinition =
-    value === null ? undefined : manifest.assets[value];
+  const selectedDefinition = value == null ? undefined : manifest.assets[value];
   const animation =
     selectedDefinition?.animation === undefined
       ? undefined

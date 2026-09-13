@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   DecorativeFrameClock,
+  FrameLoopRegistry,
   FrameSequencePlayer,
   frameIndexAt,
   frameIndexForAssetAt,
@@ -245,5 +246,107 @@ describe("resolveImageAsset", () => {
     expect(frameIndexForAssetAt("gui.blinking", 300, animations)).toBe(1);
     expect(frameIndexForAssetAt("gui.blinking", 390, animations)).toBe(0);
     expect(frameIndexForAssetAt("gui.missing", 0, animations)).toBe(-1);
+  });
+});
+
+describe("FrameLoopRegistry", () => {
+  const walk = (): ImageAssetSource => ({
+    asset: "walk",
+    url: "/assets/walk/a.png",
+    width: 100,
+    height: 50,
+    animation: animation([
+      ["a", 100],
+      ["b", 100],
+      ["c", 100],
+      ["d", 100],
+    ]),
+  });
+
+  it("shares nothing but the frame list: each instance keeps its own phase", () => {
+    const registry = new FrameLoopRegistry();
+    const first = registry.ensure("hero", walk());
+    const second = registry.ensure("friend", walk());
+    expect(first).not.toBe(second);
+    expect(registry.size()).toBe(2);
+    first.advance(250);
+    expect(first.frameIndex()).toBe(2);
+    expect(second.frameIndex()).toBe(0);
+  });
+
+  it("keeps a phase for an unchanged asset and restarts for a new one", () => {
+    const registry = new FrameLoopRegistry();
+    const player = registry.ensure("hero", walk());
+    player.advance(250);
+    expect(registry.ensure("hero", walk())).toBe(player);
+    expect(registry.ensure("hero", walk()).frameIndex()).toBe(2);
+    const replacement = registry.ensure("hero", {
+      asset: "walk",
+      url: "/assets/walk/b.png",
+      width: 100,
+      height: 50,
+      animation: animation([
+        ["b", 100],
+        ["c", 100],
+      ]),
+    });
+    expect(replacement).not.toBe(player);
+    expect(replacement.frameIndex()).toBe(0);
+  });
+
+  it("freezes while paused and never accrues debt", () => {
+    const registry = new FrameLoopRegistry();
+    const player = registry.ensure("hero", walk());
+    registry.setPaused(true);
+    expect(registry.advance(500)).toEqual([]);
+    expect(player.frameIndex()).toBe(0);
+    registry.setPaused(false);
+    expect(registry.advance(150)).toEqual(["hero"]);
+    expect(player.frameIndex()).toBe(1);
+  });
+
+  it("positions every loop from a playhead for deterministic scrubbing", () => {
+    const registry = new FrameLoopRegistry();
+    const player = registry.ensure("hero", walk());
+    expect(registry.seek(250)).toEqual(["hero"]);
+    expect(player.frameIndex()).toBe(2);
+    // The same position is a no-op and never advances twice.
+    expect(registry.seek(250)).toEqual([]);
+    expect(registry.restart()).toEqual(["hero"]);
+    expect(player.frameIndex()).toBe(0);
+  });
+
+  it("releases instances, including every one that is no longer wanted", () => {
+    const registry = new FrameLoopRegistry();
+    registry.ensure("hero", walk());
+    registry.ensure("friend", walk());
+    expect(registry.releaseMissing(new Set(["hero"]))).toEqual(["friend"]);
+    expect(registry.ids()).toEqual(["hero"]);
+    expect(registry.release("hero")).toBe(true);
+    expect(registry.release("hero")).toBe(false);
+    expect(registry.size()).toBe(0);
+  });
+
+  it("detaches a loop for a cross-fade without stopping it", () => {
+    const registry = new FrameLoopRegistry();
+    const player = registry.ensure("hero", walk());
+    player.advance(250);
+    const detached = registry.forget("hero");
+    expect(detached).toBe(player);
+    expect(registry.has("hero")).toBe(false);
+    // The detached loop keeps running until its owner disposes it.
+    player.advance(100);
+    expect(player.frameIndex()).toBe(3);
+    detached?.dispose();
+  });
+
+  it("stops notifying a detached loop after dispose", () => {
+    const registry = new FrameLoopRegistry();
+    const listener = vi.fn();
+    const player = registry.ensure("hero", walk());
+    player.subscribe(listener);
+    registry.release("hero");
+    player.advance(100);
+    expect(listener).not.toHaveBeenCalled();
   });
 });

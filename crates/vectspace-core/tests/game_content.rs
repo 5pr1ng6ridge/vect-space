@@ -76,6 +76,15 @@ fn repository_game_project_validates_including_animations() {
                 vectspace_core::model::SceneNode::Action { action, .. }
                     if action == "sprite.bounce"
             )));
+            assert!(matches!(
+                showcase.nodes.get("alli_show"),
+                Some(vectspace_core::model::SceneNode::Sprite {
+                    asset: None,
+                    character: Some(character),
+                    expression: Some(expression),
+                    ..
+                }) if character == "alli" && expression == "neutral"
+            ));
             assert!(showcase.nodes.values().any(|node| matches!(
                 node,
                 vectspace_core::model::SceneNode::Sprite {
@@ -83,6 +92,96 @@ fn repository_game_project_validates_including_animations() {
                     ..
                 } if asset == "sprite.stopmotion"
             )));
+
+            // The parity fixture is a frozen presentation baseline: the
+            // browser entry (npm run parity:check) resolves these exact nodes
+            // through the real runtime, so keep their targets and cue shapes
+            // from silently drifting.  See docs/scene-surface-migration-baseline.md.
+            let parity = catalog
+                .scenes
+                .get("surface_parity")
+                .expect("the presentation parity fixture must be registered");
+            assert!(matches!(
+                parity.nodes.get("stage_timeline"),
+                Some(vectspace_core::model::SceneNode::Timeline {
+                    duration_ms: 640,
+                    await_completion: true,
+                    skippable: true,
+                    tracks,
+                    events,
+                    ..
+                }) if tracks.iter().any(|track| matches!(
+                    track,
+                    vectspace_core::model::TimelineTrack::Sprite { sprite_id, asset: Some(asset), .. }
+                        if sprite_id == "alli" && asset == "sprite.alli_neutral"
+                )) && tracks.iter().any(|track| matches!(
+                    track,
+                    vectspace_core::model::TimelineTrack::Camera { .. }
+                )) && events.iter().any(|event| matches!(
+                    event,
+                    vectspace_core::model::TimelineEvent::ScreenEffect {
+                        id,
+                        at_ms: 320,
+                        effect: vectspace_core::model::ScreenEffectKind::Flash,
+                        duration_ms: 120,
+                    } if id == "parity_flash"
+                )) && events.iter().any(|event| matches!(
+                    event,
+                    vectspace_core::model::TimelineEvent::ScreenEffect {
+                        id,
+                        at_ms: 320,
+                        effect: vectspace_core::model::ScreenEffectKind::Shake,
+                        duration_ms: 200,
+                    } if id == "parity_shake"
+                ))
+            ));
+            assert!(matches!(
+                parity.nodes.get("frames_timeline"),
+                Some(vectspace_core::model::SceneNode::Timeline { tracks, .. })
+                    if tracks.iter().any(|track| matches!(
+                        track,
+                        vectspace_core::model::TimelineTrack::Sprite { sprite_id, asset: Some(asset), .. }
+                            if sprite_id == "prop" && asset == "sprite.stopmotion"
+                    ))
+            ));
+            // The video fixture keeps a real video track on existing local
+            // media; the browser entry asserts nonzero media observations for
+            // it instead of silently skipping a target without video.
+            assert!(matches!(
+                parity.nodes.get("video_timeline"),
+                Some(vectspace_core::model::SceneNode::Timeline {
+                    duration_ms: 1600,
+                    tracks,
+                    ..
+                }) if tracks.iter().any(|track| matches!(
+                    track,
+                    vectspace_core::model::TimelineTrack::Video {
+                        asset,
+                        clip_end_ms: Some(4000),
+                        audio_enabled: false,
+                        ..
+                    } if asset == "video.test"
+                ))
+            ));
+            let stopmotion = catalog
+                .resolve_assets(&["sprite.stopmotion".to_owned()])
+                .expect("the parity frame animation must resolve");
+            let stopmotion = stopmotion[0]
+                .animation
+                .as_ref()
+                .expect("sprite.stopmotion must stay an animation");
+            assert!(stopmotion.frames.len() >= 2, "sprite.stopmotion");
+            assert!(stopmotion.width > 0 && stopmotion.height > 0);
+            // The fixture is deliberately unreachable from the chapter map so
+            // it can never leak into the player-facing route.
+            if let Some(map) = &catalog.chapter_map {
+                assert!(
+                    !map.hotspots
+                        .iter()
+                        .any(|hotspot| hotspot.scene_id == "surface_parity"),
+                    "the parity fixture must not become a chapter-map hotspot"
+                );
+            }
         }
         // Unresolved LFS pointers mean the fixtures were never downloaded.
         Err(error) if error.to_string().contains("Git LFS") => {}

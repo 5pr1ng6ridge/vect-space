@@ -21,20 +21,44 @@ export type TimelineOutcome = "completed" | "skipped" | "failed";
 
 export class TimelineClock {
   #elapsed = 0;
+  #durationMs: number;
   #frame = 0;
   #paused = false;
   #buffering = false;
   #settle: ((outcome: TimelineOutcome) => void) | null = null;
 
   constructor(
-    readonly durationMs: number,
+    durationMs: number,
     readonly getRate: () => number,
     readonly render: (elapsedMs: number) => void,
-  ) {}
+  ) {
+    this.#durationMs = Math.max(0, durationMs);
+  }
+
+  get durationMs(): number {
+    return this.#durationMs;
+  }
+
+  /**
+   * Adopts an edited timeline length while the clock may still be running.
+   *
+   * An author can shorten or extend a timeline mid-pass; the clock must follow
+   * the edit or it would finish against the obsolete bound.  The position is
+   * clamped into the new duration.
+   */
+  setDuration(durationMs: number): void {
+    this.#durationMs = Math.max(0, durationMs);
+    this.#elapsed = Math.min(this.#elapsed, this.#durationMs);
+  }
 
   run(signal: AbortSignal): Promise<TimelineOutcome> {
     if (signal.aborted) return Promise.resolve("failed");
-    this.render(0);
+    // The first frame draws the clock's *current* position.  A caller that
+    // seeks before playing (the editor scrubs to its marker, a resumed
+    // presentation reuses the playhead) must not be rewound to zero: the
+    // rendered frame and the event cursor would otherwise jump back and every
+    // event the user already scrubbed past would fire again.
+    this.render(this.#elapsed);
     return new Promise((resolve) => {
       this.#settle = resolve;
       let previous = performance.now();
@@ -67,6 +91,15 @@ export class TimelineClock {
 
   setPaused(paused: boolean): void {
     this.#paused = paused;
+  }
+
+  /** Repositions the clock, used by scrubbing before playback resumes. */
+  setElapsed(elapsedMs: number): void {
+    this.#elapsed = Math.max(0, Math.min(this.durationMs, elapsedMs));
+  }
+
+  elapsedMs(): number {
+    return this.#elapsed;
   }
 
   setBuffering(buffering: boolean): void {

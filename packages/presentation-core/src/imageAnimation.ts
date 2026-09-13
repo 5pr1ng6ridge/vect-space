@@ -231,6 +231,145 @@ export class FrameSequencePlayer {
 }
 
 /**
+ * Per-instance decorative frame loops of one scene surface.
+ *
+ * The registry owns the *positions*; the surfaces own the decoded pixels, so
+ * two instances that show the same animation share textures but never a frame
+ * index.  The rules it encodes are the agreed migration semantics:
+ *
+ * - pausing freezes every loop without accruing debt,
+ * - `advance` is wall-clock decoration and is independent of the timeline
+ *   rate, so fast-forward never speeds a loop up,
+ * - `seek` positions every loop from a playhead, which is what makes scrubbing
+ *   deterministic,
+ * - an instance keeps its position while its asset is unchanged, and restarts
+ *   at frame one when the asset (or the whole context) changes.
+ */
+export class FrameLoopRegistry {
+  readonly #instances = new Map<
+    string,
+    { version: string; player: FrameSequencePlayer }
+  >();
+  #paused = false;
+
+  get paused(): boolean {
+    return this.#paused;
+  }
+
+  size(): number {
+    return this.#instances.size;
+  }
+
+  ids(): string[] {
+    return [...this.#instances.keys()];
+  }
+
+  has(id: string): boolean {
+    return this.#instances.has(id);
+  }
+
+  player(id: string): FrameSequencePlayer | undefined {
+    return this.#instances.get(id)?.player;
+  }
+
+  /** True when the instance already shows exactly this asset revision. */
+  matches(id: string, source: ImageAssetSource): boolean {
+    return this.#instances.get(id)?.version === imageAssetSourceVersion(source);
+  }
+
+  /**
+   * Returns the loop for an instance, creating it when needed.
+   *
+   * A changed asset revision replaces the loop and starts at frame one; an
+   * unchanged one keeps running exactly where it was.
+   */
+  ensure(id: string, source: ImageAssetSource): FrameSequencePlayer {
+    const version = imageAssetSourceVersion(source);
+    const existing = this.#instances.get(id);
+    if (existing !== undefined && existing.version === version) {
+      return existing.player;
+    }
+    existing?.player.dispose();
+    const player = new FrameSequencePlayer(source);
+    player.setPaused(this.#paused);
+    this.#instances.set(id, { version, player });
+    return player;
+  }
+
+  release(id: string): boolean {
+    const existing = this.#instances.get(id);
+    if (existing === undefined) return false;
+    existing.player.dispose();
+    this.#instances.delete(id);
+    return true;
+  }
+
+  /**
+   * Removes an instance from the registry but keeps its player running.
+   *
+   * A cross-fade replacement needs the outgoing instance to keep advancing
+   * while it fades out; the caller disposes the detached player itself.
+   */
+  forget(id: string): FrameSequencePlayer | null {
+    const existing = this.#instances.get(id);
+    if (existing === undefined) return null;
+    this.#instances.delete(id);
+    return existing.player;
+  }
+
+  /** Releases every instance that is not part of the wanted set. */
+  releaseMissing(wanted: ReadonlySet<string>): string[] {
+    const released: string[] = [];
+    for (const id of [...this.#instances.keys()]) {
+      if (wanted.has(id)) continue;
+      this.release(id);
+      released.push(id);
+    }
+    return released;
+  }
+
+  clear(): void {
+    for (const instance of this.#instances.values()) instance.player.dispose();
+    this.#instances.clear();
+  }
+
+  setPaused(paused: boolean): void {
+    this.#paused = paused;
+    for (const instance of this.#instances.values()) {
+      instance.player.setPaused(paused);
+    }
+  }
+
+  /** Wall-clock decoration. Returns the ids whose displayed frame changed. */
+  advance(deltaMs: number): string[] {
+    if (this.#paused) return [];
+    const changed: string[] = [];
+    for (const [id, instance] of this.#instances) {
+      if (instance.player.advance(deltaMs)) changed.push(id);
+    }
+    return changed;
+  }
+
+  /** Deterministic positioning. Returns the ids whose frame changed. */
+  seek(elapsedMs: number): string[] {
+    const changed: string[] = [];
+    for (const [id, instance] of this.#instances) {
+      if (instance.player.seek(elapsedMs)) changed.push(id);
+    }
+    return changed;
+  }
+
+  /** Fresh context: every loop starts at frame one again. */
+  restart(): string[] {
+    const changed: string[] = [];
+    for (const [id, instance] of this.#instances) {
+      if (instance.player.resetToFirstFrame()) changed.push(id);
+    }
+    return changed;
+  }
+}
+
+/**
  * Resolves a logical asset id to its pixels.
  *
  * `urls` keeps the historical id -> url map, `animations` carries the frame

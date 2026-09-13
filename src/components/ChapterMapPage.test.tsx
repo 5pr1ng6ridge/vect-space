@@ -61,6 +61,21 @@ const MAP: ChapterMapSnapshot = {
       asset: null,
       completed: false,
     },
+    {
+      // Author opened this chapter on purpose before the story reaches it.
+      id: "open_early",
+      scene_id: "early_scene",
+      title: "提前开放的章节",
+      hover_text: null,
+      x: 900,
+      y: 100,
+      width: 300,
+      height: 180,
+      z: 10,
+      asset: null,
+      completed: false,
+      replayable: true,
+    },
   ],
 };
 
@@ -92,6 +107,15 @@ describe("ChapterMapPage", () => {
     expect(
       screen.getByRole("button", { name: "未完成章节，尚未完成" }),
     ).toBeDisabled();
+    // A chapter the author marked as always replayable is enterable and is
+    // never labelled as unreached.
+    const openEarly = screen.getByRole("button", {
+      name: "提前开放的章节，尚未到达但可直接进入",
+    });
+    expect(openEarly).toBeEnabled();
+    expect(openEarly).not.toHaveClass("is-locked");
+    fireEvent.click(openEarly);
+    expect(onReplay).toHaveBeenCalledWith("early_scene");
     expect(document.querySelector(".chapter-map-decoration")).toHaveAttribute(
       "draggable",
       "false",

@@ -430,11 +430,35 @@ export function canConvertToTimeline(node: SceneNode): boolean {
 }
 
 /**
+ * Resolve the artwork a sprite node will use at runtime.  A node may omit
+ * `asset` when its character and expression point to a registered portrait;
+ * keeping this lookup in one place prevents the editor from treating that
+ * valid form as an incomplete direct-sprite node.
+ */
+export function resolveSpriteAsset(
+  node: Extract<SceneNode, { type: "sprite" }>,
+  manifest?: ContentManifest,
+): string | null {
+  if (node.asset != null && node.asset !== "") return node.asset;
+  if (node.character == null || node.character === "") return null;
+  if (manifest === undefined) return null;
+  const character = manifest.characters[node.character];
+  if (character === undefined) return null;
+  const expressionId = node.expression ?? character.default_expression;
+  return expressionId == null
+    ? null
+    : ((character.expressions ?? {})[expressionId]?.asset ?? null);
+}
+
+/**
  * Expand one compact presentation node into an editable Timeline node. Move,
  * hide and camera channels explicitly inherit the runtime value at 0ms, so
  * conversion is independent of the route used to reach the node.
  */
-export function convertToTimeline(node: SceneNode): TimelineNode {
+export function convertToTimeline(
+  node: SceneNode,
+  manifest?: ContentManifest,
+): TimelineNode {
   const timeline = (
     duration_ms: number,
     awaitCompletion: boolean,
@@ -496,9 +520,15 @@ export function convertToTimeline(node: SceneNode): TimelineNode {
   }
   if (node.type === "sprite") {
     const result = timeline(node.duration_ms, node.await);
+    const resolvedAsset =
+      node.action === "hide"
+        ? (node.asset ?? null)
+        : resolveSpriteAsset(node, manifest);
     let channels: TimelineChannels;
     if (node.action === "show") {
-      if (node.asset === null) throw new Error("显示立绘缺少素材，无法转换。");
+      if (resolvedAsset === null) {
+        throw new Error("显示立绘缺少素材或有效角色表情，无法转换。");
+      }
       const target = {
         x: node.x ?? 960,
         y: node.y ?? 1080,
@@ -540,7 +570,7 @@ export function convertToTimeline(node: SceneNode): TimelineNode {
       {
         type: "sprite",
         sprite_id: node.sprite_id,
-        asset: node.asset,
+        asset: resolvedAsset,
         remove_at_end: node.action === "hide",
         channels,
       },
@@ -752,8 +782,8 @@ export function preparePastedNode(
 ): SceneNode {
   const node = structuredClone(source);
   const variables = new Set(Object.keys(manifest.variables));
-  const hasAsset = (id: string | null, kind: string): boolean =>
-    id !== null && manifest.assets[id]?.kind === kind;
+  const hasAsset = (id: string | null | undefined, kind: string): boolean =>
+    id != null && manifest.assets[id]?.kind === kind;
   const clearOperand = (
     operand: { variable: string } | { value: ScalarValue },
   ): { variable: string } | { value: ScalarValue } =>
@@ -793,7 +823,7 @@ export function preparePastedNode(
         node.background = null;
       break;
     case "sprite":
-      if (node.asset !== null && !hasAsset(node.asset, "sprite"))
+      if (node.asset != null && !hasAsset(node.asset, "sprite"))
         node.asset = null;
       break;
     case "say":

@@ -294,3 +294,110 @@ describe("evaluateTimelineFrame", () => {
     });
   });
 });
+
+describe("evaluateActiveScreenEffects overlap rules", () => {
+  const events = [
+    {
+      type: "screen_effect",
+      id: "early-flash",
+      at_ms: 100,
+      effect: "flash",
+      duration_ms: 900,
+    },
+    {
+      type: "screen_effect",
+      id: "early-shake",
+      at_ms: 150,
+      effect: "shake",
+      duration_ms: 900,
+    },
+    {
+      type: "screen_effect",
+      id: "late-flash",
+      at_ms: 500,
+      effect: "flash",
+      duration_ms: 400,
+    },
+  ] as const;
+
+  it("lets the latest start win and keeps flash and shake independent", () => {
+    const active = evaluateActiveScreenEffects(events, 600);
+    expect(active.flash).toEqual({ startMs: 500, durationMs: 400 });
+    expect(active.shake).toEqual({ startMs: 150, durationMs: 900 });
+  });
+
+  it("keeps the later array entry when timestamps are equal", () => {
+    const sameTime = [
+      {
+        type: "screen_effect",
+        id: "first",
+        at_ms: 100,
+        effect: "flash",
+        duration_ms: 500,
+      },
+      {
+        type: "screen_effect",
+        id: "second",
+        at_ms: 100,
+        effect: "flash",
+        duration_ms: 600,
+      },
+    ] as const;
+    expect(evaluateActiveScreenEffects(sameTime, 200).flash).toEqual({
+      startMs: 100,
+      durationMs: 600,
+    });
+  });
+
+  it("resolves same-kind shake overlaps with the latest start and the later array entry", () => {
+    const shakes = [
+      {
+        type: "screen_effect",
+        id: "shake-a",
+        at_ms: 100,
+        effect: "shake",
+        duration_ms: 900,
+      },
+      {
+        type: "screen_effect",
+        id: "shake-b",
+        at_ms: 100,
+        effect: "shake",
+        duration_ms: 600,
+      },
+      {
+        type: "screen_effect",
+        id: "shake-c",
+        at_ms: 500,
+        effect: "shake",
+        duration_ms: 100,
+      },
+    ] as const;
+    // Equal starts: the later array entry owns the interval.
+    expect(evaluateActiveScreenEffects(shakes, 300).shake).toEqual({
+      startMs: 100,
+      durationMs: 600,
+    });
+    // A later start supersedes both, regardless of duration.
+    expect(evaluateActiveScreenEffects(shakes, 550).shake).toEqual({
+      startMs: 500,
+      durationMs: 100,
+    });
+    // When the later intervals end, the still-running early one is active.
+    expect(evaluateActiveScreenEffects(shakes, 800).shake).toEqual({
+      startMs: 100,
+      durationMs: 900,
+    });
+  });
+
+  it("falls back to the still-running effect and then drops both", () => {
+    // Once the later flash interval ends, the earlier one is active again.
+    const active = evaluateActiveScreenEffects(events, 950);
+    expect(active.flash).toEqual({ startMs: 100, durationMs: 900 });
+    expect(active.shake).toEqual({ startMs: 150, durationMs: 900 });
+    expect(evaluateActiveScreenEffects(events, 1_050)).toEqual({
+      flash: null,
+      shake: null,
+    });
+  });
+});

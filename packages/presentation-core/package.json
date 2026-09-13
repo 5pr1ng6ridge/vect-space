@@ -8,7 +8,6 @@
     "./audio": "./src/audio.ts",
     "./timeline": "./src/timeline.ts",
     "./ledger": "./src/ledger.ts",
-    "./timeline-preview": "./src/timelinePreview.ts",
     "./timeline-evaluator": "./src/timelineEvaluator.ts",
     "./scene-surface": "./src/sceneSurface.ts",
     "./types": "./src/types.ts",
@@ -16,7 +15,14 @@
     "./chapter-map": "./src/chapterMap.ts",
     "./image-animation": "./src/imageAnimation.ts",
     "./virtual-clock": "./src/virtualClock.ts",
-    "./browser-guards": "./src/browserGuards.ts"
+    "./browser-guards": "./src/browserGuards.ts",
+    "./scene-frame": "./src/sceneFrame.ts",
+    "./scene-textures": "./src/sceneTextures.ts",
+    "./timeline-session": "./src/timelineSession.ts",
+    "./deferred-session": "./src/deferredSession.ts",
+    "./motion": "./src/motion.ts",
+    "./scene-test-kit": "./src/sceneTestKit.ts",
+    "./session-test-kit": "./src/sessionTestKit.ts"
   },
   "peerDependencies": {
     "pixi.js": "8.20.0"

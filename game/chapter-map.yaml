@@ -1,5 +1,5 @@
 schema_version: 1
-width: 1920
+width: 2560
 height: 1080
 view_x: 960
 view_y: 540
@@ -28,13 +28,15 @@ hotspots:
 - id: test-scene
   scene_id: test_scene
   title: 测试场景
-  x: 800
-  "y": 420
+  x: 680
+  "y": 480
   width: 300
   height: 180
   z: 2
   asset: gui.name_box
   reveal:
+    mode: always
+  replay:
     mode: always
   variable_overrides: {}
 - id: sandbox
@@ -47,6 +49,8 @@ hotspots:
   z: 2
   asset: gui.name_box
   reveal:
+    mode: always
+  replay:
     mode: always
   variable_overrides: {}
 - id: button-test
@@ -61,17 +65,63 @@ hotspots:
   asset: gui.name_box
   reveal:
     mode: always
+  replay:
+    mode: always
   variable_overrides: {}
 - id: ui-motion-regression
   scene_id: ui_motion_regression
   title: UI 动效回归测试
   hover_text: 覆盖对话框入场、独立播放、五类 UI 目标和连续 hide/show 的状态复位。
-  x: 800
-  "y": 700
+  x: 1000
+  "y": 720
   width: 300
   height: 180
   z: 2
   asset: gui.name_box
   reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}
+- id: presentation_showcase
+  scene_id: presentation_showcase
+  title: presentation_showcase
+  x: 1500
+  "y": 160
+  width: 280
+  height: 160
+  z: 10
+  asset: gui.testbutton0_0
+  reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}
+- id: character_action_showcase
+  scene_id: character_action_showcase
+  title: character_action_showcase
+  x: 620
+  "y": 140
+  width: 280
+  height: 160
+  z: 10
+  asset: gui.testbutton0_0
+  reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}
+- id: ch0
+  scene_id: ch0
+  title: ch0
+  x: 2160
+  "y": 440
+  width: 280
+  height: 160
+  z: 10
+  asset: gui.button_pulse
+  reveal:
+    mode: always
+  replay:
     mode: always
   variable_overrides: {}

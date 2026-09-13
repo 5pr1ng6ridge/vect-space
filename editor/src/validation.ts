@@ -1178,11 +1178,11 @@ function validateNode(
     }
   };
   const checkAsset = (
-    id: string | null,
+    id: string | null | undefined,
     kind: AssetKind,
     required: boolean,
   ) => {
-    if (id === null || id === "") {
+    if (id == null || id === "") {
       if (required) issue("missing_asset", `必须选择 ${kind} 素材`);
       return;
     }
@@ -1222,9 +1222,10 @@ function validateNode(
         } else if (
           node.expression == null &&
           node.asset == null &&
-          character.default_expression == null
+          character.default_expression == null &&
+          node.action !== "hide"
         ) {
-          issue("missing_character_expression", "角色没有默认表情");
+          issue("missing_character_expression", "角色没有可用表情或素材");
         }
       } else if (node.expression != null) {
         issue("expression_without_character", "表情必须与角色一起使用");
@@ -2173,6 +2174,18 @@ function reachabilityWarnings(
   if (entry === undefined || entry.nodes[entry.entry] === undefined) return [];
   const reached = new Set<string>();
   const queue: [string, string][] = [[entry.id, entry.entry]];
+  // The room map is a second way into the story.  A hotspot that is always
+  // revealed *and* always replayable is enterable without ever reaching the
+  // chapter through a jump, so its scene entry counts as reachable.  A locked
+  // hotspot (`replay: completed`) or a hidden one cannot bootstrap itself, and
+  // a profile condition cannot be decided statically, so those keep warning.
+  for (const hotspot of project.chapter_map?.definition.hotspots ?? []) {
+    const scene = sceneById.get(hotspot.scene_id);
+    if (scene === undefined || scene.nodes[scene.entry] === undefined) continue;
+    const revealed = (hotspot.reveal?.mode ?? "completed") === "always";
+    const replayable = (hotspot.replay?.mode ?? "completed") === "always";
+    if (revealed && replayable) queue.push([hotspot.scene_id, scene.entry]);
+  }
   while (queue.length > 0) {
     const next = queue.shift();
     if (next === undefined) break;

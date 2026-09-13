@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, within } from "@testing-library/react";
+import { useRef, useState, type ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -70,6 +71,70 @@ const ASSETS: EditorAsset[] = [
     absolute_path: "C:/new.png",
   },
 ];
+
+const EMPTY_MAP: ChapterMapDefinition = {
+  schema_version: 1,
+  width: 1920,
+  height: 1080,
+  view_x: 960,
+  view_y: 540,
+  background: null,
+  decorations: [],
+  hotspots: [],
+};
+
+/**
+ * Controlled harness that mirrors how the editor application owns the map and
+ * the selected object id.  Selection must stay a single derived value: a
+ * mirrored pair of states here used to update forever, so a hard render cap
+ * turns that regression into a fast, readable failure instead of a hang.
+ */
+function Harness({
+  initialMap,
+  sceneIds,
+  onChange,
+  onSelectionChange,
+}: {
+  initialMap: ChapterMapDefinition;
+  sceneIds: string[];
+  onChange?(next: ChapterMapDefinition): void;
+  onSelectionChange?(selectionId: string | null): void;
+}): ReactElement {
+  const [map, setMap] = useState(initialMap);
+  const [selectionId, setSelectionId] = useState<string | null>(null);
+  const notifications = useRef(0);
+  return (
+    <ChapterMapWorkspace
+      activeEdit={null}
+      assets={ASSETS}
+      dirty={false}
+      manifest={MANIFEST}
+      map={map}
+      onChange={(next) => {
+        onChange?.(next);
+        setMap(next);
+      }}
+      onClose={() => undefined}
+      onRedo={() => undefined}
+      onSave={() => undefined}
+      onUndo={() => undefined}
+      onValidate={() => undefined}
+      onSelectionChange={(value) => {
+        notifications.current += 1;
+        // Refuse further mirror updates after a generous bound.  A regression
+        // in the selection mirror then fails the recorded-call assertion
+        // instead of hanging the whole test run forever.
+        if (notifications.current > 12) return;
+        onSelectionChange?.(value);
+        setSelectionId(value);
+      }}
+      sceneIds={sceneIds}
+      selectionId={selectionId}
+      undoAvailable={false}
+      redoAvailable={false}
+    />
+  );
+}
 
 function renderWorkspace(
   map: ChapterMapDefinition = MAP,
@@ -175,14 +240,39 @@ describe("ChapterMapWorkspace pointer interactions", () => {
     fireEvent.click(object);
     expect(object).toHaveClass("selected");
 
-    const material = result.container.querySelector(
-      ".map-inspector select",
-    ) as HTMLSelectElement;
+    // Target the selected object's own artwork <select>.  The first select in
+    // the inspector is the hotspot *reveal* selector, so the lookup must be by
+    // label; querying positionally silently edited the reveal mode instead.
+    const material = within(result.container).getByLabelText("素材");
     fireEvent.change(material, { target: { value: "gui.new" } });
 
+    expect(currentMap.hotspots[0].asset).toBe("gui.new");
     expect(
       result.container.querySelector(".map-editor-object.selected"),
     ).toBeNull();
+  });
+
+  it("keeps a newly created hotspot selected without mirroring it back and forth", () => {
+    // Regression: creating a hotspot used to ping-pong the selection between
+    // "no selection" (map background settings) and the new hotspot forever,
+    // because one effect mirrored the local selection to the parent while
+    // another mirrored the parent back before the new map had rendered.
+    const changes: string[] = [];
+    const { container } = render(
+      <Harness
+        initialMap={EMPTY_MAP}
+        sceneIds={["scene-a", "scene-b"]}
+        onChange={() => undefined}
+        onSelectionChange={(value) => changes.push(String(value))}
+      />,
+    );
+
+    fireEvent.click(within(container).getByText("＋ scene-a"));
+
+    expect(changes).toEqual(["scene-a"]);
+    expect(container.querySelector(".map-editor-object.selected")).toHaveClass(
+      "selected",
+    );
   });
 
   it("previews and edits a hotspot hover text", () => {
