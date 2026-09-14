@@ -473,6 +473,7 @@ fn wire_asset_kind(kind: AssetKind) -> WireAssetKind {
         AssetKind::Sprite => WireAssetKind::Sprite,
         AssetKind::Gui => WireAssetKind::Gui,
         AssetKind::Bgm => WireAssetKind::Bgm,
+        AssetKind::Ambience => WireAssetKind::Ambience,
         AssetKind::Sfx => WireAssetKind::Sfx,
         AssetKind::Video => WireAssetKind::Video,
         AssetKind::Font => WireAssetKind::Font,
@@ -485,6 +486,7 @@ fn asset_kind_from_wire(kind: WireAssetKind) -> AssetKind {
         WireAssetKind::Sprite => AssetKind::Sprite,
         WireAssetKind::Gui => AssetKind::Gui,
         WireAssetKind::Bgm => AssetKind::Bgm,
+        WireAssetKind::Ambience => AssetKind::Ambience,
         WireAssetKind::Sfx => AssetKind::Sfx,
         WireAssetKind::Video => AssetKind::Video,
         WireAssetKind::Font => AssetKind::Font,
@@ -497,10 +499,25 @@ fn inferred_asset_kind(path: &Path) -> Option<WireAssetKind> {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if ["png", "jpg", "jpeg", "webp"].contains(&extension.as_str()) {
         return Some(WireAssetKind::Background);
     }
     if ["ogg", "wav", "mp3", "flac"].contains(&extension.as_str()) {
+        // Containers do not identify whether an author intends BGM, ambience,
+        // or SFX. Preserve the historical SFX fallback while honoring the
+        // explicit `ambience`/`ambient` filename convention used by the
+        // editor's import queue.
+        if stem
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| matches!(token, "ambience" | "ambient"))
+        {
+            return Some(WireAssetKind::Ambience);
+        }
         return Some(WireAssetKind::Sfx);
     }
     if extension == "mp4" {
@@ -1567,7 +1584,7 @@ fn validate_import_extension(kind: AssetKind, source: &Path) -> Result<(), WireC
         AssetKind::Background | AssetKind::Sprite | AssetKind::Gui => {
             ["png", "jpg", "jpeg", "webp"].contains(&extension.as_str())
         }
-        AssetKind::Bgm | AssetKind::Sfx => {
+        AssetKind::Bgm | AssetKind::Ambience | AssetKind::Sfx => {
             ["ogg", "wav", "mp3", "flac"].contains(&extension.as_str())
         }
         AssetKind::Font => ["ttf", "otf"].contains(&extension.as_str()),
@@ -1627,7 +1644,7 @@ fn validate_import_bytes(kind: AssetKind, bytes: &[u8]) -> Result<(), String> {
                 || starts(b"\xff\xd8\xff")
                 || (bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
         }
-        AssetKind::Bgm | AssetKind::Sfx => {
+        AssetKind::Bgm | AssetKind::Ambience | AssetKind::Sfx => {
             starts(b"OggS")
                 || starts(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WAVE"
                 || starts(b"fLaC")
@@ -1662,7 +1679,9 @@ fn validate_import_source(kind: AssetKind, source: &Path) -> Result<(), String> 
                 AssetKind::Background | AssetKind::Sprite | AssetKind::Gui
             )
         }
-        "ogg" | "wav" | "mp3" | "flac" => matches!(kind, AssetKind::Bgm | AssetKind::Sfx),
+        "ogg" | "wav" | "mp3" | "flac" => {
+            matches!(kind, AssetKind::Bgm | AssetKind::Ambience | AssetKind::Sfx)
+        }
         "mp4" => matches!(kind, AssetKind::Video),
         "ttf" | "otf" => matches!(kind, AssetKind::Font),
         _ => false,
@@ -3698,9 +3717,7 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
     // a map background, chapter artwork, the shared font, or an implicit UI
     // asset is not incorrectly reported as unused (and therefore offered for
     // deletion) just because it lives outside a SceneDefinition.
-    if let Some(font) = &catalog.manifest.default_font {
-        referenced_assets.insert(font.clone());
-    }
+    collect_manifest_assets(&catalog.manifest, &mut referenced_assets);
     for template in catalog.buttons.values() {
         for asset in [&template.normal, &template.hover, &template.pressed]
             .into_iter()
@@ -3757,6 +3774,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::Action { next, .. }
         | SceneNode::Wait { next, .. }
         | SceneNode::Bgm { next, .. }
+        | SceneNode::Ambience { next, .. }
         | SceneNode::Sfx { next, .. }
         | SceneNode::Camera { next, .. }
         | SceneNode::ScreenEffect { next, .. }
@@ -3801,6 +3819,9 @@ fn is_immediate(node: &SceneNode) -> bool {
             await_completion, ..
         }
         | SceneNode::Bgm {
+            await_completion, ..
+        }
+        | SceneNode::Ambience {
             await_completion, ..
         }
         | SceneNode::Camera {
@@ -3893,6 +3914,17 @@ fn find_immediate_cycles(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
     diagnostics
 }
 
+fn collect_manifest_assets(manifest: &ContentManifest, output: &mut BTreeSet<String>) {
+    if let Some(font) = &manifest.default_font {
+        output.insert(font.clone());
+    }
+    for character in manifest.characters.values() {
+        for expression in character.expressions.values() {
+            output.insert(expression.asset.clone());
+        }
+    }
+}
+
 fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
     match node {
         SceneNode::Background {
@@ -3903,6 +3935,9 @@ fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
             asset: Some(id), ..
         }
         | SceneNode::Bgm {
+            asset: Some(id), ..
+        }
+        | SceneNode::Ambience {
             asset: Some(id), ..
         }
         | SceneNode::Sfx { asset: id, .. } => {
@@ -3944,7 +3979,8 @@ fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
                     TimelineTrack::Sprite { asset: None, .. }
                     | TimelineTrack::Camera { .. }
                     | TimelineTrack::Button { .. }
-                    | TimelineTrack::Bgm { .. } => {}
+                    | TimelineTrack::Bgm { .. }
+                    | TimelineTrack::Ambience { .. } => {}
                 }
             }
             for event in events {
@@ -3962,7 +3998,7 @@ fn asset_folder(kind: AssetKind) -> &'static str {
         AssetKind::Background => "backgrounds",
         AssetKind::Sprite => "sprites",
         AssetKind::Gui => "gui",
-        AssetKind::Bgm | AssetKind::Sfx => "audio",
+        AssetKind::Bgm | AssetKind::Ambience | AssetKind::Sfx => "audio",
         AssetKind::Font => "fonts",
         AssetKind::Video => "videos",
     }
@@ -4353,9 +4389,26 @@ mod tests {
     }
 
     #[test]
+    fn audio_import_inference_recognizes_explicit_ambience_names() {
+        assert_eq!(
+            inferred_asset_kind(Path::new("ambience.forest.ogg")),
+            Some(WireAssetKind::Ambience)
+        );
+        assert_eq!(
+            inferred_asset_kind(Path::new("ambient_rain.wav")),
+            Some(WireAssetKind::Ambience)
+        );
+        assert_eq!(
+            inferred_asset_kind(Path::new("button_click.ogg")),
+            Some(WireAssetKind::Sfx)
+        );
+    }
+
+    #[test]
     fn staged_import_headers_reject_renamed_or_empty_files() {
         assert!(validate_import_bytes(AssetKind::Background, b"\x89PNG\r\n\x1a\nminimal").is_ok());
         assert!(validate_import_bytes(AssetKind::Bgm, b"RIFF0000WAVEfmt ").is_ok());
+        assert!(validate_import_bytes(AssetKind::Ambience, b"RIFF0000WAVEfmt ").is_ok());
         assert!(validate_import_bytes(AssetKind::Font, b"\x00\x01\x00\x00font").is_ok());
         assert!(validate_import_bytes(AssetKind::Video, b"\x00\x00\x00\x18ftypisom").is_ok());
         assert!(validate_import_bytes(AssetKind::Background, b"not an image").is_err());
@@ -4588,6 +4641,55 @@ mod tests {
 
         assert!(recover_pending_transactions(root).is_err());
         assert!(transaction_root.exists());
+    }
+
+    #[test]
+    fn manifest_character_expression_assets_are_collected() {
+        use vectspace_core::model::{CharacterDefinition, CharacterExpression};
+
+        let manifest = ContentManifest {
+            schema_version: 2,
+            content_version: "test".to_owned(),
+            entry_scene: "main".to_owned(),
+            default_locale: "zh-CN".to_owned(),
+            default_font: None,
+            variables: BTreeMap::new(),
+            characters: BTreeMap::from([(
+                "alice".to_owned(),
+                CharacterDefinition {
+                    display_name: "Alice".to_owned(),
+                    name_color: None,
+                    text_color: None,
+                    expressions: BTreeMap::from([(
+                        "happy".to_owned(),
+                        CharacterExpression {
+                            asset: "sprite.alice.happy".to_owned(),
+                            anchor_x: 0.5,
+                            anchor_y: 1.0,
+                            offset_x: 0.0,
+                            offset_y: 0.0,
+                            scale: 1.0,
+                        },
+                    )]),
+                    default_expression: None,
+                    default_scale: 1.0,
+                },
+            )]),
+            assets: BTreeMap::new(),
+            scenes: Vec::new(),
+            ui_motions: Vec::new(),
+            buttons: Vec::new(),
+            ui_motion_defaults: Default::default(),
+            animations: Vec::new(),
+            actions: Vec::new(),
+            chapter_map: None,
+        };
+        let mut assets = BTreeSet::new();
+        collect_manifest_assets(&manifest, &mut assets);
+        assert_eq!(
+            assets.into_iter().collect::<Vec<_>>(),
+            vec!["sprite.alice.happy".to_owned()]
+        );
     }
 
     #[test]

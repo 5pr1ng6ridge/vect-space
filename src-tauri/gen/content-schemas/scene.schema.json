@@ -29,6 +29,16 @@
     "nodes"
   ],
   "$defs": {
+    "AmbienceSlot": {
+      "description": "Fixed ambience channel identity shared by authored nodes, snapshots and\ntimeline tracks. Explicit serde names are required because\n`rename_all = \"snake_case\"` would serialize `Slot1` as `slot1`, not the\ncontract's `slot_1`.",
+      "type": "string",
+      "enum": [
+        "slot_1",
+        "slot_2",
+        "slot_3",
+        "slot_4"
+      ]
+    },
     "AudioAction": {
       "type": "string",
       "enum": [
@@ -1474,6 +1484,75 @@
           ]
         },
         {
+          "description": "Start or stop one of the four independent ambience channels.\n\nAmbience deliberately mirrors the BGM node's loop parameters so the\nruntime can describe one canonical looping state to every host. The\nslot is fixed rather than an arbitrary string, which keeps authored\ncontent and the wire protocol exhaustive.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/AudioAction"
+            },
+            "asset": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 500,
+              "minimum": 0
+            },
+            "loop_end_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "loop_start_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "next": {
+              "type": "string"
+            },
+            "slot": {
+              "$ref": "#/$defs/AmbienceSlot"
+            },
+            "start_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 0,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "ambience"
+            },
+            "volume": {
+              "type": "number",
+              "format": "float",
+              "default": 0.800000011920929
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "slot",
+            "action",
+            "next"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "await": {
@@ -2451,6 +2530,34 @@
           "additionalProperties": false,
           "required": [
             "type"
+          ]
+        },
+        {
+          "description": "Transient volume automation for one fixed ambience slot. The runtime\nrestores the authoritative snapshot volume after this cue completes.",
+          "type": "object",
+          "properties": {
+            "channels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/TimelineKeyframe"
+                }
+              },
+              "default": {}
+            },
+            "slot": {
+              "$ref": "#/$defs/AmbienceSlot"
+            },
+            "type": {
+              "type": "string",
+              "const": "ambience"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "slot"
           ]
         }
       ]

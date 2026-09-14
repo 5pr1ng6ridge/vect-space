@@ -16,6 +16,18 @@ export function findAssetReferences(
     references.push("manifest / default_font");
   if (["gui.dialogue_box", "gui.name_box", "sfx.typing"].includes(assetId))
     references.push("runtime / implicit asset");
+  for (const [characterId, character] of Object.entries(
+    project.manifest.characters,
+  )) {
+    for (const [expressionId, expression] of Object.entries(
+      character.expressions ?? {},
+    )) {
+      if (expression.asset === assetId)
+        references.push(
+          `manifest / characters:${characterId} / expression:${expressionId}`,
+        );
+    }
+  }
   for (const scene of project.scenes) {
     for (const [nodeId, node] of Object.entries(scene.definition.nodes)) {
       if (nodeReferencesAsset(node, assetId))
@@ -101,6 +113,8 @@ function nodeReferencesAsset(node: SceneNode, assetId: string): boolean {
     case "long_text":
       return node.paper === assetId;
     case "bgm":
+      return node.asset === assetId;
+    case "ambience":
       return node.asset === assetId;
     case "sfx":
       return node.asset === assetId;

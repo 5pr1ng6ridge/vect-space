@@ -66,6 +66,7 @@ const DEFAULT_SETTINGS: Settings = {
   bgm_volume: 0.7,
   sfx_volume: 0.8,
   video_volume: 1,
+  ambience_volume: 0.8,
   text_speed_cps: 30,
   text_reveal_animation: "typewriter",
   skip_mode: "read_only",
@@ -1678,7 +1679,7 @@ interface SettingsPanelProps {
   onClose(): void;
 }
 
-function SettingsPanel({
+export function SettingsPanel({
   settings,
   onChange,
   onSave,
@@ -1719,6 +1720,7 @@ function SettingsPanel({
     key:
       | "master_volume"
       | "bgm_volume"
+      | "ambience_volume"
       | "sfx_volume"
       | "video_volume"
       | "text_speed_cps";
@@ -1729,6 +1731,13 @@ function SettingsPanel({
   }[] = [
     { key: "master_volume", label: "主音量", min: 0, max: 1, step: 0.01 },
     { key: "bgm_volume", label: "BGM", min: 0, max: 1, step: 0.01 },
+    {
+      key: "ambience_volume",
+      label: "环境声",
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
     { key: "sfx_volume", label: "音效", min: 0, max: 1, step: 0.01 },
     { key: "video_volume", label: "视频", min: 0, max: 1, step: 0.01 },
     { key: "text_speed_cps", label: "文字速度", min: 5, max: 80, step: 1 },
@@ -1745,25 +1754,35 @@ function SettingsPanel({
             关闭
           </button>
         </header>
-        {rows.map((row) => (
-          <label className="setting-row" key={row.key}>
-            <span>{row.label}</span>
-            <input
-              max={row.max}
-              min={row.min}
-              onChange={(event) =>
-                onChange({
-                  ...settings,
-                  [row.key]: Number(event.currentTarget.value),
-                })
-              }
-              step={row.step}
-              type="range"
-              value={settings[row.key]}
-            />
-            <output>{formatSetting(settings[row.key], row.key)}</output>
-          </label>
-        ))}
+        {rows.map((row) => {
+          // Settings files written before C1 omit ambience_volume. Keep the
+          // control usable while the compatibility default is supplied by the
+          // runtime and Rust save layer.
+          const value =
+            row.key === "ambience_volume"
+              ? (settings.ambience_volume ?? 0.8)
+              : settings[row.key];
+          return (
+            <label className="setting-row" key={row.key}>
+              <span>{row.label}</span>
+              <input
+                aria-label={row.label}
+                max={row.max}
+                min={row.min}
+                onChange={(event) =>
+                  onChange({
+                    ...settings,
+                    [row.key]: Number(event.currentTarget.value),
+                  })
+                }
+                step={row.step}
+                type="range"
+                value={value}
+              />
+              <output>{formatSetting(value, row.key)}</output>
+            </label>
+          );
+        })}
         <label className="setting-row">
           <span>文字动画</span>
           <select
@@ -1950,6 +1969,7 @@ function formatSetting(
   key:
     | "master_volume"
     | "bgm_volume"
+    | "ambience_volume"
     | "sfx_volume"
     | "video_volume"
     | "text_speed_cps",

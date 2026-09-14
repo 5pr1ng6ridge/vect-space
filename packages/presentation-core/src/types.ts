@@ -1,5 +1,12 @@
 export type AssetKind =
-  "background" | "sprite" | "gui" | "bgm" | "sfx" | "font" | "video";
+  | "background"
+  | "sprite"
+  | "gui"
+  | "bgm"
+  | "ambience"
+  | "sfx"
+  | "font"
+  | "video";
 export type CueGate = "none" | "player_advance" | "runtime";
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
 export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
@@ -183,17 +190,24 @@ export interface UiMotionPreset {
   tracks: UiMotionTrack[];
 }
 
-export interface LoopingAudioSnapshot {
-  asset: string;
-  volume: number;
-  start_ms: number;
-  loop_start_ms?: number | null;
-  loop_end_ms?: number | null;
-}
+import type {
+  WireAmbienceSnapshot,
+  WireAudioSnapshot,
+  WireLoopingAudioSnapshot,
+} from "../../../shared/generated";
 
-export interface AudioSnapshot {
-  bgm: LoopingAudioSnapshot | null;
-}
+export type {
+  WireAmbienceSnapshot,
+  WireAudioSnapshot,
+  WireLoopingAudioSnapshot,
+} from "../../../shared/generated";
+
+/** Audio snapshots are the generated Rust-owned IPC contract, not a parallel TS shape. */
+export type LoopingAudioSnapshot = WireLoopingAudioSnapshot;
+export type AmbienceSnapshot = WireAmbienceSnapshot;
+export type AudioSnapshot = WireAudioSnapshot;
+
+export type AmbienceSlot = "slot_1" | "slot_2" | "slot_3" | "slot_4";
 
 export interface PlaybackSnapshot {
   auto: "normal" | "forced";
@@ -409,7 +423,8 @@ export type TimelineTrack =
       audio_enabled: boolean;
       channels: TimelineChannels;
     }
-  | { type: "bgm"; channels: TimelineChannels };
+  | { type: "bgm"; channels: TimelineChannels }
+  | { type: "ambience"; slot: AmbienceSlot; channels: TimelineChannels };
 
 export type TimelineEvent =
   | { type: "sfx"; id: string; at_ms: number; asset: string; volume: number }
@@ -500,6 +515,13 @@ export type PresentationCue = CueBase &
       }
     | {
         type: "bgm_transition";
+        from: LoopingAudioSnapshot | null;
+        to: LoopingAudioSnapshot | null;
+        duration_ms: number;
+      }
+    | {
+        type: "ambience_transition";
+        slot: AmbienceSlot;
         from: LoopingAudioSnapshot | null;
         to: LoopingAudioSnapshot | null;
         duration_ms: number;
@@ -628,6 +650,8 @@ export interface Settings {
   bgm_volume: number;
   sfx_volume: number;
   video_volume: number;
+  /** Optional for settings files written before C1. */
+  ambience_volume?: number;
   text_speed_cps: number;
   text_reveal_animation: TextRevealAnimation;
   skip_mode: SkipMode;

@@ -17,6 +17,7 @@ import {
   type TimelineKeyframeClipboard,
 } from "../timeline";
 import type {
+  AmbienceSlot,
   EditorAsset,
   TimelineEasing,
   TimelineEvent,
@@ -46,6 +47,13 @@ interface MarqueeBox {
 
 let keyframeClipboard: TimelineKeyframeClipboard | null = null;
 
+const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
+  "slot_1",
+  "slot_2",
+  "slot_3",
+  "slot_4",
+];
+
 const CHANNELS: Record<TimelineTrack["type"], string[]> = {
   sprite: [
     "x",
@@ -60,6 +68,7 @@ const CHANNELS: Record<TimelineTrack["type"], string[]> = {
   camera: ["x", "y", "zoom", "rotation_deg"],
   video: ["x", "y", "width", "height", "opacity", "z", "volume"],
   bgm: ["volume"],
+  ambience: ["volume"],
   button: [
     "x",
     "y",
@@ -236,6 +245,19 @@ export function TimelineEditor({
   const addTrack = (): void => {
     const sprite = assets.find((asset) => asset.kind === "sprite")?.id ?? "";
     const video = assets.find((asset) => asset.kind === "video")?.id ?? "";
+    const ambienceSlot =
+      AMBIENCE_SLOTS.find(
+        (slot) =>
+          !draft.tracks.some(
+            (track) => track.type === "ambience" && track.slot === slot,
+          ),
+      ) ?? "slot_1";
+    if (
+      trackType === "ambience" &&
+      draft.tracks.filter((track) => track.type === "ambience").length >=
+        AMBIENCE_SLOTS.length
+    )
+      return;
     const track: TimelineTrack =
       trackType === "sprite"
         ? {
@@ -262,7 +284,9 @@ export function TimelineEditor({
                 instance_id: `button_${draft.tracks.length + 1}`,
                 channels: {},
               }
-            : { type: trackType, channels: {} };
+            : trackType === "ambience"
+              ? { type: "ambience", slot: ambienceSlot, channels: {} }
+              : { type: trackType, channels: {} };
     commit({ ...draft, tracks: [...draft.tracks, track] });
   };
   const selectedFrame = findSelectedFrame(draft, selected);
@@ -687,6 +711,7 @@ export function TimelineEditor({
             <option value="camera">镜头轨</option>
             <option value="video">视频轨</option>
             <option value="bgm">BGM 音量轨</option>
+            <option value="ambience">环境声轨</option>
             <option value="button">按钮轨</option>
           </select>
           <button onClick={addTrack} type="button">
@@ -807,7 +832,9 @@ export function TimelineEditor({
                   ? track.sprite_id
                   : track.type === "button"
                     ? track.instance_id
-                    : ""}
+                    : track.type === "ambience"
+                      ? track.slot
+                      : ""}
               </strong>
               {(track.type === "sprite" || track.type === "video") && (
                 <select
@@ -888,6 +915,42 @@ export function TimelineEditor({
                     type="checkbox"
                   />
                   结束后移除
+                </label>
+              </div>
+            )}
+            {track.type === "ambience" && (
+              <div className="timeline-track-config">
+                <label>
+                  槽位
+                  <select
+                    value={track.slot}
+                    onChange={(event) => {
+                      const slot = event.currentTarget.value as AmbienceSlot;
+                      const alreadyUsed = draft.tracks.some(
+                        (candidate, candidateIndex) =>
+                          candidateIndex !== trackIndex &&
+                          candidate.type === "ambience" &&
+                          candidate.slot === slot,
+                      );
+                      if (!alreadyUsed)
+                        updateTrack(trackIndex, { ...track, slot });
+                    }}
+                  >
+                    {AMBIENCE_SLOTS.map((slot) => (
+                      <option
+                        disabled={draft.tracks.some(
+                          (candidate, candidateIndex) =>
+                            candidateIndex !== trackIndex &&
+                            candidate.type === "ambience" &&
+                            candidate.slot === slot,
+                        )}
+                        key={slot}
+                        value={slot}
+                      >
+                        {slot}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               </div>
             )}

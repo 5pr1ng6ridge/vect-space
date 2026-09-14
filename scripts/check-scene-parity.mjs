@@ -720,6 +720,47 @@ async function main() {
       console.error(`真实视频夹具断言失败：${videoProblems.length} 处：`);
       for (const problem of videoProblems) console.error(`  - ${problem}`);
     }
+    // Four-slot ambience fixture: the browser harness reads the same
+    // read-only AudioDiagnostics seam from the game controller and editor
+    // TimelineSession. A report without observations or checks must fail
+    // rather than silently treating ambience parity as optional.
+    const ambienceProblems = [];
+    for (const target of Array.isArray(report.targets) ? report.targets : []) {
+      const ambience = target.ambience;
+      if (ambience?.fixture !== true) continue;
+      const observations = Array.isArray(ambience.observations)
+        ? ambience.observations
+        : [];
+      const checks = Array.isArray(ambience.checks) ? ambience.checks : [];
+      if (checks.length === 0) {
+        ambienceProblems.push(`${target.id}: 没有执行四槽位环境声断言`);
+      }
+      for (const check of checks) {
+        if (check.ok !== true) {
+          ambienceProblems.push(`${target.id}/${check.name}: ${check.detail}`);
+        }
+      }
+      for (const host of ["game", "editor"]) {
+        const hostObservation = observations.find(
+          (observation) => observation.host === host,
+        );
+        if (hostObservation === undefined) {
+          ambienceProblems.push(`${target.id}: ${host} 端没有环境声诊断观测`);
+        }
+      }
+    }
+    console.log(
+      `环境声：${
+        (Array.isArray(report.targets) ? report.targets : []).filter(
+          (target) => target.ambience?.fixture === true,
+        ).length
+      } 个目标 / ${ambienceProblems.length} 个问题`,
+    );
+    if (ambienceProblems.length > 0) {
+      console.error(`四槽位环境声断言失败：${ambienceProblems.length} 处：`);
+      for (const problem of ambienceProblems) console.error(`  - ${problem}`);
+    }
+
     // Browser-driven lifecycle: a cancelled game presentation must settle
     // `failed`, a cancelled/reset editor session must reload to exactly the
     // same deterministic frame, and a cancel must have released any media.
@@ -763,6 +804,7 @@ async function main() {
       choiceLayoutProblems.length > 0 ||
       scrubMediaProblems.length > 0 ||
       videoProblems.length > 0 ||
+      ambienceProblems.length > 0 ||
       lifecycleProblems.length > 0
     ) {
       process.exitCode = 1;

@@ -13,6 +13,7 @@ import { defaultFlashEffect } from "../presentationDefaults";
 import { projectRequest } from "../story";
 import { stringifyScalarJson } from "../scalars";
 import type {
+  AmbienceSlot,
   BuildNodePreviewResult,
   EditorAsset,
   EditorProject,
@@ -83,6 +84,12 @@ const DEFAULT_PREVIEW_SETTINGS: TimelinePreviewSettings = {
   variable_overrides: {},
   choices: [],
 };
+const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
+  "slot_1",
+  "slot_2",
+  "slot_3",
+  "slot_4",
+];
 
 export function TimelineWorkspace({
   project,
@@ -808,6 +815,21 @@ export function TimelineWorkspace({
     const spriteAsset =
       assets.find((asset) => asset.kind === "sprite")?.id ?? "";
     const videoAsset = assets.find((asset) => asset.kind === "video")?.id ?? "";
+    const ambienceSlot =
+      AMBIENCE_SLOTS.find(
+        (slot) =>
+          !current.tracks.some(
+            (track) => track.type === "ambience" && track.slot === slot,
+          ),
+      ) ?? "slot_1";
+    if (
+      newTrackType === "ambience" &&
+      current.tracks.filter((track) => track.type === "ambience").length >=
+        AMBIENCE_SLOTS.length
+    ) {
+      onError("环境声轨道最多只能使用四个固定槽位。");
+      return;
+    }
     const track: TimelineTrack =
       newTrackType === "sprite"
         ? {
@@ -834,7 +856,9 @@ export function TimelineWorkspace({
                 instance_id: selectedButtonInstanceId || "button_1",
                 channels: {},
               }
-            : { type: newTrackType, channels: {} };
+            : newTrackType === "ambience"
+              ? { type: "ambience", slot: ambienceSlot, channels: {} }
+              : { type: newTrackType, channels: {} };
     commitNode({ ...current, tracks: [...current.tracks, track] });
   };
 
@@ -1316,6 +1340,7 @@ export function TimelineWorkspace({
               <option value="camera">镜头轨</option>
               <option value="video">视频轨</option>
               <option value="bgm">BGM 轨</option>
+              <option value="ambience">环境声轨</option>
               <option value="button">按钮轨</option>
             </select>
             {newTrackType === "button" && (

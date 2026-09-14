@@ -36,7 +36,9 @@ import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import { PresentationController } from "./presentation";
 import { SceneSurface } from "@vectspace/presentation-core/scene-surface";
 import type {
+  AmbienceSlot,
   AssetUrlMap,
+  LoopingAudioSnapshot,
   PresentationOutcome,
   RuntimeSnapshot,
   RuntimeUpdate,
@@ -48,6 +50,7 @@ const SETTINGS: Settings = {
   bgm_volume: 1,
   sfx_volume: 1,
   video_volume: 1,
+  ambience_volume: 0.8,
   text_speed_cps: 30,
   text_reveal_animation: "typewriter",
   skip_mode: "disabled",
@@ -55,6 +58,10 @@ const SETTINGS: Settings = {
 
 const ASSETS: AssetUrlMap = {
   "sfx.boom": "/sfx/boom.wav",
+  "ambience.one": "/ambience/one.mp3",
+  "ambience.two": "/ambience/two.mp3",
+  "ambience.three": "/ambience/three.mp3",
+  "bgm.track": "/bgm/track.mp3",
   "video.clip": "/video/clip.mp4",
   "sprite.alice": "/sprite/alice.png",
   "bg.room": "/bg/room.png",
@@ -523,6 +530,395 @@ describe("PresentationController timeline wiring", () => {
     expect(kit.renderCount()).toBe(rendersAfterCancel);
     controller.destroy();
     expect(textures.loaded.every((texture) => texture.destroyed)).toBe(true);
+  });
+
+  it("orders ambience cues per slot while allowing different slots to run concurrently", async () => {
+    const { controller } = createHost();
+    const starts: string[] = [];
+    const pending = new Map<string, (() => void)[]>();
+    const transition = vi
+      .spyOn(AudioManager.prototype, "transitionAmbience")
+      .mockImplementation(async (slot, target, durationMs): Promise<void> => {
+        if (durationMs === 0) return;
+        const asset = target?.asset ?? "stop";
+        starts.push(`${slot}:${asset}`);
+        await new Promise<void>((resolve) => {
+          const queue = pending.get(slot) ?? [];
+          queue.push(resolve);
+          pending.set(slot, queue);
+        });
+      });
+    await controller.init();
+    const state = (asset: string) => ({
+      asset,
+      volume: 1,
+      start_ms: 0,
+      loop_start_ms: null,
+      loop_end_ms: null,
+    });
+    const playing = controller.present(
+      {
+        update_id: "ambience-order",
+        snapshot: snapshot(),
+        cues: [
+          {
+            cue_id: "one-a",
+            gate: "runtime",
+            type: "ambience_transition",
+            slot: "slot_1",
+            from: null,
+            to: state("ambience.one"),
+            duration_ms: 10,
+          },
+          {
+            cue_id: "one-b",
+            gate: "runtime",
+            type: "ambience_transition",
+            slot: "slot_1",
+            from: null,
+            to: state("ambience.two"),
+            duration_ms: 10,
+          },
+          {
+            cue_id: "two-a",
+            gate: "runtime",
+            type: "ambience_transition",
+            slot: "slot_2",
+            from: null,
+            to: state("ambience.three"),
+            duration_ms: 10,
+          },
+        ],
+        requires_ack: false,
+      },
+      ASSETS,
+    );
+    await settle();
+    expect(starts).toEqual(["slot_1:ambience.one", "slot_2:ambience.three"]);
+    pending.get("slot_1")?.shift()?.();
+    await settle();
+    expect(starts).toEqual([
+      "slot_1:ambience.one",
+      "slot_2:ambience.three",
+      "slot_1:ambience.two",
+    ]);
+    pending.get("slot_1")?.shift()?.();
+    pending.get("slot_2")?.shift()?.();
+    expect(await playing).toBe("completed");
+    expect(transition).toHaveBeenCalledTimes(7);
+    controller.destroy();
+  });
+
+  it("keeps a non-awaited slot-1 timeline from overwriting slot-2", async () => {
+    const { controller, pump } = createHost();
+    const liveVolumes = new Map<AmbienceSlot, number>([
+      ["slot_1", 0.7],
+      ["slot_2", 0.4],
+    ]);
+    const writes: { slot: AmbienceSlot; volume: number }[] = [];
+    vi.spyOn(
+      AudioManager.prototype,
+      "currentAmbienceVolume",
+    ).mockImplementation((slot) => liveVolumes.get(slot));
+    vi.spyOn(
+      AudioManager.prototype,
+      "setAmbienceTimelineVolume",
+    ).mockImplementation((slot, volume) => {
+      writes.push({ slot, volume });
+      liveVolumes.set(slot, volume);
+    });
+    let releaseSlot2: (() => void) | undefined;
+    let slot2Started = false;
+    const slot2Transition = new Promise<void>((resolve) => {
+      releaseSlot2 = resolve;
+    });
+    vi.spyOn(AudioManager.prototype, "transitionAmbience").mockImplementation(
+      (slot, _target, durationMs) => {
+        if (durationMs > 0 && slot === "slot_2") {
+          slot2Started = true;
+          return slot2Transition;
+        }
+        return Promise.resolve();
+      },
+    );
+    await controller.init();
+    const base = timelineUpdate({
+      updateId: "ambience-race",
+      durationMs: 1_000,
+    });
+    const timelineCue = base.cues[0];
+    if (timelineCue?.type !== "timeline") throw new Error("缺少时间线 Cue");
+    const track: Extract<
+      (typeof timelineCue.tracks)[number],
+      { type: "ambience" }
+    > = {
+      type: "ambience",
+      slot: "slot_1",
+      channels: {
+        volume: [
+          { at_ms: 0, value: 0.2, easing: "linear" },
+          { at_ms: 1_000, value: 0.8, easing: "linear" },
+        ],
+      },
+    };
+    const target: LoopingAudioSnapshot = {
+      asset: "ambience.two",
+      volume: 0.5,
+      start_ms: 0,
+      loop_start_ms: null,
+      loop_end_ms: null,
+    };
+    const playing = controller.present(
+      {
+        ...base,
+        cues: [
+          { ...timelineCue, tracks: [...timelineCue.tracks, track] },
+          {
+            cue_id: "slot-2-transition",
+            gate: "runtime",
+            type: "ambience_transition",
+            slot: "slot_2",
+            from: null,
+            to: target,
+            duration_ms: 100,
+          },
+        ],
+      },
+      ASSETS,
+    );
+    await waitFor(
+      () => slot2Started && writes.length > 0,
+      "非阻塞时间线和 slot_2 转场启动",
+    );
+    expect(writes.every((write) => write.slot === "slot_1")).toBe(true);
+    const beforeFrames = writes.length;
+    for (let frame = 0; frame < 4; frame += 1) {
+      pump.step(100);
+      await settle();
+    }
+    expect(writes.length).toBeGreaterThan(beforeFrames);
+    expect(
+      writes.slice(beforeFrames).every((write) => write.slot === "slot_1"),
+    ).toBe(true);
+    expect(liveVolumes.get("slot_2")).toBe(0.4);
+
+    releaseSlot2?.();
+    for (let frame = 0; frame < 12; frame += 1) {
+      pump.step(100);
+      await settle();
+    }
+    expect(await playing).toBe("completed");
+    expect(liveVolumes.get("slot_2")).toBe(0.4);
+    controller.destroy();
+  });
+
+  it("reports one failed ambience cue without cancelling another slot", async () => {
+    const { controller } = createHost();
+    const transition = vi
+      .spyOn(AudioManager.prototype, "transitionAmbience")
+      .mockImplementation((slot, _target, durationMs): Promise<void> => {
+        if (durationMs > 0 && slot === "slot_1")
+          return Promise.reject(new Error("slot 1 failed"));
+        return Promise.resolve();
+      });
+    await controller.init();
+    const cue = (cueId: string, slot: "slot_1" | "slot_2") => ({
+      cue_id: cueId,
+      gate: "runtime" as const,
+      type: "ambience_transition" as const,
+      slot,
+      from: null,
+      to: {
+        asset: "ambience.one",
+        volume: 1,
+        start_ms: 0,
+        loop_start_ms: null,
+        loop_end_ms: null,
+      },
+      duration_ms: 1,
+    });
+    const outcome = await controller.present(
+      {
+        update_id: "ambience-failure",
+        snapshot: snapshot(),
+        cues: [cue("bad", "slot_1"), cue("good", "slot_2")],
+        requires_ack: false,
+      },
+      ASSETS,
+    );
+    expect(outcome).toBe("failed");
+    expect(transition).toHaveBeenCalledWith(
+      "slot_2",
+      expect.objectContaining({ asset: "ambience.one" }),
+      1,
+      ASSETS,
+      expect.any(AbortSignal),
+    );
+    controller.destroy();
+  });
+
+  it("reports an audio-only ambience cancellation as failed", async () => {
+    const { controller } = createHost();
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transition = vi
+      .spyOn(AudioManager.prototype, "transitionAmbience")
+      .mockReturnValue(blocked);
+    await controller.init();
+    const playing = controller.present(
+      {
+        update_id: "ambience-cancel",
+        snapshot: snapshot(),
+        cues: [
+          {
+            cue_id: "ambience-cancel-cue",
+            gate: "runtime",
+            type: "ambience_transition",
+            slot: "slot_1",
+            from: null,
+            to: {
+              asset: "ambience.one",
+              volume: 0.5,
+              start_ms: 0,
+              loop_start_ms: null,
+              loop_end_ms: null,
+            },
+            duration_ms: 1_000,
+          },
+        ],
+        requires_ack: false,
+      },
+      ASSETS,
+    );
+    await waitFor(() => transition.mock.calls.length === 1, "环境声转场启动");
+    controller.cancelCurrentPresentation();
+    release?.();
+    expect(await playing).toBe("failed");
+    controller.destroy();
+  });
+});
+
+describe("PresentationController BGM timeline dependencies", () => {
+  const bgmTrack = {
+    type: "bgm" as const,
+    channels: {
+      volume: [
+        { at_ms: 0, value: 0.2, easing: "linear" as const },
+        { at_ms: 1_000, value: 0.8, easing: "linear" as const },
+      ],
+    },
+  };
+
+  const bgmCue = {
+    cue_id: "bgm-transition",
+    gate: "runtime" as const,
+    type: "bgm_transition" as const,
+    from: null,
+    to: {
+      asset: "bgm.track",
+      volume: 0.6,
+      start_ms: 0,
+      loop_start_ms: null,
+      loop_end_ms: null,
+    },
+    duration_ms: 1,
+  };
+
+  it("orders a later BGM cue after a timeline that owns the BGM resource", async () => {
+    const harness = createHost();
+    const starts: string[] = [];
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transition = vi
+      .spyOn(AudioManager.prototype, "transitionBgm")
+      .mockImplementation((target, durationMs) => {
+        if (durationMs > 0) {
+          starts.push(target?.asset ?? "stop");
+          return blocked;
+        }
+        return Promise.resolve();
+      });
+    const timelineVolume = vi.spyOn(
+      AudioManager.prototype,
+      "setBgmTimelineVolume",
+    );
+    await harness.controller.init();
+    const base = timelineUpdate({ updateId: "bgm-order", durationMs: 1_000 });
+    const timeline = base.cues[0];
+    if (timeline?.type !== "timeline") throw new Error("缺少时间线 Cue");
+    const playing = harness.controller.present(
+      {
+        ...base,
+        cues: [{ ...timeline, tracks: [...timeline.tracks, bgmTrack] }, bgmCue],
+      },
+      ASSETS,
+    );
+    await waitFor(
+      () => timelineVolume.mock.calls.length > 0,
+      "BGM 时间线开始定位",
+    );
+    for (let frame = 0; frame < 3; frame += 1) {
+      harness.pump.step(100);
+      await settle();
+    }
+    expect(starts).toEqual([]);
+    for (let frame = 0; frame < 12; frame += 1) {
+      harness.pump.step(100);
+      await settle();
+      if (starts.length > 0) break;
+    }
+    expect(starts).toEqual(["bgm.track"]);
+    release?.();
+    expect(await playing).toBe("completed");
+    expect(transition).toHaveBeenCalledWith(
+      expect.objectContaining({ asset: "bgm.track" }),
+      1,
+      ASSETS,
+      expect.any(AbortSignal),
+    );
+    harness.controller.destroy();
+  });
+
+  it("lets a BGM cue run concurrently with a timeline that has no BGM track", async () => {
+    const harness = createHost();
+    const starts: string[] = [];
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(AudioManager.prototype, "transitionBgm").mockImplementation(
+      (target, durationMs) => {
+        if (durationMs > 0) {
+          starts.push(target?.asset ?? "stop");
+          return blocked;
+        }
+        return Promise.resolve();
+      },
+    );
+    await harness.controller.init();
+    const base = timelineUpdate({
+      updateId: "bgm-concurrent",
+      durationMs: 1_000,
+    });
+    const timeline = base.cues[0];
+    if (timeline?.type !== "timeline") throw new Error("缺少时间线 Cue");
+    const playing = harness.controller.present(
+      { ...base, cues: [timeline, bgmCue] },
+      ASSETS,
+    );
+    await waitFor(() => starts.length === 1, "无 BGM 时间线旁的 BGM Cue");
+    expect(starts).toEqual(["bgm.track"]);
+    release?.();
+    for (let frame = 0; frame < 12; frame += 1) {
+      harness.pump.step(100);
+      await settle();
+    }
+    expect(await playing).toBe("completed");
+    harness.controller.destroy();
   });
 });
 

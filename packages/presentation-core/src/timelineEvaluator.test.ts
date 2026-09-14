@@ -133,6 +133,41 @@ describe("evaluateTimelineFrame", () => {
     expect(frame.bgm_volume).toBe(0.75);
   });
 
+  it("evaluates ambience volume tracks per slot without changing authoritative audio state", () => {
+    const frame = evaluateTimelineFrame(
+      {
+        duration_ms: 1_000,
+        tracks: [
+          {
+            type: "ambience",
+            slot: "slot_1",
+            channels: {
+              volume: [
+                { at_ms: 0, value: 0.2, easing: "linear" },
+                { at_ms: 1_000, value: 0.8, easing: "linear" },
+              ],
+            },
+          },
+          {
+            type: "ambience",
+            slot: "slot_4",
+            channels: {
+              volume: [{ at_ms: 0, value: 0.4, easing: "linear" }],
+            },
+          },
+        ],
+      },
+      {
+        sprites: {},
+        camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
+        ambience_volumes: { slot_1: 0.6, slot_4: 0.9 },
+      },
+      500,
+    );
+    expect(frame.bgm_volume).toBe(1);
+    expect(frame.ambience_volumes).toEqual({ slot_1: 0.5, slot_4: 0.4 });
+  });
+
   it("clamps time and preserves video defaults", () => {
     const frame = evaluateTimelineFrame(
       {

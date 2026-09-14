@@ -15,6 +15,31 @@
       "id": "video-timeline",
       "scene_id": "surface_parity",
       "node_id": "video_timeline"
+    },
+    {
+      "id": "ambience-lab",
+      "scene_id": "ambience_lab",
+      "node_id": "mix_timeline"
+    },
+    {
+      "id": "ambience-retune",
+      "scene_id": "ambience_lab",
+      "node_id": "retune_slot_2"
+    },
+    {
+      "id": "ambience-replace",
+      "scene_id": "ambience_lab",
+      "node_id": "replace_slot_2"
+    },
+    {
+      "id": "ambience-stop",
+      "scene_id": "ambience_lab",
+      "node_id": "stop_slot_3"
+    },
+    {
+      "id": "ambience-closing",
+      "scene_id": "ambience_lab",
+      "node_id": "closing"
     }
   ]
 }

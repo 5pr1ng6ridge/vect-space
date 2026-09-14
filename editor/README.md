@@ -33,7 +33,7 @@ npm run editor:build
 NSIS 安装包位于：
 
 ```text
-editor/src-tauri/target/release/bundle/nsis/
+target/release/bundle/nsis/
 ```
 
 ## 使用方式
@@ -70,6 +70,9 @@ editor/src-tauri/target/release/bundle/nsis/
   同一组参数与同一虚拟时刻总是产生同一帧。
 - 幕布节点支持 `cover`/`reveal`、颜色或 `gui` 素材填充、`fade`、四向 `wipe`、
   `split_horizontal`/`split_vertical`、时长、缓动与 `await`；预览画布是 1920×1080。
+- 环境声节点使用固定 `slot_1`–`slot_4` 和独立 ambience bus；时间线可分别自动化四个
+  槽位的音量，预览默认静音且点击「声音」后才激活。游戏和编辑器通过共享只读
+  `AudioDiagnostics` 检查素材、音量、相位与暂停状态；`ambience_lab` 在章节地图中可达。
 - 素材引用统计、重命名与删除保护覆盖幕布的 `gui` 填充；`transition_lab` 演示场景可在
   游戏中手工走查全部五种背景转场、幕布组合与参数化效果。
 

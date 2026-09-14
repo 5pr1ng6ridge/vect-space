@@ -111,6 +111,20 @@ assets:
   bgm.test1:
     kind: bgm
     path: audio/test_bgm.ogg
+  # These four ambience files are deterministic project-generated WAV fixtures;
+  # run `npm run assets:ambience` to reproduce them without external recordings.
+  ambience.birds:
+    kind: ambience
+    path: audio/ambience/ambience_birds.wav
+  ambience.rain:
+    kind: ambience
+    path: audio/ambience/ambience_rain.wav
+  ambience.intro:
+    kind: ambience
+    path: audio/ambience/ambience_intro.wav
+  ambience.demo:
+    kind: ambience
+    path: audio/ambience/ambience_demo.wav
   font.fusion_pixel:
     kind: font
     path: fonts/fusion-pixel-12px-monospaced-zh_hans.ttf
@@ -292,6 +306,7 @@ scenes:
 - scenes/ch0.yaml
 - scenes/character_action_showcase.yaml
 - scenes/transition_lab.yaml
+- scenes/ambience_lab.yaml
 - scenes/surface_parity.yaml
 animations:
 - animations/scan.yaml

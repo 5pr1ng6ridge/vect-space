@@ -879,6 +879,7 @@ const ASSET_KINDS: AssetKind[] = [
   "sprite",
   "gui",
   "bgm",
+  "ambience",
   "sfx",
   "video",
   "font",
@@ -964,6 +965,18 @@ function TextEntryDialog({
 
 function inferAssetKind(fileName: string): AssetKind {
   const extension = fileName.split(".").at(-1)?.toLowerCase() ?? "";
+  const stem = fileName
+    .split(/[\\/]/)
+    .at(-1)
+    ?.replace(/\.[^.]+$/, "")
+    .toLowerCase();
+  const tokens = stem?.split(/[^a-z0-9]+/).filter(Boolean) ?? [];
+  // Audio containers do not encode their authored role.  Keep the historic
+  // SFX fallback, but recognize the explicit ambience naming convention so a
+  // file such as ambience.forest.ogg enters the import queue with the right
+  // initial kind.
+  if (tokens.some((token) => token === "ambience" || token === "ambient"))
+    return "ambience";
   if (["ttf", "otf"].includes(extension)) return "font";
   // The runtime currently guarantees MP4/H.264 playback.  Do not classify
   // WebM/MOV as video only to make the later staged-import validation fail.
@@ -981,6 +994,7 @@ function assetFolder(kind: AssetKind): string {
     case "gui":
       return "gui";
     case "bgm":
+    case "ambience":
     case "sfx":
       return "audio";
     case "video":
@@ -997,6 +1011,7 @@ function supportedImportExtension(kind: AssetKind, fileName: string): boolean {
     sprite: ["png", "jpg", "jpeg", "webp"],
     gui: ["png", "jpg", "jpeg", "webp"],
     bgm: ["ogg", "wav", "mp3", "flac"],
+    ambience: ["ogg", "wav", "mp3", "flac"],
     sfx: ["ogg", "wav", "mp3", "flac"],
     video: ["mp4"],
     font: ["ttf", "otf"],
@@ -1195,7 +1210,11 @@ function AssetPreview({
   if (["background", "sprite", "gui"].includes(asset.kind)) {
     return <img alt={asset.id} className="asset-preview" src={url} />;
   }
-  if (asset.kind === "bgm" || asset.kind === "sfx") {
+  if (
+    asset.kind === "bgm" ||
+    asset.kind === "ambience" ||
+    asset.kind === "sfx"
+  ) {
     return <audio className="asset-audio" controls src={url} />;
   }
   if (asset.kind === "video") {

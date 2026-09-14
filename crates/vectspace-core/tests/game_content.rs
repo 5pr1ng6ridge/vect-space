@@ -368,6 +368,92 @@ fn repository_game_project_validates_including_animations() {
             assert!(choices
                 .iter()
                 .any(|choice| choice.enabled_if.is_some() && choice.id == "locked"));
+
+            // The ambience lab is the reachable four-channel acceptance
+            // fixture. Keep the authored slot/kind contract explicit here so
+            // a renamed slot or accidentally ordinary audio asset cannot
+            // silently turn the demo into an SFX/BGM test.
+            let ambience = catalog
+                .scenes
+                .get("ambience_lab")
+                .expect("the four-channel ambience fixture must be registered");
+            for (id, path) in [
+                ("ambience.birds", "audio/ambience/ambience_birds.wav"),
+                ("ambience.rain", "audio/ambience/ambience_rain.wav"),
+                ("ambience.intro", "audio/ambience/ambience_intro.wav"),
+                ("ambience.demo", "audio/ambience/ambience_demo.wav"),
+            ] {
+                let asset = catalog
+                    .manifest
+                    .assets
+                    .get(id)
+                    .unwrap_or_else(|| panic!("missing ambience asset {id}"));
+                assert_eq!(asset.kind, vectspace_core::model::AssetKind::Ambience);
+                assert_eq!(asset.path.as_deref(), Some(path));
+            }
+            let started_slots: std::collections::BTreeSet<_> = ambience
+                .nodes
+                .values()
+                .filter_map(|node| match node {
+                    vectspace_core::model::SceneNode::Ambience {
+                        slot,
+                        action: vectspace_core::model::AudioAction::Start,
+                        ..
+                    } => Some(*slot),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                started_slots,
+                vectspace_core::model::AmbienceSlot::ALL
+                    .into_iter()
+                    .collect()
+            );
+            let mix = ambience
+                .nodes
+                .get("mix_timeline")
+                .expect("ambience lab must include a timeline mixer");
+            assert!(matches!(
+                mix,
+                vectspace_core::model::SceneNode::Timeline { tracks, .. }
+                    if vectspace_core::model::AmbienceSlot::ALL.into_iter().all(|slot| tracks.iter().any(|track| matches!(
+                        track,
+                        vectspace_core::model::TimelineTrack::Ambience { slot: found, channels }
+                            if *found == slot && channels.contains_key("volume")
+                    )))
+            ));
+            assert!(matches!(
+                ambience.nodes.get("retune_slot_2"),
+                Some(vectspace_core::model::SceneNode::Ambience {
+                    slot: vectspace_core::model::AmbienceSlot::Slot2,
+                    action: vectspace_core::model::AudioAction::Start,
+                    asset: Some(asset),
+                    volume,
+                    start_ms: 760,
+                    loop_start_ms: Some(200),
+                    loop_end_ms: Some(800),
+                    duration_ms: 0,
+                    await_completion: true,
+                    ..
+                }) if asset == "ambience.rain" && (*volume - 0.36).abs() < f32::EPSILON
+            ));
+            assert!(ambience.nodes.values().any(|node| matches!(
+                node,
+                vectspace_core::model::SceneNode::Ambience {
+                    slot: vectspace_core::model::AmbienceSlot::Slot2,
+                    action: vectspace_core::model::AudioAction::Start,
+                    asset: Some(asset),
+                    ..
+                } if asset == "ambience.birds"
+            )));
+            if let Some(map) = &catalog.chapter_map {
+                assert!(
+                    map.hotspots
+                        .iter()
+                        .any(|hotspot| hotspot.scene_id == "ambience_lab"),
+                    "the ambience lab must remain reachable from the chapter map"
+                );
+            }
         }
         // Unresolved LFS pointers mean the fixtures were never downloaded.
         Err(error) if error.to_string().contains("Git LFS") => {}

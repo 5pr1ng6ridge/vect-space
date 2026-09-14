@@ -11,7 +11,10 @@
  * - audio and UI cues stay here because they are host concerns, not pixels.
  */
 
-import { AudioManager } from "@vectspace/presentation-core/audio";
+import {
+  AudioManager,
+  type AudioDiagnostics,
+} from "@vectspace/presentation-core/audio";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import { animate } from "@vectspace/presentation-core/motion";
 import {
@@ -224,17 +227,15 @@ export class PresentationController {
         return "completed" as const;
       }
       // Most cues are independent and should start together (for example a
-      // background cross-fade and a camera move).  Sprite transforms are the
-      // exception: a non-blocking move followed by a reusable sprite action
-      // must finish the previous transform before the next one samples the
-      // pose.  Build a small per-update dependency graph instead of making
-      // every cue serial, preserving authored concurrency while guaranteeing
-      // same-instance ordering.
-      const lastBySprite = new Map<string, Promise<PresentationOutcome>>();
+      // background cross-fade and a camera move).  Sprite transforms and
+      // ambience slots are the exceptions: requests on one resource must stay
+      // ordered, while different resources remain concurrent.  Build one
+      // small per-update dependency graph instead of making every cue serial.
+      const lastByResource = new Map<string, Promise<PresentationOutcome>>();
       const tasks = update.cues.map((cue) => {
-        const spriteIds = cueSpriteResourceIds(cue);
-        const predecessors = spriteIds
-          .map((id) => lastBySprite.get(id))
+        const resourceIds = cueResourceIds(cue);
+        const predecessors = resourceIds
+          .map((id) => lastByResource.get(id))
           .filter(
             (task): task is Promise<PresentationOutcome> => task !== undefined,
           );
@@ -245,7 +246,7 @@ export class PresentationController {
           await Promise.allSettled(predecessors);
           return this.#executeCue(update, cue, assets, signal);
         })();
-        for (const id of spriteIds) lastBySprite.set(id, task);
+        for (const id of resourceIds) lastByResource.set(id, task);
         return task;
       });
       const results = await Promise.allSettled(tasks);
@@ -264,6 +265,11 @@ export class PresentationController {
           outcome = "skipped";
         }
       }
+      // Signal-aware audio cues resolve quietly when aborted so their owned
+      // media can roll back. The presentation itself must still report the
+      // lifecycle cancellation as failed; otherwise an audio-only ambience
+      // update appears completed after cancelCurrentPresentation().
+      if (signal.aborted || generation !== this.#generation) outcome = "failed";
       if (generation === this.#generation && !signal.aborted) {
         await this.#reconcile(update.snapshot, assets, signal);
       }
@@ -338,6 +344,11 @@ export class PresentationController {
     return this.#session.videoState;
   }
 
+  /** Shared read-only audio state used by editor/game parity diagnostics. */
+  get audioDiagnostics(): AudioDiagnostics {
+    return this.#audio.diagnostics;
+  }
+
   /** True while the host-only session curtain fully covers the canvas. */
   get sessionCovered(): boolean {
     return this.#surface.sessionCovered;
@@ -386,6 +397,17 @@ export class PresentationController {
       case "bgm_transition":
         if (this.#oneShotLedger.consume(key)) {
           await this.#audio.transitionBgm(
+            cue.to,
+            cue.duration_ms,
+            assets,
+            signal,
+          );
+        }
+        break;
+      case "ambience_transition":
+        if (this.#oneShotLedger.consume(key)) {
+          await this.#audio.transitionAmbience(
+            cue.slot,
             cue.to,
             cue.duration_ms,
             assets,
@@ -491,14 +513,20 @@ export class PresentationController {
   }
 }
 
-function cueSpriteResourceIds(cue: PresentationCue): string[] {
+function cueResourceIds(cue: PresentationCue): string[] {
   const ids = new Set<string>();
   if (cue.type === "sprite_tween") {
     ids.add(`sprite:${cue.sprite_id}`);
   } else if (cue.type === "timeline") {
     for (const track of cue.tracks) {
       if (track.type === "sprite") ids.add(`sprite:${track.sprite_id}`);
+      else if (track.type === "bgm") ids.add("bgm");
+      else if (track.type === "ambience") ids.add(`ambience:${track.slot}`);
     }
+  } else if (cue.type === "bgm_transition") {
+    ids.add("bgm");
+  } else if (cue.type === "ambience_transition") {
+    ids.add(`ambience:${cue.slot}`);
   }
   return [...ids];
 }

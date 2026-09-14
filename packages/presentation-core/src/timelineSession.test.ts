@@ -26,6 +26,7 @@ import type {
 } from "./sceneSurface";
 import type { AnimationMap } from "./imageAnimation";
 import type {
+  AmbienceSlot,
   AssetUrlMap,
   AudioSnapshot,
   CameraSnapshot,
@@ -117,6 +118,38 @@ const VIDEO_TRACK: TimelineTrack = {
   fit: "contain",
   audio_enabled: true,
   channels: {},
+};
+
+const AMBIENCE_TRACK: TimelineTrack = {
+  type: "ambience",
+  slot: "slot_1",
+  channels: {
+    volume: [
+      { at_ms: 0, value: 0.2, easing: "linear" },
+      { at_ms: 1_000, value: 0.8, easing: "linear" },
+    ],
+  },
+};
+
+const AMBIENCE_SLOT_2_TRACK: TimelineTrack = {
+  ...AMBIENCE_TRACK,
+  slot: "slot_2",
+  channels: {
+    volume: [
+      { at_ms: 0, value: 0.3, easing: "linear" },
+      { at_ms: 1_000, value: 0.9, easing: "linear" },
+    ],
+  },
+};
+
+const BGM_TRACK: TimelineTrack = {
+  type: "bgm",
+  channels: {
+    volume: [
+      { at_ms: 0, value: 0.2, easing: "linear" },
+      { at_ms: 1_000, value: 0.8, easing: "linear" },
+    ],
+  },
 };
 
 interface FrameRecord {
@@ -267,16 +300,40 @@ class FakeVideoHandle implements SceneVideoHandle {
   }
 }
 
+interface DeferredPromise {
+  promise: Promise<void>;
+  resolve(): void;
+}
+
+function makeDeferredPromise(): DeferredPromise {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve: () => resolvePromise?.(),
+  };
+}
+
 class FakeAudio implements PresentationAudioPort {
   readonly sfx: { asset: string; volume: number }[] = [];
   readonly timelineVolumes: number[] = [];
+  readonly ambienceTimelineVolumes: Array<{
+    slot: AmbienceSlot;
+    volume: number;
+  }> = [];
+  readonly ambienceVolumes = new Map<AmbienceSlot, number>();
   readonly videoVolumes: number[] = [];
   readonly settings: Settings[] = [];
   readonly rates: number[] = [];
   reconciled: AudioSnapshot[] = [];
+  reconcileError: Error | null = null;
   attached = 0;
   unlocks = 0;
   deferred = 0;
+  activationSignals: AbortSignal[] = [];
+  activation: DeferredPromise | null = null;
   destroyed = 0;
 
   async playSfx(asset: string, volume: number): Promise<void> {
@@ -295,6 +352,15 @@ class FakeAudio implements PresentationAudioPort {
     this.timelineVolumes.push(volume);
   }
 
+  setAmbienceTimelineVolume(slot: AmbienceSlot, volume: number): void {
+    this.ambienceTimelineVolumes.push({ slot, volume });
+    this.ambienceVolumes.set(slot, volume);
+  }
+
+  currentAmbienceVolume(slot: AmbienceSlot): number | undefined {
+    return this.ambienceVolumes.get(slot);
+  }
+
   currentBgmVolume(): number | undefined {
     return 0.5;
   }
@@ -305,14 +371,18 @@ class FakeAudio implements PresentationAudioPort {
 
   async reconcile(snapshot: AudioSnapshot): Promise<void> {
     this.reconciled.push(snapshot);
+    if (this.reconcileError !== null) throw this.reconcileError;
   }
 
   applySettings(settings: Settings): void {
     this.settings.push(settings);
   }
 
-  async activateDeferred(): Promise<void> {
+  async activateDeferred(signal?: AbortSignal): Promise<void> {
     this.deferred += 1;
+    if (signal !== undefined) this.activationSignals.push(signal);
+    const activation = this.activation;
+    if (activation !== null) await activation.promise;
   }
 
   async unlock(): Promise<void> {
@@ -638,15 +708,87 @@ describe("TimelineSession load", () => {
     expect(harness.surface.stagedWorlds).toEqual(["world"]);
   });
 
-  it("releases a video and clears the BGM when the load fails", async () => {
+  it("releases a video and clears BGM plus ambience when the load fails", async () => {
     const harness = createHarness();
-    harness.surface.ensureCharactersResult = false;
-    const result = await harness.session.load({
+    const initial = snapshot();
+    initial.audio = {
+      bgm: null,
+      ambience: {
+        slot_1: {
+          asset: "forest",
+          volume: 0.6,
+          start_ms: 0,
+        },
+      },
+    };
+    await harness.session.load({
       update: update([SPRITE_TRACK], [], 100),
       assets: ASSETS,
+      snapshot: initial,
+      world: "restore",
     });
-    expect(result).toBe("stale");
-    expect(harness.audio.reconciled).toEqual([]);
+    harness.audio.reconcileError = new Error("forced audio failure");
+
+    await expect(
+      harness.session.load({
+        update: update([SPRITE_TRACK], [], 100),
+        assets: ASSETS,
+        snapshot: snapshot(),
+        world: "restore",
+      }),
+    ).rejects.toThrow("forced audio failure");
+    expect(harness.audio.reconciled.at(-1)).toEqual({
+      bgm: null,
+      ambience: {},
+    });
+  });
+
+  it("aborts delayed preview activation before a failed replacement load", async () => {
+    const harness = createHarness();
+    const initial = snapshot();
+    initial.audio = {
+      bgm: { asset: "music", volume: 1, start_ms: 0 },
+      ambience: {
+        slot_1: { asset: "forest", volume: 0.6, start_ms: 0 },
+      },
+    };
+    await harness.session.load({
+      update: update([BGM_TRACK, AMBIENCE_TRACK], [], 100),
+      assets: ASSETS,
+      snapshot: initial,
+      world: "restore",
+    });
+    await harness.session.seek(50, "scrub");
+
+    const activation = makeDeferredPromise();
+    harness.audio.activation = activation;
+    harness.session.setMuted(false);
+    await Promise.resolve();
+    const activationSignal = harness.audio.activationSignals.at(-1);
+    if (activationSignal === undefined)
+      throw new Error("missing activation signal");
+    expect(activationSignal.aborted).toBe(false);
+
+    harness.audio.reconcileError = new Error("replacement failed");
+    await expect(
+      harness.session.load({
+        update: update([SPRITE_TRACK], [], 100),
+        assets: ASSETS,
+        snapshot: snapshot(),
+        world: "restore",
+      }),
+    ).rejects.toThrow("replacement failed");
+    expect(activationSignal.aborted).toBe(true);
+    const timelineWrites = harness.audio.timelineVolumes.length;
+    const ambienceWrites = harness.audio.ambienceTimelineVolumes.length;
+
+    // Let the old activation settle after the failed boundary. Its generation
+    // check must prevent a stale sidecar reapply or resource resurrection.
+    activation.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(harness.audio.timelineVolumes.length).toBe(timelineWrites);
+    expect(harness.audio.ambienceTimelineVolumes.length).toBe(ambienceWrites);
   });
 
   it("prepares a video element with listeners and no audio while silent", async () => {
@@ -737,6 +879,125 @@ describe("TimelineSession timeline edits", () => {
     ).toBe(false);
     harness.session.dispose();
   });
+
+  it("applies ambience sidecar volumes and restores the authoritative base", async () => {
+    const harness = createHarness();
+    harness.audio.ambienceVolumes.set("slot_1", 0.7);
+    harness.audio.ambienceVolumes.set("slot_2", 0.4);
+    await harness.session.load({
+      update: update([AMBIENCE_TRACK], [], 1_000),
+      assets: ASSETS,
+    });
+    expect(harness.audio.ambienceTimelineVolumes.at(-1)).toEqual({
+      slot: "slot_1",
+      volume: 0.2,
+    });
+    await harness.session.seek(500, "scrub");
+    expect(harness.audio.ambienceTimelineVolumes.at(-1)?.volume).toBeCloseTo(
+      0.5,
+    );
+    expect(
+      harness.audio.ambienceTimelineVolumes.every(
+        (entry) => entry.slot === "slot_1",
+      ),
+    ).toBe(true);
+    expect(harness.surface.applied.at(-1)?.frame).not.toHaveProperty(
+      "ambience_volumes",
+    );
+    harness.session.cancel();
+    expect(harness.audio.ambienceTimelineVolumes.at(-1)).toEqual({
+      slot: "slot_1",
+      volume: 0.7,
+    });
+    expect(
+      harness.audio.ambienceTimelineVolumes.every(
+        (entry) => entry.slot === "slot_1",
+      ),
+    ).toBe(true);
+    harness.session.dispose();
+  });
+
+  it("does not write BGM for a timeline without a BGM track", async () => {
+    const harness = createHarness();
+    await harness.session.load({
+      update: update([SPRITE_TRACK], [], 1_000),
+      assets: ASSETS,
+    });
+    await harness.session.seek(500, "scrub");
+    expect(harness.audio.timelineVolumes).toEqual([]);
+    harness.session.cancel();
+    expect(harness.audio.timelineVolumes).toEqual([]);
+    harness.session.dispose();
+  });
+
+  it("restores muted-scrubbed BGM and ambience after deferred activation", async () => {
+    const harness = createHarness();
+    harness.audio.ambienceVolumes.set("slot_1", 0.65);
+    await harness.session.load({
+      update: update([BGM_TRACK, AMBIENCE_TRACK], [], 1_000),
+      assets: ASSETS,
+    });
+    await harness.session.seek(500, "scrub");
+    const applied = harness.surface.applied.length;
+    const effects = harness.surface.effects.length;
+    const bgmWrites = harness.audio.timelineVolumes.length;
+    const ambienceWrites = harness.audio.ambienceTimelineVolumes.length;
+
+    harness.session.setMuted(false);
+    await Promise.resolve();
+
+    expect(harness.audio.timelineVolumes.length).toBe(bgmWrites + 1);
+    expect(harness.audio.timelineVolumes.at(-1)).toBeCloseTo(0.5);
+    expect(harness.audio.ambienceTimelineVolumes.length).toBe(
+      ambienceWrites + 1,
+    );
+    expect(harness.audio.ambienceTimelineVolumes.at(-1)).toEqual({
+      slot: "slot_1",
+      volume: 0.5,
+    });
+    // Activation only reapplies the audio sidecar; it does not render Pixi or
+    // derive effects a second time.
+    expect(harness.surface.applied.length).toBe(applied);
+    expect(harness.surface.effects.length).toBe(effects);
+    expect(harness.session.elapsedMs).toBe(500);
+    harness.session.dispose();
+  });
+
+  it("keeps an unrelated transition untouched and restores removed tracks", async () => {
+    const harness = createHarness();
+    harness.audio.ambienceVolumes.set("slot_1", 0.7);
+    harness.audio.ambienceVolumes.set("slot_2", 0.4);
+    await harness.session.load({
+      update: update([AMBIENCE_TRACK], [], 1_000),
+      assets: ASSETS,
+    });
+    await harness.session.seek(500, "scrub");
+    // A non-awaited transition on another slot changes its authoritative
+    // volume while this timeline continues to own slot_1.
+    harness.audio.ambienceVolumes.set("slot_2", 0.9);
+    const beforeEdit = harness.audio.ambienceTimelineVolumes.length;
+    expect(harness.session.applyTimelineEdit(update([], [], 1_000))).toBe(true);
+    expect(harness.audio.ambienceVolumes.get("slot_1")).toBe(0.7);
+    expect(harness.audio.ambienceVolumes.get("slot_2")).toBe(0.9);
+    expect(harness.audio.ambienceTimelineVolumes.slice(beforeEdit)).toEqual([
+      { slot: "slot_1", volume: 0.7 },
+    ]);
+
+    // Add slot_2 back as a timeline track: its current transition value is the
+    // new base, and cancellation restores that value rather than slot_1's.
+    expect(
+      harness.session.applyTimelineEdit(
+        update([AMBIENCE_SLOT_2_TRACK], [], 1_000),
+      ),
+    ).toBe(true);
+    await harness.session.seek(500, "scrub");
+    expect(harness.audio.ambienceVolumes.get("slot_1")).toBe(0.7);
+    expect(harness.audio.ambienceVolumes.get("slot_2")).toBeCloseTo(0.6);
+    harness.session.cancel();
+    expect(harness.audio.ambienceVolumes.get("slot_1")).toBe(0.7);
+    expect(harness.audio.ambienceVolumes.get("slot_2")).toBeCloseTo(0.9);
+    harness.session.dispose();
+  });
 });
 
 describe("TimelineSession playback", () => {
@@ -817,6 +1078,24 @@ describe("TimelineSession playback", () => {
     expect(await play).toBe("skipped");
     expect(harness.session.elapsedMs).toBe(1_000);
     expect(harness.audio.sfx).toEqual([]);
+    harness.session.dispose();
+  });
+
+  it("restores each ambience base after terminal playback", async () => {
+    const harness = createHarness();
+    harness.audio.ambienceVolumes.set("slot_1", 0.65);
+    await harness.session.load({
+      update: update([AMBIENCE_TRACK], [], 1_000),
+      assets: ASSETS,
+    });
+    harness.session.setMuted(false);
+    const play = harness.session.play();
+    await advance(600, 3);
+    expect(await play).toBe("completed");
+    expect(harness.audio.ambienceTimelineVolumes.at(-1)).toEqual({
+      slot: "slot_1",
+      volume: 0.65,
+    });
     harness.session.dispose();
   });
 

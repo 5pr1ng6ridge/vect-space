@@ -2191,6 +2191,38 @@ fn validate_scenes(
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
+                SceneNode::Ambience {
+                    action,
+                    asset,
+                    volume,
+                    duration_ms,
+                    start_ms,
+                    loop_start_ms,
+                    loop_end_ms,
+                    next,
+                    ..
+                } => {
+                    if *action == AudioAction::Start && asset.is_none() {
+                        return node_error(scene_id, node_id, "ambience start 必须提供 asset");
+                    }
+                    if *action == AudioAction::Stop && asset.is_some() {
+                        return node_error(scene_id, node_id, "ambience stop 不能提供 asset");
+                    }
+                    if let Some(id) = asset {
+                        require_asset(assets, id, AssetKind::Ambience, scene_id, node_id)?;
+                    }
+                    validate_volume(*volume, scene_id, node_id)?;
+                    if loop_start_ms.is_some() != loop_end_ms.is_some() {
+                        return node_error(scene_id, node_id, "ambience 循环起止点必须同时提供");
+                    }
+                    if let (Some(start), Some(end)) = (loop_start_ms, loop_end_ms) {
+                        if start >= end || *start_ms > *end {
+                            return node_error(scene_id, node_id, "ambience 循环点顺序无效");
+                        }
+                    }
+                    validate_duration(*duration_ms, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
                 SceneNode::Sfx {
                     asset,
                     volume,
@@ -2563,6 +2595,12 @@ fn validate_timeline(
             TimelineTrack::Bgm { channels } => {
                 if !track_ids.insert("bgm".to_owned()) {
                     return node_error(scene_id, node_id, "时间线只能包含一条 BGM 音量轨");
+                }
+                (channels, &["volume"], true)
+            }
+            TimelineTrack::Ambience { slot, channels } => {
+                if !track_ids.insert(format!("ambience:{}", slot.as_str())) {
+                    return node_error(scene_id, node_id, "同一 ambience 槽位不能出现多条时间线轨");
                 }
                 (channels, &["volume"], true)
             }
@@ -5026,6 +5064,22 @@ mod tests {
         )
     }
 
+    fn validate_fixture_scenes_with_assets(
+        catalog: &ContentCatalog,
+        scenes: &BTreeMap<String, SceneDefinition>,
+        assets: &BTreeMap<String, AssetDefinition>,
+    ) -> Result<(), ContentError> {
+        validate_scenes(
+            scenes,
+            assets,
+            &catalog.manifest.variables,
+            &catalog.manifest.characters,
+            &catalog.ui_motions,
+            &catalog.buttons,
+            &catalog.actions,
+        )
+    }
+
     fn prologue_with_node(
         catalog: &ContentCatalog,
         node_id: &str,
@@ -5038,6 +5092,175 @@ mod tests {
             .nodes
             .insert(node_id.to_owned(), node);
         scenes
+    }
+
+    #[test]
+    fn ambience_nodes_validate_kind_stop_asset_loop_and_timeline_slots() {
+        let catalog = fixture_catalog();
+        let mut assets = catalog.manifest.assets.clone();
+        assets.insert(
+            "ambience.test".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Ambience,
+                path: Some("audio/test_bgm.ogg".to_owned()),
+                animation: None,
+            },
+        );
+        let valid = |action: AudioAction, asset: Option<&str>, loop_end_ms: Option<u64>| {
+            SceneNode::Ambience {
+                slot: crate::model::AmbienceSlot::Slot1,
+                action,
+                asset: asset.map(str::to_owned),
+                volume: 0.6,
+                start_ms: 0,
+                loop_start_ms: Some(100),
+                loop_end_ms,
+                duration_ms: 300,
+                await_completion: false,
+                next: "introduction".to_owned(),
+            }
+        };
+        assert!(validate_fixture_scenes_with_assets(
+            &catalog,
+            &prologue_with_node(
+                &catalog,
+                "valid_ambience",
+                valid(AudioAction::Start, Some("ambience.test"), Some(900)),
+            ),
+            &assets,
+        )
+        .is_ok());
+
+        let wrong_kind = valid(AudioAction::Start, Some("bgm.test1"), Some(900));
+        let error = validate_fixture_scenes(
+            &catalog,
+            &prologue_with_node(&catalog, "ambience_wrong_kind", wrong_kind),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("类型不正确"), "{error}");
+
+        let stop_with_asset = valid(AudioAction::Stop, Some("ambience.test"), Some(900));
+        let error = validate_fixture_scenes_with_assets(
+            &catalog,
+            &prologue_with_node(&catalog, "ambience_stop_asset", stop_with_asset),
+            &assets,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("不能提供 asset"), "{error}");
+
+        let bad_loop = valid(AudioAction::Start, Some("ambience.test"), Some(50));
+        let error = validate_fixture_scenes_with_assets(
+            &catalog,
+            &prologue_with_node(&catalog, "ambience_bad_loop", bad_loop),
+            &assets,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("循环点顺序无效"), "{error}");
+
+        let channels = BTreeMap::from([(
+            "volume".to_owned(),
+            vec![TimelineKeyframe {
+                at_ms: 0,
+                value: TimelineKeyframeValue::Number(0.2),
+                easing: TimelineEasing::default(),
+            }],
+        )]);
+        let duplicate_slots = SceneNode::Timeline {
+            duration_ms: 300,
+            await_completion: true,
+            skippable: true,
+            tracks: vec![
+                TimelineTrack::Ambience {
+                    slot: crate::model::AmbienceSlot::Slot2,
+                    channels: channels.clone(),
+                },
+                TimelineTrack::Ambience {
+                    slot: crate::model::AmbienceSlot::Slot2,
+                    channels,
+                },
+            ],
+            events: Vec::new(),
+            next: "introduction".to_owned(),
+        };
+        let error = validate_fixture_scenes_with_assets(
+            &catalog,
+            &prologue_with_node(&catalog, "ambience_duplicate_track", duplicate_slots),
+            &assets,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("同一 ambience 槽位"), "{error}");
+    }
+
+    #[test]
+    fn ambience_node_rejects_each_invalid_start_and_timing_input_explicitly() {
+        let catalog = fixture_catalog();
+        let mut assets = catalog.manifest.assets.clone();
+        assets.insert(
+            "ambience.test".to_owned(),
+            AssetDefinition {
+                kind: AssetKind::Ambience,
+                path: Some("audio/test_bgm.ogg".to_owned()),
+                animation: None,
+            },
+        );
+        let node = || SceneNode::Ambience {
+            slot: crate::model::AmbienceSlot::Slot1,
+            action: AudioAction::Start,
+            asset: Some("ambience.test".to_owned()),
+            volume: 0.6,
+            start_ms: 0,
+            loop_start_ms: Some(100),
+            loop_end_ms: Some(900),
+            duration_ms: 300,
+            await_completion: false,
+            next: "introduction".to_owned(),
+        };
+        let assert_error = |node: SceneNode, expected: &str| {
+            let error = validate_fixture_scenes_with_assets(
+                &catalog,
+                &prologue_with_node(&catalog, "invalid_ambience", node),
+                &assets,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "expected {expected}, got {error}");
+        };
+
+        let mut missing_start_asset = node();
+        if let SceneNode::Ambience { asset, .. } = &mut missing_start_asset {
+            *asset = None;
+        }
+        assert_error(missing_start_asset, "必须提供 asset");
+
+        let mut stop_with_asset = node();
+        if let SceneNode::Ambience { action, .. } = &mut stop_with_asset {
+            *action = AudioAction::Stop;
+        }
+        assert_error(stop_with_asset, "不能提供 asset");
+
+        for volume in [f32::NAN, -0.01, 1.01] {
+            let mut invalid_volume = node();
+            if let SceneNode::Ambience { volume: value, .. } = &mut invalid_volume {
+                *value = volume;
+            }
+            assert_error(invalid_volume, "音量必须");
+        }
+
+        let mut duration_overflow = node();
+        if let SceneNode::Ambience { duration_ms, .. } = &mut duration_overflow {
+            *duration_ms = u64::MAX;
+        }
+        assert_error(duration_overflow, "单个动画时长不能超过 60 秒");
+
+        let mut start_after_loop = node();
+        if let SceneNode::Ambience { start_ms, .. } = &mut start_after_loop {
+            *start_ms = 901;
+        }
+        assert_error(start_after_loop, "循环点顺序无效");
     }
 
     #[test]

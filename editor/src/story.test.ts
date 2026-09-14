@@ -3,8 +3,9 @@ import {
   countVariableReferences,
   countCharacterReferences,
   convertToTimeline,
-  outputPorts,
   defaultNode,
+  NODE_TYPES,
+  outputPorts,
   insertNode,
   preparePastedNode,
   renameNode,
@@ -730,6 +731,48 @@ describe("story graph mapping", () => {
     ).toBe(true);
   });
 
+  it("exposes a four-slot ambience node with asset-safe paste and validation", () => {
+    expect(NODE_TYPES.some((candidate) => candidate.type === "ambience")).toBe(
+      true,
+    );
+    const authored = project();
+    authored.manifest.assets["ambience.forest"] = {
+      kind: "ambience",
+      path: "audio/ambience.forest.ogg",
+    };
+    const node = defaultNode("ambience", "end");
+    expect(node).toMatchObject({
+      type: "ambience",
+      slot: "slot_1",
+      action: "start",
+      volume: 0.8,
+      next: "end",
+    });
+    if (node.type !== "ambience") throw new Error("expected ambience node");
+    const pasted = preparePastedNode(
+      { ...node, asset: "ambience.forest", slot: "slot_4" },
+      authored.manifest,
+    );
+    expect(pasted).toMatchObject({
+      type: "ambience",
+      slot: "slot_4",
+      asset: "ambience.forest",
+      next: "",
+    });
+    authored.scenes[0].definition.nodes.ambience = pasted;
+    expect(validateLive(authored).map((issue) => issue.code)).not.toContain(
+      "missing_asset",
+    );
+    if (pasted.type !== "ambience") throw new Error("expected pasted ambience");
+    authored.scenes[0].definition.nodes.ambience = {
+      ...pasted,
+      slot: "slot_5" as never,
+    };
+    expect(validateLive(authored).map((issue) => issue.code)).toContain(
+      "invalid_ambience_slot",
+    );
+  });
+
   it("matches Rust by rejecting non-finite story node numbers", () => {
     const invalid = project();
     invalid.scenes[0].definition.nodes.bad_sprite = {
@@ -800,6 +843,11 @@ describe("story graph mapping", () => {
           audio_enabled: false,
           channels: { opacity: [] },
         },
+        {
+          type: "ambience",
+          slot: "slot_5" as never,
+          channels: { volume: [] },
+        },
       ],
       events: [
         {
@@ -815,6 +863,7 @@ describe("story graph mapping", () => {
 
     const codes = validateLive(invalid).map((diagnostic) => diagnostic.code);
     expect(codes).toContain("invalid_bgm_loop");
+    expect(codes).toContain("invalid_ambience_slot");
     expect(codes).toContain("invalid_video_clip");
     expect(codes).toContain("empty_timeline_channel");
     expect(codes).toContain("invalid_timeline_event_time");

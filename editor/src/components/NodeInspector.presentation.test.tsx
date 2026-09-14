@@ -46,6 +46,12 @@ const ASSETS: EditorAsset[] = [
     path: "gui/curtain.png",
     absolute_path: "C:/curtain.png",
   },
+  {
+    id: "ambience.forest",
+    kind: "ambience",
+    path: "audio/ambience.forest.ogg",
+    absolute_path: "C:/ambience.forest.ogg",
+  },
 ];
 
 const MANIFEST: ContentManifest = {
@@ -58,6 +64,10 @@ const MANIFEST: ContentManifest = {
   assets: {
     "bg.a": { kind: "background", path: "backgrounds/a.png" },
     "gui.curtain": { kind: "gui", path: "gui/curtain.png" },
+    "ambience.forest": {
+      kind: "ambience",
+      path: "audio/ambience.forest.ogg",
+    },
   },
   scenes: ["scenes/main.yaml"],
   ui_motions: [],
@@ -120,6 +130,47 @@ function renderInspector(node: SceneNode, onChange = vi.fn()) {
 }
 
 describe("NodeInspector canonical presentation editors", () => {
+  it("edits ambience slots and canonicalizes stop nodes", () => {
+    const { onChange } = renderInspector({
+      type: "ambience",
+      slot: "slot_1",
+      action: "start",
+      asset: "ambience.forest",
+      volume: 0.5,
+      duration_ms: 0,
+      start_ms: 250,
+      loop_start_ms: 100,
+      loop_end_ms: 900,
+      await: true,
+      next: "target",
+    });
+    const comboboxes = screen.getAllByRole<HTMLSelectElement>("combobox");
+    expect(comboboxes.some((field) => field.value === "slot_1")).toBe(true);
+    expect(comboboxes.some((field) => field.value === "start")).toBe(true);
+    const slotField = comboboxes.find((field) => field.value === "slot_1");
+    if (slotField === undefined) throw new Error("missing ambience slot field");
+    fireEvent.change(slotField, { target: { value: "slot_4" } });
+    expect(onChange).toHaveBeenLastCalledWith(
+      "target",
+      expect.objectContaining({ slot: "slot_4" }),
+    );
+
+    const actionField = comboboxes.find((field) => field.value === "start");
+    if (actionField === undefined)
+      throw new Error("missing ambience action field");
+    fireEvent.change(actionField, { target: { value: "stop" } });
+    expect(onChange).toHaveBeenLastCalledWith("target", {
+      type: "ambience",
+      slot: "slot_1",
+      action: "stop",
+      asset: null,
+      volume: 0.5,
+      duration_ms: 0,
+      await: true,
+      next: "target",
+    });
+  });
+
   it("edits a background transition with every parameter and a live preview", () => {
     const { onChange } = renderInspector({
       type: "background",

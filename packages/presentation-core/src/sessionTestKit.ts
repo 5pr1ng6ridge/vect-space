@@ -18,7 +18,12 @@ import type {
   PresentationAudioPort,
   TimelineDomAdapter,
 } from "./timelineSession";
-import type { AssetUrlMap, AudioSnapshot, Settings } from "./types";
+import type {
+  AmbienceSlot,
+  AssetUrlMap,
+  AudioSnapshot,
+  Settings,
+} from "./types";
 
 export interface FakeMediaElement {
   element: HTMLVideoElement;
@@ -186,6 +191,10 @@ export interface RecordingAudio extends PresentationAudioPort {
   readonly attached: HTMLVideoElement[];
   readonly videoVolumes: number[];
   readonly bgmTimelineVolumes: number[];
+  readonly ambienceTimelineVolumes: Array<{
+    slot: AmbienceSlot;
+    volume: number;
+  }>;
   readonly rates: number[];
   readonly settings: Settings[];
   readonly reconciled: AudioSnapshot[];
@@ -201,6 +210,7 @@ export function createRecordingAudio(): RecordingAudio {
     attached: [],
     videoVolumes: [],
     bgmTimelineVolumes: [],
+    ambienceTimelineVolumes: [],
     rates: [],
     settings: [],
     reconciled: [],
@@ -219,6 +229,12 @@ export function createRecordingAudio(): RecordingAudio {
     },
     setBgmTimelineVolume(volume: number): void {
       this.bgmTimelineVolumes.push(volume);
+    },
+    setAmbienceTimelineVolume(slot: AmbienceSlot, volume: number): void {
+      this.ambienceTimelineVolumes.push({ slot, volume });
+    },
+    currentAmbienceVolume(_slot: AmbienceSlot): number | undefined {
+      return undefined;
     },
     currentBgmVolume(): number | undefined {
       return undefined;

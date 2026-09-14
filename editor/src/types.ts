@@ -1,5 +1,12 @@
 export type AssetKind =
-  "background" | "sprite" | "gui" | "bgm" | "sfx" | "font" | "video";
+  | "background"
+  | "sprite"
+  | "gui"
+  | "bgm"
+  | "ambience"
+  | "sfx"
+  | "font"
+  | "video";
 
 import type { WireAssetInspection } from "../../shared/generated/WireAssetInspection";
 import type { WireAssetMetadata } from "../../shared/generated/WireAssetMetadata";
@@ -463,6 +470,19 @@ export interface BgmNode extends AwaitedNode {
   loop_end_ms?: number | null;
 }
 
+export type AmbienceSlot = "slot_1" | "slot_2" | "slot_3" | "slot_4";
+
+export interface AmbienceNode extends AwaitedNode {
+  type: "ambience";
+  slot: AmbienceSlot;
+  action: "start" | "stop";
+  asset?: string | null;
+  volume: number;
+  start_ms?: number;
+  loop_start_ms?: number | null;
+  loop_end_ms?: number | null;
+}
+
 export type TimelineTrack =
   | {
       type: "sprite";
@@ -483,7 +503,8 @@ export type TimelineTrack =
       audio_enabled: boolean;
       channels: TimelineChannels;
     }
-  | { type: "bgm"; channels: TimelineChannels };
+  | { type: "bgm"; channels: TimelineChannels }
+  | { type: "ambience"; slot: AmbienceSlot; channels: TimelineChannels };
 
 export type TimelineEvent =
   | { type: "sfx"; id: string; at_ms: number; asset: string; volume: number }
@@ -604,6 +625,7 @@ export type SceneNode =
   | JumpNode
   | WaitNode
   | BgmNode
+  | AmbienceNode
   | SfxNode
   | CameraNode
   | ScreenEffectNode

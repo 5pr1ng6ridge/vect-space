@@ -22,15 +22,19 @@
  *   plus a presented frame with a diagnostic timeout, and the latest seek wins.
  */
 
-import { evaluateActiveScreenEffects } from "./timelineEvaluator";
 import {
-  evaluateSceneFrame,
+  evaluateActiveScreenEffects,
+  evaluateTimelineFrame,
+} from "./timelineEvaluator";
+import {
   mergeSceneOverrides,
+  sceneFrameFromTimeline,
   type SceneFrame,
   type SceneOverrides,
   type SceneSpriteGeometry,
 } from "./sceneFrame";
 import { TimelineClock, type TimelineOutcome } from "./timeline";
+import type { AudioDiagnostics } from "./audio";
 import type {
   SceneActiveEffects,
   SceneBases,
@@ -42,6 +46,7 @@ import type {
 } from "./sceneSurface";
 import type { AnimationMap } from "./imageAnimation";
 import type {
+  AmbienceSlot,
   AssetUrlMap,
   AudioSnapshot,
   Settings,
@@ -114,6 +119,8 @@ export interface TimelineSurfacePort {
 
 /** Narrow audio contract so the session can be exercised without Web Audio. */
 export interface PresentationAudioPort {
+  /** Optional read-only graph seam; recording test ports may omit it. */
+  readonly diagnostics?: AudioDiagnostics;
   playSfx(
     asset: string,
     volume: number,
@@ -124,6 +131,8 @@ export interface PresentationAudioPort {
   setVideoVolume(element: HTMLVideoElement, volume: number): void;
   setBgmTimelineVolume(volume: number): void;
   currentBgmVolume(): number | undefined;
+  setAmbienceTimelineVolume(slot: AmbienceSlot, volume: number): void;
+  currentAmbienceVolume(slot: AmbienceSlot): number | undefined;
   setPlaybackRate(rate: number): void;
   reconcile(
     snapshot: AudioSnapshot,
@@ -196,15 +205,48 @@ interface SessionVideo {
 
 type TimelineCue = Extract<RuntimeUpdate["cues"][number], { type: "timeline" }>;
 
+const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
+  "slot_1",
+  "slot_2",
+  "slot_3",
+  "slot_4",
+];
+
 const DEFAULT_SETTINGS: Settings = {
   master_volume: 1,
   bgm_volume: 1,
   sfx_volume: 1,
   video_volume: 1,
+  ambience_volume: 0.8,
   text_speed_cps: 30,
   text_reveal_animation: "typewriter",
   skip_mode: "disabled",
 };
+
+function snapshotAmbienceVolumes(
+  audio: AudioSnapshot,
+): Partial<Record<AmbienceSlot, number>> {
+  const result: Partial<Record<AmbienceSlot, number>> = {};
+  for (const slot of AMBIENCE_SLOTS) {
+    const volume = audio.ambience?.[slot]?.volume;
+    if (volume !== undefined) result[slot] = volume;
+  }
+  return result;
+}
+
+function captureAmbienceVolumes(
+  audio: PresentationAudioPort,
+  fallback: AudioSnapshot,
+): Partial<Record<AmbienceSlot, number>> {
+  const result: Partial<Record<AmbienceSlot, number>> = {};
+  for (const slot of AMBIENCE_SLOTS) {
+    const live = audio.currentAmbienceVolume(slot);
+    const authored = fallback.ambience?.[slot]?.volume;
+    if (live !== undefined) result[slot] = live;
+    else if (authored !== undefined) result[slot] = authored;
+  }
+  return result;
+}
 
 export class TimelineSession {
   readonly #surface: TimelineSurfacePort;
@@ -223,6 +265,15 @@ export class TimelineSession {
     camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
     bgmVolume: 1,
   };
+  /**
+   * Audio-sidecar interpolation bases stay in the timeline session. They are
+   * deliberately not part of SceneBases or SceneFrame, which are Pixi-facing
+   * visual contracts. The audio port consumes the evaluated sidecar without
+   * teaching the visual surface about ambience.
+   */
+  #ambienceVolumes: Partial<Record<AmbienceSlot, number>> = {};
+  #trackedAmbienceSlots = new Set<AmbienceSlot>();
+  #hasBgmTrack = false;
   #clock: TimelineClock | null = null;
   #settle: ((outcome: TimelineOutcome) => void) | null = null;
   #playPromise: Promise<TimelineOutcome> | null = null;
@@ -295,6 +346,14 @@ export class TimelineSession {
     };
   }
 
+  /**
+   * Read-only shared audio graph state for host diagnostics and parity. The
+   * optional port keeps lightweight recording adapters source-compatible.
+   */
+  get audioDiagnostics(): AudioDiagnostics | null {
+    return this.#audio.diagnostics ?? null;
+  }
+
   /** Replaces the frame lists used for animated artwork. */
   setAnimations(animations: AnimationMap): void {
     this.#surface.setAnimations(animations);
@@ -320,6 +379,11 @@ export class TimelineSession {
     signal?: AbortSignal,
   ): Promise<TimelineLoadStatus> {
     if (this.#disposed) return "stale";
+    // A replacement load is an activation boundary. Abort preview audio before
+    // preparing or reconciling the replacement so a delayed context.resume()
+    // continuation cannot revive the previous target behind the new timeline.
+    this.#activationAbort?.abort();
+    this.#activationAbort = null;
     const generation = ++this.#loadGeneration;
     this.#loadAbort?.abort();
     const controller = new AbortController();
@@ -364,6 +428,12 @@ export class TimelineSession {
         if (preparation === null || !this.#surface.applyWorld(preparation)) {
           return "stale";
         }
+        // A muted preview load is an activation boundary. Fully dispose the
+        // previous graph before preparing the deferred target so repeated
+        // editor loads do not keep hidden media/context resources alive before
+        // the next unlock.
+        if (this.#audioPolicy === "preview" && this.#muted)
+          this.#audio.destroy();
         await this.#audio.reconcile(
           snapshot.audio,
           request.assets,
@@ -376,13 +446,20 @@ export class TimelineSession {
           camera: { ...snapshot.world.camera },
           bgmVolume: snapshot.audio.bgm?.volume ?? 1,
         };
+        this.#ambienceVolumes = snapshotAmbienceVolumes(snapshot.audio);
       } else {
         this.#bases = {
           ...this.#surface.captureBases(),
           bgmVolume: this.#audio.currentBgmVolume() ?? 1,
         };
+        this.#ambienceVolumes = captureAmbienceVolumes(
+          this.#audio,
+          request.update.snapshot.audio,
+        );
       }
       this.#cue = cue;
+      this.#hasBgmTrack = hasBgmTrack(cue);
+      this.#trackedAmbienceSlots = ambienceSlotsForCue(cue);
       this.#firedEvents.clear();
       this.#lastCursor = -1;
       this.#elapsed = 0;
@@ -395,9 +472,16 @@ export class TimelineSession {
     } catch (error) {
       if (!isCurrent()) return "stale";
       this.#releaseVideo();
+      this.#restoreTimelineAudioVolumes();
       this.#cue = null;
+      this.#hasBgmTrack = false;
+      this.#ambienceVolumes = {};
+      this.#trackedAmbienceSlots.clear();
+      // A failed load must clear every audio channel it may have partially
+      // activated.  Omitting ambience here leaves a previous slot alive when
+      // the failure happened after the new snapshot's reconciliation began.
       await this.#audio
-        .reconcile({ bgm: null }, request.assets)
+        .reconcile({ bgm: null, ambience: {} }, request.assets)
         .catch(() => undefined);
       throw error;
     } finally {
@@ -425,6 +509,37 @@ export class TimelineSession {
       return false;
     }
     const previousCue = this.#cue;
+    const previousHasBgm = this.#hasBgmTrack;
+    const nextHasBgm = hasBgmTrack(cue);
+    if (previousHasBgm && !nextHasBgm) {
+      this.#audio.setBgmTimelineVolume(this.#bases.bgmVolume);
+    } else if (nextHasBgm && !previousHasBgm) {
+      this.#bases.bgmVolume =
+        this.#audio.currentBgmVolume() ??
+        update.snapshot.audio.bgm?.volume ??
+        1;
+    }
+    const previousTracked = this.#trackedAmbienceSlots;
+    const nextTracked = ambienceSlotsForCue(cue);
+    // A hot edit may remove a volume track while the session is idle or
+    // playing. Restore only the slots the old timeline actually modulated;
+    // unrelated explicit transitions must remain untouched. Newly-added slots
+    // capture their live authoritative volume before the first frame writes it.
+    for (const slot of previousTracked) {
+      if (!nextTracked.has(slot)) this.#restoreAmbienceTimelineVolume(slot);
+    }
+    if (nextTracked.size > 0) {
+      const captured = captureAmbienceVolumes(
+        this.#audio,
+        update.snapshot.audio,
+      );
+      for (const slot of nextTracked) {
+        if (!previousTracked.has(slot) && captured[slot] !== undefined)
+          this.#ambienceVolumes[slot] = captured[slot];
+      }
+    }
+    this.#trackedAmbienceSlots = nextTracked;
+    this.#hasBgmTrack = nextHasBgm;
     this.#cue = cue;
     const elapsed = Math.max(0, Math.min(cue.duration_ms, this.#elapsed));
     const cursor = Math.max(0, Math.min(cue.duration_ms, this.#lastCursor));
@@ -505,7 +620,10 @@ export class TimelineSession {
       // Web Audio graph here; the game unlocks on its own first gesture and
       // must never block playback on an AudioContext that a headless runner
       // keeps suspended.
-      if (this.#audioPolicy === "preview") {
+      // A muted editor preview must remain resource-free.  Unmuting is the
+      // explicit activation boundary; calling unlock while still muted would
+      // defeat deferred AudioManager reconciliation.
+      if (this.#audioPolicy === "preview" && !this.#muted) {
         await this.#audio.unlock().catch(() => undefined);
       }
       if (!this.#playing || this.#clock !== clock) return;
@@ -582,9 +700,27 @@ export class TimelineSession {
       });
       if (!muted) {
         const activation = new AbortController();
+        const cue = this.#cue;
+        const loadGeneration = this.#loadGeneration;
         this.#activationAbort = activation;
         void this.#audio
           .activateDeferred(activation.signal)
+          .then(() => {
+            // Deferred activation is intentionally audio-only here.  A scrub
+            // may have moved the playhead while media was pending; once the
+            // same loaded cue is active, restore the current elapsed values
+            // without rendering Pixi, consuming events, or advancing time.
+            if (
+              this.#disposed ||
+              this.#muted ||
+              activation.signal.aborted ||
+              this.#activationAbort !== activation ||
+              this.#loadGeneration !== loadGeneration ||
+              this.#cue !== cue
+            )
+              return;
+            this.#applyTimelineAudioVolumes();
+          })
           .catch((error: unknown) =>
             this.#diagnostic(`预览音频初始化失败：${errorMessage(error)}`),
           )
@@ -659,6 +795,7 @@ export class TimelineSession {
    * late media callback can no longer reach a replacement session.
    */
   cancel(): void {
+    this.#restoreTimelineAudioVolumes();
     this.#loadGeneration += 1;
     this.#loadAbort?.abort();
     this.#loadAbort = null;
@@ -677,6 +814,8 @@ export class TimelineSession {
     this.#firedEvents.clear();
     this.#lastCursor = -1;
     this.#cue = null;
+    this.#hasBgmTrack = false;
+    this.#trackedAmbienceSlots.clear();
     this.#elapsed = 0;
     this.#suppressEvents = false;
     this.#buffering = false;
@@ -741,7 +880,12 @@ export class TimelineSession {
     this.#seekGeneration += 1;
     this.#seekAbort?.abort();
     this.#seekAbort = null;
-    if (this.#clock === null && this.#settle === null) return;
+    if (this.#clock === null && this.#settle === null) {
+      // A preview may have been scrubbed without ever starting playback.  Its
+      // timeline volume sidecar still needs to yield to the next target.
+      this.#restoreTimelineAudioVolumes();
+      return;
+    }
     this.#runAbort?.abort();
     this.#runAbort = null;
     this.#clock = null;
@@ -753,6 +897,7 @@ export class TimelineSession {
     if (this.#decorations === "while-playing") {
       this.#surface.setDecorativeRunning(false);
     }
+    this.#restoreTimelineAudioVolumes();
     const settle = this.#settle;
     this.#settle = null;
     this.#playPromise = null;
@@ -760,25 +905,32 @@ export class TimelineSession {
   }
 
   #evaluate(elapsedMs: number): SceneFrame {
+    const evaluated = this.#evaluateTimeline(elapsedMs);
+    if (evaluated === null) return this.#surface.readFrame();
+    return sceneFrameFromTimeline(evaluated, this.#surface.geometry);
+  }
+
+  #evaluateTimeline(elapsedMs: number) {
     const cue = this.#cue;
-    if (cue === null) return this.#surface.readFrame();
-    return evaluateSceneFrame(
+    if (cue === null) return null;
+    return evaluateTimelineFrame(
+      { duration_ms: cue.duration_ms, tracks: cue.tracks },
       {
-        duration_ms: cue.duration_ms,
-        tracks: cue.tracks,
         sprites: this.#bases.sprites,
         buttons: this.#bases.buttons,
         camera: this.#bases.camera,
         bgm_volume: this.#bases.bgmVolume,
+        ambience_volumes: this.#ambienceVolumes,
       },
       elapsedMs,
-      this.#surface.geometry,
     );
   }
 
   #applyFrame(elapsedMs: number, phase: "playhead" | "keep"): void {
+    const evaluated = this.#evaluateTimeline(elapsedMs);
+    if (evaluated === null) return;
     const frame = mergeSceneOverrides(
-      this.#evaluate(elapsedMs),
+      sceneFrameFromTimeline(evaluated, this.#surface.geometry),
       this.#surface.readOverrides(),
       this.#surface.geometry,
     );
@@ -790,7 +942,7 @@ export class TimelineSession {
     // Effects are derived from the playhead in both modes, so scrubbing and
     // playback cannot drift apart and flash/shake can coexist.
     this.#surface.setActiveEffects({ flash, shake, elapsedMs });
-    this.#audio.setBgmTimelineVolume(frame.bgm_volume);
+    this.#applyTimelineAudioVolumes(evaluated);
     this.#onFrame?.(frame);
   }
 
@@ -850,6 +1002,35 @@ export class TimelineSession {
     } else {
       this.#video?.element.pause();
     }
+    this.#restoreTimelineAudioVolumes();
+  }
+
+  #applyTimelineAudioVolumes(
+    evaluated = this.#evaluateTimeline(this.#elapsed),
+  ): void {
+    if (evaluated === null) return;
+    if (this.#hasBgmTrack)
+      this.#audio.setBgmTimelineVolume(evaluated.bgm_volume);
+    for (const slot of this.#trackedAmbienceSlots) {
+      const volume =
+        evaluated.ambience_volumes?.[slot] ?? this.#ambienceVolumes[slot];
+      if (volume !== undefined)
+        this.#audio.setAmbienceTimelineVolume(slot, volume);
+    }
+  }
+
+  #restoreTimelineAudioVolumes(): void {
+    if (this.#cue === null) return;
+    if (this.#hasBgmTrack)
+      this.#audio.setBgmTimelineVolume(this.#bases.bgmVolume);
+    for (const slot of this.#trackedAmbienceSlots)
+      this.#restoreAmbienceTimelineVolume(slot);
+  }
+
+  #restoreAmbienceTimelineVolume(slot: AmbienceSlot): void {
+    const volume = this.#ambienceVolumes[slot];
+    if (volume !== undefined)
+      this.#audio.setAmbienceTimelineVolume(slot, volume);
   }
 
   async #ensureTrackSprites(
@@ -1111,6 +1292,18 @@ function findTimelineCue(update: RuntimeUpdate): TimelineCue | undefined {
   return update.cues.find(
     (candidate): candidate is TimelineCue => candidate.type === "timeline",
   );
+}
+
+function hasBgmTrack(cue: TimelineCue): boolean {
+  return cue.tracks.some((track) => track.type === "bgm");
+}
+
+function ambienceSlotsForCue(cue: TimelineCue): Set<AmbienceSlot> {
+  const slots = new Set<AmbienceSlot>();
+  for (const track of cue.tracks) {
+    if (track.type === "ambience") slots.add(track.slot);
+  }
+  return slots;
 }
 
 /**

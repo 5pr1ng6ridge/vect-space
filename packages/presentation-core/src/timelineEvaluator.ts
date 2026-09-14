@@ -1,5 +1,5 @@
 import { evaluateChannel, type SharedTimelineChannels } from "./timeline";
-import type { ScreenEffectSpec, TimelineEvent } from "./types";
+import type { AmbienceSlot, ScreenEffectSpec, TimelineEvent } from "./types";
 
 export interface TimelineBaseSprite {
   asset: string;
@@ -24,6 +24,8 @@ export interface TimelineBaseState {
   buttons?: Readonly<Record<string, TimelineBaseButton>>;
   camera: { x: number; y: number; zoom: number; rotation_deg: number };
   bgm_volume?: number;
+  /** Transient volume bases for ambience tracks; never persisted by the runtime. */
+  ambience_volumes?: Partial<Record<AmbienceSlot, number>>;
 }
 
 export interface TimelineBaseButton {
@@ -70,6 +72,8 @@ export interface TimelineFrame {
   camera: TimelineBaseState["camera"];
   videos: TimelineFrameVideo[];
   bgm_volume: number;
+  /** Present only when the timeline contains ambience volume automation. */
+  ambience_volumes?: Partial<Record<AmbienceSlot, number>>;
 }
 
 export interface ActiveScreenEffect {
@@ -146,7 +150,8 @@ export type TimelineEvaluationTrack =
       asset: string;
       channels: SharedTimelineChannels;
     }
-  | { type: "bgm"; channels: SharedTimelineChannels };
+  | { type: "bgm"; channels: SharedTimelineChannels }
+  | { type: "ambience"; slot: AmbienceSlot; channels: SharedTimelineChannels };
 
 /**
  * Pure timeline evaluation shared by the game renderer and editor.  It never
@@ -163,6 +168,7 @@ export function evaluateTimelineFrame(
   const buttons = new Map<string, TimelineFrameButton>();
   const camera = { ...bases.camera };
   let bgmVolume = bases.bgm_volume ?? 1;
+  const ambienceVolumes: Partial<Record<AmbienceSlot, number>> = {};
   const videos: TimelineFrameVideo[] = [];
 
   for (const [id, base] of Object.entries(bases.sprites)) {
@@ -279,6 +285,14 @@ export function evaluateTimelineFrame(
       });
     } else if (track.type === "bgm") {
       bgmVolume = evaluateChannel(track.channels, "volume", elapsed, bgmVolume);
+    } else if (track.type === "ambience") {
+      const base = bases.ambience_volumes?.[track.slot] ?? 1;
+      ambienceVolumes[track.slot] = evaluateChannel(
+        track.channels,
+        "volume",
+        elapsed,
+        base,
+      );
     }
   }
   // Keep untracked starting sprites in the evaluated frame.  This is the
@@ -290,6 +304,9 @@ export function evaluateTimelineFrame(
     camera,
     videos,
     bgm_volume: Number.isFinite(bgmVolume) ? bgmVolume : 0,
+    ...(Object.keys(ambienceVolumes).length > 0
+      ? { ambience_volumes: ambienceVolumes }
+      : {}),
   };
 }
 

@@ -14,6 +14,7 @@ import {
   hitTestSceneFrame,
   isEmptySceneOverrides,
   mergeSceneOverrides,
+  sceneFrameFromTimeline,
   shakeOffset,
   spriteBox,
   stagePointToWorld,
@@ -143,6 +144,22 @@ describe("evaluateSceneFrame", () => {
     expect(video?.width).toBeCloseTo(150);
     expect(video?.volume).toBe(1);
     expect(scene.bgm_volume).toBeCloseTo(0.5);
+  });
+
+  it("keeps the ambience sidecar out of the Pixi-facing SceneFrame", () => {
+    const scene = sceneFrameFromTimeline(
+      {
+        elapsed_ms: 0,
+        sprites: [],
+        buttons: [],
+        camera: CAMERA,
+        videos: [],
+        bgm_volume: 1,
+        ambience_volumes: { slot_1: 0.25 },
+      },
+      GEOMETRY,
+    );
+    expect(scene).not.toHaveProperty("ambience_volumes");
   });
 
   it("falls back to a default sprite box for an unresolved asset", () => {

@@ -463,6 +463,7 @@ export function snapTimelineTime(
 function timelineTrackIdentity(track: TimelineTrack): string {
   if (track.type === "sprite") return `sprite:${track.sprite_id}`;
   if (track.type === "button") return `button:${track.instance_id}`;
+  if (track.type === "ambience") return `ambience:${track.slot}`;
   return track.type;
 }
 
@@ -496,6 +497,7 @@ function timelineTrackChannels(type: TimelineTrack["type"]): string[] {
     case "video":
       return ["x", "y", "width", "height", "opacity", "z", "volume"];
     case "bgm":
+    case "ambience":
       return ["volume"];
   }
 }

@@ -126,6 +126,21 @@ hotspots:
   replay:
     mode: always
   variable_overrides: {}
+- id: ambience_lab
+  scene_id: ambience_lab
+  title: ambience_lab
+  hover_text: 四个固定环境声槽位同时播放，验证独立音量自动化、同素材保留播放头 retune、跨素材替换、停止和场景边界清理。
+  x: 1860
+  "y": 140
+  width: 280
+  height: 160
+  z: 10
+  asset: gui.button_pulse
+  reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}
 - id: ch0
   scene_id: ch0
   title: ch0

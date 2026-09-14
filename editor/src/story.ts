@@ -57,6 +57,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "button_update", label: "更新按钮", group: "交互" },
   { type: "button_remove", label: "移除按钮", group: "交互" },
   { type: "bgm", label: "BGM", group: "声音" },
+  { type: "ambience", label: "环境声", group: "声音" },
   { type: "sfx", label: "音效", group: "声音" },
   { type: "wait", label: "等待", group: "流程" },
   { type: "end", label: "结束", group: "流程" },
@@ -187,6 +188,8 @@ export function summarizeNode(node: SceneNode): string {
       return `${node.duration_ms} ms`;
     case "bgm":
       return `${node.action} ${node.asset ?? ""}`.trim();
+    case "ambience":
+      return `${node.slot} · ${node.action} ${node.asset ?? ""}`.trim();
     case "sfx":
       return node.asset;
     case "camera":
@@ -401,6 +404,17 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         action: "start",
         asset: null,
         volume: 1,
+        duration_ms: 500,
+        await: false,
+        next: fallback,
+      };
+    case "ambience":
+      return {
+        type,
+        slot: "slot_1",
+        action: "start",
+        asset: null,
+        volume: 0.8,
         duration_ms: 500,
         await: false,
         next: fallback,
@@ -974,6 +988,10 @@ export function preparePastedNode(
       break;
     case "bgm":
       if (node.asset !== null && !hasAsset(node.asset, "bgm"))
+        node.asset = null;
+      break;
+    case "ambience":
+      if (node.asset != null && !hasAsset(node.asset, "ambience"))
         node.asset = null;
       break;
     case "sfx":

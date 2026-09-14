@@ -54,10 +54,54 @@ the story, and a loaded save only contributes option ids, order, labels and
 enabled flags. See the root `README.md` for the full rules.
 
 Timeline nodes use an explicit `duration_ms` and contain sprite, camera, video,
-and BGM-volume tracks. Each channel is an ordered list of
-`{ at_ms, value, easing }` keyframes; easing controls the segment from that
-keyframe to the next. Presets are `step`, `linear`, `ease_in`, `ease_out`, and
-`ease_in_out`; custom curves use `{ cubic_bezier: [x1, y1, x2, y2] }`.
+BGM-volume, and one ambience-volume track per fixed slot. Each channel is an
+ordered list of `{ at_ms, value, easing }` keyframes; easing controls the
+segment from that keyframe to the next. Presets are `step`, `linear`, `ease_in`,
+`ease_out`, and `ease_in_out`; custom curves use
+`{ cubic_bezier: [x1, y1, x2, y2] }`.
+
+## Four-channel ambience
+
+Register environment recordings with `kind: ambience`, then use the fixed
+`slot_1`–`slot_4` values in `ambience` nodes. `start` requires an ambience
+asset; `stop` omits `asset` and clears only that slot. `volume` is 0–1,
+`start_ms` selects the initial phase, and optional loop bounds must be a valid
+pair. The four channels share BGM's looping transport but route through a
+separate ambience bus and keep phase when the same asset is updated.
+
+```yaml
+rain:
+  type: ambience
+  slot: slot_2
+  action: start
+  asset: ambience.rain
+  volume: 0.5
+  start_ms: 0
+  duration_ms: 280
+  await: true
+  next: mix
+
+mix:
+  type: timeline
+  duration_ms: 1200
+  await: true
+  skippable: true
+  tracks:
+    - type: ambience
+      slot: slot_1
+      channels:
+        volume:
+          - { at_ms: 0, value: 0.65, easing: linear }
+          - { at_ms: 1200, value: 0.2, easing: ease_in_out }
+```
+
+A timeline may not repeat a slot track, and only `volume` is automatable.
+Cancellation, failed loads, save loads, and Scene changes restore or clear the
+snapshot through the shared audio owner rather than leaving a stale transport.
+`ambience_lab.yaml` is the reachable four-slot demo. Its four ambience fixtures are
+reproducible project-generated WAV files (`npm run assets:ambience`); see
+`assets/THIRD_PARTY.md` for exact provenance and the separate notice for unrelated
+legacy recordings.
 
 Videos are registered as `kind: video` under `assets/videos` and must be MP4
 files encoded as H.264 video with AAC audio. Video timelines are always awaited.

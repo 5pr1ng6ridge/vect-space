@@ -14,6 +14,7 @@ import {
 } from "@vectspace/presentation-core/choice-layout";
 import type {
   AssetKind,
+  AmbienceSlot,
   BackgroundTransitionSpec,
   ChoiceNode,
   ConditionExpression,
@@ -31,6 +32,12 @@ import type {
 } from "./types";
 
 const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
+  "slot_1",
+  "slot_2",
+  "slot_3",
+  "slot_4",
+];
 
 export function validateLive(project: EditorProject): EditorDiagnostic[] {
   const diagnostics: EditorDiagnostic[] = [];
@@ -1635,6 +1642,29 @@ function validateNode(
         }
       }
       break;
+    case "ambience":
+      if (!AMBIENCE_SLOTS.includes(node.slot))
+        issue("invalid_ambience_slot", "环境声槽位必须是 slot_1 到 slot_4");
+      checkAsset(node.asset, "ambience", node.action === "start");
+      if (node.action === "stop" && node.asset != null) {
+        issue("invalid_ambience_stop_asset", "ambience stop 不能提供 asset");
+      }
+      checkVolume(node.volume);
+      checkDuration(node.duration_ms);
+      checkTimestamp(node.start_ms ?? 0, "ambience 起始点");
+      if ((node.loop_start_ms == null) !== (node.loop_end_ms == null)) {
+        issue("invalid_ambience_loop", "ambience 循环起止点必须同时提供");
+      } else if (node.loop_start_ms != null && node.loop_end_ms != null) {
+        checkTimestamp(node.loop_start_ms, "ambience 循环起点");
+        checkTimestamp(node.loop_end_ms, "ambience 循环终点");
+        if (
+          node.loop_start_ms >= node.loop_end_ms ||
+          (node.start_ms ?? 0) > node.loop_end_ms
+        ) {
+          issue("invalid_ambience_loop", "ambience 循环点顺序无效");
+        }
+      }
+      break;
     case "sfx":
       checkAsset(node.asset, "sfx", true);
       checkVolume(node.volume);
@@ -1730,10 +1760,17 @@ function validateNode(
             ? `sprite:${track.sprite_id}`
             : track.type === "button"
               ? `button:${track.instance_id}`
-              : track.type;
+              : track.type === "ambience"
+                ? `ambience:${track.slot}`
+                : track.type;
         if (trackIds.has(trackId))
           issue("duplicate_timeline_track", `重复时间线轨道：${trackId}`);
         trackIds.add(trackId);
+        if (track.type === "ambience" && !AMBIENCE_SLOTS.includes(track.slot))
+          issue(
+            "invalid_ambience_slot",
+            "环境声轨道槽位必须是 slot_1 到 slot_4",
+          );
         if (track.type === "video") {
           videos += 1;
           checkAsset(track.asset, "video", true);
@@ -2080,6 +2117,7 @@ function timelineChannels(track: TimelineTrack): string[] {
     case "video":
       return ["x", "y", "width", "height", "opacity", "z", "volume"];
     case "bgm":
+    case "ambience":
       return ["volume"];
   }
 }

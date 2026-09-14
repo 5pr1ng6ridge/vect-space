@@ -756,7 +756,7 @@ impl RuntimeEngine {
                 let mut cues = Vec::new();
                 if crosses_scene {
                     self.completed_scenes.insert(previous_scene);
-                    self.leave_scene(content)?;
+                    cues.extend(self.leave_scene(content)?);
                     cues.push(self.cue(
                         CueGate::Runtime,
                         PresentationCueKind::ClearScene {
@@ -1619,7 +1619,7 @@ impl RuntimeEngine {
                     // background or sprite cue.
                     if crosses_scene {
                         self.completed_scenes.insert(scene_id.clone());
-                        self.leave_scene(content)?;
+                        cues.extend(self.leave_scene(content)?);
                         cues.push(self.cue(
                             CueGate::Runtime,
                             PresentationCueKind::ClearScene {
@@ -1668,6 +1668,48 @@ impl RuntimeEngine {
                     cues.push(self.cue(
                         gate(await_completion),
                         PresentationCueKind::BgmTransition {
+                            from,
+                            to,
+                            duration_ms,
+                        },
+                    ));
+                    if await_completion {
+                        return Ok(cues);
+                    }
+                }
+                SceneNode::Ambience {
+                    slot,
+                    action,
+                    asset,
+                    volume,
+                    start_ms,
+                    loop_start_ms,
+                    loop_end_ms,
+                    duration_ms,
+                    await_completion,
+                    next,
+                } => {
+                    let from = self.snapshot.audio.ambience.get(slot).cloned();
+                    let to = match action {
+                        AudioAction::Start => Some(LoopingAudioSnapshot {
+                            asset: asset.ok_or_else(|| {
+                                RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: ambience start 缺少 asset"
+                                ))
+                            })?,
+                            volume,
+                            start_ms,
+                            loop_start_ms,
+                            loop_end_ms,
+                        }),
+                        AudioAction::Stop => None,
+                    };
+                    self.snapshot.audio.ambience.set(slot, to.clone());
+                    self.snapshot.location.node_id = next;
+                    cues.push(self.cue(
+                        gate(await_completion),
+                        PresentationCueKind::AmbienceTransition {
+                            slot,
                             from,
                             to,
                             duration_ms,
@@ -2236,7 +2278,21 @@ impl RuntimeEngine {
     /// save-scoped variables all return to their declared defaults. Profile
     /// variables and read/seen/completion metadata live outside a Scene and
     /// deliberately remain available for global progression.
-    fn leave_scene(&mut self, content: &ContentCatalog) -> Result<(), RuntimeError> {
+    fn leave_scene(
+        &mut self,
+        content: &ContentCatalog,
+    ) -> Result<Vec<PresentationCue>, RuntimeError> {
+        // The audio snapshot is authoritative, but hosts also need an
+        // explicit stop cue for every active ambience slot at a scene
+        // boundary.  Keep this separate from `clear`, whose contract is
+        // visual-only and must preserve ambience.
+        let ambience_to_stop: Vec<_> = self
+            .snapshot
+            .audio
+            .ambience
+            .iter()
+            .map(|(slot, state)| (slot, state.clone()))
+            .collect();
         self.snapshot.variables = defaults_for_scope(content, VariableScope::Save)?;
         self.snapshot.world = WorldSnapshot {
             ui_motion_bindings: content.manifest.ui_motion_defaults.clone(),
@@ -2248,7 +2304,20 @@ impl RuntimeEngine {
         self.snapshot.long_text_page = None;
         self.snapshot.prompt = PromptSnapshot::None;
         self.dialogue_history.clear();
-        Ok(())
+        Ok(ambience_to_stop
+            .into_iter()
+            .map(|(slot, from)| {
+                self.cue(
+                    CueGate::Runtime,
+                    PresentationCueKind::AmbienceTransition {
+                        slot,
+                        from: Some(from),
+                        to: None,
+                        duration_ms: 0,
+                    },
+                )
+            })
+            .collect())
     }
 
     fn finish_update(&mut self, cues: Vec<PresentationCue>, bump_revision: bool) -> RuntimeUpdate {
@@ -2456,6 +2525,7 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::Action { next, .. }
         | SceneNode::Wait { next, .. }
         | SceneNode::Bgm { next, .. }
+        | SceneNode::Ambience { next, .. }
         | SceneNode::Sfx { next, .. }
         | SceneNode::Camera { next, .. }
         | SceneNode::ScreenEffect { next, .. }
@@ -2844,6 +2914,12 @@ fn apply_timeline_final_state(
                     bgm.volume = value;
                 }
             }
+            // Ambience volume automation is presentation-only. The
+            // authoritative loop state, including its volume, remains in the
+            // snapshot so skip/final evaluation cannot persist a transient
+            // timeline value. Like the existing BGM track, an absent slot is
+            // simply left unchanged.
+            TimelineTrack::Ambience { .. } => {}
             TimelineTrack::Video { .. } => {}
         }
     }
@@ -3846,6 +3922,9 @@ fn validate_snapshot(
     if let Some(bgm) = &snapshot.audio.bgm {
         referenced_assets.push(bgm.asset.clone());
     }
+    for (_, ambience) in snapshot.audio.ambience.iter() {
+        referenced_assets.push(ambience.asset.clone());
+    }
     if let Some(paper) = snapshot
         .long_text_page
         .as_ref()
@@ -3895,6 +3974,40 @@ fn validate_snapshot(
             ));
         }
     }
+    for (slot, ambience) in snapshot.audio.ambience.iter() {
+        if !ambience.volume.is_finite()
+            || !(0.0..=1.0).contains(&ambience.volume)
+            || ambience.loop_start_ms.is_some() != ambience.loop_end_ms.is_some()
+            || matches!(
+                (ambience.loop_start_ms, ambience.loop_end_ms),
+                (Some(start), Some(end))
+                    if start >= end || ambience.start_ms > end
+            )
+        {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "ambience {} 状态包含无效数值或循环点",
+                slot.as_str()
+            )));
+        }
+        let asset = content
+            .manifest
+            .assets
+            .get(&ambience.asset)
+            .ok_or_else(|| {
+                RuntimeError::InvalidSnapshot(format!(
+                    "ambience {} 引用了未知素材 {}",
+                    slot.as_str(),
+                    ambience.asset
+                ))
+            })?;
+        if asset.kind != AssetKind::Ambience {
+            return Err(RuntimeError::InvalidSnapshot(format!(
+                "ambience {} 必须引用 ambience 素材 {}",
+                slot.as_str(),
+                ambience.asset
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -3924,6 +4037,398 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game"),
         )
         .expect("demo content must be valid")
+    }
+
+    fn ambience_content(nodes: BTreeMap<String, SceneNode>) -> ContentCatalog {
+        let mut content = catalog();
+        content.manifest.entry_scene = "ambience_scene".to_owned();
+        content.manifest.assets.insert(
+            "ambience.test".to_owned(),
+            crate::model::AssetDefinition {
+                kind: AssetKind::Ambience,
+                path: Some("audio/test_bgm.ogg".to_owned()),
+                animation: None,
+            },
+        );
+        content.scenes.insert(
+            "ambience_scene".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "ambience_scene".to_owned(),
+                entry: ["start", "start_1", "await_ambience"]
+                    .into_iter()
+                    .find(|id| nodes.contains_key(*id))
+                    .map(str::to_owned)
+                    .or_else(|| nodes.keys().next().cloned())
+                    .expect("ambience fixture needs an entry"),
+                nodes,
+            },
+        );
+        content
+    }
+
+    fn ambience_node(
+        slot: crate::model::AmbienceSlot,
+        action: AudioAction,
+        asset: Option<&str>,
+        await_completion: bool,
+        next: &str,
+    ) -> SceneNode {
+        SceneNode::Ambience {
+            slot,
+            action,
+            asset: asset.map(str::to_owned),
+            volume: 0.8,
+            start_ms: 0,
+            loop_start_ms: None,
+            loop_end_ms: None,
+            duration_ms: 100,
+            await_completion,
+            next: next.to_owned(),
+        }
+    }
+
+    #[test]
+    fn ambience_updates_four_slots_independently_and_replaces_or_stops_one_slot() {
+        use crate::model::AmbienceSlot::{Slot1, Slot2, Slot3, Slot4};
+
+        let content = ambience_content(BTreeMap::from([
+            (
+                "start_1".to_owned(),
+                ambience_node(
+                    Slot1,
+                    AudioAction::Start,
+                    Some("ambience.test"),
+                    false,
+                    "start_2",
+                ),
+            ),
+            (
+                "start_2".to_owned(),
+                ambience_node(
+                    Slot2,
+                    AudioAction::Start,
+                    Some("ambience.test"),
+                    false,
+                    "start_3",
+                ),
+            ),
+            (
+                "start_3".to_owned(),
+                ambience_node(
+                    Slot3,
+                    AudioAction::Start,
+                    Some("ambience.test"),
+                    false,
+                    "start_4",
+                ),
+            ),
+            (
+                "start_4".to_owned(),
+                ambience_node(
+                    Slot4,
+                    AudioAction::Start,
+                    Some("ambience.test"),
+                    false,
+                    "replace_2",
+                ),
+            ),
+            (
+                "replace_2".to_owned(),
+                SceneNode::Ambience {
+                    slot: Slot2,
+                    action: AudioAction::Start,
+                    asset: Some("ambience.test".to_owned()),
+                    volume: 0.35,
+                    start_ms: 900,
+                    loop_start_ms: None,
+                    loop_end_ms: None,
+                    duration_ms: 100,
+                    await_completion: false,
+                    next: "stop_3".to_owned(),
+                },
+            ),
+            (
+                "stop_3".to_owned(),
+                ambience_node(Slot3, AudioAction::Stop, None, false, "end"),
+            ),
+            ("end".to_owned(), SceneNode::End),
+        ]));
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let update = runtime.start_new_game(&content).unwrap();
+
+        assert!(!update.requires_ack);
+        assert!(update.snapshot.audio.ambience.get(Slot1).is_some());
+        let slot2 = update.snapshot.audio.ambience.get(Slot2).unwrap();
+        assert_eq!(slot2.asset, "ambience.test");
+        assert_eq!(slot2.volume, 0.35);
+        assert!(update.snapshot.audio.ambience.get(Slot3).is_none());
+        assert!(update.snapshot.audio.ambience.get(Slot4).is_some());
+        assert!(update.cues.iter().any(|cue| matches!(
+            &cue.kind,
+            PresentationCueKind::AmbienceTransition {
+                slot: Slot2,
+                from: Some(from),
+                to: Some(to),
+                ..
+            } if from.asset == to.asset
+        )));
+        assert!(update.cues.iter().any(|cue| matches!(
+            &cue.kind,
+            PresentationCueKind::AmbienceTransition {
+                slot: Slot3,
+                from: Some(_),
+                to: None,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn awaited_ambience_uses_the_existing_cue_gate() {
+        use crate::model::AmbienceSlot::Slot1;
+
+        let content = ambience_content(BTreeMap::from([
+            (
+                "await_ambience".to_owned(),
+                ambience_node(
+                    Slot1,
+                    AudioAction::Start,
+                    Some("ambience.test"),
+                    true,
+                    "end",
+                ),
+            ),
+            ("end".to_owned(), SceneNode::End),
+        ]));
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let update = runtime.start_new_game(&content).unwrap();
+        assert!(update.requires_ack);
+        assert_eq!(update.cues[0].gate, CueGate::Runtime);
+        assert!(matches!(
+            runtime.advance(&content, update.snapshot.revision, AdvanceSource::Manual),
+            Err(RuntimeError::PresentationPending(_))
+        ));
+        let complete = runtime
+            .presentation_complete(&content, update.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(matches!(
+            complete.snapshot.prompt,
+            PromptSnapshot::End { .. }
+        ));
+    }
+
+    #[test]
+    fn clear_preserves_ambience_but_scene_leave_stops_it() {
+        use crate::model::AmbienceSlot::Slot1;
+
+        let mut content = ambience_content(BTreeMap::from([
+            (
+                "start".to_owned(),
+                ambience_node(
+                    Slot1,
+                    AudioAction::Start,
+                    Some("ambience.test"),
+                    false,
+                    "clear",
+                ),
+            ),
+            (
+                "clear".to_owned(),
+                SceneNode::Clear {
+                    duration_ms: 100,
+                    easing: crate::model::Easing::Linear,
+                    await_completion: true,
+                    next: "leave".to_owned(),
+                },
+            ),
+            (
+                "leave".to_owned(),
+                SceneNode::Jump {
+                    scene: Some("destination".to_owned()),
+                    target: "end".to_owned(),
+                },
+            ),
+        ]));
+        content.scenes.insert(
+            "destination".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "destination".to_owned(),
+                entry: "end".to_owned(),
+                nodes: BTreeMap::from([("end".to_owned(), SceneNode::End)]),
+            },
+        );
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let cleared = runtime.start_new_game(&content).unwrap();
+        assert!(cleared.snapshot.audio.ambience.get(Slot1).is_some());
+        let left = runtime
+            .presentation_complete(&content, cleared.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(left.snapshot.audio.ambience.is_empty());
+        assert!(left.cues.iter().any(|cue| matches!(
+            &cue.kind,
+            PresentationCueKind::AmbienceTransition {
+                slot: Slot1,
+                to: None,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn ambience_timeline_volume_is_transient_and_does_not_change_snapshot() {
+        use crate::model::AmbienceSlot::Slot1;
+
+        let track = TimelineTrack::Ambience {
+            slot: Slot1,
+            channels: BTreeMap::from([(
+                "volume".to_owned(),
+                vec![
+                    crate::model::TimelineKeyframe {
+                        at_ms: 0,
+                        value: crate::model::TimelineKeyframeValue::Number(0.2),
+                        easing: TimelineEasing::default(),
+                    },
+                    crate::model::TimelineKeyframe {
+                        at_ms: 100,
+                        value: crate::model::TimelineKeyframeValue::Number(0.1),
+                        easing: TimelineEasing::default(),
+                    },
+                ],
+            )]),
+        };
+        let content = ambience_content(BTreeMap::from([
+            (
+                "start".to_owned(),
+                ambience_node(
+                    Slot1,
+                    AudioAction::Start,
+                    Some("ambience.test"),
+                    false,
+                    "timeline",
+                ),
+            ),
+            (
+                "timeline".to_owned(),
+                SceneNode::Timeline {
+                    duration_ms: 100,
+                    await_completion: true,
+                    skippable: true,
+                    tracks: vec![track],
+                    events: Vec::new(),
+                    next: "end".to_owned(),
+                },
+            ),
+            ("end".to_owned(), SceneNode::End),
+        ]));
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let update = runtime.start_new_game(&content).unwrap();
+        assert!(update.requires_ack);
+        assert_eq!(
+            update.snapshot.audio.ambience.get(Slot1).unwrap().volume,
+            0.8
+        );
+        let complete = runtime
+            .presentation_complete(&content, update.update_id, PresentationOutcome::Skipped)
+            .unwrap();
+        assert_eq!(
+            complete.snapshot.audio.ambience.get(Slot1).unwrap().volume,
+            0.8
+        );
+    }
+
+    #[test]
+    fn malformed_ambience_snapshot_rejects_numeric_loop_and_asset_errors() {
+        use crate::model::{AmbienceSlot, LoopingAudioSnapshot};
+
+        let content = ambience_content(BTreeMap::from([("end".to_owned(), SceneNode::End)]));
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let malformed_states = [
+            (
+                LoopingAudioSnapshot {
+                    asset: "ambience.test".to_owned(),
+                    volume: f32::NAN,
+                    start_ms: 0,
+                    loop_start_ms: None,
+                    loop_end_ms: None,
+                },
+                "无效数值",
+            ),
+            (
+                LoopingAudioSnapshot {
+                    asset: "ambience.test".to_owned(),
+                    volume: 1.01,
+                    start_ms: 0,
+                    loop_start_ms: None,
+                    loop_end_ms: None,
+                },
+                "无效数值",
+            ),
+            (
+                LoopingAudioSnapshot {
+                    asset: "ambience.test".to_owned(),
+                    volume: 0.8,
+                    start_ms: 0,
+                    loop_start_ms: Some(100),
+                    loop_end_ms: None,
+                },
+                "无效数值",
+            ),
+            (
+                LoopingAudioSnapshot {
+                    asset: "ambience.test".to_owned(),
+                    volume: 0.8,
+                    start_ms: 901,
+                    loop_start_ms: Some(100),
+                    loop_end_ms: Some(900),
+                },
+                "无效数值",
+            ),
+        ];
+        for (state, expected) in malformed_states {
+            let mut malformed = runtime.snapshot().clone();
+            malformed
+                .audio
+                .ambience
+                .set(AmbienceSlot::Slot1, Some(state));
+            assert!(matches!(
+                runtime.load_snapshot(&content, malformed),
+                Err(RuntimeError::InvalidSnapshot(message)) if message.contains(expected)
+            ));
+        }
+
+        let mut snapshot = runtime.snapshot().clone();
+        snapshot.audio.ambience.set(
+            AmbienceSlot::Slot1,
+            Some(LoopingAudioSnapshot {
+                asset: "bgm.test1".to_owned(),
+                volume: 0.8,
+                start_ms: 0,
+                loop_start_ms: None,
+                loop_end_ms: None,
+            }),
+        );
+        assert!(matches!(
+            runtime.load_snapshot(&content, snapshot),
+            Err(RuntimeError::InvalidSnapshot(message)) if message.contains("必须引用 ambience")
+        ));
+
+        let mut unknown = runtime.snapshot().clone();
+        unknown.audio.ambience.set(
+            AmbienceSlot::Slot1,
+            Some(LoopingAudioSnapshot {
+                asset: "ambience.missing".to_owned(),
+                volume: 0.8,
+                start_ms: 0,
+                loop_start_ms: None,
+                loop_end_ms: None,
+            }),
+        );
+        assert!(matches!(
+            runtime.load_snapshot(&content, unknown),
+            Err(RuntimeError::InvalidSnapshot(message)) if message.contains("素材未登记")
+        ));
     }
 
     fn catalog_with_chapter_map() -> ContentCatalog {

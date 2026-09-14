@@ -10,6 +10,7 @@ use thiserror::Error;
 use vectspace_core::model::{
     DialogueHistoryEntry, ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary,
     ScalarValue, Settings, VariableDefinition, VariableMap, VariableScope, VariableType,
+    AMBIENCE_VOLUME_DEFAULT,
 };
 
 const SAVE_SCHEMA_VERSION: u32 = 2;
@@ -694,6 +695,7 @@ fn validate_settings(settings: Settings) -> Result<Settings, SaveError> {
         settings.bgm_volume,
         settings.sfx_volume,
         settings.video_volume,
+        settings.ambience_volume,
     ];
     if volumes
         .iter()
@@ -716,6 +718,8 @@ fn sanitize_settings(mut settings: Settings) -> Settings {
     settings.bgm_volume = finite_clamp(settings.bgm_volume, 0.0, 1.0, 0.7);
     settings.sfx_volume = finite_clamp(settings.sfx_volume, 0.0, 1.0, 0.8);
     settings.video_volume = finite_clamp(settings.video_volume, 0.0, 1.0, 1.0);
+    settings.ambience_volume =
+        finite_clamp(settings.ambience_volume, 0.0, 1.0, AMBIENCE_VOLUME_DEFAULT);
     settings.text_speed_cps = finite_clamp(settings.text_speed_cps, 1.0, 200.0, 30.0);
     settings
 }
@@ -956,6 +960,95 @@ mod tests {
             vectspace_core::model::SkipMode::ReadOnly
         );
         assert_eq!(settings.video_volume, 1.0);
+        assert_eq!(settings.ambience_volume, 0.8);
+    }
+
+    #[test]
+    fn ambience_volume_is_validated_and_sanitized_without_a_schema_bump() {
+        let invalid = Settings {
+            ambience_volume: 1.1,
+            ..Settings::default()
+        };
+        assert!(validate_settings(invalid).is_err());
+        let repaired = sanitize_settings(Settings {
+            ambience_volume: f32::NAN,
+            ..Settings::default()
+        });
+        assert_eq!(repaired.ambience_volume, 0.8);
+        assert_eq!(SETTINGS_SCHEMA_VERSION, 1);
+        assert_eq!(SAVE_SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn active_ambience_save_load_round_trip_preserves_all_schema_versions() {
+        use vectspace_core::model::{
+            AmbienceSlot, AmbienceSnapshot, AudioSnapshot, LoopingAudioSnapshot, PlaybackSnapshot,
+            RuntimeSnapshot, StoryLocation, WorldSnapshot,
+        };
+
+        let directory = tempdir().unwrap();
+        let manager =
+            SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
+        let state = LoopingAudioSnapshot {
+            asset: "ambience.forest".to_owned(),
+            volume: 0.45,
+            start_ms: 120,
+            loop_start_ms: Some(400),
+            loop_end_ms: Some(1_800),
+        };
+        let mut ambience = AmbienceSnapshot::default();
+        ambience.set(AmbienceSlot::Slot2, Some(state.clone()));
+        let snapshot = RuntimeSnapshot {
+            revision: 7,
+            location: StoryLocation {
+                scene_id: "prologue".to_owned(),
+                node_id: "ambience".to_owned(),
+            },
+            variables: VariableMap::new(),
+            world: WorldSnapshot::default(),
+            audio: AudioSnapshot {
+                bgm: None,
+                ambience,
+            },
+            playback: PlaybackSnapshot::default(),
+            dialogue_page: None,
+            long_text_page: None,
+            prompt: PromptSnapshot::None,
+        };
+
+        manager.save("1", &snapshot, None).unwrap();
+        let loaded = manager.load("1").unwrap();
+        assert_eq!(loaded.audio.ambience.get(AmbienceSlot::Slot2), Some(&state));
+        let save_file: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("slot-1.json")).unwrap())
+                .unwrap();
+        assert_eq!(save_file["schema_version"], SAVE_SCHEMA_VERSION);
+        assert_eq!(
+            save_file["snapshot"]["audio"]["ambience"]["slot_2"]["asset"],
+            "ambience.forest"
+        );
+
+        manager.save_settings(Settings::default()).unwrap();
+        let settings_file: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings_file["schema_version"], SETTINGS_SCHEMA_VERSION);
+        assert_eq!(manager.load_settings().ambience_volume, 0.8);
+
+        let (profile_manager, profile) = ProfileManager::new(
+            directory.path().to_path_buf(),
+            &std::collections::BTreeMap::new(),
+            "demo-c1".to_owned(),
+        )
+        .unwrap();
+        profile_manager.save(&profile).unwrap();
+        let profile_file: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("profile.json")).unwrap())
+                .unwrap();
+        assert_eq!(profile_file["schema_version"], PROFILE_SCHEMA_VERSION);
+        assert_eq!(SAVE_SCHEMA_VERSION, 2);
+        assert_eq!(SETTINGS_SCHEMA_VERSION, 1);
+        assert_eq!(PROFILE_SCHEMA_VERSION, 4);
     }
 
     #[test]

@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use ts_rs::TS;
 use vectspace_core::model::{
-    AudioSnapshot, BootstrapPayload, DialogueHistoryEntry, DialoguePageSnapshot,
-    LongTextPageSnapshot, MutationValue, PlaybackSnapshot, PresentationCue, PromptSnapshot,
-    RuntimeSnapshot, RuntimeUpdate, ScalarValue, StoryLocation, WorldSnapshot,
+    AmbienceSnapshot as CoreAmbienceSnapshot, AudioSnapshot as CoreAudioSnapshot, BootstrapPayload,
+    DialogueHistoryEntry, DialoguePageSnapshot, LongTextPageSnapshot,
+    LoopingAudioSnapshot as CoreLoopingAudioSnapshot, MutationValue, PlaybackSnapshot,
+    PresentationCue, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, ScalarValue, StoryLocation,
+    WorldSnapshot,
 };
 use vectspace_core::runtime::RuntimeError;
 
@@ -67,6 +69,57 @@ impl WireU64 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireLoopingAudioSnapshot.ts"
+)]
+#[serde(deny_unknown_fields)]
+pub struct WireLoopingAudioSnapshot {
+    pub asset: String,
+    pub volume: f32,
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub start_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null", optional)]
+    pub loop_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null", optional)]
+    pub loop_end_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(
+    export,
+    export_to = "../../../shared/generated/WireAmbienceSnapshot.ts"
+)]
+#[serde(deny_unknown_fields)]
+pub struct WireAmbienceSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub slot_1: Option<WireLoopingAudioSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub slot_2: Option<WireLoopingAudioSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub slot_3: Option<WireLoopingAudioSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub slot_4: Option<WireLoopingAudioSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../shared/generated/WireAudioSnapshot.ts")]
+#[serde(deny_unknown_fields)]
+pub struct WireAudioSnapshot {
+    pub bgm: Option<WireLoopingAudioSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub ambience: Option<WireAmbienceSnapshot>,
+}
+
 impl From<u64> for WireU64 {
     fn from(value: u64) -> Self {
         Self(value.to_string())
@@ -83,6 +136,7 @@ pub enum WireAssetKind {
     Sprite,
     Gui,
     Bgm,
+    Ambience,
     Sfx,
     Video,
     Font,
@@ -304,7 +358,7 @@ pub struct WireRuntimeSnapshot {
     pub variables: WireVariableMap,
     #[serde(serialize_with = "serialize_world_snapshot")]
     pub world: WorldSnapshot,
-    pub audio: AudioSnapshot,
+    pub audio: WireAudioSnapshot,
     pub playback: PlaybackSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialogue_page: Option<DialoguePageSnapshot>,
@@ -435,6 +489,39 @@ impl From<ScalarValue> for WireScalarValue {
     }
 }
 
+impl From<CoreLoopingAudioSnapshot> for WireLoopingAudioSnapshot {
+    fn from(snapshot: CoreLoopingAudioSnapshot) -> Self {
+        Self {
+            asset: snapshot.asset,
+            volume: snapshot.volume,
+            start_ms: snapshot.start_ms,
+            loop_start_ms: snapshot.loop_start_ms,
+            loop_end_ms: snapshot.loop_end_ms,
+        }
+    }
+}
+
+impl From<CoreAmbienceSnapshot> for WireAmbienceSnapshot {
+    fn from(snapshot: CoreAmbienceSnapshot) -> Self {
+        Self {
+            slot_1: snapshot.slot_1.map(Into::into),
+            slot_2: snapshot.slot_2.map(Into::into),
+            slot_3: snapshot.slot_3.map(Into::into),
+            slot_4: snapshot.slot_4.map(Into::into),
+        }
+    }
+}
+
+impl From<CoreAudioSnapshot> for WireAudioSnapshot {
+    fn from(snapshot: CoreAudioSnapshot) -> Self {
+        let ambience = (!snapshot.ambience.is_empty()).then(|| snapshot.ambience.into());
+        Self {
+            bgm: snapshot.bgm.map(Into::into),
+            ambience,
+        }
+    }
+}
+
 impl From<RuntimeSnapshot> for WireRuntimeSnapshot {
     fn from(snapshot: RuntimeSnapshot) -> Self {
         Self::with_session(snapshot, WireU64::from(0), WireSessionMode::Story)
@@ -458,7 +545,7 @@ impl WireRuntimeSnapshot {
                 .map(|(id, value)| (id, value.into()))
                 .collect(),
             world: snapshot.world,
-            audio: snapshot.audio,
+            audio: snapshot.audio.into(),
             playback: snapshot.playback,
             dialogue_page: snapshot.dialogue_page,
             long_text_page: snapshot.long_text_page,
@@ -577,10 +664,122 @@ fn stringify_id_fields(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ts_rs::Config;
     use vectspace_core::model::{
-        ButtonAssetFit, ButtonAssetMode, ButtonClickAction, ButtonSetAction, ButtonSnapshot,
-        MutationValue, VariableOperation,
+        AmbienceSlot, AmbienceSnapshot, AudioSnapshot, ButtonAssetFit, ButtonAssetMode,
+        ButtonClickAction, ButtonSetAction, ButtonSnapshot, CueGate, LoopingAudioSnapshot,
+        MutationValue, PresentationCue, PresentationCueKind, VariableOperation,
     };
+
+    #[test]
+    fn export_bindings() {
+        let config = Config::from_env();
+        WireScalarValue::export(&config).unwrap();
+        WireU64::export(&config).unwrap();
+        WireSessionMode::export(&config).unwrap();
+        WireAssetKind::export(&config).unwrap();
+        WireAssetMetadata::export(&config).unwrap();
+        WireAssetDiagnostic::export(&config).unwrap();
+        WireAssetReuseCandidate::export(&config).unwrap();
+        WireAssetInspection::export(&config).unwrap();
+        WireInspectAssetImportsRequest::export(&config).unwrap();
+        WireImportAssetRequest::export(&config).unwrap();
+        WireStageAssetImportsRequest::export(&config).unwrap();
+        WireImportedAsset::export(&config).unwrap();
+        WireCommandError::export(&config).unwrap();
+        WireCommandErrorCode::export(&config).unwrap();
+        WireStoryLocation::export(&config).unwrap();
+        WireDialogueHistoryEntry::export(&config).unwrap();
+        WireLoopingAudioSnapshot::export(&config).unwrap();
+        WireAmbienceSnapshot::export(&config).unwrap();
+        WireAudioSnapshot::export(&config).unwrap();
+    }
+
+    #[test]
+    fn wire_audio_empty_omits_ambience_but_keeps_null_bgm() {
+        let value =
+            serde_json::to_value(WireAudioSnapshot::from(AudioSnapshot::default())).unwrap();
+        assert_eq!(value, serde_json::json!({"bgm": null}));
+    }
+
+    #[test]
+    fn wire_audio_has_exactly_four_fixed_slots_and_isolated_conversion() {
+        let source = AudioSnapshot {
+            bgm: Some(LoopingAudioSnapshot {
+                asset: "bgm.test".to_owned(),
+                volume: 0.25,
+                start_ms: 17,
+                loop_start_ms: Some(100),
+                loop_end_ms: Some(900),
+            }),
+            ambience: AmbienceSnapshot {
+                slot_1: Some(LoopingAudioSnapshot {
+                    asset: "ambience.one".to_owned(),
+                    volume: 0.5,
+                    start_ms: 12,
+                    loop_start_ms: Some(200),
+                    loop_end_ms: Some(800),
+                }),
+                slot_2: Some(LoopingAudioSnapshot {
+                    asset: "ambience.two".to_owned(),
+                    volume: 0.4,
+                    start_ms: 0,
+                    loop_start_ms: None,
+                    loop_end_ms: None,
+                }),
+                slot_3: Some(LoopingAudioSnapshot {
+                    asset: "ambience.three".to_owned(),
+                    volume: 0.3,
+                    start_ms: 0,
+                    loop_start_ms: None,
+                    loop_end_ms: None,
+                }),
+                slot_4: Some(LoopingAudioSnapshot {
+                    asset: "ambience.four".to_owned(),
+                    volume: 0.2,
+                    start_ms: 0,
+                    loop_start_ms: None,
+                    loop_end_ms: None,
+                }),
+            },
+        };
+        let wire = WireAudioSnapshot::from(source.clone());
+        let value = serde_json::to_value(&wire).unwrap();
+        let slots = value["ambience"].as_object().unwrap();
+        assert_eq!(
+            slots.keys().collect::<Vec<_>>(),
+            vec!["slot_1", "slot_2", "slot_3", "slot_4"]
+        );
+        assert_eq!(value["bgm"]["start_ms"], 17);
+        assert_eq!(value["ambience"]["slot_1"]["loop_start_ms"], 200);
+        assert_eq!(value["ambience"]["slot_2"]["start_ms"], 0);
+        assert!(value["ambience"]["slot_2"].get("loop_start_ms").is_none());
+
+        let mut changed = source;
+        changed.bgm.as_mut().unwrap().asset = "bgm.changed".to_owned();
+        changed.ambience.slot_1.as_mut().unwrap().asset = "ambience.changed".to_owned();
+        assert_eq!(wire.bgm.as_ref().unwrap().asset, "bgm.test");
+        assert_eq!(
+            wire.ambience
+                .as_ref()
+                .unwrap()
+                .slot_1
+                .as_ref()
+                .unwrap()
+                .asset,
+            "ambience.one"
+        );
+        assert_eq!(
+            wire.ambience
+                .as_ref()
+                .unwrap()
+                .slot_2
+                .as_ref()
+                .unwrap()
+                .asset,
+            "ambience.two"
+        );
+    }
 
     #[test]
     fn full_i64_range_round_trips_without_javascript_numbers() {
@@ -656,7 +855,7 @@ mod tests {
             },
             variables: BTreeMap::new(),
             world,
-            audio: AudioSnapshot::default(),
+            audio: WireAudioSnapshot::default(),
             playback: PlaybackSnapshot::default(),
             dialogue_page: None,
             long_text_page: None,
@@ -667,5 +866,57 @@ mod tests {
             value["world"]["buttons"]["large"]["action"]["sets"][0]["value"],
             serde_json::json!({"kind": "integer", "value": i64::MAX.to_string()}),
         );
+    }
+
+    #[test]
+    fn ambience_runtime_state_and_cues_use_fixed_wire_contract() {
+        let ambience_state = LoopingAudioSnapshot {
+            asset: "ambience.forest".to_owned(),
+            volume: 0.45,
+            start_ms: 120,
+            loop_start_ms: Some(400),
+            loop_end_ms: Some(1800),
+        };
+        let mut ambience = AmbienceSnapshot::default();
+        ambience.set(AmbienceSlot::Slot1, Some(ambience_state.clone()));
+        let update = RuntimeUpdate {
+            update_id: 3,
+            snapshot: RuntimeSnapshot {
+                revision: 2,
+                location: StoryLocation {
+                    scene_id: "scene".to_owned(),
+                    node_id: "node".to_owned(),
+                },
+                variables: BTreeMap::new(),
+                world: WorldSnapshot::default(),
+                audio: AudioSnapshot {
+                    bgm: None,
+                    ambience,
+                },
+                playback: PlaybackSnapshot::default(),
+                dialogue_page: None,
+                long_text_page: None,
+                prompt: PromptSnapshot::None,
+            },
+            cues: vec![PresentationCue {
+                cue_id: 7,
+                gate: CueGate::Runtime,
+                kind: PresentationCueKind::AmbienceTransition {
+                    slot: AmbienceSlot::Slot1,
+                    from: None,
+                    to: Some(ambience_state),
+                    duration_ms: 500,
+                },
+            }],
+            requires_ack: true,
+        };
+        let value = serde_json::to_value(WireRuntimeUpdate::from(update)).unwrap();
+        assert_eq!(
+            value["snapshot"]["audio"]["ambience"]["slot_1"]["asset"],
+            "ambience.forest"
+        );
+        assert_eq!(value["cues"][0]["type"], "ambience_transition");
+        assert_eq!(value["cues"][0]["slot"], "slot_1");
+        assert_eq!(value["cues"][0]["cue_id"], "7");
     }
 }

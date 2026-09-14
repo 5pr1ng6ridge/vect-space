@@ -32,6 +32,7 @@ import type { Settings } from "@vectspace/presentation-core/types";
 export const MUTED_PREVIEW_SETTINGS: Settings = {
   master_volume: 0,
   bgm_volume: 1,
+  ambience_volume: 1,
   sfx_volume: 1,
   video_volume: 1,
   text_speed_cps: 30,

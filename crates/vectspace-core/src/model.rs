@@ -765,9 +765,111 @@ pub enum AssetKind {
     Sprite,
     Gui,
     Bgm,
+    Ambience,
     Sfx,
     Font,
     Video,
+}
+
+/// Fixed ambience channel identity shared by authored nodes, snapshots and
+/// timeline tracks. Explicit serde names are required because
+/// `rename_all = "snake_case"` would serialize `Slot1` as `slot1`, not the
+/// contract's `slot_1`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbienceSlot {
+    #[serde(rename = "slot_1")]
+    Slot1,
+    #[serde(rename = "slot_2")]
+    Slot2,
+    #[serde(rename = "slot_3")]
+    Slot3,
+    #[serde(rename = "slot_4")]
+    Slot4,
+}
+
+impl AmbienceSlot {
+    pub const ALL: [Self; 4] = [Self::Slot1, Self::Slot2, Self::Slot3, Self::Slot4];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Slot1 => "slot_1",
+            Self::Slot2 => "slot_2",
+            Self::Slot3 => "slot_3",
+            Self::Slot4 => "slot_4",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AmbienceSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_1: Option<LoopingAudioSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_2: Option<LoopingAudioSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_3: Option<LoopingAudioSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_4: Option<LoopingAudioSnapshot>,
+}
+
+impl AmbienceSnapshot {
+    pub const fn is_empty(&self) -> bool {
+        self.slot_1.is_none()
+            && self.slot_2.is_none()
+            && self.slot_3.is_none()
+            && self.slot_4.is_none()
+    }
+
+    pub fn get(&self, slot: AmbienceSlot) -> Option<&LoopingAudioSnapshot> {
+        match slot {
+            AmbienceSlot::Slot1 => self.slot_1.as_ref(),
+            AmbienceSlot::Slot2 => self.slot_2.as_ref(),
+            AmbienceSlot::Slot3 => self.slot_3.as_ref(),
+            AmbienceSlot::Slot4 => self.slot_4.as_ref(),
+        }
+    }
+
+    pub fn get_mut(&mut self, slot: AmbienceSlot) -> Option<&mut LoopingAudioSnapshot> {
+        match slot {
+            AmbienceSlot::Slot1 => self.slot_1.as_mut(),
+            AmbienceSlot::Slot2 => self.slot_2.as_mut(),
+            AmbienceSlot::Slot3 => self.slot_3.as_mut(),
+            AmbienceSlot::Slot4 => self.slot_4.as_mut(),
+        }
+    }
+
+    pub fn set(&mut self, slot: AmbienceSlot, state: Option<LoopingAudioSnapshot>) {
+        match slot {
+            AmbienceSlot::Slot1 => self.slot_1 = state,
+            AmbienceSlot::Slot2 => self.slot_2 = state,
+            AmbienceSlot::Slot3 => self.slot_3 = state,
+            AmbienceSlot::Slot4 => self.slot_4 = state,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (AmbienceSlot, &LoopingAudioSnapshot)> {
+        AmbienceSlot::ALL
+            .into_iter()
+            .filter_map(|slot| self.get(slot).map(|state| (slot, state)))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (AmbienceSlot, &mut LoopingAudioSnapshot)> {
+        // A fixed array of mutable optional references avoids exposing the
+        // representation as a map while still making validation exhaustive.
+        let slots = [
+            (AmbienceSlot::Slot1, &mut self.slot_1),
+            (AmbienceSlot::Slot2, &mut self.slot_2),
+            (AmbienceSlot::Slot3, &mut self.slot_3),
+            (AmbienceSlot::Slot4, &mut self.slot_4),
+        ];
+        slots
+            .into_iter()
+            .filter_map(|(slot, state)| state.as_mut().map(|state| (slot, state)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -934,6 +1036,31 @@ pub enum SceneNode {
         action: AudioAction,
         asset: Option<String>,
         #[serde(default = "default_volume")]
+        volume: f32,
+        #[serde(default)]
+        start_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_start_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_end_ms: Option<u64>,
+        #[serde(default = "default_medium_duration")]
+        duration_ms: u64,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    /// Start or stop one of the four independent ambience channels.
+    ///
+    /// Ambience deliberately mirrors the BGM node's loop parameters so the
+    /// runtime can describe one canonical looping state to every host. The
+    /// slot is fixed rather than an arbitrary string, which keeps authored
+    /// content and the wire protocol exhaustive.
+    Ambience {
+        slot: AmbienceSlot,
+        action: AudioAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asset: Option<String>,
+        #[serde(default = "default_ambience_volume")]
         volume: f32,
         #[serde(default)]
         start_ms: u64,
@@ -1261,6 +1388,14 @@ fn default_clear_await() -> bool {
 
 fn default_volume() -> f32 {
     1.0
+}
+
+/// Player-facing default for authored ambience nodes and the corresponding
+/// settings control. BGM/SFX defaults remain unchanged.
+pub const AMBIENCE_VOLUME_DEFAULT: f32 = 0.8;
+
+fn default_ambience_volume() -> f32 {
+    AMBIENCE_VOLUME_DEFAULT
 }
 
 /// Fixed 1920x1080 design space every resolved choice layout is expressed in.
@@ -1915,6 +2050,13 @@ pub enum TimelineTrack {
         #[serde(default)]
         channels: TimelineChannels,
     },
+    /// Transient volume automation for one fixed ambience slot. The runtime
+    /// restores the authoritative snapshot volume after this cue completes.
+    Ambience {
+        slot: AmbienceSlot,
+        #[serde(default)]
+        channels: TimelineChannels,
+    },
 }
 
 fn default_video_fit() -> VideoFit {
@@ -2158,6 +2300,25 @@ impl Default for CameraSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct AudioSnapshot {
     pub bgm: Option<LoopingAudioSnapshot>,
+    /// Four fixed optional slots. The whole object is omitted when empty so
+    /// pre-ambience snapshots and idle audio keep their compact legacy shape.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_ambience_snapshot_compat",
+        skip_serializing_if = "AmbienceSnapshot::is_empty"
+    )]
+    pub ambience: AmbienceSnapshot,
+}
+
+/// Older hosts represented an empty ambience state as `null`; accept that
+/// spelling while keeping the canonical Rust model as four optional fields.
+fn deserialize_ambience_snapshot_compat<'de, D>(
+    deserializer: D,
+) -> Result<AmbienceSnapshot, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<AmbienceSnapshot>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2426,6 +2587,15 @@ pub enum PresentationCueKind {
         to: Option<LoopingAudioSnapshot>,
         duration_ms: u64,
     },
+    /// Starts, stops or replaces one ambience slot. Hosts may treat a
+    /// same-slot/same-asset replacement as a volume/loop-state update and
+    /// preserve the existing playback head.
+    AmbienceTransition {
+        slot: AmbienceSlot,
+        from: Option<LoopingAudioSnapshot>,
+        to: Option<LoopingAudioSnapshot>,
+        duration_ms: u64,
+    },
     Delay {
         duration_ms: u64,
     },
@@ -2519,6 +2689,8 @@ pub struct Settings {
     pub sfx_volume: f32,
     #[serde(default = "default_volume")]
     pub video_volume: f32,
+    #[serde(default = "default_ambience_volume")]
+    pub ambience_volume: f32,
     pub text_speed_cps: f32,
     #[serde(default)]
     pub text_reveal_animation: TextRevealAnimation,
@@ -2542,6 +2714,7 @@ impl Default for Settings {
             bgm_volume: 0.7,
             sfx_volume: 0.8,
             video_volume: 1.0,
+            ambience_volume: AMBIENCE_VOLUME_DEFAULT,
             text_speed_cps: 30.0,
             text_reveal_animation: TextRevealAnimation::Typewriter,
             skip_mode: SkipMode::ReadOnly,
@@ -2568,6 +2741,99 @@ mod tests {
     fn parse_timeline_event(yaml: &str) -> TimelineEvent {
         let options = serde_saphyr::options! { strict_booleans: true };
         serde_saphyr::from_str_with_options(yaml, options).expect("timeline event must parse")
+    }
+
+    #[test]
+    fn ambience_nodes_and_snapshots_use_the_fixed_four_slot_contract() {
+        let node = parse_scene_node(
+            "type: ambience\nslot: slot_3\naction: start\nasset: ambience.forest\nnext: end\n",
+        );
+        assert!(matches!(
+            node,
+            SceneNode::Ambience {
+                slot: AmbienceSlot::Slot3,
+                action: AudioAction::Start,
+                asset: Some(asset),
+                volume,
+                ..
+            } if asset == "ambience.forest" && volume == AMBIENCE_VOLUME_DEFAULT
+        ));
+
+        let state = LoopingAudioSnapshot {
+            asset: "ambience.forest".to_owned(),
+            volume: 0.35,
+            start_ms: 120,
+            loop_start_ms: Some(400),
+            loop_end_ms: Some(1800),
+        };
+        let mut ambience = AmbienceSnapshot::default();
+        ambience.set(AmbienceSlot::Slot2, Some(state.clone()));
+        assert_eq!(ambience.get(AmbienceSlot::Slot2), Some(&state));
+        assert!(ambience.get(AmbienceSlot::Slot1).is_none());
+
+        let empty = serde_json::to_value(AudioSnapshot::default()).unwrap();
+        assert_eq!(empty, serde_json::json!({"bgm": null}));
+        let populated = serde_json::to_value(AudioSnapshot {
+            bgm: None,
+            ambience,
+        })
+        .unwrap();
+        assert_eq!(populated["ambience"]["slot_2"]["asset"], "ambience.forest");
+        assert!(populated["ambience"].get("slot_1").is_none());
+
+        let legacy: AudioSnapshot = serde_json::from_value(serde_json::json!({
+            "bgm": null
+        }))
+        .unwrap();
+        assert!(legacy.ambience.is_empty());
+
+        let explicit_null: AudioSnapshot = serde_json::from_value(serde_json::json!({
+            "bgm": null,
+            "ambience": null
+        }))
+        .unwrap();
+        assert!(explicit_null.ambience.is_empty());
+        assert_eq!(
+            serde_json::to_value(explicit_null).unwrap(),
+            serde_json::json!({"bgm": null}),
+        );
+    }
+
+    #[test]
+    fn ambience_slots_serialize_to_the_four_wire_names() {
+        let names: Vec<String> = AmbienceSlot::ALL
+            .into_iter()
+            .map(|slot| serde_json::to_string(&slot).expect("slot must serialize"))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["\"slot_1\"", "\"slot_2\"", "\"slot_3\"", "\"slot_4\""]
+        );
+        for (name, slot) in [
+            ("slot_1", AmbienceSlot::Slot1),
+            ("slot_2", AmbienceSlot::Slot2),
+            ("slot_3", AmbienceSlot::Slot3),
+            ("slot_4", AmbienceSlot::Slot4),
+        ] {
+            let parsed: AmbienceSlot =
+                serde_json::from_str(&format!("\"{name}\"")).expect("slot name must deserialize");
+            assert_eq!(parsed, slot);
+        }
+    }
+
+    #[test]
+    fn ambience_stop_with_an_asset_remains_parseable_for_content_validation() {
+        let node = parse_scene_node(
+            "type: ambience\nslot: slot_1\naction: stop\nasset: ambience.forest\nnext: end\n",
+        );
+        assert!(matches!(
+            node,
+            SceneNode::Ambience {
+                action: AudioAction::Stop,
+                asset: Some(asset),
+                ..
+            } if asset == "ambience.forest"
+        ));
     }
 
     #[test]

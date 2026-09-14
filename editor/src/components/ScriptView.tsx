@@ -901,6 +901,8 @@ function summarize(node: SceneNode): string {
       return `时间线 · ${node.duration_ms} ms`;
     case "bgm":
       return `BGM · ${node.action}`;
+    case "ambience":
+      return `环境声 ${node.slot} · ${node.action}`;
     case "sfx":
       return `音效 · ${node.asset}`;
     case "wait":

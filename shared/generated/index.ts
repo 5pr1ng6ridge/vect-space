@@ -16,3 +16,6 @@ export type { WireImportAssetRequest } from "./WireImportAssetRequest";
 export type { WireImportedAsset } from "./WireImportedAsset";
 export type { WireInspectAssetImportsRequest } from "./WireInspectAssetImportsRequest";
 export type { WireStageAssetImportsRequest } from "./WireStageAssetImportsRequest";
+export type { WireLoopingAudioSnapshot } from "./WireLoopingAudioSnapshot";
+export type { WireAmbienceSnapshot } from "./WireAmbienceSnapshot";
+export type { WireAudioSnapshot } from "./WireAudioSnapshot";

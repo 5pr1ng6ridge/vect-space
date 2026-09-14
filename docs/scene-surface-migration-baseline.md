@@ -322,3 +322,17 @@ headless=new + SwiftShader，`WebGL 2.0 (OpenGL ES 3.0 Chromium)`）：3 个目�
   fade/wipe/split 的 cover/reveal 组合、参数化 flash/shake（固定 seed）以及重叠的时间线
   效果；它已接入 `chapter-map.yaml`。`game_content.rs` 对上述形状追加断言，防止演示场景
   静默退化。`surface_parity` 夹具保持不可达、不接入章节地图的既有约束不变。
+- **四槽环境声验收**：`game/scenes/ambience_lab.yaml` 作为可达演示场景启动
+  `slot_1`–`slot_4`，再执行每槽音量自动化、slot 2 同素材保留播放头的 retune、
+  跨素材替换和 slot 3/4 停止。`parity/targets.json` 的 ambience 目标由浏览器
+  同时驱动游戏 `PresentationController` 与编辑器 `TimelineSession`，通过共享只读
+  `AudioDiagnostics` 检查四个素材、独立 ambience bus、槽位身份和 retune 播放头。
+  四个演示 WAV 由 `npm run assets:ambience` 确定性生成；其它历史录音仍按
+  `game/assets/THIRD_PARTY.md` 单独记录来源与发行限制。
+
+C3b 最近一次本机浏览器验收输出为 8 个目标、77 张截图、0 个步骤错误、4/4
+Choice 布局探针、1 个视频目标的 13 个观测/42 项断言（0 失败），5 个环境声
+目标的 75 项诊断断言（0 问题），其中 retune 明确证明播放头未 seek 到 authored
+`start_ms`；生命周期断言通过。完整命令、启动标记、安装包路径和剩余风险记录在
+本次会话的实现报告中；本次运行使用 OS 临时输出目录并已删除，`.parity-output/`
+产物不作为发行证据。

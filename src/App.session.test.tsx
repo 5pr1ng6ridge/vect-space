@@ -11,7 +11,7 @@ import type {
   ButtonSnapshot,
   ResolvedAsset,
 } from "@vectspace/presentation-core/types";
-import type { RuntimeUpdate } from "./engine/types";
+import type { RuntimeUpdate, Settings } from "./engine/types";
 import type { SceneCanvasHandle } from "./components/SceneCanvas";
 
 const host = vi.hoisted(() => {
@@ -151,6 +151,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         bgm_volume: 1,
         sfx_volume: 1,
         video_volume: 1,
+        ambience_volume: 0.8,
         text_speed_cps: 30,
         text_reveal_animation: "typewriter",
         skip_mode: "read_only",
@@ -269,7 +270,7 @@ function resolvedChoiceAssets(): ResolvedAsset[] {
   ];
 }
 
-import App from "./App";
+import App, { SettingsPanel } from "./App";
 afterEach(async () => {
   cleanup();
   // Drain in-flight mocked host commands and frame-scheduled transitions so
@@ -286,6 +287,35 @@ beforeEach(() => {
   host.failures = {};
   host.alignFailures = 0;
   host.mode = "story";
+});
+
+it("edits ambience volume through the settings control", () => {
+  const settings: Settings = {
+    master_volume: 1,
+    bgm_volume: 0.7,
+    sfx_volume: 0.8,
+    video_volume: 1,
+    ambience_volume: 0.8,
+    text_speed_cps: 30,
+    text_reveal_animation: "typewriter",
+    skip_mode: "read_only",
+  };
+  const onChange = vi.fn();
+  render(
+    <SettingsPanel
+      onChange={onChange}
+      onClose={() => undefined}
+      onSave={() => undefined}
+      settings={settings}
+    />,
+  );
+
+  fireEvent.change(screen.getByLabelText("环境声"), {
+    target: { value: "0.37" },
+  });
+  expect(onChange).toHaveBeenLastCalledWith(
+    expect.objectContaining({ ambience_volume: 0.37 }),
+  );
 });
 
 it("retains host identity across title, load and repeated replay transitions", async () => {

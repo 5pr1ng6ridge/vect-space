@@ -607,7 +607,7 @@ function renderFields(
       return (
         <>
           <p className="field-note">
-            淡出背景、立绘、镜头与持续视觉效果；BGM 和对话框 UI 会保留。
+            淡出背景、立绘、镜头与持续视觉效果；BGM、环境声和对话框 UI 会保留。
           </p>
           <AnimationFields node={node} onChange={update} />
           <TargetSelect
@@ -1588,6 +1588,115 @@ function renderFields(
             allowNone={node.action === "stop"}
             kind="bgm"
             label="BGM 素材"
+            manifest={manifest}
+            onChange={(asset) => update({ ...node, asset })}
+            value={node.asset}
+          />
+          <NumberField
+            label="音量"
+            max={1}
+            min={0}
+            onChange={(volume) => update({ ...node, volume })}
+            step={0.05}
+            value={node.volume}
+          />
+          {node.action === "start" && (
+            <>
+              <NumberField
+                label="起播 ms"
+                min={0}
+                onChange={(start_ms) => update({ ...node, start_ms })}
+                step={100}
+                value={node.start_ms ?? 0}
+              />
+              <BooleanField
+                label="自定义循环段"
+                onChange={(enabled) =>
+                  update({
+                    ...node,
+                    loop_start_ms: enabled ? 0 : null,
+                    loop_end_ms: enabled ? 1000 : null,
+                  })
+                }
+                value={node.loop_start_ms != null && node.loop_end_ms != null}
+              />
+              {node.loop_start_ms != null && node.loop_end_ms != null && (
+                <div className="field-grid">
+                  <NumberField
+                    label="循环起点 ms"
+                    min={0}
+                    onChange={(loop_start_ms) =>
+                      update({ ...node, loop_start_ms })
+                    }
+                    step={100}
+                    value={node.loop_start_ms}
+                  />
+                  <NumberField
+                    label="循环终点 ms"
+                    min={0}
+                    onChange={(loop_end_ms) => update({ ...node, loop_end_ms })}
+                    step={100}
+                    value={node.loop_end_ms}
+                  />
+                </div>
+              )}
+            </>
+          )}
+          <AwaitFields node={node} onChange={update} />
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    case "ambience":
+      return (
+        <>
+          <Field label="槽位">
+            <select
+              value={node.slot}
+              onChange={(event) =>
+                update({
+                  ...node,
+                  slot: event.currentTarget.value as typeof node.slot,
+                })
+              }
+            >
+              <option value="slot_1">槽位 1</option>
+              <option value="slot_2">槽位 2</option>
+              <option value="slot_3">槽位 3</option>
+              <option value="slot_4">槽位 4</option>
+            </select>
+          </Field>
+          <Field label="动作">
+            <select
+              value={node.action}
+              onChange={(event) => {
+                const action = event.currentTarget.value as typeof node.action;
+                const next = { ...node, action };
+                if (action === "stop") {
+                  // Stop nodes carry no start/loop metadata.  Besides keeping
+                  // the authored shape canonical, this prevents changing back
+                  // and forth between actions from leaving invalid hidden
+                  // fields behind.
+                  next.asset = null;
+                  delete next.start_ms;
+                  delete next.loop_start_ms;
+                  delete next.loop_end_ms;
+                }
+                update(next);
+              }}
+            >
+              <option value="start">开始 / 替换</option>
+              <option value="stop">停止</option>
+            </select>
+          </Field>
+          <AssetSelect
+            allowNone={node.action === "stop"}
+            kind="ambience"
+            label="环境声素材"
             manifest={manifest}
             onChange={(asset) => update({ ...node, asset })}
             value={node.asset}
