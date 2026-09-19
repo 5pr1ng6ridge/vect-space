@@ -2158,6 +2158,23 @@ fn validate_scenes(
                         return node_error(scene_id, node_id, "jump 目标节点不存在");
                     }
                 }
+                SceneNode::OpenWindow {
+                    scene: target_scene,
+                    next,
+                } => {
+                    if !scenes.contains_key(target_scene) {
+                        return node_error(
+                            scene_id,
+                            node_id,
+                            &format!("open_window 指向未声明的场景 {target_scene}"),
+                        );
+                    }
+                    // `next` continues the *current* Scene; only the named
+                    // window Scene is resolved across scenes.
+                    if !scene.nodes.contains_key(next) {
+                        return node_error(scene_id, node_id, "open_window 的 next 节点不存在");
+                    }
+                }
                 SceneNode::Wait { duration_ms, next } => {
                     validate_duration(*duration_ms, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
@@ -4445,6 +4462,112 @@ mod tests {
     fn markup_scanner_keeps_unmatched_dollars_as_plain_text() {
         assert!(scan_text_markup("金额 $678932{}|{}[AFKV;").is_ok());
         assert!(scan_text_markup("\n[fx=glow]字[/fx]\r\n").is_ok());
+    }
+
+    #[test]
+    fn open_window_requires_a_declared_scene_and_a_declared_next_node() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game");
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let ui_motion_files: BTreeMap<String, UiMotionPreset> = catalog
+            .manifest
+            .ui_motions
+            .iter()
+            .map(|path| (path.clone(), read_yaml(&root.join(path)).unwrap()))
+            .collect();
+        let mut scenes = catalog.scenes.clone();
+        scenes.insert(
+            "window_scene".to_owned(),
+            crate::model::SceneDefinition {
+                schema_version: 2,
+                id: "window_scene".to_owned(),
+                entry: "open".to_owned(),
+                nodes: BTreeMap::from([
+                    (
+                        "open".to_owned(),
+                        SceneNode::OpenWindow {
+                            scene: "prologue".to_owned(),
+                            next: "done".to_owned(),
+                        },
+                    ),
+                    ("done".to_owned(), SceneNode::End),
+                ]),
+            },
+        );
+        let valid = ContentCatalog::from_documents(
+            root.clone(),
+            catalog.manifest.clone(),
+            scenes.clone(),
+            ui_motion_files.clone(),
+        );
+        assert!(valid.is_ok(), "{valid:?}");
+
+        // An undeclared target Scene must be rejected at load time, not when the
+        // player reaches the node.
+        let mut unknown_scene = scenes.clone();
+        let node = unknown_scene
+            .get_mut("window_scene")
+            .unwrap()
+            .nodes
+            .get_mut("open")
+            .unwrap();
+        *node = SceneNode::OpenWindow {
+            scene: "does_not_exist".to_owned(),
+            next: "done".to_owned(),
+        };
+        let error = ContentCatalog::from_documents(
+            root.clone(),
+            catalog.manifest.clone(),
+            unknown_scene,
+            ui_motion_files.clone(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("does_not_exist"),
+            "unexpected error: {error}"
+        );
+
+        // `next` stays inside the current Scene and must exist there.
+        let mut unknown_next = scenes;
+        let node = unknown_next
+            .get_mut("window_scene")
+            .unwrap()
+            .nodes
+            .get_mut("open")
+            .unwrap();
+        *node = SceneNode::OpenWindow {
+            scene: "prologue".to_owned(),
+            next: "missing".to_owned(),
+        };
+        let error =
+            ContentCatalog::from_documents(root, catalog.manifest.clone(), unknown_next, ui_motion_files)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("open_window"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn open_window_round_trips_through_the_yaml_scene_document() {
+        let document = serde_json::json!({
+            "schema_version": 2,
+            "id": "window_scene",
+            "entry": "open",
+            "nodes": {
+                "open": {
+                    "type": "open_window",
+                    "scene": "prologue",
+                    "next": "done"
+                },
+                "done": { "type": "end" }
+            }
+        });
+        let scene: crate::model::SceneDefinition = serde_json::from_value(document).unwrap();
+        let SceneNode::OpenWindow { scene, next } = scene.nodes.get("open").unwrap() else {
+            panic!("open_window must deserialize into its own variant");
+        };
+        assert_eq!(scene, "prologue");
+        assert_eq!(next, "done");
     }
 
     #[test]

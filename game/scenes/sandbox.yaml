@@ -5,7 +5,8 @@ nodes:
   boot:
     type: background
     background: bg.vector_space
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 350
     easing: ease_in_out
     await: false
@@ -30,6 +31,63 @@ nodes:
     op: add
     value: 1
     next: revisit_condition
+  demo_overlay_button:
+    type: button_create
+    instance_id: demo_overlay
+    template: demo.overlay
+    x: 80.0
+    "y": 280.0
+    width: 240.0
+    height: 80.0
+    rotation_deg: null
+    scale_x: null
+    scale_y: null
+    opacity: null
+    z: 20
+    visible: true
+    enabled: true
+    action:
+      sets: []
+    next: timeline
+  demo_separate_button:
+    type: button_create
+    instance_id: demo_separate
+    template: demo.separate
+    x: 80.0
+    "y": 180.0
+    width: 240.0
+    height: 80.0
+    rotation_deg: null
+    scale_x: null
+    scale_y: null
+    opacity: null
+    z: 20
+    visible: true
+    enabled: true
+    action:
+      sets:
+      - variable: score
+        op: add
+        value: 1
+    next: demo_overlay_button
+  demo_transparent_button:
+    type: button_create
+    instance_id: demo_transparent
+    template: demo.transparent
+    x: 80.0
+    "y": 80.0
+    width: 240.0
+    height: 80.0
+    rotation_deg: null
+    scale_x: null
+    scale_y: null
+    opacity: null
+    z: 20
+    visible: true
+    enabled: true
+    action:
+      sets: []
+    next: demo_separate_button
   end:
     type: end
   forced_line:
@@ -80,7 +138,7 @@ nodes:
   lecture_start:
     type: long_text
     document: sandbox_proof
-    on_exit: hide
+    on_exit: keep_visible
     paper: gui.scratch_paper
     pagination: auto
     font_size: 28.0
@@ -150,54 +208,6 @@ nodes:
     document: sandbox_proof
     action: show
     next: demo_transparent_button
-  demo_transparent_button:
-    type: button_create
-    instance_id: demo_transparent
-    template: demo.transparent
-    x: 80.0
-    y: 80.0
-    width: 240.0
-    height: 80.0
-    z: 20
-    visible: true
-    enabled: true
-    action:
-      sets: []
-      next: null
-    next: demo_separate_button
-  demo_separate_button:
-    type: button_create
-    instance_id: demo_separate
-    template: demo.separate
-    x: 80.0
-    y: 180.0
-    width: 240.0
-    height: 80.0
-    z: 20
-    visible: true
-    enabled: true
-    action:
-      sets:
-      - variable: score
-        op: add
-        value: 1
-      next: null
-    next: demo_overlay_button
-  demo_overlay_button:
-    type: button_create
-    instance_id: demo_overlay
-    template: demo.overlay
-    x: 80.0
-    y: 280.0
-    width: 240.0
-    height: 80.0
-    z: 20
-    visible: true
-    enabled: true
-    action:
-      sets: []
-      next: null
-    next: timeline
   show_jelly:
     type: sprite
     sprite_id: sandbox_jelly

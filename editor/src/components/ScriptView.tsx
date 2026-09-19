@@ -885,6 +885,8 @@ function summarize(node: SceneNode): string {
       return "条件分支";
     case "jump":
       return `${node.scene ?? "本场景"} / ${node.target}`;
+    case "open_window":
+      return `副窗口 · ${node.scene}`;
     case "end":
       return "剧情终点";
     case "background":

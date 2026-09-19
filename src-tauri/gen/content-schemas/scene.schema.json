@@ -1397,6 +1397,28 @@
           ]
         },
         {
+          "description": "Ask the desktop host to show another Scene in the single secondary game\nwindow.  The node is deliberately non-blocking: the engine advances to\n`next` in the same update and only emits a window cue.  The host consumes\nthat cue for the committed main story runtime, so a replay or the\nsecondary engine itself can never open or re-point a window.",
+          "type": "object",
+          "properties": {
+            "next": {
+              "type": "string"
+            },
+            "scene": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "open_window"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "scene",
+            "next"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "duration_ms": {

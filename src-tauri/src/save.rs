@@ -7,13 +7,18 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use schemars::JsonSchema;
 use vectspace_core::model::{
     DialogueHistoryEntry, ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary,
     ScalarValue, Settings, VariableDefinition, VariableMap, VariableScope, VariableType,
     AMBIENCE_VOLUME_DEFAULT,
 };
 
-const SAVE_SCHEMA_VERSION: u32 = 2;
+const SAVE_SCHEMA_VERSION: u32 = 3;
+/// Schema v2 is still readable: it simply has no merged history and no
+/// secondary state, which preserves the historical "loading clears the ledger"
+/// behaviour for slots written before multiwindow support.
+const SAVE_SCHEMA_VERSION_LEGACY: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const PROFILE_SCHEMA_VERSION: u32 = 4;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
@@ -21,6 +26,10 @@ const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
 // entry below.  A profile is user data, so malformed entries are repaired
 // rather than allowed to make the whole profile unreadable.
 const MAX_PROFILE_FILE_BYTES: usize = 64 * 1024 * 1024;
+/// Bounds a slot read the same way a profile read is bounded.  Schema v3 adds a
+/// dialogue ledger to the file, so an unbounded read would let a malformed slot
+/// allocate without limit before any validation runs.
+const MAX_SAVE_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 500;
 const MAX_HISTORY_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_HISTORY_SPEAKER_ID_BYTES: usize = 128;
@@ -67,6 +76,48 @@ struct SaveFile {
     saved_at_unix_ms: u64,
     snapshot: RuntimeSnapshot,
     thumbnail_data_url: Option<String>,
+    /// The complete ordered dialogue ledger (main + secondary occurrences), not
+    /// nested inside `secondary`, because history outlives the secondary window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    history: Vec<DialogueHistoryEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secondary: Option<SecondaryState>,
+}
+
+/// Everything needed to rebuild the secondary window's runtime at the exact
+/// scene it was showing.  Transient host/IPC identity (session tokens, pending
+/// acknowledgements) is deliberately absent: a restored secondary always gets a
+/// fresh token and a fresh frontend bootstrap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SecondaryState {
+    /// Scene currently shown in the secondary window.
+    pub scene_id: String,
+    /// Main-story Scene that owns the window; leaving it closes the window.
+    pub owning_scene: String,
+    pub snapshot: RuntimeSnapshot,
+    /// The secondary runtime's own progression metadata (read/seen/completed).
+    /// Shared variables are intentionally excluded: the main snapshot is their
+    /// authority.
+    pub profile: ProfileState,
+}
+
+/// The complete contents of one slot as passed to [`SaveManager::save`].
+#[derive(Debug, Clone, Copy)]
+pub struct SlotDocument<'a> {
+    pub snapshot: &'a RuntimeSnapshot,
+    pub history: &'a [DialogueHistoryEntry],
+    pub secondary: Option<&'a SecondaryState>,
+}
+
+/// Restored slot contents.
+#[derive(Debug, Clone)]
+pub struct LoadedSlot {
+    pub snapshot: RuntimeSnapshot,
+    /// Merged ledger stored by schema v3.  Empty for a legacy v2 slot, which
+    /// keeps the original behaviour of clearing the ledger on load.
+    pub history: Vec<DialogueHistoryEntry>,
+    pub secondary: Option<SecondaryState>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -123,7 +174,7 @@ impl SaveManager {
     pub fn save(
         &self,
         slot: &str,
-        snapshot: &RuntimeSnapshot,
+        document: SlotDocument<'_>,
         thumbnail_data_url: Option<String>,
     ) -> Result<SaveSlotSummary, SaveError> {
         validate_slot(slot)?;
@@ -132,8 +183,10 @@ impl SaveManager {
             schema_version: SAVE_SCHEMA_VERSION,
             content_version: self.content_version.clone(),
             saved_at_unix_ms: now_unix_ms(),
-            snapshot: snapshot.clone(),
+            snapshot: document.snapshot.clone(),
             thumbnail_data_url,
+            history: document.history.to_vec(),
+            secondary: document.secondary.cloned(),
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| SaveError::InvalidData(error.to_string()))?;
@@ -141,10 +194,13 @@ impl SaveManager {
         Ok(summary_from_file(slot, &file))
     }
 
-    pub fn load(&self, slot: &str) -> Result<RuntimeSnapshot, SaveError> {
+    pub fn load(&self, slot: &str) -> Result<LoadedSlot, SaveError> {
         validate_slot(slot)?;
-        let file: SaveFile = read_json_with_backup(&self.slot_path(slot))?;
-        if file.schema_version != SAVE_SCHEMA_VERSION {
+        let (file, _from_backup) =
+            read_json_with_backup_limit_source::<SaveFile>(&self.slot_path(slot), MAX_SAVE_FILE_BYTES)?;
+        if file.schema_version != SAVE_SCHEMA_VERSION
+            && file.schema_version != SAVE_SCHEMA_VERSION_LEGACY
+        {
             return Err(SaveError::InvalidData(format!(
                 "不支持 schema_version {}",
                 file.schema_version
@@ -156,7 +212,18 @@ impl SaveManager {
                 actual: file.content_version,
             });
         }
-        Ok(file.snapshot)
+        // A legacy slot has neither field; keep the pre-multiwindow behaviour
+        // of restoring only the main snapshot.
+        let mut history = file.history;
+        if history.len() > MAX_HISTORY_ENTRIES {
+            let excess = history.len() - MAX_HISTORY_ENTRIES;
+            history.drain(..excess);
+        }
+        Ok(LoadedSlot {
+            snapshot: file.snapshot,
+            history,
+            secondary: file.secondary,
+        })
     }
 
     pub fn list(&self) -> Vec<SaveSlotSummary> {
@@ -976,7 +1043,7 @@ mod tests {
         });
         assert_eq!(repaired.ambience_volume, 0.8);
         assert_eq!(SETTINGS_SCHEMA_VERSION, 1);
-        assert_eq!(SAVE_SCHEMA_VERSION, 2);
+        assert_eq!(SAVE_SCHEMA_VERSION, 3);
     }
 
     #[test]
@@ -1016,9 +1083,24 @@ mod tests {
             prompt: PromptSnapshot::None,
         };
 
-        manager.save("1", &snapshot, None).unwrap();
+        manager
+            .save(
+                "1",
+                SlotDocument {
+                    snapshot: &snapshot,
+                    history: &[],
+                    secondary: None,
+                },
+                None,
+            )
+            .unwrap();
         let loaded = manager.load("1").unwrap();
-        assert_eq!(loaded.audio.ambience.get(AmbienceSlot::Slot2), Some(&state));
+        assert_eq!(
+            loaded.snapshot.audio.ambience.get(AmbienceSlot::Slot2),
+            Some(&state)
+        );
+        assert!(loaded.history.is_empty());
+        assert!(loaded.secondary.is_none());
         let save_file: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.path().join("slot-1.json")).unwrap())
                 .unwrap();
@@ -1046,9 +1128,166 @@ mod tests {
             serde_json::from_slice(&fs::read(directory.path().join("profile.json")).unwrap())
                 .unwrap();
         assert_eq!(profile_file["schema_version"], PROFILE_SCHEMA_VERSION);
-        assert_eq!(SAVE_SCHEMA_VERSION, 2);
+        assert_eq!(SAVE_SCHEMA_VERSION, 3);
         assert_eq!(SETTINGS_SCHEMA_VERSION, 1);
         assert_eq!(PROFILE_SCHEMA_VERSION, 4);
+    }
+
+    #[test]
+    fn schema_v2_slot_still_loads_without_history_or_secondary_state() {
+        use vectspace_core::model::{
+            AudioSnapshot, PlaybackSnapshot, RuntimeSnapshot, StoryLocation, WorldSnapshot,
+        };
+
+        let directory = tempdir().unwrap();
+        let manager =
+            SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
+        let snapshot = RuntimeSnapshot {
+            revision: 4,
+            location: StoryLocation {
+                scene_id: "prologue".to_owned(),
+                node_id: "intro".to_owned(),
+            },
+            variables: VariableMap::new(),
+            world: WorldSnapshot::default(),
+            audio: AudioSnapshot::default(),
+            playback: PlaybackSnapshot::default(),
+            dialogue_page: None,
+            long_text_page: None,
+            prompt: PromptSnapshot::None,
+        };
+        // A real schema-v2 document: the same snapshot without the fields the
+        // multiwindow schema added.
+        let legacy = serde_json::json!({
+            "schema_version": 2,
+            "content_version": "demo-c1",
+            "saved_at_unix_ms": 7,
+            "snapshot": snapshot,
+            "thumbnail_data_url": null
+        });
+        fs::write(
+            directory.path().join("slot-2.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = manager.load("2").unwrap();
+        assert_eq!(loaded.snapshot.location.scene_id, "prologue");
+        assert_eq!(loaded.snapshot.revision, 4);
+        assert!(loaded.history.is_empty());
+        assert!(loaded.secondary.is_none());
+        // Reading a legacy slot never rewrites it; it is only normalised when
+        // the player saves over it again.
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("slot-2.json")).unwrap())
+                .unwrap();
+        assert_eq!(on_disk["schema_version"], 2);
+    }
+
+    #[test]
+    fn schema_v3_round_trips_merged_history_and_secondary_state() {
+        use vectspace_core::model::{
+            AudioSnapshot, PlaybackSnapshot, RuntimeSnapshot, StoryLocation, WorldSnapshot,
+        };
+
+        let directory = tempdir().unwrap();
+        let manager =
+            SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
+        let snapshot = RuntimeSnapshot {
+            revision: 9,
+            location: StoryLocation {
+                scene_id: "prologue".to_owned(),
+                node_id: "intro".to_owned(),
+            },
+            variables: VariableMap::new(),
+            world: WorldSnapshot::default(),
+            audio: AudioSnapshot::default(),
+            playback: PlaybackSnapshot::default(),
+            dialogue_page: None,
+            long_text_page: None,
+            prompt: PromptSnapshot::None,
+        };
+        let history = vec![
+            DialogueHistoryEntry {
+                entry_id: 1,
+                prompt_id: "prologue/intro".to_owned(),
+                speaker_id: None,
+                speaker: None,
+                name_color: None,
+                text_color: None,
+                text: "main line".to_owned(),
+            },
+            DialogueHistoryEntry {
+                entry_id: 2,
+                prompt_id: "ambience_lab/intro".to_owned(),
+                speaker_id: None,
+                speaker: None,
+                name_color: None,
+                text_color: None,
+                text: "secondary line".to_owned(),
+            },
+        ];
+        let secondary = SecondaryState {
+            scene_id: "ambience_lab".to_owned(),
+            owning_scene: "prologue".to_owned(),
+            snapshot: RuntimeSnapshot {
+                location: StoryLocation {
+                    scene_id: "ambience_lab".to_owned(),
+                    node_id: "intro".to_owned(),
+                },
+                ..snapshot.clone()
+            },
+            profile: ProfileState {
+                variables: VariableMap::new(),
+                read_content_version: "demo-c1".to_owned(),
+                read_dialogues: Default::default(),
+                seen_presentations: Default::default(),
+                completed_scenes: Default::default(),
+                dialogue_history: Default::default(),
+            },
+        };
+
+        manager
+            .save(
+                "3",
+                SlotDocument {
+                    snapshot: &snapshot,
+                    history: &history,
+                    secondary: Some(&secondary),
+                },
+                None,
+            )
+            .unwrap();
+        let loaded = manager.load("3").unwrap();
+        assert_eq!(loaded.history, history);
+        assert_eq!(loaded.secondary, Some(secondary));
+
+        // The ledger lives at the top level, never nested inside the optional
+        // secondary, so a slot without a secondary still carries history.
+        manager
+            .save(
+                "1",
+                SlotDocument {
+                    snapshot: &snapshot,
+                    history: &history,
+                    secondary: None,
+                },
+                None,
+            )
+            .unwrap();
+        let only_history: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("slot-1.json")).unwrap())
+                .unwrap();
+        assert!(only_history.get("secondary").is_none());
+        assert_eq!(
+            only_history["history"].as_array().map(Vec::len),
+            Some(history.len())
+        );
+        assert_eq!(
+            manager.load("1").unwrap().history,
+            history,
+            "history must survive without a live secondary window"
+        );
     }
 
     #[test]

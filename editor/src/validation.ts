@@ -1919,6 +1919,25 @@ function validateNode(
     case "jump":
     case "end":
       break;
+    case "open_window":
+      // Non-blocking: the story continues to `next` in this Scene. The named
+      // window Scene is resolved across scenes and must exist.
+      if (node.scene.length === 0) {
+        issue("missing_window_scene", "副窗口必须指定目标场景");
+      } else if (
+        !project.scenes.some(
+          (candidate) => candidate.definition.id === node.scene,
+        )
+      ) {
+        issue("unknown_window_scene", `副窗口指向未声明的场景 ${node.scene}`);
+      }
+      if (
+        scene === undefined ||
+        scene.definition.nodes[node.next] === undefined
+      ) {
+        issue("missing_next_node", "open_window 的 next 节点不存在");
+      }
+      break;
   }
 }
 

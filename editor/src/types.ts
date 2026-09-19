@@ -455,6 +455,16 @@ export interface JumpNode {
   target: string;
 }
 
+/**
+ * Ask the game host to show another Scene in the single secondary window.
+ * Non-blocking: the story continues to `next` in the same Scene, and only the
+ * main window's story runtime can act on the request.
+ */
+export interface OpenWindowNode extends NextNode {
+  type: "open_window";
+  scene: string;
+}
+
 export interface WaitNode extends NextNode {
   type: "wait";
   duration_ms: number;
@@ -623,6 +633,7 @@ export type SceneNode =
   | PlaybackNode
   | ActionNode
   | JumpNode
+  | OpenWindowNode
   | WaitNode
   | BgmNode
   | AmbienceNode

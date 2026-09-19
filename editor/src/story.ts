@@ -43,6 +43,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "action", label: "立绘动作", group: "画面" },
   { type: "set", label: "设置变量", group: "逻辑" },
   { type: "jump", label: "跳转", group: "逻辑" },
+  { type: "open_window", label: "打开副窗口", group: "逻辑" },
   { type: "background", label: "背景", group: "画面" },
   { type: "curtain", label: "幕布", group: "画面" },
   { type: "sprite", label: "立绘", group: "画面" },
@@ -168,6 +169,8 @@ export function summarizeNode(node: SceneNode): string {
       return `${node.action} · ${node.sprite_id}${node.duration_ms ? ` · ${node.duration_ms} ms` : ""}`;
     case "jump":
       return `${node.scene ?? "本场景"} / ${node.target}`;
+    case "open_window":
+      return `副窗口 · ${node.scene}`;
     case "background":
       return node.background ?? "清除背景";
     case "curtain": {
@@ -396,6 +399,8 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
       };
     case "jump":
       return { type, scene: null, target: fallback };
+    case "open_window":
+      return { type, scene: "", next: fallback };
     case "wait":
       return { type, duration_ms: 500, next: fallback };
     case "bgm":
@@ -985,6 +990,9 @@ export function preparePastedNode(
     case "jump":
       node.scene = null;
       node.target = "";
+      break;
+    case "open_window":
+      node.scene = "";
       break;
     case "bgm":
       if (node.asset !== null && !hasAsset(node.asset, "bgm"))
@@ -1598,6 +1606,9 @@ export function renameScene(
   for (const file of updated.scenes) {
     for (const node of Object.values(file.definition.nodes)) {
       if (node.type === "jump" && node.scene === previousId) {
+        node.scene = nextId;
+      }
+      if (node.type === "open_window" && node.scene === previousId) {
         node.scene = nextId;
       }
     }

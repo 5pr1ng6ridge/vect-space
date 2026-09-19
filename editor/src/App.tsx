@@ -28,6 +28,7 @@ import {
 } from "./imageAnimation";
 import { projectAnimationMap } from "./imageAnimationMap";
 import { expandSpriteActionNode } from "./timeline";
+import { createProjectSectionState } from "./components/projectSections";
 import {
   ProjectSidebar,
   type ImportDraft,
@@ -214,6 +215,19 @@ export function App(): ReactElement {
   );
   const [addType, setAddType] = useState<NodeType>("say");
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("scenes");
+  // Sidebar view state lives here because App survives the early-return
+  // keyframe/full-screen workspaces that unmount ProjectSidebar, and because
+  // collapse/scroll preferences are UI-only: they must never dirty content.
+  const [sidebarSections, setSidebarSections] = useState(
+    createProjectSectionState,
+  );
+  const sidebarScrollRef = useRef<Partial<Record<SidebarTab, number>>>({});
+  const handleSidebarScroll = useCallback(
+    (tab: SidebarTab, offset: number): void => {
+      sidebarScrollRef.current[tab] = offset;
+    },
+    [],
+  );
   const [assetSelectionId, setAssetSelectionId] = useState<string | null>(null);
   const [panelsVisible, setPanelsVisible] = useState(true);
   const [timelineTarget, setTimelineTarget] = useState<{
@@ -548,7 +562,7 @@ export function App(): ReactElement {
     if (!flushEditorEdits()) return;
     const currentProject = projectRef.current;
     if (currentProject === null) return;
-    if (
+    /*if (
       contentDocumentFingerprint(currentProject) !== savedContentRef.current &&
       currentProject.manifest.content_version ===
         savedContentVersionRef.current &&
@@ -557,7 +571,7 @@ export function App(): ReactElement {
       )
     ) {
       return;
-    }
+    }*/
     const currentDiagnostics = validateLive(currentProject);
     const errors = currentDiagnostics.filter(
       (diagnostic) => diagnostic.severity === "error",
@@ -2731,8 +2745,17 @@ export function App(): ReactElement {
           setSelectedNodeId(null);
         }}
         onNavigate={navigate}
+        onScrollOffset={handleSidebarScroll}
         onTabChange={setSidebarTab}
+        onToggleSection={(sectionId) =>
+          setSidebarSections((current) => ({
+            ...current,
+            [sectionId]: !current[sectionId],
+          }))
+        }
         project={project}
+        scrollStore={sidebarScrollRef}
+        sectionOpen={sidebarSections}
       />
       <ResizeHandle axis="left" onStart={startResize} onStep={resizeBy} />
 

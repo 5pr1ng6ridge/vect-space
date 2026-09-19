@@ -1,9 +1,11 @@
-import type { ReactElement } from "react";
+import type { ReactElement, Ref, UIEventHandler } from "react";
 import type { EditorDiagnostic } from "../types";
 
 export function DiagnosticsPanel({
   diagnostics,
   onNavigate,
+  onScroll,
+  scrollRef,
 }: {
   diagnostics: EditorDiagnostic[];
   onNavigate(
@@ -12,6 +14,8 @@ export function DiagnosticsPanel({
     workspace?: "story" | "map",
     flowElementId?: string | null,
   ): void;
+  scrollRef?: Ref<HTMLDivElement>;
+  onScroll?: UIEventHandler<HTMLDivElement>;
 }): ReactElement {
   if (diagnostics.length === 0) {
     return (
@@ -22,7 +26,12 @@ export function DiagnosticsPanel({
     );
   }
   return (
-    <div className="diagnostic-list">
+    <div
+      className="diagnostic-list"
+      data-sidebar-scroller="problems"
+      onScroll={onScroll}
+      ref={scrollRef}
+    >
       {diagnostics.map((diagnostic, index) => (
         <button
           className={`diagnostic-row diagnostic-${diagnostic.severity}`}

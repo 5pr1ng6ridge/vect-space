@@ -945,8 +945,21 @@ fn save_project(
         .as_mut()
         .ok_or_else(|| validation_command_error("尚未打开项目"))?;
 
+    // A save fingerprints the same tree twice: once here to reject a stale
+    // session, then again after serialization to substitute the bytes that are
+    // about to be published.  Sharing one save-local cache across both passes
+    // reuses the pre-save disk hashes for every unchanged file instead of
+    // reading large assets from disk twice.
+    //
+    // The first pass is the snapshot this save commits to.  Because unchanged
+    // files are reused from the cache, an external edit/delete that lands after
+    // this check is not folded into the fingerprint published here; the next
+    // save's fresh staleness pass detects it and fails closed instead of
+    // overwriting the external change.
+    let mut hash_cache = BTreeMap::new();
     let actual_fingerprint =
-        project_fingerprint(&session.root, &session.catalog.manifest).map_err(io_command_error)?;
+        project_fingerprint_cached(&session.root, &session.catalog.manifest, &mut hash_cache)
+            .map_err(io_command_error)?;
     if request.expected_fingerprint != session.fingerprint
         || actual_fingerprint != session.fingerprint
     {
@@ -1038,11 +1051,12 @@ fn save_project(
         let deletes =
             managed_deletions(&session.root, &session.catalog.manifest, &request.manifest);
         // Compute every value needed by the response before publication. The
-        // fingerprint uses the bytes that are actually going to be written
-        // (and the inspected hashes of staged binaries), while unchanged files
-        // are read from the still-current project tree. Once the journal is
-        // committed, the command therefore cannot report a failure while the
-        // editor still holds the old fingerprint.
+        // fingerprint is built from the bytes that are actually going to be
+        // written (and the inspected hashes of staged binaries), from the
+        // save-start snapshot memoized for paths that already existed then, and
+        // by re-reading paths that were missing when the save began. Once the
+        // journal is committed, the command therefore cannot report a failure
+        // while the editor still holds the old fingerprint.
         let mut expected_hashes = BTreeMap::new();
         for (path, bytes) in &writes {
             expected_hashes.insert(path.clone(), hash_bytes(bytes));
@@ -1052,9 +1066,13 @@ fn save_project(
                 .iter()
                 .map(|(path, hash)| (path.clone(), hash.clone())),
         );
-        let fingerprint =
-            project_fingerprint_with_hashes(&session.root, &request.manifest, &expected_hashes)
-                .map_err(io_command_error)?;
+        let fingerprint = project_fingerprint_with_hashes(
+            &session.root,
+            &request.manifest,
+            &expected_hashes,
+            &mut hash_cache,
+        )
+        .map_err(io_command_error)?;
         let project = project_payload_from_request(
             &session.root,
             &candidate,
@@ -3549,16 +3567,42 @@ fn prune_backup_generations(root: &Path, retain: usize) -> Result<(), std::io::E
 }
 
 fn project_fingerprint(root: &Path, manifest: &ContentManifest) -> Result<String, std::io::Error> {
-    project_fingerprint_with_hashes(root, manifest, &BTreeMap::new())
+    project_fingerprint_cached(root, manifest, &mut BTreeMap::new())
+}
+
+/// Fingerprint the current on-disk project, memoizing every resolved-path hash
+/// in `cache`.  A save computes the staleness fingerprint first and the
+/// post-serialization fingerprint second over the same tree; sharing the cache
+/// lets the second pass reuse the first pass's file reads.
+///
+/// The first pass's hashes are the save's snapshot: once a present path is
+/// memoized, the second pass reports those pre-save bytes even if the file is
+/// externally edited or deleted in between.  That is deliberate.  An external
+/// edit/delete that lands after the staleness check is therefore not absorbed
+/// into the fingerprint published by this save; it leaves the on-disk tree
+/// diverged from `session.fingerprint`, so the *next* save's fresh staleness
+/// pass detects it and fails closed with `StaleProject` rather than overwriting
+/// the external change.  Only missing paths are left uncached (see
+/// `append_expected_or_disk_hash`).
+fn project_fingerprint_cached(
+    root: &Path,
+    manifest: &ContentManifest,
+    cache: &mut BTreeMap<PathBuf, String>,
+) -> Result<String, std::io::Error> {
+    project_fingerprint_with_hashes(root, manifest, &BTreeMap::new(), cache)
 }
 
 /// Compute the fingerprint while optionally substituting hashes for files that
 /// are about to be published.  Save requests use this before the journal is
 /// applied, so no fallible read is needed after the transaction commits.
+///
+/// `expected_hashes` always wins over `cache`: those bytes are about to be
+/// written, so a hash memoized from the pre-save tree would be stale.
 fn project_fingerprint_with_hashes(
     root: &Path,
     manifest: &ContentManifest,
     expected_hashes: &BTreeMap<PathBuf, String>,
+    cache: &mut BTreeMap<PathBuf, String>,
 ) -> Result<String, std::io::Error> {
     let mut hasher = Sha256::new();
     let mut paths = Vec::with_capacity(
@@ -3612,11 +3656,11 @@ fn project_fingerprint_with_hashes(
         hasher.update(id.as_bytes());
         hasher.update(b"\0");
         hasher.update(path.to_string_lossy().as_bytes());
-        append_expected_or_disk_hash(&mut hasher, &path, expected_hashes)?;
+        append_expected_or_disk_hash(&mut hasher, &path, expected_hashes, cache)?;
     }
     for path in paths {
         hasher.update(path.to_string_lossy().as_bytes());
-        append_expected_or_disk_hash(&mut hasher, &path, expected_hashes)?;
+        append_expected_or_disk_hash(&mut hasher, &path, expected_hashes, cache)?;
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -3625,13 +3669,28 @@ fn append_expected_or_disk_hash(
     hasher: &mut Sha256,
     path: &Path,
     expected_hashes: &BTreeMap<PathBuf, String>,
+    cache: &mut BTreeMap<PathBuf, String>,
 ) -> Result<(), std::io::Error> {
+    // Bytes that are about to be published take precedence over a hash that was
+    // memoized during the pre-save staleness pass.
     if let Some(hash) = expected_hashes.get(path) {
         hasher.update(hash.as_bytes());
         return Ok(());
     }
+    if let Some(hash) = cache.get(path) {
+        hasher.update(hash.as_bytes());
+        return Ok(());
+    }
     match hash_file_streaming(path) {
-        Ok(hash) => hasher.update(hash.as_bytes()),
+        Ok(hash) => {
+            hasher.update(hash.as_bytes());
+            // Successful first-pass hashes are the save's snapshot: memoizing
+            // them reuses the pre-save bytes on the second pass even if the
+            // file is edited or deleted in between.  Only missing paths stay
+            // uncached, so a path that appears between passes is still observed
+            // instead of being pinned to the first pass's `<missing>` value.
+            cache.insert(path.to_path_buf(), hash);
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update(b"<missing>"),
         Err(error) => return Err(error),
     }
@@ -3786,6 +3845,9 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::ButtonUpdate { next, .. }
         | SceneNode::ButtonRemove { next, .. } => vec![local(next)],
         SceneNode::Timeline { next, .. } => vec![local(next)],
+        // A non-blocking host request: control continues to `next` in the same
+        // Scene. The named window Scene is a reference, not a flow successor.
+        SceneNode::OpenWindow { next, .. } => vec![local(next)],
         SceneNode::Choice { choices, .. } => {
             choices.iter().map(|choice| local(&choice.next)).collect()
         }
@@ -3852,7 +3914,8 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::LongTextControl { .. }
         | SceneNode::ButtonCreate { .. }
         | SceneNode::ButtonUpdate { .. }
-        | SceneNode::ButtonRemove { .. } => true,
+        | SceneNode::ButtonRemove { .. }
+        | SceneNode::OpenWindow { .. } => true,
     }
 }
 
@@ -4757,5 +4820,153 @@ mod tests {
             assets.into_iter().collect::<Vec<_>>(),
             vec!["gui.icon".to_owned()]
         );
+    }
+
+    /// Minimal manifest that makes the fingerprint walk one document path and
+    /// one static asset path (the layout file is intentionally absent).
+    fn fingerprint_manifest() -> ContentManifest {
+        use vectspace_core::model::AssetDefinition;
+
+        ContentManifest {
+            schema_version: 2,
+            content_version: "test".to_owned(),
+            entry_scene: "main".to_owned(),
+            default_locale: "zh-CN".to_owned(),
+            default_font: None,
+            variables: BTreeMap::new(),
+            characters: BTreeMap::new(),
+            assets: BTreeMap::from([(
+                "bg.room".to_owned(),
+                AssetDefinition {
+                    kind: AssetKind::Background,
+                    path: Some("backgrounds/room.png".to_owned()),
+                    animation: None,
+                },
+            )]),
+            scenes: vec!["scenes/main.yaml".to_owned()],
+            ui_motions: Vec::new(),
+            buttons: Vec::new(),
+            ui_motion_defaults: Default::default(),
+            animations: Vec::new(),
+            actions: Vec::new(),
+            chapter_map: None,
+        }
+    }
+
+    fn seed_fingerprint_project(root: &Path) -> ContentManifest {
+        fs::create_dir_all(root.join("assets/backgrounds")).unwrap();
+        fs::create_dir_all(root.join("scenes")).unwrap();
+        fs::write(root.join("manifest.yaml"), b"manifest").unwrap();
+        fs::write(root.join("scenes/main.yaml"), b"scene").unwrap();
+        fs::write(root.join("assets/backgrounds/room.png"), b"png bytes one").unwrap();
+        fingerprint_manifest()
+    }
+
+    #[test]
+    fn save_fingerprint_cache_reuses_unchanged_hashes() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let manifest = seed_fingerprint_project(root);
+
+        // The staleness pass fills the save-local cache from disk.
+        let mut cache = BTreeMap::new();
+        let first = project_fingerprint_cached(root, &manifest, &mut cache).unwrap();
+        assert!(cache.contains_key(&root.join("scenes/main.yaml")));
+        assert!(cache.contains_key(&root.join("assets/backgrounds/room.png")));
+
+        // The second pass must reuse those hashes instead of reading the tree
+        // again, so a later on-disk edit cannot change its result.
+        fs::write(root.join("scenes/main.yaml"), b"scene edited").unwrap();
+        fs::write(root.join("assets/backgrounds/room.png"), b"png bytes two").unwrap();
+        let second =
+            project_fingerprint_with_hashes(root, &manifest, &BTreeMap::new(), &mut cache).unwrap();
+        assert_eq!(first, second);
+
+        // Without the cache the same tree yields a different fingerprint, so
+        // the equality above is real cache reuse rather than a fixed hash.
+        assert_ne!(first, project_fingerprint(root, &manifest).unwrap());
+    }
+
+    #[test]
+    fn save_fingerprint_expected_hashes_override_cached_disk_hashes() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let manifest = seed_fingerprint_project(root);
+
+        let mut cache = BTreeMap::new();
+        let first = project_fingerprint_cached(root, &manifest, &mut cache).unwrap();
+
+        // Rewrite the scene on disk so the memoized hash is now stale.
+        fs::write(root.join("scenes/main.yaml"), b"externally edited").unwrap();
+
+        // The cache alone reproduces the pre-save fingerprint...
+        let cached_only =
+            project_fingerprint_with_hashes(root, &manifest, &BTreeMap::new(), &mut cache).unwrap();
+        assert_eq!(first, cached_only);
+
+        // ...but bytes that are about to be published win over the stale cached
+        // hash, matching a fingerprint computed with no cache at all.
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            root.join("scenes/main.yaml"),
+            hash_bytes(b"staged scene bytes"),
+        );
+        let with_expected =
+            project_fingerprint_with_hashes(root, &manifest, &expected, &mut cache).unwrap();
+        let reference =
+            project_fingerprint_with_hashes(root, &manifest, &expected, &mut BTreeMap::new())
+                .unwrap();
+        assert_ne!(first, with_expected);
+        assert_eq!(with_expected, reference);
+    }
+
+    #[test]
+    fn save_fingerprint_cache_does_not_memoize_missing_paths() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let manifest = seed_fingerprint_project(root);
+        let scene = root.join("scenes/main.yaml");
+        fs::remove_file(&scene).unwrap();
+
+        let mut cache = BTreeMap::new();
+        let first = project_fingerprint_cached(root, &manifest, &mut cache).unwrap();
+        assert!(
+            !cache.contains_key(&scene),
+            "a missing path must not be memoized"
+        );
+
+        // Because the missing entry was never cached, a path that appears
+        // before the second pass is observed by that pass instead of being
+        // pinned to the first pass's `<missing>` value.
+        fs::write(&scene, b"scene appeared").unwrap();
+        let second =
+            project_fingerprint_with_hashes(root, &manifest, &BTreeMap::new(), &mut cache).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(second, project_fingerprint(root, &manifest).unwrap());
+    }
+
+    #[test]
+    fn save_fingerprint_cache_keeps_present_paths_as_snapshot() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let manifest = seed_fingerprint_project(root);
+        let scene = root.join("scenes/main.yaml");
+
+        // The first pass memoizes the present scene's bytes.
+        let mut cache = BTreeMap::new();
+        let first = project_fingerprint_cached(root, &manifest, &mut cache).unwrap();
+        assert!(cache.contains_key(&scene));
+
+        // A delete after the staleness pass is not absorbed into this save's
+        // fingerprint: the second pass reuses the snapshot hash instead of
+        // degrading to `<missing>`.
+        fs::remove_file(&scene).unwrap();
+        let second =
+            project_fingerprint_with_hashes(root, &manifest, &BTreeMap::new(), &mut cache).unwrap();
+        assert_eq!(first, second);
+
+        // The delete is not lost, only deferred to the next save, whose fresh
+        // cache sees the path as missing and fails closed on the mismatch.
+        assert_ne!(first, project_fingerprint(root, &manifest).unwrap());
     }
 }

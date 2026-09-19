@@ -1028,6 +1028,15 @@ pub enum SceneNode {
         scene: Option<String>,
         target: String,
     },
+    /// Ask the desktop host to show another Scene in the single secondary game
+    /// window.  The node is deliberately non-blocking: the engine advances to
+    /// `next` in the same update and only emits a window cue.  The host consumes
+    /// that cue for the committed main story runtime, so a replay or the
+    /// secondary engine itself can never open or re-point a window.
+    OpenWindow {
+        scene: String,
+        next: String,
+    },
     Wait {
         duration_ms: u64,
         next: String,
@@ -2595,6 +2604,14 @@ pub enum PresentationCueKind {
         from: Option<LoopingAudioSnapshot>,
         to: Option<LoopingAudioSnapshot>,
         duration_ms: u64,
+    },
+    /// A host control cue, never a presentation cue: the desktop host consumes
+    /// it while committing the main story update to open or re-point the single
+    /// secondary window, and strips it before the update reaches any WebView.
+    /// It is therefore absent from the hand-maintained TypeScript wire mirror in
+    /// `packages/presentation-core/src/types.ts`.
+    OpenWindow {
+        scene: String,
     },
     Delay {
         duration_ms: u64,

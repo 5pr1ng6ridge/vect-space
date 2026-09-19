@@ -27,6 +27,10 @@ use crate::{
 use thiserror::Error;
 
 const MAX_IMMEDIATE_NODES: usize = 10_000;
+/// Same bound the profile layer enforces on the persisted dialogue ledger, so a
+/// host-merged main+secondary ledger is always already canonical when it is
+/// written back through `ProfileManager::save`.
+const MAX_DIALOGUE_HISTORY_ENTRIES: usize = 500;
 const MAX_LONG_TEXT_DOCUMENT_STEPS: usize = 1_024;
 const MAX_LONG_TEXT_DOCUMENT_BYTES: usize = 1024 * 1024;
 
@@ -110,6 +114,18 @@ pub struct RuntimeEngine {
     pending_runtime_update: Option<PendingPresentation>,
     preview_target: Option<StoryLocation>,
     preview_skip_target_once: bool,
+    /// When true this engine is the secondary window's runtime: it shares the
+    /// host-authoritative variable maps with the main runtime, so leaving a
+    /// Scene must not reset Save-scope variables to their declared defaults.
+    /// Only the main runtime owns the shared map's reset semantics.
+    shared_save_variables: bool,
+    /// Dialogue entries appended since the host last drained this queue.  The
+    /// desktop hosts keep one ordered ledger across the main and secondary
+    /// runtimes, and that delta cannot be reconstructed from `dialogue_history`
+    /// because a Scene boundary resets it.  The queue therefore survives
+    /// `leave_scene` and is only dropped by explicit history resets, so an
+    /// occurrence produced inside one command can never be silently lost.
+    appended_history: Vec<DialogueHistoryEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,7 +172,63 @@ impl RuntimeEngine {
             pending_runtime_update: None,
             preview_target: None,
             preview_skip_target_once: false,
+            shared_save_variables: false,
+            appended_history: Vec::new(),
         })
+    }
+
+    /// Mark this engine as the host's secondary-window runtime.  A secondary
+    /// engine shares the authoritative Save/Profile variable maps with the main
+    /// runtime, so its own Scene boundary must preserve them instead of
+    /// resetting Save-scope variables to the declared defaults.
+    pub fn set_shared_save_variables(&mut self, shared: bool) {
+        self.shared_save_variables = shared;
+    }
+
+    /// Replace the Save-scope variable map with the host-authoritative copy.
+    pub fn set_save_variables(&mut self, variables: VariableMap) {
+        self.snapshot.variables = variables;
+    }
+
+    /// Replace the Profile-scope variable map with the host-authoritative copy.
+    pub fn set_profile_variables(&mut self, variables: VariableMap) {
+        self.profile_variables = variables;
+    }
+
+    /// Take the entries appended since the previous drain.  The desktop host
+    /// merges them into its single ordered ledger right after a command
+    /// commits; the queue is intentionally not cleared by a Scene boundary.
+    pub fn take_appended_history(&mut self) -> Vec<DialogueHistoryEntry> {
+        std::mem::take(&mut self.appended_history)
+    }
+
+    /// Append host-merged history entries (for example the secondary window's
+    /// occurrences) to this runtime's ledger, keeping it canonical: ids are
+    /// renumbered and the ledger keeps the newest entries up to the same cap the
+    /// profile layer enforces.
+    pub fn extend_dialogue_history(
+        &mut self,
+        entries: impl IntoIterator<Item = DialogueHistoryEntry>,
+    ) {
+        self.dialogue_history.extend(entries);
+        self.canonicalize_dialogue_history();
+    }
+
+    /// Replace the ledger with a persisted one (used when a save slot's merged
+    /// history is restored) and make it canonical again.
+    pub fn replace_dialogue_history(&mut self, entries: Vec<DialogueHistoryEntry>) {
+        self.dialogue_history = entries;
+        self.canonicalize_dialogue_history();
+    }
+
+    fn canonicalize_dialogue_history(&mut self) {
+        if self.dialogue_history.len() > MAX_DIALOGUE_HISTORY_ENTRIES {
+            let excess = self.dialogue_history.len() - MAX_DIALOGUE_HISTORY_ENTRIES;
+            self.dialogue_history.drain(..excess);
+        }
+        for (index, entry) in self.dialogue_history.iter_mut().enumerate() {
+            entry.entry_id = index as u64 + 1;
+        }
     }
 
     /// Build an isolated runtime with editor-provided variable overrides.
@@ -476,6 +548,7 @@ impl RuntimeEngine {
         self.started = true;
         self.pending_runtime_update = None;
         self.dialogue_history.clear();
+        self.appended_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -509,6 +582,7 @@ impl RuntimeEngine {
         self.started = true;
         self.pending_runtime_update = None;
         self.dialogue_history.clear();
+        self.appended_history.clear();
         let cues = self.run_until_boundary(content)?;
         Ok(self.finish_update(cues, true))
     }
@@ -824,6 +898,12 @@ impl RuntimeEngine {
         &self.profile_variables
     }
 
+    /// The Profile-scope variable map, for hosts that own it as shared
+    /// authoritative state across more than one runtime.
+    pub fn profile_variables_map(&self) -> &VariableMap {
+        &self.profile_variables
+    }
+
     pub fn profile_state(&self, content: &ContentCatalog) -> ProfileState {
         ProfileState {
             variables: self.profile_variables.clone(),
@@ -840,8 +920,11 @@ impl RuntimeEngine {
     }
 
     /// Clear the current Scene's dialogue history for an explicit user action.
+    /// The pending append queue is dropped as well so a later drain cannot
+    /// resurrect entries the user just cleared.
     pub fn clear_dialogue_history(&mut self) {
         self.dialogue_history.clear();
+        self.appended_history.clear();
     }
 
     /// Return only the revealed part of the chapter room.  The content map is
@@ -970,6 +1053,7 @@ impl RuntimeEngine {
         self.started = true;
         self.pending_runtime_update = None;
         self.dialogue_history.clear();
+        self.appended_history.clear();
         Ok(self.update_without_cues())
     }
 
@@ -1630,6 +1714,16 @@ impl RuntimeEngine {
                         return Ok(cues);
                     }
                 }
+                SceneNode::OpenWindow { scene, next } => {
+                    // Never blocking: the runtime only records the request and
+                    // continues to `next`.  The desktop host decides whether to
+                    // act on it (main story runtime only) and strips the cue
+                    // before the update reaches any WebView.
+                    self.snapshot.location.node_id = next;
+                    cues.push(
+                        self.cue(CueGate::None, PresentationCueKind::OpenWindow { scene }),
+                    );
+                }
                 SceneNode::Wait { duration_ms, next } => {
                     self.snapshot.location.node_id = next;
                     cues.push(
@@ -2241,7 +2335,7 @@ impl RuntimeEngine {
             .dialogue_history
             .last()
             .map_or(1, |entry| entry.entry_id.saturating_add(1));
-        self.dialogue_history.push(DialogueHistoryEntry {
+        let entry = DialogueHistoryEntry {
             entry_id,
             prompt_id,
             speaker_id,
@@ -2249,13 +2343,13 @@ impl RuntimeEngine {
             name_color,
             text_color,
             text,
-        });
-        if self.dialogue_history.len() > 500 {
-            self.dialogue_history
-                .drain(..self.dialogue_history.len() - 500);
-            for (index, entry) in self.dialogue_history.iter_mut().enumerate() {
-                entry.entry_id = index as u64 + 1;
-            }
+        };
+        self.appended_history.push(entry.clone());
+        self.dialogue_history.push(entry);
+        self.canonicalize_dialogue_history();
+        if self.appended_history.len() > MAX_DIALOGUE_HISTORY_ENTRIES {
+            let excess = self.appended_history.len() - MAX_DIALOGUE_HISTORY_ENTRIES;
+            self.appended_history.drain(..excess);
         }
     }
 
@@ -2278,6 +2372,12 @@ impl RuntimeEngine {
     /// save-scoped variables all return to their declared defaults. Profile
     /// variables and read/seen/completion metadata live outside a Scene and
     /// deliberately remain available for global progression.
+    ///
+    /// The secondary-window runtime shares the host-authoritative variable maps
+    /// with the main runtime, so it deliberately preserves them here; only the
+    /// main runtime owns the shared map's reset. The pending append queue is
+    /// left untouched as well so a boundary inside one command cannot drop an
+    /// occurrence the host has not drained yet.
     fn leave_scene(
         &mut self,
         content: &ContentCatalog,
@@ -2293,7 +2393,9 @@ impl RuntimeEngine {
             .iter()
             .map(|(slot, state)| (slot, state.clone()))
             .collect();
-        self.snapshot.variables = defaults_for_scope(content, VariableScope::Save)?;
+        if !self.shared_save_variables {
+            self.snapshot.variables = defaults_for_scope(content, VariableScope::Save)?;
+        }
         self.snapshot.world = WorldSnapshot {
             ui_motion_bindings: content.manifest.ui_motion_defaults.clone(),
             ..WorldSnapshot::default()
@@ -2536,7 +2638,8 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::ButtonCreate { next, .. }
         | SceneNode::ButtonUpdate { next, .. }
         | SceneNode::ButtonRemove { next, .. }
-        | SceneNode::Timeline { next, .. } => Some(local(next)),
+        | SceneNode::Timeline { next, .. }
+        | SceneNode::OpenWindow { next, .. } => Some(local(next)),
         SceneNode::Jump { scene, target } => Some(StoryLocation {
             scene_id: scene.clone().unwrap_or_else(|| scene_id.to_owned()),
             node_id: target.clone(),
@@ -7160,5 +7263,278 @@ mod tests {
         runtime.run_until_boundary(&content).unwrap();
         assert!(!runtime.snapshot.world.curtain.covered);
         assert_eq!(runtime.snapshot.world.curtain.fill, None);
+    }
+
+    // -- secondary window: open_window node and the shared-ledger hooks -------
+
+    fn open_window_content() -> ContentCatalog {
+        let mut content = catalog();
+        content.manifest.entry_scene = "window_scene".to_owned();
+        content.scenes.insert(
+            "window_scene".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "window_scene".to_owned(),
+                entry: "open".to_owned(),
+                nodes: BTreeMap::from([
+                    (
+                        "open".to_owned(),
+                        SceneNode::OpenWindow {
+                            scene: "prologue".to_owned(),
+                            next: "line".to_owned(),
+                        },
+                    ),
+                    (
+                        "line".to_owned(),
+                        SceneNode::Say {
+                            speaker: None,
+                            text: "主窗口台词".to_owned(),
+                            mode: DialogueMode::Start,
+                            page_id: None,
+                            speed_cps: None,
+                            reveal_animation: None,
+                            next: "end".to_owned(),
+                        },
+                    ),
+                    ("end".to_owned(), SceneNode::End),
+                ]),
+            },
+        );
+        content
+    }
+
+    /// A scene that appends one dialogue line and then leaves for another scene.
+    fn say_then_leave_content() -> ContentCatalog {
+        let mut content = catalog();
+        content.manifest.entry_scene = "origin".to_owned();
+        content.scenes.insert(
+            "origin".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "origin".to_owned(),
+                entry: "line".to_owned(),
+                nodes: BTreeMap::from([
+                    (
+                        "line".to_owned(),
+                        SceneNode::Say {
+                            speaker: None,
+                            text: "离开前的一行".to_owned(),
+                            mode: DialogueMode::Start,
+                            page_id: None,
+                            speed_cps: None,
+                            reveal_animation: None,
+                            next: "hop".to_owned(),
+                        },
+                    ),
+                    (
+                        "hop".to_owned(),
+                        SceneNode::Jump {
+                            scene: Some("destination".to_owned()),
+                            target: "end".to_owned(),
+                        },
+                    ),
+                ]),
+            },
+        );
+        content.scenes.insert(
+            "destination".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "destination".to_owned(),
+                entry: "end".to_owned(),
+                nodes: BTreeMap::from([("end".to_owned(), SceneNode::End)]),
+            },
+        );
+        content
+    }
+
+    /// A scene that writes a Save-scope variable and then crosses a scene
+    /// boundary, which is exactly where the shared-map rule matters.
+    fn shared_variable_cross_scene_content() -> ContentCatalog {
+        let mut content = catalog();
+        content.manifest.entry_scene = "origin".to_owned();
+        content.scenes.insert(
+            "origin".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "origin".to_owned(),
+                entry: "set".to_owned(),
+                nodes: BTreeMap::from([
+                    (
+                        "set".to_owned(),
+                        SceneNode::Set {
+                            variable: "score".to_owned(),
+                            op: VariableOperation::Assign,
+                            value: Some(MutationValue::Literal(ScalarValue::Integer(7))),
+                            next: "hop".to_owned(),
+                        },
+                    ),
+                    (
+                        "hop".to_owned(),
+                        SceneNode::Jump {
+                            scene: Some("destination".to_owned()),
+                            target: "end".to_owned(),
+                        },
+                    ),
+                ]),
+            },
+        );
+        content.scenes.insert(
+            "destination".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "destination".to_owned(),
+                entry: "end".to_owned(),
+                nodes: BTreeMap::from([("end".to_owned(), SceneNode::End)]),
+            },
+        );
+        content
+    }
+
+    #[test]
+    fn open_window_is_non_blocking_and_emits_exactly_one_host_cue() {
+        let content = open_window_content();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let update = runtime.start_new_game(&content).unwrap();
+        // Non-blocking: the story continues to `next` inside the same update and
+        // never asks the presentation layer to acknowledge the request.
+        assert!(!update.requires_ack);
+        // The node is non-blocking, so control has already advanced to `next`.
+        assert_eq!(update.snapshot.location.node_id, "end");
+        assert!(matches!(
+            update.snapshot.prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        let window_cues = update
+            .cues
+            .iter()
+            .filter(|cue| matches!(&cue.kind, PresentationCueKind::OpenWindow { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(window_cues.len(), 1);
+        assert_eq!(
+            window_cues[0].kind,
+            PresentationCueKind::OpenWindow {
+                scene: "prologue".to_owned()
+            }
+        );
+        // A host control cue must not gate the presentation pipeline.
+        assert_eq!(window_cues[0].gate, CueGate::None);
+    }
+
+    #[test]
+    fn shared_save_variables_survive_a_secondary_scene_boundary_only_when_shared() {
+        let content = shared_variable_cross_scene_content();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.set_shared_save_variables(true);
+        let update = runtime.start_new_game(&content).unwrap();
+        assert_eq!(update.snapshot.location.scene_id, "destination");
+        assert_eq!(
+            runtime.snapshot().variables.get("score"),
+            Some(&ScalarValue::Integer(7)),
+            "a shared (secondary) runtime must preserve the authoritative map"
+        );
+
+        // The main runtime keeps the original reset semantics.
+        let mut main = RuntimeEngine::new(&content).unwrap();
+        let update = main.start_new_game(&content).unwrap();
+        assert_eq!(update.snapshot.location.scene_id, "destination");
+        assert_eq!(
+            main.snapshot().variables.get("score"),
+            Some(&ScalarValue::Integer(0)),
+            "the main runtime still resets Save scope when it leaves a Scene"
+        );
+    }
+
+    #[test]
+    fn appended_history_survives_an_undrained_scene_boundary_and_clears_explicitly() {
+        let content = say_then_leave_content();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let first = runtime.start_new_game(&content).unwrap();
+        assert!(matches!(
+            first.snapshot.prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        // Simulate a host that has not drained yet: the occurrence is still
+        // pending when the next command crosses a Scene boundary.
+        assert_eq!(runtime.appended_history.len(), 1);
+        let second = runtime
+            .advance(&content, first.snapshot.revision, AdvanceSource::Manual)
+            .unwrap();
+        assert!(second.requires_ack);
+        assert_eq!(runtime.snapshot().location.scene_id, "destination");
+        assert!(
+            runtime.dialogue_history().is_empty(),
+            "the Scene boundary still resets the runtime's local ledger"
+        );
+        let appended = runtime.take_appended_history();
+        assert_eq!(
+            appended.len(),
+            1,
+            "an undrained occurrence must not be lost at a Scene boundary"
+        );
+        assert_eq!(appended[0].prompt_id, "origin/line");
+        assert!(runtime.take_appended_history().is_empty());
+
+        // An explicit clear drops the queue so a later drain cannot resurrect
+        // entries the player just cleared.
+        let content = open_window_content();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime.start_new_game(&content).unwrap();
+        runtime.clear_dialogue_history();
+        assert!(runtime.dialogue_history().is_empty());
+        assert!(runtime.take_appended_history().is_empty());
+    }
+
+    #[test]
+    fn merged_ledger_is_canonical_bounded_and_is_what_the_profile_persists() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let entries = |count: usize, prefix: &str, start: u64| {
+            (0..count)
+                .map(|index| DialogueHistoryEntry {
+                    entry_id: start + index as u64 * 3,
+                    prompt_id: format!("prologue/{prefix}{index}"),
+                    speaker_id: None,
+                    speaker: None,
+                    name_color: None,
+                    text_color: None,
+                    text: format!("{prefix} {index}"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        runtime.extend_dialogue_history(entries(3, "main", 41));
+        assert_eq!(
+            runtime
+                .dialogue_history()
+                .iter()
+                .map(|entry| entry.entry_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "merged entries are renumbered canonically"
+        );
+
+        runtime.extend_dialogue_history(entries(600, "secondary", 900));
+        assert_eq!(runtime.dialogue_history().len(), MAX_DIALOGUE_HISTORY_ENTRIES);
+        assert_eq!(runtime.dialogue_history()[0].entry_id, 1);
+        assert_eq!(
+            runtime.dialogue_history().last().unwrap().entry_id,
+            MAX_DIALOGUE_HISTORY_ENTRIES as u64
+        );
+        assert_eq!(
+            runtime.dialogue_history().last().unwrap().text,
+            "secondary 599",
+            "the newest occurrences are kept when the ledger is trimmed"
+        );
+
+        // The runtime's own profile state must carry the merged ledger, not a
+        // main-only view, or a command commit would overwrite it.
+        let persisted = runtime.profile_state(&content).dialogue_history;
+        assert_eq!(persisted, runtime.dialogue_history().to_vec());
+
+        runtime.replace_dialogue_history(entries(2, "restored", 77));
+        assert_eq!(runtime.dialogue_history().len(), 2);
+        assert_eq!(runtime.dialogue_history()[1].entry_id, 2);
+        assert_eq!(runtime.dialogue_history()[0].text, "restored 0");
     }
 }

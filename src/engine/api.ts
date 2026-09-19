@@ -164,6 +164,52 @@ export const engineApi = {
   loadSettings: () => command<Settings>("load_settings"),
   saveSettings: (settings: Settings) =>
     command<Settings>("save_settings", { settings }),
+  // -- secondary window -----------------------------------------------------
+  // The host routes by the WebView label it assigned, so these are gameplay
+  // only: the secondary has no save, settings, history, chapter-map or replay
+  // transport at all.
+  secondaryBootstrap: () => command<BootstrapPayload>("secondary_bootstrap"),
+  secondarySnapshot: () => command<RuntimeSnapshot>("secondary_snapshot"),
+  secondaryAdvance: (
+    expectedRevision: WireU64,
+    source: AdvanceSource,
+    expectedSessionId: WireU64,
+  ) =>
+    command<RuntimeUpdate>("secondary_advance", {
+      expectedRevision,
+      source,
+      expectedSessionId,
+    }),
+  secondaryChoose: (
+    choiceId: string,
+    expectedRevision: WireU64,
+    expectedSessionId: WireU64,
+  ) =>
+    command<RuntimeUpdate>("secondary_choose", {
+      choiceId,
+      expectedRevision,
+      expectedSessionId,
+    }),
+  secondaryClickButton: (
+    instanceId: string,
+    expectedRevision: WireU64,
+    expectedSessionId: WireU64,
+  ) =>
+    command<RuntimeUpdate>("secondary_click_button", {
+      instanceId,
+      expectedRevision,
+      expectedSessionId,
+    }),
+  secondaryPresentationComplete: (
+    updateId: WireU64,
+    outcome: PresentationOutcome,
+    expectedSessionId: WireU64,
+  ) =>
+    command<RuntimeUpdate>("secondary_presentation_complete", {
+      updateId,
+      outcome,
+      expectedSessionId,
+    }),
 };
 
 export function resolvedAssetsToUrls(

@@ -1548,6 +1548,43 @@ function renderFields(
         </>
       );
     }
+    case "open_window": {
+      return (
+        <>
+          <Field hint="重复打开会在同一个副窗口中替换场景" label="副窗口场景">
+            <select
+              value={node.scene}
+              onChange={(event) =>
+                update({ ...node, scene: event.currentTarget.value })
+              }
+            >
+              <option value="">请选择场景</option>
+              {manifest.scenes.map((path) => {
+                const id =
+                  path
+                    .split("/")
+                    .at(-1)
+                    ?.replace(/\.ya?ml$/, "") ?? path;
+                return (
+                  <option key={path} value={id}>
+                    {id}
+                  </option>
+                );
+              })}
+            </select>
+          </Field>
+          <p className="field-note">
+            仅主窗口的剧情运行时可以打开副窗口；副窗口没有存档、设置或历史界面。
+          </p>
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    }
     case "wait":
       return (
         <>

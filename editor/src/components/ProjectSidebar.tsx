@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+  type UIEventHandler,
+} from "react";
 import { assetUrl, editorApi } from "../api";
 import {
   animationSourceId,
@@ -8,6 +17,10 @@ import {
 import { isCanonicalIntegerText } from "../scalars";
 import { useAssetFont } from "../useAssetFont";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
+import {
+  type ProjectSectionId,
+  type SidebarScrollStore,
+} from "./projectSections";
 import {
   findAssetReferences,
   findButtonTemplateReferences,
@@ -76,9 +89,108 @@ interface ProjectSidebarProps {
     flowElementId?: string | null,
   ): void;
   onTabChange?(tab: SidebarTab): void;
+  /** App-owned expand/collapse state for the five project sections. */
+  sectionOpen?: Partial<Record<ProjectSectionId, boolean>>;
+  onToggleSection?(id: ProjectSectionId): void;
+  /** App-owned, save-independent sidebar scroll offsets keyed by tab. */
+  scrollStore?: SidebarScrollStore;
+  /** Records the live offset of whichever tab is scrolled. */
+  onScrollOffset?(tab: SidebarTab, offset: number): void;
 }
 
 export type SidebarTab = "scenes" | "assets" | "project" | "problems";
+
+/**
+ * Restore the host-owned scroll offset for `tab` exactly when the element that
+ * owns the scrollbar mounts.  A callback ref is used instead of an effect
+ * because the problems panel is rendered conditionally: an effect owned by the
+ * sidebar runs once at first mount, when the ref is still null, and never
+ * reruns on an ordinary tab switch.  The callback ref fires on every attach, so
+ * it covers tab switches inside the sidebar, conditional panels appearing, and
+ * keyframe/full-screen workspace remounts, and it runs during commit (before
+ * paint), so there is no flash of the panel top.
+ *
+ * `store` is ref-shaped host state with a stable identity, so the callback ref
+ * is not re-created on re-render and the offset is not re-applied mid-scroll.
+ */
+function useSidebarScroller(
+  tab: SidebarTab,
+  store: SidebarScrollStore | undefined,
+  onScrollOffset?: (tab: SidebarTab, offset: number) => void,
+): {
+  onScroll: UIEventHandler<HTMLDivElement>;
+  ref(node: HTMLDivElement | null): void;
+} {
+  const offsets = store?.current;
+  const ref = useCallback(
+    (node: HTMLDivElement | null): void => {
+      if (node === null) return;
+      node.scrollTop = offsets?.[tab] ?? 0;
+    },
+    [offsets, tab],
+  );
+  const onScroll = useCallback<UIEventHandler<HTMLDivElement>>(
+    (event) => {
+      onScrollOffset?.(tab, event.currentTarget.scrollTop);
+    },
+    [onScrollOffset, tab],
+  );
+  return { onScroll, ref };
+}
+
+/**
+ * Accessible collapsible section for the project tab.  The title toggle is a
+ * real button that owns `aria-expanded`/`aria-controls`; per-section action
+ * buttons stay siblings of it so they keep working while collapsed, and the
+ * body stays mounted (hidden) so its ids keep resolving.
+ */
+function CollapsibleSection({
+  id,
+  title,
+  className,
+  open,
+  onToggle,
+  actions,
+  children,
+}: {
+  id: ProjectSectionId;
+  title: string;
+  className?: string;
+  open: boolean;
+  onToggle(): void;
+  actions?: ReactNode;
+  children: ReactNode;
+}): ReactElement {
+  const contentId = `project-section-content-${id}`;
+  return (
+    <section
+      className={`variable-settings project-section${
+        open ? "" : " collapsed"
+      }${className === undefined ? "" : ` ${className}`}`}
+    >
+      <header>
+        <button
+          aria-controls={contentId}
+          aria-expanded={open}
+          className="project-section-toggle"
+          onClick={onToggle}
+          type="button"
+        >
+          <span aria-hidden="true" className="project-section-caret">
+            {open ? "▾" : "▸"}
+          </span>
+          <strong>{title}</strong>
+        </button>
+        {actions !== undefined && (
+          <div className="project-section-actions">{actions}</div>
+        )}
+      </header>
+      <div className="project-section-content" hidden={!open} id={contentId}>
+        {children}
+      </div>
+    </section>
+  );
+}
 
 export function ProjectSidebar({
   project,
@@ -118,6 +230,10 @@ export function ProjectSidebar({
   onEditActionKeyframes,
   onNavigate,
   onTabChange,
+  onScrollOffset,
+  sectionOpen,
+  onToggleSection,
+  scrollStore,
 }: ProjectSidebarProps): ReactElement {
   const [internalTab, setInternalTab] = useState<SidebarTab>("scenes");
   const tab = activeTab ?? internalTab;
@@ -128,6 +244,11 @@ export function ProjectSidebar({
     setInternalTab(next);
     onTabChange?.(next);
   };
+  const { onScroll: onProblemsScroll, ref: problemsRef } = useSidebarScroller(
+    "problems",
+    scrollStore,
+    onScrollOffset,
+  );
   return (
     <aside className="project-sidebar">
       <div className="sidebar-tabs">
@@ -180,8 +301,10 @@ export function ProjectSidebar({
           onAddScene={onAddScene}
           onDeleteScene={onDeleteScene}
           onRenameScene={onRenameScene}
+          onScrollOffset={onScrollOffset}
           onSelectScene={onSelectScene}
           project={project}
+          scrollStore={scrollStore}
         />
       )}
       {tab === "assets" && (
@@ -190,7 +313,9 @@ export function ProjectSidebar({
           project={project}
           onImportAssets={onImportAssets}
           onRemoveAsset={onRemoveAsset}
+          onScrollOffset={onScrollOffset}
           selectedAssetId={selectedAssetId}
+          scrollStore={scrollStore}
         />
       )}
       {tab === "project" && (
@@ -218,11 +343,20 @@ export function ProjectSidebar({
           onDuplicateAction={onDuplicateAction}
           onDeleteAction={onDeleteAction}
           onEditActionKeyframes={onEditActionKeyframes}
+          onScrollOffset={onScrollOffset}
+          onToggleSection={onToggleSection}
           project={project}
+          scrollStore={scrollStore}
+          sectionOpen={sectionOpen}
         />
       )}
       {tab === "problems" && (
-        <DiagnosticsPanel diagnostics={diagnostics} onNavigate={onNavigate} />
+        <DiagnosticsPanel
+          diagnostics={diagnostics}
+          onNavigate={onNavigate}
+          onScroll={onProblemsScroll}
+          scrollRef={problemsRef}
+        />
       )}
     </aside>
   );
@@ -338,16 +472,20 @@ function ScenesPanel({
   onAddScene,
   onDeleteScene,
   onRenameScene,
+  onScrollOffset,
   onSelectScene,
   project,
+  scrollStore,
 }: {
   activeSceneId: string;
   diagnostics: EditorDiagnostic[];
   onAddScene(id: string): boolean;
   onDeleteScene(sceneId: string): void;
   onRenameScene(previousId: string, nextId: string): boolean;
+  onScrollOffset?(tab: SidebarTab, offset: number): void;
   onSelectScene(sceneId: string): void;
   project: EditorProject;
+  scrollStore?: SidebarScrollStore;
 }): ReactElement {
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState<{
@@ -358,6 +496,11 @@ function ScenesPanel({
   } | null>(null);
   const scenes = project.scenes.filter((file) =>
     file.definition.id.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+  const { onScroll: onSceneListScroll, ref: sceneListRef } = useSidebarScroller(
+    "scenes",
+    scrollStore,
+    onScrollOffset,
   );
   return (
     <div className="sidebar-body">
@@ -378,7 +521,12 @@ function ScenesPanel({
           ＋
         </button>
       </div>
-      <div className="scene-list">
+      <div
+        className="scene-list"
+        data-sidebar-scroller="scenes"
+        onScroll={onSceneListScroll}
+        ref={sceneListRef}
+      >
         {scenes.map((file) => {
           const scene = file.definition;
           const issueCount = diagnostics.filter(
@@ -455,13 +603,17 @@ function AssetsPanel({
   onImportAssets,
   onRemoveAsset,
   onCreateImageAnimation,
+  onScrollOffset,
   selectedAssetId,
+  scrollStore,
 }: {
   project: EditorProject;
   onImportAssets(items: ImportDraft[]): Promise<void>;
   onRemoveAsset(id: string): boolean;
   onCreateImageAnimation(draft: AnimationDraft): boolean;
+  onScrollOffset?(tab: SidebarTab, offset: number): void;
   selectedAssetId?: string | null;
+  scrollStore?: SidebarScrollStore;
 }): ReactElement {
   const { assets, manifest } = project;
   const animations = project.animations ?? [];
@@ -493,6 +645,11 @@ function AssetsPanel({
     [assets, kindFilter, query],
   );
   const selectedAsset = assets.find((asset) => asset.id === selected);
+  const { onScroll: onAssetListScroll, ref: assetListRef } = useSidebarScroller(
+    "assets",
+    scrollStore,
+    onScrollOffset,
+  );
   useEffect(() => {
     if (
       selectedAssetId !== null &&
@@ -677,7 +834,12 @@ function AssetsPanel({
       >
         创建帧动画
       </button>
-      <div className="asset-list">
+      <div
+        className="asset-list"
+        data-sidebar-scroller="assets"
+        onScroll={onAssetListScroll}
+        ref={assetListRef}
+      >
         {assets.length === 0 && (
           <p className="muted">将文件拖到这里，或点击 ＋ 批量导入</p>
         )}
@@ -1253,7 +1415,11 @@ function ProjectPanel({
   onDuplicateAction,
   onDeleteAction,
   onEditActionKeyframes,
+  onScrollOffset,
   project,
+  scrollStore,
+  sectionOpen,
+  onToggleSection,
 }: {
   manifest: ContentManifest;
   onChange(manifest: ContentManifest): void;
@@ -1278,7 +1444,11 @@ function ProjectPanel({
   onDuplicateAction(id: string): void;
   onDeleteAction(id: string): void;
   onEditActionKeyframes(id: string): void;
+  onScrollOffset?(tab: SidebarTab, offset: number): void;
   project: EditorProject;
+  scrollStore?: SidebarScrollStore;
+  sectionOpen?: Partial<Record<ProjectSectionId, boolean>>;
+  onToggleSection?(id: ProjectSectionId): void;
 }): ReactElement {
   const [dialog, setDialog] = useState<{
     title: string;
@@ -1292,8 +1462,23 @@ function ProjectPanel({
       | "action_rename";
     previous?: string;
   } | null>(null);
+  const { onScroll: onSettingsScroll, ref: settingsRef } = useSidebarScroller(
+    "project",
+    scrollStore,
+    onScrollOffset,
+  );
+  const isSectionOpen = (sectionId: ProjectSectionId): boolean =>
+    sectionOpen?.[sectionId] ?? true;
+  const toggleSection = (sectionId: ProjectSectionId): void => {
+    onToggleSection?.(sectionId);
+  };
   return (
-    <div className="sidebar-body project-settings">
+    <div
+      className="sidebar-body project-settings"
+      data-sidebar-scroller="project"
+      onScroll={onSettingsScroll}
+      ref={settingsRef}
+    >
       <label>
         <span>内容版本</span>
         <DeferredTextInput
@@ -1328,13 +1513,18 @@ function ProjectPanel({
           ))}
         </select>
       </label>
-      <section className="variable-settings ui-motion-settings">
-        <header>
-          <strong>UI 动效</strong>
+      <CollapsibleSection
+        actions={
           <button onClick={onCreateUiMotion} type="button">
             ＋
           </button>
-        </header>
+        }
+        className="ui-motion-settings"
+        id="ui-motion"
+        onToggle={() => toggleSection("ui-motion")}
+        open={isSectionOpen("ui-motion")}
+        title="UI 动效"
+      >
         <label>
           <span>对话框出现默认动效</span>
           <select
@@ -1411,14 +1601,19 @@ function ProjectPanel({
             <small>还没有预设。创建后可在 UI 节点中复用。</small>
           )}
         </div>
-      </section>
-      <section className="variable-settings button-template-settings">
-        <header>
-          <strong>按钮模板</strong>
+      </CollapsibleSection>
+      <CollapsibleSection
+        actions={
           <button onClick={onCreateButtonTemplate} type="button">
             ＋
           </button>
-        </header>
+        }
+        className="button-template-settings"
+        id="button-template"
+        onToggle={() => toggleSection("button-template")}
+        open={isSectionOpen("button-template")}
+        title="按钮模板"
+      >
         <p className="field-note">
           剧情节点可创建多个实例；模板被引用或贴图仍被使用时不能删除。
         </p>
@@ -1482,10 +1677,9 @@ function ProjectPanel({
             <small>还没有按钮模板。创建后可在按钮节点中复用。</small>
           )}
         </div>
-      </section>
-      <section className="variable-settings action-settings">
-        <header>
-          <strong>立绘动作库</strong>
+      </CollapsibleSection>
+      <CollapsibleSection
+        actions={
           <button
             onClick={() => {
               let index = (project.actions ?? []).length + 1;
@@ -1508,7 +1702,13 @@ function ProjectPanel({
           >
             ＋
           </button>
-        </header>
+        }
+        className="action-settings"
+        id="sprite-action"
+        onToggle={() => toggleSection("sprite-action")}
+        open={isSectionOpen("sprite-action")}
+        title="立绘动作库"
+      >
         <p className="field-note">
           动作以当前立绘姿态为基准，位置/旋转为偏移，缩放/透明度为倍率。
         </p>
@@ -1536,10 +1736,9 @@ function ProjectPanel({
             <small>还没有动作。创建后可在“立绘动作”节点中调用。</small>
           )}
         </div>
-      </section>
-      <section className="variable-settings character-settings">
-        <header>
-          <strong>角色</strong>
+      </CollapsibleSection>
+      <CollapsibleSection
+        actions={
           <button
             onClick={() => {
               setDialog({
@@ -1552,7 +1751,13 @@ function ProjectPanel({
           >
             ＋
           </button>
-        </header>
+        }
+        className="character-settings"
+        id="character"
+        onToggle={() => toggleSection("character")}
+        open={isSectionOpen("character")}
+        title="角色"
+      >
         {Object.entries(manifest.characters).map(([id, definition]) => (
           <article className="variable-card character-card" key={id}>
             <header>
@@ -1712,10 +1917,9 @@ function ProjectPanel({
             </div>
           </article>
         ))}
-      </section>
-      <section className="variable-settings">
-        <header>
-          <strong>剧情变量</strong>
+      </CollapsibleSection>
+      <CollapsibleSection
+        actions={
           <button
             onClick={() => {
               setDialog({
@@ -1728,7 +1932,12 @@ function ProjectPanel({
           >
             ＋
           </button>
-        </header>
+        }
+        id="variable"
+        onToggle={() => toggleSection("variable")}
+        open={isSectionOpen("variable")}
+        title="剧情变量"
+      >
         {Object.entries(manifest.variables).map(([id, definition]) => (
           <article className="variable-card" key={id}>
             <header>
@@ -1802,7 +2011,7 @@ function ProjectPanel({
             </label>
           </article>
         ))}
-      </section>
+      </CollapsibleSection>
       <dl className="project-facts">
         <div>
           <dt>Schema</dt>

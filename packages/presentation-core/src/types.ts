@@ -436,6 +436,15 @@ export type TimelineEvent =
       duration_ms: number;
     };
 
+/**
+ * Presentation cues that actually cross the host IPC boundary.
+ *
+ * The core model also has an `open_window` cue, which is a *host control*
+ * instruction rather than a presentation one: the desktop host consumes it while
+ * committing the main story update and strips it before the update reaches any
+ * WebView, so it is intentionally absent from this mirror. Keeping it out means
+ * the cue dispatcher below stays exhaustive over everything it can receive.
+ */
 export type PresentationCue = CueBase &
   (
     | {

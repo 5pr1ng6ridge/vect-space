@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secondary",
+  "description": "Capability for the single secondary game window. The reused gameplay UI only subscribes to the host's own session event (and unsubscribes on unmount): it has no title, save/load, settings, history or chapter-map transport, so it is granted nothing beyond listening. Window creation, window enumeration and every other main-only power stay with the main capability.",
+  "windows": ["secondary"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

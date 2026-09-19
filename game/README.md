@@ -103,6 +103,60 @@ reproducible project-generated WAV files (`npm run assets:ambience`); see
 `assets/THIRD_PARTY.md` for exact provenance and the separate notice for unrelated
 legacy recordings.
 
+## Secondary window (`open_window`)
+
+The game has exactly one secondary native window. A script asks the host to show
+a Scene in it with a non-blocking node:
+
+```yaml
+introduce:
+  type: say
+  text: 让副窗口同时演示环境声。
+  next: open_lab
+
+open_lab:
+  type: open_window
+  scene: ambience_lab
+  next: continue_story
+
+continue_story:
+  type: say
+  text: 副窗口已经打开，主窗口继续推进。
+  next: end
+```
+
+Rules:
+
+- `scene` names any Scene in the project, including one the main story has not
+  reached. `next` stays inside the current Scene, exactly like `say`.
+- The node never blocks: the main runtime advances to `next` in the same update
+  and emits a host control cue instead of a presentation cue. That cue is
+  consumed by the desktop host and never reaches the presentation layer.
+- Only the **main** window's story runtime can open or re-point the window. A
+  Scene replay or the secondary window itself advances through the node normally
+  and opens nothing.
+- Opening again **replaces** the Scene shown in the same native window (the
+  secondary runtime is rebuilt with a fresh session token). A second window is
+  never created.
+- The secondary window has normal gameplay — its own scene, presentation, audio
+  and input — but no save, load, settings or history UI, and the host refuses
+  those commands from it.
+- Save-scoped and profile-scoped variables are shared: the secondary observes
+  the main runtime's authoritative maps, and its own writes are published back
+  to the main runtime. Leaving a Scene in the secondary preserves the shared
+  values; only the main runtime's Scene boundary resets them.
+- The merged dialogue history stays in occurrence order across both windows.
+  Secondary entries are never dropped when the secondary changes Scene, is
+  replaced, or closes; only the main story's established reset points (a new
+  game, a load, a main Scene change, or the explicit clear action) remove them.
+- The secondary is tied to the main Scene that owns it: a main new game, load,
+  return to the title, replay entry, main Scene change or shutdown closes it. A
+  user/native close of the secondary window is prevented; only the host may
+  remove it.
+- Saving captures both windows (and the merged history) in one slot; loading a
+  slot restores both. Slots written before this feature still load: they simply
+  restore the main snapshot without a secondary and without a stored history.
+
 Videos are registered as `kind: video` under `assets/videos` and must be MP4
 files encoded as H.264 video with AAC audio. Video timelines are always awaited.
 Neither video playback position nor transient timeline events are saved: loading

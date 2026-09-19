@@ -41,6 +41,10 @@ pub struct WireU64(pub String);
 pub enum WireSessionMode {
     Story,
     Replay,
+    /// The single secondary game window.  It has its own session identity so a
+    /// delayed acknowledgement from a replaced secondary instance is rejected
+    /// exactly like a stale story/replay session.
+    Secondary,
 }
 
 impl Serialize for WireU64 {

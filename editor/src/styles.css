@@ -867,6 +867,82 @@ code {
   font-size: 9px;
 }
 
+/* Collapsible project sections: each one is a bordered card so the five
+   groups read as clearly separate blocks in both wide and narrow sidebars. */
+.project-settings .project-section {
+  gap: 10px;
+  padding: 10px 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.project-settings .project-section > header {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.project-settings .project-section.collapsed > header {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.project-section-toggle {
+  display: flex;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  flex: 1;
+  gap: 6px;
+  align-items: center;
+  text-align: left;
+}
+
+.project-section-toggle:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--panel-3);
+}
+
+.project-section-toggle:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.project-section-toggle strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-section-caret {
+  color: var(--accent);
+  font-size: 10px;
+  flex: 0 0 auto;
+}
+
+.project-section-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.project-section-content {
+  display: grid;
+  gap: 8px;
+}
+
+/* Keep `hidden` authoritative: the grid display above must not win over the
+   UA rule that removes collapsed content from the layout and the a11y tree. */
+.project-section-content[hidden] {
+  display: none;
+}
+
 .project-facts {
   display: grid;
   margin: 4px 0 0;
