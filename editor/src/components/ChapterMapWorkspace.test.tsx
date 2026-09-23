@@ -240,11 +240,14 @@ describe("ChapterMapWorkspace pointer interactions", () => {
     fireEvent.click(object);
     expect(object).toHaveClass("selected");
 
-    // Target the selected object's own artwork <select>.  The first select in
+    // Target the selected object's own artwork chooser.  The first control in
     // the inspector is the hotspot *reveal* selector, so the lookup must be by
     // label; querying positionally silently edited the reveal mode instead.
     const material = within(result.container).getByLabelText("素材");
-    fireEvent.change(material, { target: { value: "gui.new" } });
+    fireEvent.click(material);
+    fireEvent.click(
+      within(result.container).getByRole("option", { name: /gui\.new/ }),
+    );
 
     expect(currentMap.hotspots[0].asset).toBe("gui.new");
     expect(

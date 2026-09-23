@@ -181,7 +181,7 @@ describe("ActionWorkspace", () => {
       },
     });
 
-    expect(screen.getByLabelText("立绘素材")).toHaveValue("sprite.jelly");
+    expect(screen.getByLabelText("立绘素材")).toHaveTextContent("sprite.jelly");
     await waitFor(() => {
       expect(screen.getByLabelText("动作预览播放头")).not.toBeDisabled();
     });

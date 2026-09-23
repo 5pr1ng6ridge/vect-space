@@ -95,6 +95,11 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (command === "secondary_advance") {
       host.advanceCalls.push(args);
       if (host.staleAdvance) {
+        // The real WebView rejects an invoke with the serialized wire error
+        // (a plain object with `message`/`code`), never an `Error` instance;
+        // `src/engine/api.ts` normalizes it into a `CommandError`. Throwing
+        // the wire shape here keeps the mock faithful to the transport.
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
         throw { message: "副窗口会话已切换", code: "stale_session" };
       }
       if (host.deferAdvance) {

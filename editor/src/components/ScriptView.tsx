@@ -8,6 +8,12 @@ import {
 } from "react";
 import { nodeLabel, outputPorts } from "../story";
 import { buildScriptChainOptions } from "./scriptChains";
+import {
+  imeState,
+  isEditableTarget,
+  isInteractiveTarget,
+  shouldIgnoreNodeDeletion,
+} from "./nodeDeleteShortcut";
 import type {
   CharacterDefinition,
   ContentManifest,
@@ -30,6 +36,8 @@ export interface ScriptViewProps {
   ): void;
   onDelete(nodeId: string): void;
   onDeleteMany?(nodeIds: string[]): void;
+  /** True while an App-level dialog or entry overlay owns the interaction. */
+  deleteDisabled?: boolean;
   onBatchSpeaker?(nodeIds: string[], speaker: string | null): void;
   onOpenGraph(nodeId: string): void;
   /** Explicitly follow a terminal port without conflating it with selection. */
@@ -116,6 +124,16 @@ function buildScriptRows(
   return result;
 }
 
+/** A selection id that is only trusted when the node still exists. */
+function knownNodeId(
+  candidate: string | null,
+  nodes: Record<string, unknown>,
+): string | null {
+  return candidate !== null && nodes[candidate] !== undefined
+    ? candidate
+    : null;
+}
+
 export function ScriptView({
   scene,
   manifest,
@@ -127,6 +145,7 @@ export function ScriptView({
   onInsertBatch,
   onDelete,
   onDeleteMany,
+  deleteDisabled = false,
   onBatchSpeaker,
   onOpenGraph,
   onNavigateToNode,
@@ -142,7 +161,14 @@ export function ScriptView({
   // Selection is an inspection concern. Only the selector or an explicit
   // terminal-port click changes which chain is expanded.
   const initialChainStart = scene.entry;
-  const [chainStartId, setChainStartId] = useState(initialChainStart);
+  // A graph selection is the current inspection target, so it seeds both the
+  // local multi-select set and the expanded chain on mount.  Switching from the
+  // story graph to the script list must make Delete work on the node the author
+  // selected there, without re-picking it in the list first.
+  const initialSelectedNode = knownNodeId(selectedNodeId, scene.nodes);
+  const [chainStartId, setChainStartId] = useState(
+    () => initialSelectedNode ?? initialChainStart,
+  );
   const [pastePreview, setPastePreview] = useState<{
     afterNodeId: string;
     rows: { speaker: string | null; text: string }[];
@@ -155,8 +181,19 @@ export function ScriptView({
     [chainStartId, scene],
   );
   const chainOptions = useMemo(() => buildScriptChainOptions(scene), [scene]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(initialSelectedNode === null ? [] : [initialSelectedNode]),
+  );
   const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // The scoped Delete handler only sees keys that originate inside the list,
+    // and the view switch can leave focus on the graph shell or the toolbar.
+    // Move it into the list unless the author already focused something here.
+    const root = rootRef.current;
+    if (root !== null && !root.contains(document.activeElement)) root.focus();
+  }, []);
 
   useEffect(() => {
     if (previousSceneId.current === scene.id) return;
@@ -285,16 +322,29 @@ export function ScriptView({
   };
   const handleScriptKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     const target = event.target as HTMLElement;
-    const editing =
-      target.tagName === "TEXTAREA" ||
-      target.tagName === "INPUT" ||
-      target.tagName === "SELECT";
+    const editing = isEditableTarget(target);
+    // A destructive key is ignored for an editable field, an IME composition, a
+    // held-down key, focus on an interactive control of this pane (a row or
+    // summary button, a select, an open insert menu), an open App dialog
+    // (`deleteDisabled`) and the local paste preview.
+    const blocked =
+      deleteDisabled ||
+      pastePreview !== null ||
+      shouldIgnoreNodeDeletion({
+        target: event.target,
+        repeat: event.repeat,
+        ...imeState(event),
+      }) ||
+      isInteractiveTarget(event.target);
     if (
-      !editing &&
+      !blocked &&
       (event.key === "Delete" || event.key === "Backspace") &&
       selectedIds.length > 0
     ) {
       event.preventDefault();
+      // One key press deletes once: never let the same event reach another
+      // handler (a workspace shortcut, or a future App-level listener).
+      event.stopPropagation();
       if (selectedIds.length === 1) onDelete(selectedIds[0]);
       else onDeleteMany?.(selectedIds);
       return;
@@ -331,6 +381,7 @@ export function ScriptView({
       className="script-view"
       onKeyDown={handleScriptKeyDown}
       onPaste={handlePaste}
+      ref={rootRef}
       tabIndex={0}
     >
       <div className="script-toolbar">

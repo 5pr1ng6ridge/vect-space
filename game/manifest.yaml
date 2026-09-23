@@ -24,51 +24,84 @@ variables:
     type: integer
     default: 0
 characters:
-  test:
-    display_name: 测试角色
-    name_color: "#1D5C78"
-    text_color: "#17213A"
   alli:
-    display_name: 艾莉
-    name_color: "#80D8FF"
-    text_color: "#FFFFFF"
-    default_expression: neutral
-    default_scale: 0.78
+    display_name: Alli
+    name_color: "#B3FFCC"
+    text_color: "#000000"
     expressions:
       neutral:
         asset: sprite.alli_neutral
         anchor_x: 0.5
         anchor_y: 1.0
+        offset_x: 0.0
+        offset_y: 0.0
+        scale: 1.0
       smug:
         asset: sprite.alli_smug
         anchor_x: 0.5
         anchor_y: 1.0
+        offset_x: 0.0
         offset_y: 4.0
+        scale: 1.0
       surprise:
         asset: sprite.alli_surprise
         anchor_x: 0.5
         anchor_y: 1.0
+        offset_x: 0.0
         offset_y: 2.0
+        scale: 1.0
+    default_expression: neutral
+    default_scale: 0.78
   sat:
-    display_name: 萨特
-    name_color: "#FFB86C"
-    text_color: "#FFF7E6"
-    default_expression: smile
-    default_scale: 0.68
+    display_name: Sat
+    name_color: "#FFA3EE"
+    text_color: "#000000"
     expressions:
       smile:
         asset: sprite.sat_smile
         anchor_x: 0.5
         anchor_y: 1.0
+        offset_x: 0.0
+        offset_y: 0.0
+        scale: 1.0
       smug:
         asset: sprite.sat_smug
         anchor_x: 0.5
         anchor_y: 1.0
+        offset_x: 0.0
+        offset_y: 0.0
+        scale: 1.0
       soft:
         asset: sprite.sat_soft
         anchor_x: 0.5
         anchor_y: 1.0
+        offset_x: 0.0
+        offset_y: 0.0
+        scale: 1.0
+    default_expression: smile
+    default_scale: 0.68
+  test:
+    display_name: 测试角色
+    name_color: "#1D5C78"
+    text_color: "#17213A"
+    expressions: {}
+    default_scale: 1.0
 assets:
+  am.bgs_rain:
+    kind: ambience
+    path: test/bgs_rain.ogg
+  ambience.birds:
+    kind: ambience
+    path: audio/ambience/ambience_birds.wav
+  ambience.demo:
+    kind: ambience
+    path: audio/ambience/ambience_demo.wav
+  ambience.intro:
+    kind: ambience
+    path: audio/ambience/ambience_intro.wav
+  ambience.rain:
+    kind: ambience
+    path: audio/ambience/ambience_rain.wav
   bg.anim_scan:
     kind: background
     animation: anim.scan
@@ -87,9 +120,6 @@ assets:
   bg.taiwan:
     kind: background
     path: backgrounds/RFTI0925.PNG
-  bg.vector_space:
-    kind: background
-    path: backgrounds/bg_vstest.png
   bg.test_1:
     kind: background
     path: test/backtest1.png
@@ -99,32 +129,21 @@ assets:
   bg.test_3:
     kind: background
     path: test/backtest3.png
-  bgm.test_birds:
-    kind: bgm
-    path: test/bgs_birds.ogg
-  bgm.test_rain:
-    kind: bgm
-    path: test/bgs_rain.ogg
-  bgm.test_intro:
-    kind: bgm
-    path: test/intro.ogg
+  bg.vector_space:
+    kind: background
+    path: backgrounds/bg_vstest.png
   bgm.test1:
     kind: bgm
     path: audio/test_bgm.ogg
-  # These four ambience files are deterministic project-generated WAV fixtures;
-  # run `npm run assets:ambience` to reproduce them without external recordings.
-  ambience.birds:
-    kind: ambience
-    path: audio/ambience/ambience_birds.wav
-  ambience.rain:
-    kind: ambience
-    path: audio/ambience/ambience_rain.wav
-  ambience.intro:
-    kind: ambience
-    path: audio/ambience/ambience_intro.wav
-  ambience.demo:
-    kind: ambience
-    path: audio/ambience/ambience_demo.wav
+  bgm.test_birds:
+    kind: bgm
+    path: test/bgs_birds.ogg
+  bgm.test_intro:
+    kind: bgm
+    path: test/intro.ogg
+  bgm.test_rain:
+    kind: bgm
+    path: test/bgs_rain.ogg
   font.fusion_pixel:
     kind: font
     path: fonts/fusion-pixel-12px-monospaced-zh_hans.ttf
@@ -182,12 +201,6 @@ assets:
   sfx.typing:
     kind: sfx
     path: audio/sfx_typing.wav
-  sprite.jelly:
-    kind: sprite
-    path: sprites/jelly.png
-  sprite.omo:
-    kind: sprite
-    path: sprites/omo.png
   sprite.alli_neutral:
     kind: sprite
     path: test/alli_neutral.png
@@ -197,6 +210,15 @@ assets:
   sprite.alli_surprise:
     kind: sprite
     path: test/alli_surprise.png
+  sprite.black:
+    kind: sprite
+    path: sprites/black.png
+  sprite.jelly:
+    kind: sprite
+    path: sprites/jelly.png
+  sprite.omo:
+    kind: sprite
+    path: sprites/omo.png
   sprite.sat_smile:
     kind: sprite
     path: test/sat_smile.png
@@ -308,13 +330,6 @@ scenes:
 - scenes/transition_lab.yaml
 - scenes/ambience_lab.yaml
 - scenes/surface_parity.yaml
-animations:
-- animations/scan.yaml
-- animations/dialogue_pulse.yaml
-- animations/button_pulse.yaml
-- animations/stopmotion.yaml
-actions:
-- actions/bounce.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml
@@ -328,4 +343,11 @@ buttons:
 ui_motion_defaults:
   dialogue_show: ui.dialogue.slide_in
   dialogue_hide: ui.dialogue.slide_out
+animations:
+- animations/scan.yaml
+- animations/dialogue_pulse.yaml
+- animations/button_pulse.yaml
+- animations/stopmotion.yaml
+actions:
+- actions/bounce.yaml
 chapter_map: chapter-map.yaml

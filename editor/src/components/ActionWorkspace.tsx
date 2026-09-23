@@ -9,6 +9,8 @@ import {
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 
 import { TimelineEditor } from "./TimelineEditor";
+import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import { firstVisibleAssetId } from "../assetLibrary";
 import { ActionPreview, type ActionPreviewHandle } from "./ActionPreview";
 import type { EditorPreviewEnvironment } from "./timelinePreview";
 import {
@@ -77,9 +79,12 @@ export function ActionWorkspace({
   // The preview pose is author-facing state: relative channels are only
   // meaningful against an explicit starting pose, so it is shown and editable
   // instead of being hidden inside the conversion.
+  const assetLayout = useAssetLayout();
   const [base, setBase] = useState<SpriteSnapshot>(SPRITE_ACTION_PREVIEW_BASE);
-  const [previewAsset, setPreviewAsset] = useState<string | null>(() =>
-    firstPreviewAsset(assets),
+  const [previewAsset, setPreviewAsset] = useState<string | null>(
+    () =>
+      firstVisibleAssetId(assets, assetLayout, "sprite") ??
+      firstVisibleAssetId(assets, assetLayout, "gui"),
   );
   const [playhead, setPlayhead] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +101,8 @@ export function ActionWorkspace({
     (asset) => asset.id === previewAsset,
   )
     ? previewAsset
-    : (imageAssets[0]?.id ?? null);
+    : (firstVisibleAssetId(assets, assetLayout, "sprite") ??
+      firstVisibleAssetId(assets, assetLayout, "gui"));
   const node = useMemo(
     () =>
       spriteActionToTimelineNode({
@@ -238,21 +244,13 @@ export function ActionWorkspace({
           <h3>预览基准姿态</h3>
           <label>
             立绘素材
-            <select
-              onChange={(event) =>
-                setPreviewAsset(event.currentTarget.value || null)
-              }
-              value={selectedPreviewAsset ?? ""}
-            >
-              {imageAssets.length === 0 && (
-                <option value="">没有可用素材</option>
-              )}
-              {imageAssets.map((asset) => (
-                <option key={asset.id} value={asset.id}>
-                  {asset.id}
-                </option>
-              ))}
-            </select>
+            <AssetChooser
+              assets={imageAssets}
+              kind={["sprite", "gui"]}
+              label="立绘素材"
+              onChange={(value) => setPreviewAsset(value)}
+              value={selectedPreviewAsset}
+            />
           </label>
           <div className="action-base-row">
             <label>
@@ -417,13 +415,5 @@ export function ActionWorkspace({
         </div>
       </section>
     </main>
-  );
-}
-
-function firstPreviewAsset(assets: readonly EditorAsset[]): string | null {
-  return (
-    assets.find((asset) => asset.kind === "sprite")?.id ??
-    assets.find((asset) => asset.kind === "gui")?.id ??
-    null
   );
 }

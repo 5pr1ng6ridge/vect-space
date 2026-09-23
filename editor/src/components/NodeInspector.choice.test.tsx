@@ -233,8 +233,9 @@ describe("choice inspector presentation fields", () => {
     let next = onChange.mock.calls.at(-1)?.[1] as ChoiceNode;
     expect(next.choices[0].template).toBe("choice.primary");
 
-    const iconSelects = screen.getAllByLabelText("图标（gui）");
-    fireEvent.change(iconSelects[1], { target: { value: "gui.icon" } });
+    const iconChoosers = screen.getAllByRole("button", { name: "图标（gui）" });
+    fireEvent.click(iconChoosers[1]);
+    fireEvent.click(screen.getByRole("option", { name: /gui\.icon/ }));
     next = onChange.mock.calls.at(-1)?.[1] as ChoiceNode;
     expect(next.choices[1].icon).toBe("gui.icon");
   });

@@ -1,23 +1,31 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactElement,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
-import { editorImageSource } from "../imageAnimationMap";
-import { AnimatedImage } from "./AnimatedImage";
+import type {
+  AssetUrlMap,
+  ButtonSnapshot,
+} from "@vectspace/presentation-core/types";
+import { TemplateButton } from "@vectspace/presentation-react/button";
+// The shared gameplay stylesheet carries the `scene-button*` rules the real
+// button is styled with; a host-local copy is forbidden by the CSS contract.
+import "@vectspace/presentation-react/gameplay.css";
+import { assetUrl } from "../api";
+import { AssetChooser } from "./AssetChooser";
 import { evaluateChannel } from "../timeline";
+import {
+  KeyframeInspector,
+  TimelineSurface,
+  type TimelineSurfaceDocument,
+  type TimelineSurfaceSelection,
+} from "./TimelineSurface";
 import type {
   ButtonAnimation,
+  ButtonAnimations,
   ButtonAssetFit,
   ButtonAssetMode,
   ButtonFile,
   ButtonState,
   EditorAsset,
-  TimelineEasing,
+  TimelineChannels,
   TimelineKeyframe,
 } from "../types";
 
@@ -26,7 +34,9 @@ const STATES: { id: ButtonState; label: string }[] = [
   { id: "hover", label: "悬停" },
   { id: "pressed", label: "按下" },
 ];
-const CHANNELS = [
+
+/** Button animation channels keep their runtime names (offsets + multiples). */
+const BUTTON_ANIMATION_CHANNELS = [
   "offset_x",
   "offset_y",
   "scale_x",
@@ -35,15 +45,24 @@ const CHANNELS = [
   "opacity",
 ] as const;
 
-interface FrameSelection {
-  channel: string;
-  index: number;
-}
+const BUTTON_CHANNEL_DEFAULTS: Record<string, number> = {
+  offset_x: 0,
+  offset_y: 0,
+  scale_x: 1,
+  scale_y: 1,
+  rotation_deg: 0,
+  opacity: 1,
+};
 
 /**
- * Project level button template editor.  The preview deliberately uses the
- * same asset fit and state animation equations as the game button layer, but
- * never dispatches click actions.
+ * Project level button template editor.
+ *
+ * The preview deliberately uses the same asset fit and state animation
+ * equations as the game button layer, but never dispatches click actions.
+ * The animation channels are authored with the same keyframe surface (ruler,
+ * transport, marquee selection, drag, easing inspector, copy/paste/delete)
+ * every other timeline workspace uses, while button states, variants, asset
+ * mode and fit remain domain concerns outside it.
  */
 export function ButtonWorkspace({
   file,
@@ -68,23 +87,35 @@ export function ButtonWorkspace({
 }): ReactElement {
   const [state, setState] = useState<ButtonState>("normal");
   const [playhead, setPlayhead] = useState(0);
-  const [playing, setPlaying] = useState(false);
   const [showHitArea, setShowHitArea] = useState(true);
-  const [selection, setSelection] = useState<FrameSelection | null>(null);
+  const [selection, setSelection] = useState<TimelineSurfaceSelection | null>(
+    null,
+  );
+  const [channelName, setChannelName] = useState<string>(
+    BUTTON_ANIMATION_CHANNELS[0],
+  );
+  const [gestureDraft, setGestureDraft] =
+    useState<TimelineSurfaceDocument<ButtonState> | null>(null);
   const [previewScale, setPreviewScale] = useState(0.5);
   const previewRef = useRef<HTMLDivElement>(null);
-  const playheadRef = useRef(playhead);
   const draft = file.definition;
   const animation = draft.animations[state] ?? null;
+
   const imageAssets = useMemo(
     () =>
       assets.filter((asset) => asset.kind === "gui" || asset.kind === "sprite"),
     [assets],
   );
+  // The shared `TemplateButton` resolves artwork by asset id, exactly like the
+  // game, so the preview feeds it the same id→url map the runtime uses.
+  const urls: AssetUrlMap = useMemo(
+    () =>
+      Object.fromEntries(
+        assets.map((asset) => [asset.id, assetUrl(asset.absolute_path)]),
+      ),
+    [assets],
+  );
 
-  useEffect(() => {
-    playheadRef.current = playhead;
-  }, [playhead]);
   useEffect(() => {
     const element = previewRef.current;
     if (element === null) return;
@@ -100,42 +131,36 @@ export function ButtonWorkspace({
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
-    if (!playing) return;
-    let frame = 0;
-    let previous = performance.now();
-    const tick = (now: number): void => {
-      const duration = animation?.duration_ms ?? 0;
-      const delta = now - previous;
-      previous = now;
-      setPlayhead((current) => {
-        const next = current + delta;
-        if (duration <= 0 || next >= duration) {
-          setPlaying(false);
-          return duration;
-        }
-        return next;
-      });
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [animation?.duration_ms, playing]);
-  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") onBack();
-      if (
-        event.code === "Space" &&
-        !(event.target instanceof HTMLInputElement)
-      ) {
-        event.preventDefault();
-        if (playheadRef.current >= (animation?.duration_ms ?? 0))
-          setPlayhead(0);
-        setPlaying((value) => !value);
-      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [animation?.duration_ms, onBack]);
+  }, [onBack]);
+
+  const surfaceDocument: TimelineSurfaceDocument<ButtonState> = useMemo(
+    () => ({
+      duration_ms: animation?.duration_ms ?? 0,
+      tracks:
+        animation === null
+          ? []
+          : [
+              {
+                id: `button:${state}`,
+                label:
+                  STATES.find((candidate) => candidate.id === state)?.label ??
+                  state,
+                channels: animation.channels,
+                allowedChannels: BUTTON_ANIMATION_CHANNELS,
+                defaults: BUTTON_CHANNEL_DEFAULTS,
+                allowInherit: false,
+                data: state,
+              },
+            ],
+      events: [],
+    }),
+    [animation, state],
+  );
 
   const commitDefinition = (next: typeof draft): void => {
     setSelection(null);
@@ -147,47 +172,31 @@ export function ButtonWorkspace({
     slot: "normal" | "hover" | "pressed",
     value: string,
   ): void => updateDefinition({ ...draft, [slot]: value || null });
-  const ensureAnimation = (): ButtonAnimation =>
-    animation ?? { duration_ms: 160, channels: {} };
   const updateAnimation = (next: ButtonAnimation | null): void => {
     const animations = { ...draft.animations, [state]: next };
     commitDefinition({ ...draft, animations });
   };
-  const addChannel = (channel: string): void => {
-    const next = ensureAnimation();
-    const base =
-      channel === "scale_x" || channel === "scale_y" || channel === "opacity"
-        ? 1
-        : 0;
-    updateAnimation({
-      ...next,
-      channels: {
-        ...next.channels,
-        [channel]: [
-          { at_ms: 0, value: base, easing: "linear" },
-          { at_ms: next.duration_ms, value: base, easing: "linear" },
-        ],
+  const writeChannels = (
+    channels: TimelineChannels,
+    durationMs: number,
+  ): void => {
+    if (animation === null) return;
+    onChange({
+      ...file,
+      definition: {
+        ...draft,
+        animations: {
+          ...draft.animations,
+          [state]: { ...animation, duration_ms: durationMs, channels },
+        },
       },
     });
   };
-  const upsertFrame = (channel: string, value: number): void => {
-    const next = ensureAnimation();
-    const at = Math.round(playheadRef.current / 10) * 10;
-    const frames = [...(next.channels[channel] ?? [])];
-    const found = frames.findIndex((frame) => frame.at_ms === at);
-    const frame: TimelineKeyframe = { at_ms: at, value, easing: "linear" };
-    if (found >= 0) frames[found] = frame;
-    else frames.push(frame);
-    frames.sort((left, right) => left.at_ms - right.at_ms);
-    updateAnimation({
-      ...next,
-      channels: { ...next.channels, [channel]: frames },
-    });
+  const commitSurface = (next: TimelineSurfaceDocument<ButtonState>): void => {
+    const track = next.tracks[0];
+    if (animation === null || track === undefined) return;
+    writeChannels(track.channels, next.duration_ms);
   };
-  const selectedFrame =
-    selection === null
-      ? undefined
-      : animation?.channels[selection.channel]?.[selection.index];
   const editSelectedFrame = (patch: Partial<TimelineKeyframe>): void => {
     if (selection === null || animation === null) return;
     const frames = [...(animation.channels[selection.channel] ?? [])];
@@ -202,47 +211,65 @@ export function ButtonWorkspace({
       ),
     };
     frames.sort((left, right) => left.at_ms - right.at_ms);
-    updateAnimation({
-      ...animation,
-      channels: { ...animation.channels, [selection.channel]: frames },
-    });
+    writeChannels(
+      { ...animation.channels, [selection.channel]: frames },
+      animation.duration_ms,
+    );
   };
-  const baseAsset =
-    draft.normal === null || draft.normal === undefined
-      ? undefined
-      : assets.find((asset) => asset.id === draft.normal);
-  const stateId =
-    state === "normal"
-      ? draft.normal
-      : draft.asset_mode === "separate"
-        ? state === "hover"
-          ? (draft.hover ?? draft.normal)
-          : (draft.pressed ?? draft.normal)
-        : state === "hover"
-          ? draft.hover
-          : draft.pressed;
-  const stateAsset =
-    stateId === null || stateId === undefined
-      ? undefined
-      : assets.find((asset) => asset.id === stateId);
-  const values = {
-    x: evaluateChannel(animation?.channels ?? {}, "offset_x", playhead, 0),
-    y: evaluateChannel(animation?.channels ?? {}, "offset_y", playhead, 0),
-    scaleX: evaluateChannel(animation?.channels ?? {}, "scale_x", playhead, 1),
-    scaleY: evaluateChannel(animation?.channels ?? {}, "scale_y", playhead, 1),
-    rotation: evaluateChannel(
-      animation?.channels ?? {},
-      "rotation_deg",
-      playhead,
-      0,
-    ),
-    opacity: evaluateChannel(animation?.channels ?? {}, "opacity", playhead, 1),
-  };
-  const objectFit = (fit: ButtonAssetFit): CSSProperties["objectFit"] =>
-    fit === "contain" ? "contain" : fit === "cover" ? "cover" : "fill";
+  // The authored state is scrubbed, not animated on a wall clock: the channels
+  // are pre-evaluated at the editor playhead and baked into a single keyframe,
+  // so `TemplateButton` renders exactly the pose the game would show at that
+  // millisecond (and keeps owning artwork/state/overlay resolution).  During a
+  // keyframe drag the surface reports its live draft so the pose keeps up
+  // before the gesture commits.
+  const previewAnimation: ButtonAnimation = useMemo(
+    () => ({
+      duration_ms: gestureDraft?.duration_ms ?? animation?.duration_ms ?? 0,
+      channels: gestureDraft?.tracks[0]?.channels ?? animation?.channels ?? {},
+    }),
+    [animation, gestureDraft],
+  );
+  const bakedState: ButtonAnimation | null = useMemo(
+    () => bakeAnimation(previewAnimation, playhead),
+    [playhead, previewAnimation],
+  );
+  // Every slot carries the same baked pose so a stray pointer state can never
+  // change the artwork or the transform mid-scrub.
+  const previewAnimations: ButtonAnimations = useMemo(
+    () => ({ normal: bakedState, hover: bakedState, pressed: bakedState }),
+    [bakedState],
+  );
+  const previewButton: ButtonSnapshot = useMemo(
+    () => ({
+      id: draft.id,
+      template: draft.id,
+      asset_mode: draft.asset_mode,
+      fit: draft.fit,
+      normal: draft.normal ?? null,
+      hover: draft.hover ?? null,
+      pressed: draft.pressed ?? null,
+      animations: previewAnimations,
+      x: 0,
+      y: 0,
+      width: draft.width,
+      height: draft.height,
+      rotation_deg: 0,
+      scale_x: 1,
+      scale_y: 1,
+      opacity: 1,
+      z: 0,
+      visible: true,
+      enabled: true,
+      action: { sets: [], next: null },
+    }),
+    [draft, previewAnimations],
+  );
   const setPreviewState = (next: ButtonState): void => {
     setState(next);
-    if (next !== state) setPlayhead(0);
+    if (next !== state) {
+      setPlayhead(0);
+      setSelection(null);
+    }
   };
 
   return (
@@ -252,12 +279,6 @@ export function ButtonWorkspace({
           ← 返回项目
         </button>
         <strong>按钮模板 · {draft.id}</strong>
-        <span>
-          {Math.round(playhead)} / {animation?.duration_ms ?? 0} ms
-        </span>
-        <button onClick={() => setPlaying((value) => !value)} type="button">
-          {playing ? "暂停" : "播放"}
-        </button>
         <button onClick={onUndo} type="button">
           撤销
         </button>
@@ -282,48 +303,36 @@ export function ButtonWorkspace({
             <div className="button-preview-background">
               1920 × 1080 设计坐标
             </div>
-            <button
+            {/* The dashed box is the authored hit area; the artwork itself is
+                the real shared `TemplateButton`, pinned to the selected state
+                and posed at the editor playhead. */}
+            <div
               className="button-preview-hit"
-              onPointerDown={() => setPreviewState("pressed")}
-              onPointerEnter={() => setPreviewState("hover")}
-              onPointerLeave={() => setPreviewState("normal")}
-              onPointerUp={() => setPreviewState("hover")}
               style={{
                 width: draft.width,
                 height: draft.height,
                 borderStyle: showHitArea ? "dashed" : "none",
               }}
-              type="button"
             >
-              <span
-                className="button-preview-visual"
+              <TemplateButton
+                animations={animationMap}
+                assets={urls}
+                button={previewButton}
+                className="scene-button"
+                // Authoring only: activating a template here must never run a
+                // game action, so the preview stays inert.
+                disabled
+                onActivate={() => undefined}
+                sessionKey={`${draft.id}:${state}`}
+                state={state}
                 style={{
-                  transform: `translate(${values.x}px, ${values.y}px) rotate(${values.rotation}deg) scale(${values.scaleX}, ${values.scaleY})`,
-                  opacity: values.opacity,
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
                 }}
-              >
-                {draft.asset_mode === "overlay" &&
-                  state !== "normal" &&
-                  baseAsset !== undefined && (
-                    <AnimatedImage
-                      alt=""
-                      source={editorImageSource(
-                        baseAsset,
-                        assets,
-                        animationMap,
-                      )}
-                      style={{ objectFit: objectFit(draft.fit) }}
-                    />
-                  )}
-                {stateAsset !== undefined && (
-                  <AnimatedImage
-                    alt=""
-                    source={editorImageSource(stateAsset, assets, animationMap)}
-                    style={{ objectFit: objectFit(draft.fit) }}
-                  />
-                )}
-              </span>
-            </button>
+              />
+            </div>
           </div>
         </div>
         <aside className="button-inspector">
@@ -399,11 +408,7 @@ export function ButtonWorkspace({
               <button
                 className={state === candidate.id ? "active" : ""}
                 key={candidate.id}
-                onClick={() => {
-                  setState(candidate.id);
-                  setPlayhead(0);
-                  setSelection(null);
-                }}
+                onClick={() => setPreviewState(candidate.id)}
                 type="button"
               >
                 {candidate.label}
@@ -417,17 +422,21 @@ export function ButtonWorkspace({
                 : slot === "hover"
                   ? "悬停贴图"
                   : "按下贴图"}
-              <select
-                value={draft[slot] ?? ""}
-                onChange={(event) => setAsset(slot, event.currentTarget.value)}
-              >
-                <option value="">无（沿用/透明）</option>
-                {imageAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.id}
-                  </option>
-                ))}
-              </select>
+              <AssetChooser
+                allowEmpty
+                assets={imageAssets}
+                emptyLabel="无（沿用/透明）"
+                kind={["gui", "sprite"]}
+                label={
+                  slot === "normal"
+                    ? "正常贴图"
+                    : slot === "hover"
+                      ? "悬停贴图"
+                      : "按下贴图"
+                }
+                onChange={(value) => setAsset(slot, value ?? "")}
+                value={draft[slot] ?? null}
+              />
             </label>
           ))}
           <div className="button-animation-actions">
@@ -446,161 +455,82 @@ export function ButtonWorkspace({
             )}
           </div>
           {animation !== null && (
-            <>
-              <label>
-                动画时长
-                <input
-                  max={1_800_000}
-                  min={1}
-                  type="number"
-                  value={animation.duration_ms}
-                  onChange={(event) =>
-                    updateAnimation({
-                      ...animation,
-                      duration_ms: Math.max(
-                        1,
-                        Number(event.currentTarget.value),
-                      ),
-                    })
-                  }
-                />
-              </label>
-              {selectedFrame !== undefined && (
-                <div className="ui-keyframe-fields">
-                  <label>
-                    时间
-                    <input
-                      type="number"
-                      value={selectedFrame.at_ms}
-                      onChange={(event) =>
-                        editSelectedFrame({
-                          at_ms: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    数值
-                    <input
-                      step="0.01"
-                      type="number"
-                      value={
-                        typeof selectedFrame.value === "number"
-                          ? selectedFrame.value
-                          : 0
-                      }
-                      onChange={(event) =>
-                        editSelectedFrame({
-                          value: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    缓动
-                    <select
-                      value={
-                        typeof selectedFrame.easing === "string"
-                          ? selectedFrame.easing
-                          : "linear"
-                      }
-                      onChange={(event) =>
-                        editSelectedFrame({
-                          easing: event.currentTarget.value as TimelineEasing,
-                        })
-                      }
-                    >
-                      {[
-                        "step",
-                        "linear",
-                        "ease_in",
-                        "ease_out",
-                        "ease_in_out",
-                      ].map((value) => (
-                        <option key={value}>{value}</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-              )}
-            </>
+            <label>
+              动画时长
+              <input
+                max={1_800_000}
+                min={1}
+                type="number"
+                value={animation.duration_ms}
+                onChange={(event) =>
+                  writeChannels(
+                    animation.channels,
+                    Math.max(1, Number(event.currentTarget.value)),
+                  )
+                }
+              />
+            </label>
+          )}
+          {selection !== null && (
+            <KeyframeInspector
+              allowInherit={false}
+              frame={selection.frame}
+              onChange={editSelectedFrame}
+            />
           )}
         </aside>
       </section>
-      <section className="button-timeline">
-        <input
-          aria-label="按钮动画播放头"
-          max={animation?.duration_ms ?? 0}
-          min={0}
-          onChange={(event) => {
-            setPlaying(false);
-            setPlayhead(Number(event.currentTarget.value));
-          }}
-          type="range"
-          value={playhead}
-        />
-        {animation !== null && (
-          <>
-            <div className="button-channel-toolbar">
-              {CHANNELS.map((channel) => (
-                <button
-                  disabled={animation.channels[channel] !== undefined}
-                  key={channel}
-                  onClick={() => addChannel(channel)}
-                  type="button"
-                >
-                  ＋ {channel}
-                </button>
-              ))}
-            </div>
-            {Object.entries(animation.channels).map(([channel, frames]) => {
-              const keyframes = frames;
-              return (
-                <div className="ui-motion-channel" key={channel}>
-                  <span>{channel}</span>
-                  <div className="button-keyframe-row">
-                    {keyframes.map((frame, index) => (
-                      <button
-                        className={
-                          selection?.channel === channel &&
-                          selection.index === index
-                            ? "selected"
-                            : ""
-                        }
-                        key={`${channel}-${index}-${frame.at_ms}`}
-                        onClick={() => {
-                          setSelection({ channel, index });
-                          setPlayhead(frame.at_ms);
-                        }}
-                        style={{
-                          left: `${(frame.at_ms / Math.max(1, animation.duration_ms)) * 100}%`,
-                        }}
-                        title={`${frame.at_ms} ms`}
-                        type="button"
-                      >
-                        ◆
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={() =>
-                      upsertFrame(
-                        channel,
-                        channel.startsWith("scale_") || channel === "opacity"
-                          ? 1
-                          : 0,
-                      )
-                    }
-                    type="button"
-                  >
-                    在当前时间添加
-                  </button>
-                </div>
-              );
-            })}
-          </>
-        )}
-      </section>
+      <TimelineSurface<ButtonState>
+        allowRemoveTrack={false}
+        channelName={channelName}
+        className="button-timeline-surface"
+        document={surfaceDocument}
+        emptyLabel="该状态还没有动画，先添加状态动画"
+        keyboardPlayback
+        onChannelNameChange={setChannelName}
+        onChange={commitSurface}
+        onDraftChange={setGestureDraft}
+        onPlayheadChange={setPlayhead}
+        onSelectionChange={setSelection}
+        playhead={playhead}
+        playbackStart={0}
+        showTransport
+        snap={10}
+      />
     </main>
   );
+}
+
+/**
+ * Pre-evaluates every authored channel at `playheadMs` and collapses it to a
+ * single keyframe, so the shared button renders the authored pose at that
+ * millisecond without running its wall-clock loop.
+ *
+ * `duration_ms` is 0 because the baked animation holds one constant pose; the
+ * component's clock stops after its first frame instead of ticking the preview
+ * at 60 fps while the author drags a ruler.
+ */
+function bakeAnimation(
+  animation: ButtonAnimation | null,
+  playheadMs: number,
+): ButtonAnimation | null {
+  if (animation === null) return null;
+  const channels: TimelineChannels = {};
+  for (const channel of BUTTON_ANIMATION_CHANNELS) {
+    const frames = animation.channels[channel];
+    if (frames === undefined || frames.length === 0) continue;
+    channels[channel] = [
+      {
+        at_ms: 0,
+        value: evaluateChannel(
+          animation.channels,
+          channel,
+          playheadMs,
+          BUTTON_CHANNEL_DEFAULTS[channel] ?? 0,
+        ),
+        easing: "linear",
+      },
+    ];
+  }
+  return { duration_ms: 0, channels };
 }

@@ -21,9 +21,15 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement,
 } from "react";
 import { NODE_TYPES, nodeLabel, outputPorts, type InsertSide } from "../story";
+import {
+  imeState,
+  isInteractiveTarget,
+  shouldIgnoreNodeDeletion,
+} from "./nodeDeleteShortcut";
 import type {
   EditorDiagnostic,
   NodePosition,
@@ -35,15 +41,21 @@ import { StoryNodeCard, type StoryGraphNode } from "./StoryNode";
 
 const nodeTypes = { story: StoryNodeCard };
 
-interface StoryGraphProps {
+export interface StoryGraphProps {
   scene: SceneDefinition;
   layout: SceneLayout | undefined;
   diagnostics: EditorDiagnostic[];
   selectedNodeId: string | null;
   onSelect(nodeId: string | null): void;
   onOpen(nodeId: string): void;
+  /** Open the live gameplay preview starting from this node. */
+  onPreview(nodeId: string): void;
   onConnect(sourceId: string, handle: string, targetId: string): void;
   onCopy(nodeId: string): void;
+  /** Delete the selected node through the App confirmation/undo pipeline. */
+  onDelete(nodeId: string): void;
+  /** True while an App-level dialog or entry overlay owns the interaction. */
+  deleteDisabled?: boolean;
   onMoveNode(nodeId: string, position: NodePosition): void;
   onMoveMany(positions: Record<string, NodePosition>): void;
   onPaste(position: NodePosition): void;
@@ -75,8 +87,11 @@ function StoryGraphInner({
   selectedNodeId,
   onSelect,
   onOpen,
+  onPreview,
   onConnect,
   onCopy,
+  onDelete,
+  deleteDisabled = false,
   onMoveNode,
   onMoveMany,
   onPaste,
@@ -144,6 +159,7 @@ function StoryGraphInner({
           entry: scene.entry === nodeId,
           issueCount: issuesByNode.get(nodeId) ?? 0,
           onOpen,
+          onPreview,
           onSelect,
           onQuickInsert: openQuickInsertMenu,
         },
@@ -153,6 +169,7 @@ function StoryGraphInner({
       layout?.nodes,
       onSelect,
       onOpen,
+      onPreview,
       openQuickInsertMenu,
       scene,
       selectedNodeId,
@@ -226,6 +243,43 @@ function StoryGraphInner({
   const handleNodeClick: NodeMouseHandler<StoryGraphNode> = (_event, node) => {
     setQuickInsertMenu(null);
     onSelect(node.id);
+    // Delete is handled by this pane's own key listener, so keyboard focus has
+    // to stay inside it.  React Flow already focuses the node itself; this is
+    // the fallback for a click that did not move focus (canvas chrome, or a
+    // browser that does not focus a tabbable ancestor on click).
+    const shell = graphShellRef.current;
+    if (shell !== null && !shell.contains(document.activeElement))
+      shell.focus();
+  };
+
+  /**
+   * Scoped node deletion.  Only `Delete` is a graph shortcut (Backspace never
+   * deletes a node here), the handler is bound to the graph pane rather than the
+   * window, and the selection change/deletion/undo work stays in
+   * `App.deleteNode`.  An open quick-insert menu or App dialog disables it, and
+   * editable, composing, auto-repeat and interactive focus is ignored, so a key
+   * press can never delete twice or from another workspace.
+   */
+  const handleGraphKeyDown = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ): void => {
+    if (event.key !== "Delete") return;
+    if (deleteDisabled || quickInsertMenu !== null) return;
+    if (selectedNodeId === null || scene.nodes[selectedNodeId] === undefined)
+      return;
+    if (
+      shouldIgnoreNodeDeletion({
+        target: event.target,
+        repeat: event.repeat,
+        ...imeState(event),
+      }) ||
+      isInteractiveTarget(event.target)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    onDelete(selectedNodeId);
   };
 
   useEffect(() => {
@@ -294,10 +348,12 @@ function StoryGraphInner({
   return (
     <div
       className="graph-shell"
+      onKeyDown={handleGraphKeyDown}
       onPointerMove={(event) => {
         lastPointerRef.current = { x: event.clientX, y: event.clientY };
       }}
       ref={graphShellRef}
+      tabIndex={-1}
     >
       <div className="graph-toolbar">
         <strong>{scene.id}</strong>

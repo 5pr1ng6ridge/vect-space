@@ -146,3 +146,211 @@ describe("ScriptView choice summary", () => {
     expect(screen.getByText("2 个选项 · choice.primary · 横向")).toBeTruthy();
   });
 });
+
+const selectionScene: SceneDefinition = {
+  schema_version: 2,
+  id: "main",
+  entry: "choice",
+  nodes: {
+    choice: {
+      type: "choice",
+      choices: [
+        { id: "left", label: "左分支", next: "left" },
+        { id: "right", label: "右分支", next: "right" },
+      ],
+    },
+    left: {
+      type: "say",
+      speaker: null,
+      text: "左",
+      speed_cps: null,
+      next: "finish",
+    },
+    right: {
+      type: "say",
+      speaker: null,
+      text: "右",
+      speed_cps: null,
+      next: "finish",
+    },
+    finish: { type: "end" },
+  },
+};
+
+/** Renders the script list with the graph-style selection already applied. */
+function renderList(
+  selectedNodeId: string | null,
+  options: { deleteDisabled?: boolean } = {},
+) {
+  const onDelete = vi.fn();
+  const onSelect = vi.fn();
+  const view = render(
+    <ScriptView
+      deleteDisabled={options.deleteDisabled ?? false}
+      manifest={manifest}
+      onChange={() => undefined}
+      onDelete={onDelete}
+      onInsertAfter={() => undefined}
+      onInsertBatch={() => undefined}
+      onOpenGraph={() => undefined}
+      onSelect={onSelect}
+      scene={selectionScene}
+      selectedNodeId={selectedNodeId}
+    />,
+  );
+  const root = view.container.querySelector<HTMLElement>(".script-view");
+  if (root === null) throw new Error("missing script view root");
+  return { onDelete, onSelect, root, view };
+}
+
+describe("ScriptView node deletion shortcut", () => {
+  it("focuses the scoped root and adopts the graph selection on mount", () => {
+    const { onDelete, root } = renderList("left");
+    // A graph -> script switch must leave the node the author picked selected
+    // inside the scoped list, and the key handler must already have focus.
+    expect(document.activeElement).toBe(root);
+
+    fireEvent.keyDown(root, { key: "Delete" });
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith("left");
+  });
+
+  it("deletes once per key press and stops the event from bubbling", () => {
+    const outer = vi.fn();
+    const onDelete = vi.fn();
+    const view = render(
+      <div onKeyDown={outer}>
+        <ScriptView
+          manifest={manifest}
+          onChange={() => undefined}
+          onDelete={onDelete}
+          onInsertAfter={() => undefined}
+          onInsertBatch={() => undefined}
+          onOpenGraph={() => undefined}
+          onSelect={() => undefined}
+          scene={selectionScene}
+          selectedNodeId="left"
+        />
+      </div>,
+    );
+    const list = view.container.querySelector<HTMLElement>(".script-list");
+    if (list === null) throw new Error("missing script list");
+    fireEvent.keyDown(list, { key: "Delete" });
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    // The handled shortcut must not reach an enclosing handler as well.
+    expect(outer).not.toHaveBeenCalled();
+  });
+
+  it("ignores Delete from editable and composing focus", () => {
+    const { onDelete, root, view } = renderList("left");
+    const search = within(view.container).getByLabelText("搜索脚本");
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    const inner = document.createElement("span");
+    editable.appendChild(inner);
+    root.append(editable);
+
+    fireEvent.keyDown(search, { key: "Delete" });
+    fireEvent.keyDown(search, { key: "Backspace" });
+    fireEvent.keyDown(inner, { key: "Delete" });
+    fireEvent.keyDown(root, { key: "Delete", repeat: true });
+    fireEvent.keyDown(root, { key: "Delete", keyCode: 229 });
+    fireEvent.keyDown(root, { key: "Delete", isComposing: true });
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("does nothing without a selection", () => {
+    const { onDelete, root } = renderList(null);
+    fireEvent.keyDown(root, { key: "Delete" });
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps Backspace deletion for the list itself", () => {
+    const { onDelete, root } = renderList("left");
+    fireEvent.keyDown(root, { key: "Backspace" });
+    expect(onDelete).toHaveBeenCalledWith("left");
+  });
+});
+
+describe("ScriptView interactive-control and dialog guards", () => {
+  it("ignores Delete and Backspace from row, summary and menu controls", () => {
+    const { onDelete, root, view } = renderList("left");
+    const container = view.container;
+    const rowDelete = within(container).getByLabelText("删除 left");
+    const rowInsert = within(container).getByLabelText("在 left 后插入对话");
+    const summary =
+      container.querySelector<HTMLButtonElement>(".script-summary");
+    if (summary === null) throw new Error("missing row summary button");
+
+    for (const [control, key] of [
+      [rowDelete, "Delete"],
+      [rowDelete, "Backspace"],
+      [rowInsert, "Delete"],
+      [summary, "Delete"],
+      [summary, "Backspace"],
+    ] as const) {
+      control.focus();
+      fireEvent.keyDown(control, { key });
+      expect(onDelete).not.toHaveBeenCalled();
+    }
+
+    // The scoped list itself still deletes exactly once.
+    fireEvent.keyDown(root, { key: "Delete" });
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith("left");
+  });
+
+  it("ignores destructive keys from an open insert menu", () => {
+    const { onDelete, view } = renderList("choice");
+    fireEvent.click(
+      within(view.container).getByLabelText("在 choice 后插入对话"),
+    );
+    const menu = within(view.container).getByLabelText("choice 插入出口");
+    const option = within(menu).getByRole("button", { name: /左分支/ });
+    option.focus();
+    fireEvent.keyDown(option, { key: "Delete" });
+    fireEvent.keyDown(option, { key: "Backspace" });
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("ignores destructive keys while an App dialog owns the interaction", () => {
+    const onDelete = vi.fn();
+    const props = {
+      manifest,
+      onChange: () => undefined,
+      onDelete,
+      onInsertAfter: () => undefined,
+      onInsertBatch: () => undefined,
+      onOpenGraph: () => undefined,
+      onSelect: () => undefined,
+      scene: selectionScene,
+      selectedNodeId: "left" as const,
+    };
+    const view = render(<ScriptView {...props} deleteDisabled />);
+    const root = view.container.querySelector<HTMLElement>(".script-view");
+    if (root === null) throw new Error("missing script view root");
+    root.focus();
+    fireEvent.keyDown(root, { key: "Delete" });
+    expect(onDelete).not.toHaveBeenCalled();
+
+    // Closing the dialog re-enables the shortcut for the same selection.
+    view.rerender(<ScriptView {...props} deleteDisabled={false} />);
+    fireEvent.keyDown(root, { key: "Delete" });
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith("left");
+  });
+
+  it("ignores destructive keys while the paste preview is open", () => {
+    const { onDelete, root, view } = renderList("left");
+    fireEvent.paste(root, {
+      clipboardData: {
+        getData: () => "旁白\t第一句\n旁白\t第二句",
+        types: ["text/plain"],
+      },
+    });
+    expect(within(view.container).getByLabelText("批量粘贴预览")).toBeDefined();
+
+    fireEvent.keyDown(root, { key: "Delete" });
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+});

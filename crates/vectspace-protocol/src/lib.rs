@@ -224,6 +224,12 @@ pub struct WireImportAssetRequest {
     pub file_name: Option<String>,
     #[serde(default)]
     pub inspection_id: Option<String>,
+    /// Present when this upload replaces the binary of an existing asset.
+    /// The marker must equal `id`: replacement keeps the logical ID and every
+    /// reference, while the formal path moves to a brand new file so the old
+    /// binary is never overwritten.
+    #[serde(default)]
+    pub replace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -248,6 +254,11 @@ pub struct WireImportedAsset {
     pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reused_from: Option<String>,
+    /// Relative path of the previous binary when this record replaces an
+    /// existing asset.  The old file is intentionally retained on disk as an
+    /// unregistered recovery copy and is never part of the save deletions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_from: Option<String>,
 }
 
 /// Stable error envelope returned by every Tauri command.  Keeping the code
@@ -697,6 +708,42 @@ mod tests {
         WireLoopingAudioSnapshot::export(&config).unwrap();
         WireAmbienceSnapshot::export(&config).unwrap();
         WireAudioSnapshot::export(&config).unwrap();
+    }
+
+    #[test]
+    fn wire_import_request_replacement_marker_round_trips() {
+        // An ordinary import omits the marker entirely; a replacement carries
+        // the logical id it re-points at a brand-new path.
+        let plain: WireImportAssetRequest = serde_json::from_value(serde_json::json!({
+            "id": "bg.room",
+            "kind": "background",
+            "file_name": null,
+            "inspection_id": null
+        }))
+        .unwrap();
+        assert_eq!(plain.replace_id, None);
+        let replacing: WireImportAssetRequest = serde_json::from_value(serde_json::json!({
+            "id": "bg.room",
+            "kind": "background",
+            "file_name": "room_v2.png",
+            "inspection_id": "inspect-1",
+            "replace_id": "bg.room"
+        }))
+        .unwrap();
+        assert_eq!(replacing.replace_id.as_deref(), Some("bg.room"));
+        let imported = WireImportedAsset {
+            id: "bg.room".to_owned(),
+            kind: WireAssetKind::Background,
+            path: "backgrounds/room_v2.png".to_owned(),
+            absolute_path: "C:/tmp/room_v2.png".to_owned(),
+            size_bytes: WireU64::from(12_u64),
+            token: Some("import-1".to_owned()),
+            reused_from: None,
+            replaced_from: Some("backgrounds/room.png".to_owned()),
+        };
+        let value = serde_json::to_value(imported).unwrap();
+        assert_eq!(value["replaced_from"], "backgrounds/room.png");
+        assert!(value.get("reused_from").is_none());
     }
 
     #[test]

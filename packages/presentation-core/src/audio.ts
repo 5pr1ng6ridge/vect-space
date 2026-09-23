@@ -16,6 +16,7 @@ interface PlayingLoop {
   gain: GainNode;
   loopListener: () => void;
   metadataListener: () => void;
+  endedListener: () => void;
 }
 type PlayingBgm = PlayingLoop;
 type PlayingAmbience = PlayingLoop;
@@ -1055,25 +1056,41 @@ export class AudioManager {
       gain,
       loopListener: () => undefined,
       metadataListener: () => undefined,
+      endedListener: () => undefined,
     };
+    // `timeupdate` cadence is browser-defined (typically far coarser than a
+    // frame), so a bounded loop can overshoot its end by tens of milliseconds;
+    // the `ended` fallback below is what makes an end at the media EOF safe.
     const loopListener = (): void => {
+      // Native whole-file looping is owned by `element.loop`; running the
+      // custom rewind as well truncates the tail and can seek every event.
+      if (playing.state.loop_end_ms == null) return;
       const loopStart = (playing.state.loop_start_ms ?? 0) / 1_000;
-      const loopEnd =
-        playing.state.loop_end_ms == null
-          ? element.duration
-          : playing.state.loop_end_ms / 1_000;
+      const loopEnd = playing.state.loop_end_ms / 1_000;
       if (Number.isFinite(loopEnd) && element.currentTime >= loopEnd - 0.025)
         element.currentTime = loopStart;
+    };
+    // A bounded loop whose end sits at (or past) the media length reaches the
+    // element's own EOF, where `timeupdate` stops firing and the element
+    // pauses forever. Rewind and resume, but only while this manager still
+    // owns the transport and is not globally paused.
+    const endedListener = (): void => {
+      if (playing.state.loop_end_ms == null) return;
+      if (this.#paused || !this.#isLoopOwned(playing)) return;
+      element.currentTime = (playing.state.loop_start_ms ?? 0) / 1_000;
+      void this.#startLoop(playing).catch(() => undefined);
     };
     const seekToStart = (): void => {
       element.currentTime = state.start_ms / 1_000;
     };
     element.addEventListener("timeupdate", loopListener);
+    element.addEventListener("ended", endedListener);
     element.addEventListener("loadedmetadata", seekToStart, { once: true });
     // Real media can already have metadata by the time the listener is
     // attached (notably a cached element in an unlocked browser).
     if (element.readyState >= 1) seekToStart();
     playing.loopListener = loopListener;
+    playing.endedListener = endedListener;
     playing.metadataListener = seekToStart;
     return playing;
   }
@@ -1090,6 +1107,7 @@ export class AudioManager {
     this.#cancelLoopPlay(loop);
     loop.element.pause();
     loop.element.removeEventListener("timeupdate", loop.loopListener);
+    loop.element.removeEventListener("ended", loop.endedListener);
     loop.element.removeEventListener("loadedmetadata", loop.metadataListener);
     loop.element.removeAttribute("src");
     loop.element.load();

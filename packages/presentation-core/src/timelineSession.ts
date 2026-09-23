@@ -19,7 +19,10 @@
  * - stale callbacks (a superseded load, an older video seek) never touch the
  *   replacement session, audio graph or video element,
  * - continuous video corrects drift above 50 ms; scrubbing waits for `seeked`
- *   plus a presented frame with a diagnostic timeout, and the latest seek wins.
+ *   plus a presented frame with a diagnostic timeout, and the latest seek wins,
+ * - a non-loop video window freezes on its final frame at the effective clip
+ *   end (explicit `clip_end_ms`, else the media duration) instead of playing
+ *   on and being re-seeked; a looping window wraps and survives its own EOF.
  */
 
 import {
@@ -34,6 +37,7 @@ import {
   type SceneSpriteGeometry,
 } from "./sceneFrame";
 import { TimelineClock, type TimelineOutcome } from "./timeline";
+import { evaluateVideoClip, type VideoClipPosition } from "./videoClip";
 import type { AudioDiagnostics } from "./audio";
 import type {
   SceneActiveEffects,
@@ -201,6 +205,16 @@ interface SessionVideo {
   track: VideoTrack;
   listeners: Array<() => void>;
   audioAttached: boolean;
+  /**
+   * A non-loop window was fully consumed: the element is pinned to the final
+   * frame and paused, and continuous sync must not seek its tail again.
+   */
+  atEnd: boolean;
+  /**
+   * Aborted when this element is released, so a terminal-frame refresh that is
+   * still waiting for `seeked` cannot draw into a replaced/released handle.
+   */
+  terminalRefresh: AbortController;
 }
 
 type TimelineCue = Extract<RuntimeUpdate["cues"][number], { type: "timeline" }>;
@@ -662,7 +676,7 @@ export class TimelineSession {
     const video = this.#video;
     if (video !== null) {
       if (paused) video.element.pause();
-      else void video.element.play().catch(() => undefined);
+      else if (!video.atEnd) void video.element.play().catch(() => undefined);
     }
   }
 
@@ -1119,11 +1133,13 @@ export class TimelineSession {
     };
     const onWaiting = (): void => setBuffering(true);
     const onPlaying = (): void => setBuffering(false);
+    const onEnded = (): void => this.#handleVideoEnded(element);
     for (const [name, handler] of [
       ["waiting", onWaiting],
       ["stalled", onWaiting],
       ["playing", onPlaying],
       ["canplay", onPlaying],
+      ["ended", onEnded],
     ] as const) {
       element.addEventListener(name, handler);
       listeners.push(() => element.removeEventListener(name, handler));
@@ -1134,6 +1150,8 @@ export class TimelineSession {
       track,
       listeners,
       audioAttached: false,
+      atEnd: false,
+      terminalRefresh: new AbortController(),
     };
     this.#buffering = false;
     this.#syncVideoAudio();
@@ -1169,6 +1187,18 @@ export class TimelineSession {
   async #startVideoPlayback(): Promise<void> {
     const video = this.#video;
     if (video === null) return;
+    const position = this.#videoPosition(video, this.#elapsed);
+    if (position?.atEnd) {
+      // Resuming a consumed non-loop window must not restart its tail: the
+      // element stays pinned on the final frame until a backwards seek or a
+      // replacement load resets the terminal state.
+      video.atEnd = true;
+      video.element.pause();
+      return;
+    }
+    // A fresh play clears a terminal hold left by an earlier EOF or edge of
+    // the window; the playhead is demonstrably inside the window again.
+    video.atEnd = false;
     this.#syncVideoAudio();
     video.element.playbackRate = this.#videoPlaybackRate();
     try {
@@ -1186,6 +1216,7 @@ export class TimelineSession {
     const video = this.#video;
     if (video === null) return;
     this.#video = null;
+    video.terminalRefresh.abort();
     for (const remove of video.listeners) remove();
     video.element.pause();
     video.handle.release();
@@ -1197,20 +1228,98 @@ export class TimelineSession {
   #syncVideoContinuous(elapsedMs: number): void {
     const video = this.#video;
     if (video === null) return;
-    const desired = this.#desiredVideoTime(video, elapsedMs);
-    if (desired === null) return;
+    const position = this.#videoPosition(video, elapsedMs);
+    if (position === null) return;
     const element = video.element;
     element.playbackRate = this.#videoPlaybackRate();
+    if (video.atEnd) {
+      // Sticky terminal hold, set by the effective clip end or by the media's
+      // own `ended`. Only a seek (`#syncVideo`) or a fresh `play()` resets it,
+      // so contiguous playback never restarts the tail or its audio.
+      if (!element.paused) element.pause();
+      return;
+    }
+    if (position.atEnd) {
+      this.#holdVideoTerminalFrame(video, position.desiredSeconds);
+      return;
+    }
     if (
       !this.#buffering &&
-      Math.abs(element.currentTime - desired) > VIDEO_DRIFT_THRESHOLD_MS / 1_000
+      Math.abs(element.currentTime - position.desiredSeconds) >
+        VIDEO_DRIFT_THRESHOLD_MS / 1_000
     ) {
-      element.currentTime = desired;
+      element.currentTime = position.desiredSeconds;
     }
     if (video.audioAttached) {
       this.#audio.setVideoVolume(element, this.#videoVolume());
     }
     video.handle.updateFrame();
+  }
+
+  /**
+   * The media reached its own EOF.
+   *
+   * A looping window must rewind and resume because the element's native
+   * `loop` flag is off and no further `timeupdate`/frame callback is coming.
+   * A non-loop window is terminal: hold the final frame without seeking the
+   * tail again.  Everything is guarded by ownership so a stale callback cannot
+   * revive a replaced element.
+   */
+  #handleVideoEnded(element: HTMLVideoElement): void {
+    const video = this.#video;
+    if (this.#disposed || video === null || video.element !== element) return;
+    const position = this.#videoPosition(video, this.#elapsed);
+    if (video.track.loop) {
+      element.currentTime =
+        position?.desiredSeconds ?? video.track.clip_start_ms / 1_000;
+      video.atEnd = false;
+      if (this.#playing && !this.#paused && !this.#buffering) {
+        void element.play().catch(() => undefined);
+      }
+      video.handle.updateFrame();
+      return;
+    }
+    // The media consumed its own EOF: hold the window's final frame.  The flag
+    // is sticky until a seek/play resets it, because a later streaming frame
+    // must not seek the tail back.
+    const hold =
+      position?.endSeconds ?? position?.desiredSeconds ?? element.currentTime;
+    this.#holdVideoTerminalFrame(video, hold);
+  }
+
+  /**
+   * Freezes a consumed non-loop window on its final frame.
+   *
+   * The seek to the effective window end is asynchronous, so uploading the
+   * texture right after assigning `currentTime` presents the pre-end frame;
+   * because `atEnd` is sticky, no later frame would refresh it.  The refresh
+   * therefore waits for `seeked` and is guarded by the element's own abort
+   * signal plus the current-video and terminal checks, so a teardown,
+   * replacement load or newer seek can never draw into a released handle.
+   */
+  #holdVideoTerminalFrame(video: SessionVideo, targetSeconds: number): void {
+    const element = video.element;
+    video.atEnd = true;
+    element.pause();
+    const desired = Math.max(0, targetSeconds);
+    if (Math.abs(element.currentTime - desired) <= 0.001) {
+      video.handle.updateFrame();
+      return;
+    }
+    const signal = video.terminalRefresh.signal;
+    // Attach the listener before assigning so a seek that lands synchronously
+    // (a buffered/cached frame) still settles this wait.
+    const settled = waitForSeeked(element, signal);
+    element.currentTime = desired;
+    void settled.then(() => {
+      if (signal.aborted || this.#disposed) return;
+      const current = this.#video;
+      if (current !== video || current.element !== element) return;
+      // A scrub/newer seek reset the terminal state: that path owns the frame.
+      if (!video.atEnd) return;
+      if (Math.abs(element.currentTime - desired) > 0.001) return;
+      current.handle.updateFrame();
+    });
   }
 
   /**
@@ -1225,11 +1334,23 @@ export class TimelineSession {
   ): Promise<void> {
     const video = this.#video;
     if (video === null) return;
-    const desired = this.#desiredVideoTime(video, elapsedMs);
-    if (desired === null) return;
+    const position = this.#videoPosition(video, elapsedMs);
+    if (position === null) return;
+    const desired = position.desiredSeconds;
     const element = video.element;
+    // A scrub before the window end resets the terminal hold; a scrub at or
+    // past it keeps the element paused on the final frame.
+    video.atEnd = position.atEnd;
     if (Math.abs(element.currentTime - desired) > 0.001) {
       if (mode === "playback") {
+        if (position.atEnd) {
+          // A playback-mode seek that lands on/after the window end must hold
+          // the final frame, and the sticky terminal flag means no later frame
+          // refreshes it.  The shared terminal helper waits for the seek to
+          // land before presenting it instead of uploading the pre-end frame.
+          this.#holdVideoTerminalFrame(video, desired);
+          return;
+        }
         element.currentTime = desired;
       } else {
         try {
@@ -1265,26 +1386,27 @@ export class TimelineSession {
         }
       }
     }
-    if (this.#playing && element.paused) {
+    if (position.atEnd) {
+      if (!element.paused) element.pause();
+    } else if (this.#playing && element.paused) {
       void element.play().catch(() => undefined);
     }
     video.handle.updateFrame();
   }
 
   #desiredVideoTime(video: SessionVideo, elapsedMs: number): number | null {
-    const duration = video.element.duration;
-    const clipStart = video.track.clip_start_ms / 1_000;
-    const fallbackEnd = clipStart + elapsedMs / 1_000;
-    const clipEnd =
-      (video.track.clip_end_ms ??
-        (Number.isFinite(duration) ? duration * 1_000 : fallbackEnd * 1_000)) /
-      1_000;
-    const span = Math.max(0.001, clipEnd - clipStart);
-    const raw = clipStart + elapsedMs / 1_000;
-    const desired = video.track.loop
-      ? clipStart + ((((raw - clipStart) % span) + span) % span)
-      : Math.min(clipEnd, raw);
-    return Number.isFinite(desired) ? desired : null;
+    return this.#videoPosition(video, elapsedMs)?.desiredSeconds ?? null;
+  }
+
+  /**
+   * Shared window math.  The editor's standalone preview imports the same
+   * `evaluateVideoClip` so the two stages cannot drift apart again.
+   */
+  #videoPosition(
+    video: SessionVideo,
+    elapsedMs: number,
+  ): VideoClipPosition | null {
+    return evaluateVideoClip(video.track, elapsedMs, video.element.duration);
   }
 }
 
@@ -1459,6 +1581,46 @@ function videoErrorMessage(element: HTMLVideoElement, prefix: string): string {
   return code === undefined
     ? prefix
     : `${prefix}（MediaError ${code}: ${element.error?.message ?? ""}）`;
+}
+
+/**
+ * Resolves once a seek lands (`seeked`), the element errors, the wait is
+ * aborted, or the scrub timeout elapses — whichever happens first.
+ *
+ * The wait owns its timeout instead of wrapping the listener promise in
+ * `withTimeout`: every exit path runs the same cleanup, so a timeout removes
+ * the `seeked`/`error`/`abort` listeners and clears the timer.  Wrapping it
+ * would leave those listeners attached to a media element that never settles,
+ * and repeated terminal holds would accumulate them.
+ *
+ * The caller must attach this *before* assigning `currentTime`: a seek that
+ * lands synchronously (a cached or already-presented frame) would otherwise
+ * fire before the listener exists and this wait would hang until the timeout.
+ * The wait never rejects; after a timeout the caller still presents the best
+ * available frame.
+ */
+function waitForSeeked(
+  element: HTMLVideoElement,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: number | null = null;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) window.clearTimeout(timer);
+      element.removeEventListener("error", finish);
+      element.removeEventListener("seeked", finish);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = window.setTimeout(finish, VIDEO_SCRUB_TIMEOUT_MS);
+    element.addEventListener("seeked", finish);
+    element.addEventListener("error", finish);
+    signal.addEventListener("abort", finish);
+  });
 }
 
 function withTimeout<T>(

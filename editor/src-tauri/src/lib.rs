@@ -3,7 +3,10 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,10 +22,10 @@ use ttf_parser::Face;
 use vectspace_core::{
     content::ContentCatalog,
     model::{
-        AssetKind, ButtonTemplate, ChapterMapDefinition, ChapterMapReplay, ChapterMapReveal,
-        ChoiceSnapshot, ContentManifest, CurtainFill, ImageAnimationDefinition, ResolvedAsset,
-        SceneDefinition, SceneNode, SpriteActionDefinition, StoryLocation, TimelineEvent,
-        TimelineTrack, UiMotionPreset, VariableMap,
+        AssetDefinition, AssetKind, AdvanceSource, ButtonTemplate, ChapterMapDefinition, ChapterMapReplay,
+        ChapterMapReveal, ChoiceSnapshot, ContentManifest, CurtainFill, ImageAnimationDefinition,
+        PresentationOutcome, ResolvedAsset, SceneDefinition, SceneNode, SpriteActionDefinition,
+        StoryLocation, TimelineEvent, TimelineTrack, UiMotionPreset, VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
@@ -56,6 +59,42 @@ struct EditorState {
     /// project open.
     imports: Mutex<BTreeMap<String, StagedImport>>,
     inspections: Mutex<BTreeMap<String, InspectedImport>>,
+    /// A single live editor gameplay preview.  It owns the isolated runtime so
+    /// `advance`/`choose`/`click_button`/`presentation_complete` act on the same
+    /// world the editor is showing.  It never touches the player's save or
+    /// profile: it is built with the preview override profile like
+    /// `build_node_preview`.  The lock is only ever held for synchronous runtime
+    /// work, never across a presentation await.
+    preview: Mutex<Option<LivePreviewSession>>,
+    preview_ids: AtomicU64,
+}
+
+/// Editor-owned gameplay preview session.
+///
+/// Kept alongside the catalog that produced the runtime because every
+/// `RuntimeEngine` call takes `&ContentCatalog` and the draft (including staged
+/// imports) is validated once at start.
+struct LivePreviewSession {
+    session_id: u64,
+    catalog: ContentCatalog,
+    runtime: RuntimeEngine,
+}
+
+/// Width of the per-session id window reserved for a live preview.
+///
+/// Each preview session owns a disjoint `[base, base + PREVIEW_ID_STRIDE)`
+/// range for its revision, update and cue ids.  A restarted session can then
+/// never reuse an id the presentation controller still remembers, so the
+/// controller's per-update-id de-duplication cannot confuse a new presentation
+/// with a still-settling old one.  A live preview emits far fewer than 2^20
+/// updates/cues.
+const PREVIEW_ID_STRIDE: u64 = 1 << 20;
+
+/// Base id of a session's id window, overflow checked.
+fn preview_id_namespace(session_id: u64) -> Result<u64, WireCommandError> {
+    session_id
+        .checked_mul(PREVIEW_ID_STRIDE)
+        .ok_or_else(|| internal_command_error("预览编号空间耗尽，请重启编辑器"))
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +111,16 @@ struct StagedImport {
     /// save transaction must never delete or rewrite the shared file.
     owns_staged_path: bool,
     reused_from: Option<String>,
+    /// Present when this staged record deliberately re-points an existing
+    /// asset id at a new binary.  The recorded old path is checked again at
+    /// save time and is never overwritten or deleted.
+    replaces: Option<StagedReplacement>,
+}
+
+#[derive(Debug, Clone)]
+struct StagedReplacement {
+    old_relative_path: String,
+    old_kind: AssetKind,
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +346,15 @@ struct EditorLayout {
     scenes: BTreeMap<String, SceneLayout>,
     #[serde(default)]
     timeline_previews: BTreeMap<String, TimelinePreviewSettings>,
+    /// Editor-only virtual asset folders.  Folder ids are stable, independent
+    /// of physical asset paths, and are never written into the manifest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    asset_folders: BTreeMap<String, AssetFolderLayout>,
+    /// Editor-only per-asset metadata (virtual folder, display name, hidden).
+    /// Asset ids stay the manifest keys, so a removal never invalidates the
+    /// rest of the file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    asset_metadata: BTreeMap<String, AssetLayoutMetadata>,
 }
 
 impl Default for EditorLayout {
@@ -305,6 +363,113 @@ impl Default for EditorLayout {
             version: 1,
             scenes: BTreeMap::new(),
             timeline_previews: BTreeMap::new(),
+            asset_folders: BTreeMap::new(),
+            asset_metadata: BTreeMap::new(),
+        }
+    }
+}
+
+/// One editor-only virtual folder.  `parent_id: None` is a root folder.
+/// Moving a folder only rewrites this parent link; no asset file ever moves.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssetFolderLayout {
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    name: String,
+    /// Deterministic sibling ordering.  Ties fall back to the folder id.
+    #[serde(default)]
+    order: i64,
+}
+
+/// Editor-only metadata for one existing asset id.  Every field is optional so
+/// an untouched asset stays absent from the persisted file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssetLayoutMetadata {
+    #[serde(default)]
+    folder_id: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    hidden: bool,
+}
+
+/// Folder ids share the editable-identifier contract used by assets.
+const MAX_ASSET_FOLDER_NAME_CHARS: usize = 120;
+const MAX_ASSET_FOLDER_DEPTH: usize = 32;
+
+fn valid_asset_folder_id(value: &str) -> bool {
+    valid_asset_registration_id(value)
+}
+
+fn valid_asset_folder_name(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= MAX_ASSET_FOLDER_NAME_CHARS
+        && !trimmed.chars().any(char::is_control)
+}
+
+/// A link is safe when its parent exists and the parent chain terminates at a
+/// root within the depth budget.  A self-parent or a cycle fails here.
+fn folder_reaches_root(links: &BTreeMap<String, Option<String>>, start: &str) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut current = start.to_owned();
+    for _ in 0..MAX_ASSET_FOLDER_DEPTH {
+        if !seen.insert(current.clone()) {
+            return false;
+        }
+        match links.get(&current) {
+            None | Some(None) => return true,
+            Some(Some(parent)) => current = parent.clone(),
+        }
+    }
+    false
+}
+
+/// Make a persisted layout safe to consume without ever rejecting the project.
+/// Invalid folder ids/names are dropped, dangling and cyclic parents detach to
+/// a root folder, and folder references to a removed folder are cleared.
+/// Metadata for a missing asset is kept: an asset can be restored, and an old
+/// layout must keep loading after an asset was removed.
+fn normalize_asset_layout(layout: &mut EditorLayout) {
+    let mut valid_ids = BTreeSet::new();
+    for (id, folder) in &layout.asset_folders {
+        if valid_asset_folder_id(id) && valid_asset_folder_name(&folder.name) {
+            valid_ids.insert(id.clone());
+        }
+    }
+    layout.asset_folders.retain(|id, _| valid_ids.contains(id));
+    let links = layout
+        .asset_folders
+        .iter()
+        .map(|(id, folder)| (id.clone(), folder.parent_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (id, folder) in layout.asset_folders.iter_mut() {
+        let parent_ok = folder.parent_id.as_deref().is_some_and(|parent| {
+            parent != id && valid_ids.contains(parent) && folder_reaches_root(&links, parent)
+        });
+        if !parent_ok {
+            folder.parent_id = None;
+        }
+    }
+    layout.asset_metadata.retain(|_, metadata| {
+        metadata.folder_id.is_some() || metadata.display_name.is_some() || metadata.hidden
+    });
+    for metadata in layout.asset_metadata.values_mut() {
+        if let Some(folder_id) = metadata.folder_id.clone() {
+            if !valid_ids.contains(&folder_id) {
+                metadata.folder_id = None;
+            }
+        }
+        if let Some(display_name) = metadata.display_name.clone() {
+            let trimmed = display_name.trim();
+            metadata.display_name = if valid_asset_folder_name(trimmed) {
+                Some(trimmed.to_owned())
+            } else {
+                None
+            };
         }
     }
 }
@@ -452,6 +617,11 @@ struct ImportAssetRequest {
     file_name: Option<String>,
     #[serde(default)]
     inspection_id: Option<String>,
+    /// When present the staged upload replaces the binary of an existing
+    /// asset.  The host requires it to equal `id` and validates the old
+    /// definition before issuing a token.
+    #[serde(default)]
+    replace_id: Option<String>,
 }
 
 fn empty_asset_metadata(format: &str) -> WireAssetMetadata {
@@ -974,8 +1144,13 @@ fn save_project(
             .imports
             .lock()
             .map_err(|_| internal_command_error("素材导入锁已损坏"))?;
-        staged_imports_for_request(&imports, &session.root, &request)
-            .map_err(validation_command_error)?
+        staged_imports_for_request(
+            &imports,
+            &session.root,
+            &session.catalog.manifest.assets,
+            &request,
+        )
+        .map_err(validation_command_error)?
     };
     validate_staged_imports(&staged).map_err(io_command_error)?;
     ensure_import_targets_available(&session.root, &staged).map_err(io_command_error)?;
@@ -1195,7 +1370,7 @@ fn validate_project(
     let session = guard
         .as_ref()
         .ok_or_else(|| validation_command_error("尚未打开项目"))?;
-    let staged = request_staged_imports(&state, &session.root, &request)?;
+    let staged = request_staged_imports(&state, session, &request)?;
     let asset_overrides = staged_asset_overrides(&staged);
     let scenes = validate_scene_file_set(&request.manifest, &request.scenes)
         .map_err(validation_command_error)?;
@@ -1225,44 +1400,19 @@ fn validate_project(
     Ok(analyze_catalog(&candidate))
 }
 
-/// Stage a batch of binaries without mutating the managed `assets/` tree.
-/// The returned opaque tokens are the only handles accepted by
-/// `save_project`; the WebView never gets to choose a copy destination.
-#[tauri::command]
-fn stage_asset_imports(
-    request: WireStageAssetImportsRequest,
-    app: AppHandle,
-    state: State<'_, EditorState>,
-) -> Result<Vec<WireImportedAsset>, WireCommandError> {
-    let requests = request
-        .requests
-        .into_iter()
-        .map(|item| ImportAssetRequest {
-            id: item.id,
-            kind: asset_kind_from_wire(item.kind),
-            file_name: item.file_name,
-            inspection_id: item.inspection_id,
-        })
-        .collect::<Vec<_>>();
-    if requests.is_empty() {
-        return Ok(Vec::new());
-    }
-    let session_guard = state
-        .session
-        .lock()
-        .map_err(|_| internal_command_error("编辑器项目锁已损坏"))?;
-    let session = session_guard
-        .as_ref()
-        .ok_or_else(|| validation_command_error("尚未打开项目"))?;
-
-    let mut imports = state
-        .imports
-        .lock()
-        .map_err(|_| internal_command_error("素材导入锁已损坏"))?;
-    let mut inspections = state
-        .inspections
-        .lock()
-        .map_err(|_| internal_command_error("素材检查锁已损坏"))?;
+/// Validate one import batch and stage every accepted binary.
+///
+/// Extracted from the `stage_asset_imports` command so the
+/// undo → replace another file → save flow (superseding an earlier staged
+/// replacement of the same id) can be exercised without a Tauri app handle.
+/// On any error every directory created by this call is removed.
+fn prepare_asset_imports(
+    session: &ProjectSession,
+    existing_imports: &BTreeMap<String, StagedImport>,
+    inspections: &BTreeMap<String, InspectedImport>,
+    requests: &[ImportAssetRequest],
+    batch_id: u128,
+) -> Result<Vec<StagedImport>, WireCommandError> {
     let mut ids = session
         .catalog
         .manifest
@@ -1281,19 +1431,18 @@ fn stage_asset_imports(
     // A second import dialog can be opened before the first one is saved.
     // Reserve those staged IDs and destinations as well, otherwise two
     // independent batches could collide at commit time.
-    for staged in imports
+    for staged in existing_imports
         .values()
         .filter(|item| item.project_root == session.root)
     {
         ids.insert(staged.id.clone());
         paths.insert(path_reservation_key(&staged.relative_path));
     }
-    let batch_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     let mut prepared: Vec<StagedImport> = Vec::with_capacity(requests.len());
     let mut created_staging_dirs = BTreeSet::new();
+    // One replacement per asset id per batch, and never two replacements of a
+    // matching kind/path pair.
+    let mut replacement_ids = BTreeSet::new();
 
     let preparation = (|| -> Result<(), WireCommandError> {
         for (index, item) in requests.iter().enumerate() {
@@ -1324,7 +1473,37 @@ fn stage_asset_imports(
             let (file_name, requested_relative_path) =
                 normalize_import_request_for_source(item, &source)?;
             validate_import_file_name(item.kind, &file_name, &source)?;
-            if !ids.insert(item.id.clone()) {
+            let is_replacement = item.replace_id.is_some();
+            if let Some(replace_id) = &item.replace_id {
+                if replace_id != &item.id {
+                    return Err(validation_command_error(format!(
+                        "替换标记 {replace_id} 与素材 ID {} 不一致",
+                        item.id
+                    )));
+                }
+            }
+            if is_replacement {
+                // The id already exists by definition, so the id reservation
+                // cannot be used to reject a duplicate.  Reject a second
+                // staged replacement of the same id *in this batch* instead:
+                // one batch must not contain two competing binaries for one
+                // manifest entry.  A superseded replacement from an earlier
+                // batch is allowed: the author can undo a staged replacement
+                // and stage another file without saving first.  The two
+                // tokens stay distinct (the `paths` reservation above keeps
+                // their destination files apart) and save only submits the
+                // token whose new path matches the manifest, so the obsolete
+                // token fails closed in `staged_imports_for_request`.  The
+                // superseded staged binary is intentionally left on disk for
+                // redo/history and is removed by the existing best-effort
+                // import cleanup.
+                if !replacement_ids.insert(item.id.clone()) {
+                    return Err(validation_command_error(format!(
+                        "同一批次只能替换一次素材: {}",
+                        item.id
+                    )));
+                }
+            } else if !ids.insert(item.id.clone()) {
                 return Err(validation_command_error(format!(
                     "素材 ID 已存在或重复: {}",
                     item.id
@@ -1334,32 +1513,48 @@ fn stage_asset_imports(
                 return Err(validation_command_error("选择的素材不是文件"));
             }
             validate_import_extension(item.kind, &source)?;
-            validate_import_source(item.kind, &source).map_err(|message| {
+            let source_metadata = inspect_import_source(item.kind, &source).map_err(|message| {
                 validation_command_error(format!(
                     "素材 {} 内容校验失败：{}",
                     source.display(),
                     message
                 ))
             })?;
+            let replacement = if is_replacement {
+                Some(replacement_target(
+                    session,
+                    item,
+                    &source_metadata,
+                    &requested_relative_path,
+                )?)
+            } else {
+                None
+            };
             let sha256 = hash_file_streaming(&source).map_err(io_command_error)?;
-            // Reuse a file already staged in this batch before scanning the
-            // formal catalog. This keeps two logical registrations of the
-            // same upload on one temporary binary and preserves cross-kind
-            // reuse semantics for a shared file.
-            let staged_reusable = prepared
-                .iter()
-                .find(|candidate| candidate.sha256 == sha256)
-                .map(|candidate| {
-                    (
-                        candidate.id.clone(),
-                        candidate.relative_path.clone(),
-                        candidate.staged_path.clone(),
-                    )
-                });
-            let reusable = match staged_reusable {
-                Some(candidate) => Some(candidate),
-                None => {
-                    find_reusable_asset(session, item.kind, &sha256).map_err(io_command_error)?
+            // A replacement must own a brand new staged binary even when its
+            // bytes match the registered file, so formal deduplication is
+            // skipped entirely for it.
+            let reusable = if is_replacement {
+                None
+            } else {
+                // Reuse a file already staged in this batch before scanning the
+                // formal catalog. This keeps two logical registrations of the
+                // same upload on one temporary binary and preserves cross-kind
+                // reuse semantics for a shared file.
+                let staged_reusable = prepared
+                    .iter()
+                    .find(|candidate| candidate.sha256 == sha256)
+                    .map(|candidate| {
+                        (
+                            candidate.id.clone(),
+                            candidate.relative_path.clone(),
+                            candidate.staged_path.clone(),
+                        )
+                    });
+                match staged_reusable {
+                    Some(candidate) => Some(candidate),
+                    None => find_reusable_asset(session, item.kind, &sha256)
+                        .map_err(io_command_error)?,
                 }
             };
             let token = format!("import-{batch_id}-{index}");
@@ -1408,17 +1603,67 @@ fn stage_asset_imports(
                 sha256,
                 owns_staged_path,
                 reused_from,
+                replaces: replacement.map(ReplacementTarget::into_staged),
             };
             prepared.push(staged);
         }
         Ok(())
     })();
-    if let Err(error) = preparation {
-        for directory in created_staging_dirs.iter() {
-            let _ = fs::remove_dir_all(directory);
+    match preparation {
+        Ok(()) => Ok(prepared),
+        Err(error) => {
+            for directory in created_staging_dirs.iter() {
+                let _ = fs::remove_dir_all(directory);
+            }
+            Err(error)
         }
-        return Err(error);
     }
+}
+
+/// Stage a batch of binaries without mutating the managed `assets/` tree.
+/// The returned opaque tokens are the only handles accepted by
+/// `save_project`; the WebView never gets to choose a copy destination.
+#[tauri::command]
+fn stage_asset_imports(
+    request: WireStageAssetImportsRequest,
+    app: AppHandle,
+    state: State<'_, EditorState>,
+) -> Result<Vec<WireImportedAsset>, WireCommandError> {
+    let requests = request
+        .requests
+        .into_iter()
+        .map(|item| ImportAssetRequest {
+            id: item.id,
+            kind: asset_kind_from_wire(item.kind),
+            file_name: item.file_name,
+            inspection_id: item.inspection_id,
+            replace_id: item.replace_id,
+        })
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| internal_command_error("编辑器项目锁已损坏"))?;
+    let session = session_guard
+        .as_ref()
+        .ok_or_else(|| validation_command_error("尚未打开项目"))?;
+
+    let mut imports = state
+        .imports
+        .lock()
+        .map_err(|_| internal_command_error("素材导入锁已损坏"))?;
+    let mut inspections = state
+        .inspections
+        .lock()
+        .map_err(|_| internal_command_error("素材检查锁已损坏"))?;
+    let batch_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let prepared = prepare_asset_imports(session, &imports, &inspections, &requests, batch_id)?;
 
     // All validation and copies above succeeded.  Resolve the final metadata
     // before publishing any token.  A formal reused file may disappear
@@ -1438,13 +1683,17 @@ fn stage_asset_imports(
                 size_bytes: WireU64::from(size_bytes),
                 token: Some(staged.token.clone()),
                 reused_from: staged.reused_from.clone(),
+                replaced_from: staged
+                    .replaces
+                    .as_ref()
+                    .map(|replacement| replacement.old_relative_path.clone()),
             })
         })
         .collect::<Result<Vec<_>, WireCommandError>>()
     {
         Ok(output) => output,
         Err(error) => {
-            for directory in created_staging_dirs.iter() {
+            for directory in staged_import_directories(&prepared) {
                 let _ = fs::remove_dir_all(directory);
             }
             return Err(error);
@@ -1684,7 +1933,7 @@ fn validate_import_bytes(kind: AssetKind, bytes: &[u8]) -> Result<(), String> {
 /// truncated images and malformed media reach the staged tree.  Inspection
 /// now decodes image data and parses the audio/video/font container while
 /// keeping hashing and the eventual copy streaming and bounded.
-fn validate_import_source(kind: AssetKind, source: &Path) -> Result<(), String> {
+fn inspect_import_source(kind: AssetKind, source: &Path) -> Result<WireAssetMetadata, String> {
     let expected_extension = source
         .extension()
         .and_then(|value| value.to_str())
@@ -1707,7 +1956,151 @@ fn validate_import_source(kind: AssetKind, source: &Path) -> Result<(), String> 
     if !expected_kind {
         return Err(format!("素材扩展名与 {:?} 类型不匹配", kind));
     }
-    inspect_media_source(source).map(|_| ())
+    inspect_media_source(source)
+}
+
+/// Canonical format family of an inspected media record.  `Png`/`PNG` and
+/// `Jpeg`/`JPG` must never disagree when a replacement compares formats.
+fn media_format_family(format: &str) -> Option<&'static str> {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "png" => Some("png"),
+        "jpeg" | "jpg" => Some("jpeg"),
+        "webp" => Some("webp"),
+        "ogg" => Some("ogg"),
+        "wav" => Some("wav"),
+        "mp3" => Some("mp3"),
+        "flac" => Some("flac"),
+        "mp4" => Some("mp4"),
+        "ttf" => Some("ttf"),
+        "otf" => Some("otf"),
+        _ => None,
+    }
+}
+
+fn format_family_from_path(path: &Path) -> Option<&'static str> {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .and_then(media_format_family)
+}
+
+/// Everything the staging step needs to know about an existing asset whose
+/// binary is being replaced.  `None` means an ordinary brand-new import.
+#[derive(Debug, Clone)]
+struct ReplacementTarget {
+    old_relative_path: String,
+    old_kind: AssetKind,
+}
+
+impl ReplacementTarget {
+    fn into_staged(self) -> StagedReplacement {
+        StagedReplacement {
+            old_relative_path: self.old_relative_path,
+            old_kind: self.old_kind,
+        }
+    }
+}
+
+/// Resolve and validate the existing asset a replacement request targets.
+/// The logical id and kind must match, a composite animated asset is refused
+/// with a domain explanation, the new upload must keep the registered binary's
+/// actual format family, the destination must be a *different* safe path, and
+/// an asset used as an animation frame must keep the animation's uniform
+/// pixel size.
+fn replacement_target(
+    session: &ProjectSession,
+    request: &ImportAssetRequest,
+    source_metadata: &WireAssetMetadata,
+    requested_relative_path: &str,
+) -> Result<ReplacementTarget, WireCommandError> {
+    let definition = session
+        .catalog
+        .manifest
+        .assets
+        .get(&request.id)
+        .ok_or_else(|| validation_command_error(format!("要替换的素材不存在: {}", request.id)))?;
+    if definition.kind != request.kind {
+        return Err(validation_command_error(format!(
+            "替换素材 {} 时必须保持原始类型 {:?}",
+            request.id, definition.kind
+        )));
+    }
+    if definition.animation.is_some() {
+        return Err(validation_command_error(format!(
+            "素材 {} 是合成动画，不能替换其二进制；请改换它的帧图片或重新创建动画",
+            request.id
+        )));
+    }
+    let old_relative_path = definition
+        .path
+        .as_deref()
+        .ok_or_else(|| {
+            validation_command_error(format!("素材 {} 没有可替换的静态文件", request.id))
+        })?
+        .replace('\\', "/");
+    if path_reservation_key(requested_relative_path) == path_reservation_key(&old_relative_path) {
+        return Err(validation_command_error(format!(
+            "替换素材 {} 必须写入新的文件路径，不能覆盖 {}",
+            request.id, old_relative_path
+        )));
+    }
+    let old_absolute = resolve_case_insensitive(&session.root.join("assets"), &old_relative_path)
+        .map_err(|error| {
+        validation_command_error(format!(
+            "无法定位要替换的素材文件 {}: {error}",
+            old_relative_path
+        ))
+    })?;
+    // Decode the registered binary so a renamed or re-encoded upload cannot
+    // silently change the media format behind a stable id.
+    let old_metadata = inspect_media_source(&old_absolute).ok();
+    let old_family = old_metadata
+        .as_ref()
+        .and_then(|metadata| media_format_family(&metadata.format))
+        .or_else(|| format_family_from_path(&old_absolute));
+    let new_family = media_format_family(&source_metadata.format)
+        .or_else(|| format_family_from_path(Path::new(&requested_relative_path)));
+    if old_family.is_none() || new_family.is_none() || old_family != new_family {
+        return Err(validation_command_error(format!(
+            "替换素材 {} 的实际格式必须与原文件 {} 一致（原为 {}）",
+            request.id,
+            old_relative_path,
+            old_family.unwrap_or("未知")
+        )));
+    }
+    if session
+        .catalog
+        .animations_referencing(&request.id)
+        .is_empty()
+    {
+        // Not a frame of any loop animation: geometry may change freely.
+    } else {
+        let Some((width, height)) = old_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.width.zip(metadata.height))
+        else {
+            return Err(validation_command_error(format!(
+                "素材 {} 被帧动画引用，但无法测量当前帧尺寸，替换已取消",
+                request.id
+            )));
+        };
+        let Some((new_width, new_height)) = source_metadata.width.zip(source_metadata.height)
+        else {
+            return Err(validation_command_error(format!(
+                "素材 {} 被帧动画引用，新图片缺少像素尺寸信息",
+                request.id
+            )));
+        };
+        if width != new_width || height != new_height {
+            return Err(validation_command_error(format!(
+                "素材 {} 是帧动画的一帧，新图片尺寸 {}×{} 必须与动画尺寸 {}×{} 一致",
+                request.id, new_width, new_height, width, height
+            )));
+        }
+    }
+    Ok(ReplacementTarget {
+        old_relative_path,
+        old_kind: definition.kind,
+    })
 }
 
 /// Hash a source without loading a complete video/audio file into memory.
@@ -1789,6 +2182,7 @@ fn find_reusable_asset(
 fn staged_imports_for_request(
     imports: &BTreeMap<String, StagedImport>,
     root: &Path,
+    previous_assets: &BTreeMap<String, AssetDefinition>,
     request: &SaveProjectRequest,
 ) -> Result<Vec<StagedImport>, String> {
     let mut seen = BTreeSet::new();
@@ -1816,6 +2210,24 @@ fn staged_imports_for_request(
                 != Some(staged.relative_path.clone())
         {
             return Err(format!("素材导入 {} 的类型或目标路径已被修改", staged.id));
+        }
+        if let Some(replacement) = &staged.replaces {
+            // A replacement token is only valid while the session still holds
+            // the *old* registration it was minted against.  If the old path
+            // changed (for example an undo restored a different file), the
+            // capability must fail closed instead of re-pointing the id.
+            let previous = previous_assets
+                .get(&staged.id)
+                .ok_or_else(|| format!("素材替换 {} 的原始素材已不存在", staged.id))?;
+            if previous.kind != replacement.old_kind
+                || previous.path.as_deref().map(|path| path.replace('\\', "/"))
+                    != Some(replacement.old_relative_path.clone())
+            {
+                return Err(format!(
+                    "素材 {} 自暂存替换后已被修改，请重新导入",
+                    staged.id
+                ));
+            }
         }
         output.push(staged.clone());
     }
@@ -1869,6 +2281,16 @@ fn ensure_import_targets_available(
     Ok(())
 }
 
+/// Staging directories owned by a prepared batch, used to clean up when a
+/// later step of the same batch fails.
+fn staged_import_directories(imports: &[StagedImport]) -> BTreeSet<PathBuf> {
+    imports
+        .iter()
+        .filter(|item| item.owns_staged_path)
+        .filter_map(|item| item.staged_path.parent().map(Path::to_path_buf))
+        .collect()
+}
+
 fn staged_asset_overrides(imports: &[StagedImport]) -> BTreeMap<String, PathBuf> {
     imports
         .iter()
@@ -1878,7 +2300,7 @@ fn staged_asset_overrides(imports: &[StagedImport]) -> BTreeMap<String, PathBuf>
 
 fn request_staged_imports(
     state: &EditorState,
-    root: &Path,
+    session: &ProjectSession,
     request: &SaveProjectRequest,
 ) -> Result<Vec<StagedImport>, WireCommandError> {
     let staged = {
@@ -1886,7 +2308,13 @@ fn request_staged_imports(
             .imports
             .lock()
             .map_err(|_| internal_command_error("素材导入锁已损坏"))?;
-        staged_imports_for_request(&imports, root, request).map_err(validation_command_error)?
+        staged_imports_for_request(
+            &imports,
+            &session.root,
+            &session.catalog.manifest.assets,
+            request,
+        )
+        .map_err(validation_command_error)?
     };
     validate_staged_imports(&staged).map_err(io_command_error)?;
     Ok(staged)
@@ -1964,36 +2392,7 @@ fn build_node_preview_command(
     let session = guard
         .as_mut()
         .ok_or_else(|| validation_command_error("尚未打开项目"))?;
-    let staged = request_staged_imports(state, &session.root, &request.project)?;
-    let asset_overrides = staged_asset_overrides(&staged);
-    let scenes = validate_scene_file_set(&request.project.manifest, &request.project.scenes)
-        .map_err(validation_command_error)?;
-    let ui_motions =
-        validate_ui_motion_file_set(&request.project.manifest, &request.project.ui_motions)
-            .map_err(validation_command_error)?;
-    let buttons = validate_button_file_set(&request.project.manifest, &request.project.buttons)
-        .map_err(validation_command_error)?;
-    let animations =
-        validate_animation_file_set(&request.project.manifest, &request.project.animations)
-            .map_err(validation_command_error)?;
-    let actions = validate_action_file_set(&request.project.manifest, &request.project.actions)
-        .map_err(validation_command_error)?;
-    let catalog = ContentCatalog::from_documents_with_all_documents_and_actions(
-        session.root.clone(),
-        request.project.manifest.clone(),
-        scenes,
-        ui_motions,
-        request
-            .project
-            .chapter_map
-            .as_ref()
-            .map(|file| file.definition.clone()),
-        &asset_overrides,
-        Some(buttons),
-        Some(animations),
-        Some(actions),
-    )
-    .map_err(validation_command_error)?;
+    let catalog = build_preview_catalog(state, session, &request.project)?;
     // Preview metadata used to be collected from the story entry and can
     // therefore contain stale decisions from earlier Scenes. A node preview
     // owns only the path from its own Scene entry to the target.
@@ -2072,6 +2471,415 @@ fn build_node_preview_command(
             trace: Vec::new(),
         }),
     }
+}
+
+/// Build the runtime catalog for an editor preview from the *current draft*
+/// request (staged imports included).  `build_node_preview` and the live
+/// gameplay session share this exact validation path so a preview can never run
+/// against a different world than the one the editor is editing.
+fn build_preview_catalog(
+    state: &EditorState,
+    session: &ProjectSession,
+    project: &SaveProjectRequest,
+) -> Result<ContentCatalog, WireCommandError> {
+    let staged = request_staged_imports(state, session, project)?;
+    let asset_overrides = staged_asset_overrides(&staged);
+    let scenes = validate_scene_file_set(&project.manifest, &project.scenes)
+        .map_err(validation_command_error)?;
+    let ui_motions = validate_ui_motion_file_set(&project.manifest, &project.ui_motions)
+        .map_err(validation_command_error)?;
+    let buttons = validate_button_file_set(&project.manifest, &project.buttons)
+        .map_err(validation_command_error)?;
+    let animations = validate_animation_file_set(&project.manifest, &project.animations)
+        .map_err(validation_command_error)?;
+    let actions = validate_action_file_set(&project.manifest, &project.actions)
+        .map_err(validation_command_error)?;
+    ContentCatalog::from_documents_with_all_documents_and_actions(
+        session.root.clone(),
+        project.manifest.clone(),
+        scenes,
+        ui_motions,
+        project.chapter_map.as_ref().map(|file| file.definition.clone()),
+        &asset_overrides,
+        Some(buttons),
+        Some(animations),
+        Some(actions),
+    )
+    .map_err(validation_command_error)
+}
+
+// -- live gameplay preview session -----------------------------------------
+//
+// The editor can run one real gameplay preview at a time.  The session owns an
+// isolated `RuntimeEngine` built from the current draft with
+// `with_preview_overrides`, which never touches the player's profile or save.
+// Every mutating request carries the session id (generation) so a late reply or
+// a stop/ack from a replaced session is rejected instead of acting on the new
+// world.  The lock is only held for synchronous runtime work, never across a
+// presentation await.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PreviewStartMode {
+    /// Start at the scene's declared entry.
+    Scene,
+    /// Reconstruct the target by replaying the scene path from its entry,
+    /// returning `NeedsChoice` instead of guessing a branch.
+    Node,
+    /// Explicit fallback: reset to the scene's declared defaults and start
+    /// directly at the target node without executing any predecessor.
+    ResetNode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewSessionStartRequest {
+    project: SaveProjectRequest,
+    mode: PreviewStartMode,
+    scene_id: String,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    variable_overrides: WireVariableMap,
+    #[serde(default)]
+    choices: Vec<PreviewChoiceDecision>,
+}
+
+#[derive(Debug, Serialize)]
+#[allow(clippy::large_enum_variant)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PreviewSessionStartResult {
+    Started {
+        session_id: WireU64,
+        update: WireRuntimeUpdate,
+        assets: Vec<ResolvedAsset>,
+    },
+    NeedsChoice {
+        location: StoryLocation,
+        visit: usize,
+        choices: Vec<ChoiceSnapshot>,
+        trace: Vec<StoryLocation>,
+    },
+    Unreachable {
+        message: String,
+        trace: Vec<StoryLocation>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewSessionAdvanceRequest {
+    session_id: WireU64,
+    expected_revision: WireU64,
+    source: AdvanceSource,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewSessionChooseRequest {
+    session_id: WireU64,
+    expected_revision: WireU64,
+    choice_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewSessionClickButtonRequest {
+    session_id: WireU64,
+    expected_revision: WireU64,
+    instance_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewSessionAckRequest {
+    session_id: WireU64,
+    update_id: WireU64,
+    outcome: PresentationOutcome,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewSessionStopRequest {
+    session_id: WireU64,
+}
+
+/// Lock the live preview and reject a request that does not belong to it.
+fn with_preview_session<T>(
+    state: &EditorState,
+    session_id: &WireU64,
+    run: impl FnOnce(&mut LivePreviewSession) -> Result<T, WireCommandError>,
+) -> Result<T, WireCommandError> {
+    let expected = session_id
+        .parse()
+        .map_err(|_| validation_command_error("无效的预览会话编号"))?;
+    let mut guard = state
+        .preview
+        .lock()
+        .map_err(|_| internal_command_error("预览会话锁已损坏"))?;
+    let session = guard.as_mut().ok_or_else(|| validation_command_error("预览会话不存在"))?;
+    if session.session_id != expected {
+        return Err(validation_command_error("预览会话已过期，请重新开始预览"));
+    }
+    run(session)
+}
+
+#[tauri::command]
+fn preview_session_start(
+    request: PreviewSessionStartRequest,
+    state: State<'_, EditorState>,
+) -> Result<PreviewSessionStartResult, WireCommandError> {
+    preview_session_start_command(request, &state)
+}
+
+fn preview_session_start_command(
+    request: PreviewSessionStartRequest,
+    state: &EditorState,
+) -> Result<PreviewSessionStartResult, WireCommandError> {
+    if request.mode != PreviewStartMode::Scene && request.node_id.is_none() {
+        return Err(validation_command_error("未选择起始节点"));
+    }
+    // Allocate the session id and its id window *before* any reconstruction so
+    // the runtime's update/cue/revision namespaces are unique for this session
+    // and can never collide with a still-settling previous session.
+    let session_id = state
+        .preview_ids
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1)
+        .max(1);
+    let namespace = preview_id_namespace(session_id)?;
+    // Build the draft catalog first, then drop the project lock before touching
+    // the live-preview slot.  An invalid draft therefore fails here and cannot
+    // replace or half-install a running preview.
+    let catalog = {
+        let mut guard = state
+            .session
+            .lock()
+            .map_err(|_| internal_command_error("编辑器项目锁已损坏"))?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| validation_command_error("尚未打开项目"))?;
+        build_preview_catalog(state, session, &request.project)?
+    };
+    let variable_overrides = variable_map_from_wire(request.variable_overrides.clone())
+        .map_err(validation_command_error)?;
+    let mut runtime = RuntimeEngine::with_preview_overrides(&catalog, &variable_overrides)
+        .map_err(validation_command_error)?;
+    runtime.prepare_session_ids(namespace, namespace, namespace);
+    // A node preview only owns the path from its own Scene entry; choices from
+    // other scenes are stale metadata and are ignored.
+    let decisions = request
+        .choices
+        .iter()
+        .filter(|choice| choice.scene_id == request.scene_id)
+        .map(|choice| CorePreviewChoiceDecision {
+            scene_id: choice.scene_id.clone(),
+            node_id: choice.node_id.clone(),
+            visit: choice.visit,
+            choice_id: choice.choice_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let update = match request.mode {
+        PreviewStartMode::Scene => runtime
+            .start_scene_preview(&catalog, &request.scene_id)
+            .map_err(validation_command_error)?,
+        PreviewStartMode::Node => {
+            let target = StoryLocation {
+                scene_id: request.scene_id.clone(),
+                node_id: request.node_id.clone().unwrap_or_default(),
+            };
+            match runtime.preview_to_from_scene_entry(
+                &catalog,
+                &request.scene_id,
+                &target,
+                &decisions,
+            ) {
+                Ok(PreviewRunResult::Ready { .. }) => runtime
+                    .preview_enter_current_node(&catalog)
+                    .map_err(validation_command_error)?,
+                Ok(PreviewRunResult::NeedsChoice {
+                    location,
+                    visit,
+                    choices,
+                    trace,
+                }) => {
+                    return Ok(PreviewSessionStartResult::NeedsChoice {
+                        location,
+                        visit,
+                        choices,
+                        trace,
+                    });
+                }
+                Ok(PreviewRunResult::Unreachable { message, trace }) => {
+                    return Ok(PreviewSessionStartResult::Unreachable { message, trace });
+                }
+                Err(error) => {
+                    return Ok(PreviewSessionStartResult::Unreachable {
+                        message: error.to_string(),
+                        trace: Vec::new(),
+                    });
+                }
+            }
+        }
+        PreviewStartMode::ResetNode => runtime
+            .start_node_preview(
+                &catalog,
+                &request.scene_id,
+                &request.node_id.clone().unwrap_or_default(),
+            )
+            .map_err(validation_command_error)?,
+    };
+    let assets = catalog
+        .resolve_assets(&catalog.asset_ids())
+        .map_err(validation_command_error)?;
+    let mut guard = state
+        .preview
+        .lock()
+        .map_err(|_| internal_command_error("预览会话锁已损坏"))?;
+    *guard = Some(LivePreviewSession {
+        session_id,
+        catalog,
+        runtime,
+    });
+    Ok(PreviewSessionStartResult::Started {
+        session_id: WireU64::from(session_id),
+        update: update.into(),
+        assets,
+    })
+}
+
+#[tauri::command]
+fn preview_session_advance(
+    request: PreviewSessionAdvanceRequest,
+    state: State<'_, EditorState>,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    preview_session_advance_command(request, &state)
+}
+
+fn preview_session_advance_command(
+    request: PreviewSessionAdvanceRequest,
+    state: &EditorState,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let revision = request
+        .expected_revision
+        .parse()
+        .map_err(|_| validation_command_error("无效的修订号"))?;
+    with_preview_session(state, &request.session_id, |session| {
+        session
+            .runtime
+            .advance(&session.catalog, revision, request.source)
+            .map(Into::into)
+            .map_err(runtime_command_error)
+    })
+}
+
+#[tauri::command]
+fn preview_session_choose(
+    request: PreviewSessionChooseRequest,
+    state: State<'_, EditorState>,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    preview_session_choose_command(request, &state)
+}
+
+fn preview_session_choose_command(
+    request: PreviewSessionChooseRequest,
+    state: &EditorState,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let revision = request
+        .expected_revision
+        .parse()
+        .map_err(|_| validation_command_error("无效的修订号"))?;
+    with_preview_session(state, &request.session_id, |session| {
+        session
+            .runtime
+            .choose(&session.catalog, &request.choice_id, revision)
+            .map(Into::into)
+            .map_err(runtime_command_error)
+    })
+}
+
+#[tauri::command]
+fn preview_session_click_button(
+    request: PreviewSessionClickButtonRequest,
+    state: State<'_, EditorState>,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    preview_session_click_button_command(request, &state)
+}
+
+fn preview_session_click_button_command(
+    request: PreviewSessionClickButtonRequest,
+    state: &EditorState,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let revision = request
+        .expected_revision
+        .parse()
+        .map_err(|_| validation_command_error("无效的修订号"))?;
+    with_preview_session(state, &request.session_id, |session| {
+        session
+            .runtime
+            .click_button(&session.catalog, &request.instance_id, revision)
+            .map(Into::into)
+            .map_err(runtime_command_error)
+    })
+}
+
+#[tauri::command]
+fn preview_session_presentation_complete(
+    request: PreviewSessionAckRequest,
+    state: State<'_, EditorState>,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    preview_session_presentation_complete_command(request, &state)
+}
+
+fn preview_session_presentation_complete_command(
+    request: PreviewSessionAckRequest,
+    state: &EditorState,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let update_id = request
+        .update_id
+        .parse()
+        .map_err(|_| validation_command_error("无效的 update 编号"))?;
+    with_preview_session(state, &request.session_id, |session| {
+        session
+            .runtime
+            .presentation_complete(&session.catalog, update_id, request.outcome)
+            .map(Into::into)
+            .map_err(runtime_command_error)
+    })
+}
+
+/// Stop the live preview and release its runtime.
+///
+/// A stop from a replaced session is a no-op that never tears down the newer
+/// preview: only the matching session id may clear the slot.
+#[tauri::command]
+fn preview_session_stop(
+    request: PreviewSessionStopRequest,
+    state: State<'_, EditorState>,
+) -> Result<bool, WireCommandError> {
+    preview_session_stop_command(request, &state)
+}
+
+fn preview_session_stop_command(
+    request: PreviewSessionStopRequest,
+    state: &EditorState,
+) -> Result<bool, WireCommandError> {
+    let expected = request
+        .session_id
+        .parse()
+        .map_err(|_| validation_command_error("无效的预览会话编号"))?;
+    let mut guard = state
+        .preview
+        .lock()
+        .map_err(|_| internal_command_error("预览会话锁已损坏"))?;
+    if guard
+        .as_ref()
+        .is_some_and(|session| session.session_id == expected)
+    {
+        *guard = None;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn resolve_content_root(selected: &Path) -> Result<PathBuf, std::io::Error> {
@@ -2249,10 +3057,13 @@ fn read_layout(root: &Path) -> Result<EditorLayout, String> {
         return Ok(EditorLayout::default());
     }
     let bytes = fs::read(&path).map_err(display_error)?;
-    let layout: EditorLayout = serde_json::from_slice(&bytes).map_err(display_error)?;
+    let mut layout: EditorLayout = serde_json::from_slice(&bytes).map_err(display_error)?;
     if layout.version != 1 {
         return Err(format!("不支持编辑器布局版本 {}", layout.version));
     }
+    // A hand-edited or half-written layout must not make the whole project
+    // unopenable; repair the editor-only asset metadata instead.
+    normalize_asset_layout(&mut layout);
     Ok(layout)
 }
 
@@ -4091,6 +4902,18 @@ fn internal_command_error(error: impl std::fmt::Display) -> WireCommandError {
     command_error(WireCommandErrorCode::Internal, error)
 }
 
+/// Map a runtime rejection to the wire error the editor UI understands.  A
+/// stale revision is reported as `StaleSession` so the preview can resync
+/// instead of surfacing it as a generic content error.
+fn runtime_command_error(error: vectspace_core::runtime::RuntimeError) -> WireCommandError {
+    use vectspace_core::runtime::RuntimeError;
+    let code = match error {
+        RuntimeError::StaleRevision { .. } => WireCommandErrorCode::StaleSession,
+        _ => WireCommandErrorCode::Runtime,
+    };
+    command_error(code, error)
+}
+
 #[cfg(windows)]
 fn disable_browser_features<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
@@ -4138,6 +4961,12 @@ pub fn run() {
             inspect_asset_imports,
             stage_asset_imports,
             build_node_preview,
+            preview_session_start,
+            preview_session_advance,
+            preview_session_choose,
+            preview_session_click_button,
+            preview_session_presentation_complete,
+            preview_session_stop,
         ])
         .run(tauri::generate_context!())
         .expect("VECTSPACE Story Editor failed to start");
@@ -4241,6 +5070,213 @@ mod tests {
             response["update"]["snapshot"]["prompt"]["layout"]["direction"],
             "vertical"
         );
+    }
+
+    fn editor_state_with_request(_project: &serde_json::Value) -> EditorState {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let fingerprint = project_fingerprint(&root, &catalog.manifest).unwrap();
+        let state = EditorState::default();
+        state.session.lock().unwrap().replace(ProjectSession {
+            root,
+            catalog,
+            fingerprint,
+            document_models: BTreeMap::new(),
+        });
+        state
+    }
+
+    #[test]
+    fn preview_session_runs_a_live_draft_and_rejects_stale_generations() {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let fingerprint = project_fingerprint(&root, &catalog.manifest).unwrap();
+        let payload = project_payload(
+            &root,
+            &catalog,
+            EditorLayout::default(),
+            fingerprint.clone(),
+        )
+        .unwrap();
+        let project = serde_json::to_value(&payload).unwrap();
+        let state = editor_state_with_request(&project);
+        let mut project = project;
+        {
+            let object = project.as_object_mut().unwrap();
+            object.remove("root");
+            object.remove("assets");
+            object.remove("diagnostics");
+            let wire_fingerprint = object.remove("fingerprint").unwrap();
+            object.insert("expected_fingerprint".to_owned(), wire_fingerprint);
+            object.insert("import_tokens".to_owned(), serde_json::json!([]));
+        }
+
+        let start: PreviewSessionStartRequest = serde_json::from_value(serde_json::json!({
+            "project": project,
+            "mode": "node",
+            "scene_id": "prologue",
+            "node_id": "route_choice",
+            "choices": [],
+            "variable_overrides": {}
+        }))
+        .unwrap();
+        let started =
+            serde_json::to_value(preview_session_start_command(start, &state).unwrap()).unwrap();
+        assert_eq!(started["status"], "started");
+        assert_eq!(started["update"]["snapshot"]["prompt"]["kind"], "choice");
+        // The start response carries the resolved assets the surface needs.
+        assert!(!started["assets"].as_array().unwrap().is_empty());
+        let session_id = started["session_id"].as_str().unwrap().to_owned();
+        let revision = started["update"]["snapshot"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // A stale session id can never act on the replacement session.
+        let stale: PreviewSessionAdvanceRequest = serde_json::from_value(serde_json::json!({
+            "session_id": "999999",
+            "expected_revision": revision,
+            "source": "manual"
+        }))
+        .unwrap();
+        let error = preview_session_advance_command(stale, &state).unwrap_err();
+        assert_eq!(error.code, WireCommandErrorCode::Validation);
+
+        // A stale stop is a no-op that leaves the live session running.
+        let stale_stop: PreviewSessionStopRequest =
+            serde_json::from_value(serde_json::json!({ "session_id": "999999" })).unwrap();
+        assert!(!preview_session_stop_command(stale_stop, &state).unwrap());
+
+        // The matching command advances the same world.
+        let choice_id = started["update"]["snapshot"]["prompt"]["choices"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let choose: PreviewSessionChooseRequest = serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "expected_revision": revision,
+            "choice_id": choice_id
+        }))
+        .unwrap();
+        let update = preview_session_choose_command(choose, &state).unwrap();
+        assert!(
+            update.snapshot.revision.parse().unwrap() > revision.parse::<u64>().unwrap()
+        );
+
+        // The matching stop releases the runtime; there is no leaked session.
+        let stop: PreviewSessionStopRequest =
+            serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap();
+        assert!(preview_session_stop_command(stop, &state).unwrap());
+        assert!(state.preview.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_session_rejects_an_invalid_draft_without_installing_a_session() {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let fingerprint = project_fingerprint(&root, &catalog.manifest).unwrap();
+        let payload = project_payload(
+            &root,
+            &catalog,
+            EditorLayout::default(),
+            fingerprint.clone(),
+        )
+        .unwrap();
+        let state = editor_state_with_request(&serde_json::to_value(&payload).unwrap());
+        let mut project = serde_json::to_value(&payload).unwrap();
+        {
+            let object = project.as_object_mut().unwrap();
+            object.remove("root");
+            object.remove("assets");
+            object.remove("diagnostics");
+            let wire_fingerprint = object.remove("fingerprint").unwrap();
+            object.insert("expected_fingerprint".to_owned(), wire_fingerprint);
+            object.insert("import_tokens".to_owned(), serde_json::json!([]));
+        }
+        // An unknown node makes the Rust scene validator fail before any
+        // runtime is built, so no partially installed session can exist.
+        let start: PreviewSessionStartRequest = serde_json::from_value(serde_json::json!({
+            "project": project,
+            "mode": "reset_node",
+            "scene_id": "prologue",
+            "node_id": "does_not_exist",
+            "choices": [],
+            "variable_overrides": {}
+        }))
+        .unwrap();
+        let error = preview_session_start_command(start, &state).unwrap_err();
+        assert_ne!(error.code, WireCommandErrorCode::StaleSession);
+        assert!(state.preview.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_id_namespace_is_disjoint_and_overflow_checked() {
+        assert_eq!(preview_id_namespace(1).unwrap(), PREVIEW_ID_STRIDE);
+        assert_eq!(preview_id_namespace(2).unwrap(), 2 * PREVIEW_ID_STRIDE);
+        assert!(preview_id_namespace(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn preview_session_allocates_a_fresh_id_namespace_per_start() {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let fingerprint = project_fingerprint(&root, &catalog.manifest).unwrap();
+        let payload = project_payload(
+            &root,
+            &catalog,
+            EditorLayout::default(),
+            fingerprint.clone(),
+        )
+        .unwrap();
+        let state = editor_state_with_request(&serde_json::to_value(&payload).unwrap());
+        let mut project = serde_json::to_value(&payload).unwrap();
+        {
+            let object = project.as_object_mut().unwrap();
+            object.remove("root");
+            object.remove("assets");
+            object.remove("diagnostics");
+            let wire_fingerprint = object.remove("fingerprint").unwrap();
+            object.insert("expected_fingerprint".to_owned(), wire_fingerprint);
+            object.insert("import_tokens".to_owned(), serde_json::json!([]));
+        }
+        let start_once = |state: &EditorState| {
+            let start: PreviewSessionStartRequest =
+                serde_json::from_value(serde_json::json!({
+                    "project": project.clone(),
+                    "mode": "scene",
+                    "scene_id": "prologue",
+                    "choices": [],
+                    "variable_overrides": {}
+                }))
+                .unwrap();
+            serde_json::to_value(preview_session_start_command(start, state).unwrap()).unwrap()
+        };
+        let parse = |value: &serde_json::Value, path: &[&str]| -> u64 {
+            let mut current = value;
+            for key in path {
+                current = &current[*key];
+            }
+            current.as_str().unwrap().parse().unwrap()
+        };
+
+        let first = start_once(&state);
+        let first_session = parse(&first, &["session_id"]);
+        let first_update = parse(&first, &["update", "update_id"]);
+        let first_revision = parse(&first, &["update", "snapshot", "revision"]);
+        let base = preview_id_namespace(first_session).unwrap();
+        assert_eq!(first_update, base);
+        assert!(first_revision >= base && first_revision < base + PREVIEW_ID_STRIDE);
+
+        let second = start_once(&state);
+        let second_session = parse(&second, &["session_id"]);
+        let second_update = parse(&second, &["update", "update_id"]);
+        assert_ne!(second_session, first_session);
+        assert_ne!(second_update, first_update);
+        let second_base = preview_id_namespace(second_session).unwrap();
+        assert!(second_update >= second_base);
+        // The windows are disjoint, so a restarted session can never reuse an
+        // update id the presentation controller still remembers.
+        assert!(second_base >= base + PREVIEW_ID_STRIDE);
     }
 
     #[test]
@@ -4568,6 +5604,7 @@ mod tests {
                 sha256: hash_bytes(b"other"),
                 owns_staged_path: true,
                 reused_from: None,
+                replaces: None,
             },
         );
 
@@ -4968,5 +6005,583 @@ mod tests {
         // The delete is not lost, only deferred to the next save, whose fresh
         // cache sees the path as missing and fails closed on the mismatch.
         assert_ne!(first, project_fingerprint(root, &manifest).unwrap());
+    }
+
+    /* ---------------------------------------------------------------- *
+     * Slice 2: editor-only asset metadata and staged same-id replacement.
+     * ---------------------------------------------------------------- */
+
+    fn write_test_png(path: &Path, width: u32, height: u32) {
+        use image::{codecs::png::PngEncoder, ImageEncoder, Rgba, RgbaImage};
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let image = RgbaImage::from_pixel(width, height, Rgba([9, 21, 33, 255]));
+        PngEncoder::new(File::create(path).unwrap())
+            .write_image(
+                image.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+    }
+
+    fn write_test_jpeg(path: &Path, width: u32, height: u32) {
+        use image::{codecs::jpeg::JpegEncoder, ImageEncoder, Rgb, RgbImage};
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let image = RgbImage::from_pixel(width, height, Rgb([9, 21, 33]));
+        JpegEncoder::new(File::create(path).unwrap())
+            .write_image(
+                image.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+    }
+
+    /// Minimal valid project: one real 8×8 background PNG, one scene.
+    fn seed_asset_project(root: &Path) {
+        fs::create_dir_all(root.join("scenes")).unwrap();
+        write_test_png(&root.join("assets/backgrounds/room.png"), 8, 8);
+        fs::write(
+            root.join("manifest.yaml"),
+            b"schema_version: 2\ncontent_version: test\nentry_scene: main\ndefault_locale: zh-CN\nassets:\n  bg.room:\n    kind: background\n    path: backgrounds/room.png\nscenes:\n  - scenes/main.yaml\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("scenes/main.yaml"),
+            b"schema_version: 2\nid: main\nentry: end\nnodes:\n  end:\n    type: end\n",
+        )
+        .unwrap();
+    }
+
+    /// Same project plus a two-frame loop animation over `bg.room`.
+    fn seed_animated_asset_project(root: &Path) {
+        fs::create_dir_all(root.join("scenes")).unwrap();
+        fs::create_dir_all(root.join("animations")).unwrap();
+        write_test_png(&root.join("assets/backgrounds/room.png"), 8, 8);
+        write_test_png(&root.join("assets/backgrounds/room2.png"), 8, 8);
+        fs::write(
+            root.join("manifest.yaml"),
+            b"schema_version: 2\ncontent_version: test\nentry_scene: main\ndefault_locale: zh-CN\nassets:\n  bg.room:\n    kind: background\n    path: backgrounds/room.png\n  bg.room2:\n    kind: background\n    path: backgrounds/room2.png\n  anim.blink:\n    kind: background\n    animation: blink\nscenes:\n  - scenes/main.yaml\nanimations:\n  - animations/blink.yaml\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("scenes/main.yaml"),
+            b"schema_version: 2\nid: main\nentry: end\nnodes:\n  end:\n    type: end\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("animations/blink.yaml"),
+            b"schema_version: 1\nid: blink\nframes:\n  - asset: bg.room\n    duration_ms: 100\n  - asset: bg.room2\n    duration_ms: 100\n",
+        )
+        .unwrap();
+    }
+
+    fn asset_session(root: &Path) -> ProjectSession {
+        let root = root.canonicalize().unwrap();
+        ProjectSession {
+            catalog: ContentCatalog::from_root(root.clone()).unwrap(),
+            root,
+            fingerprint: String::new(),
+            document_models: BTreeMap::new(),
+        }
+    }
+
+    fn replacement_request(id: &str, kind: AssetKind, file_name: &str) -> ImportAssetRequest {
+        ImportAssetRequest {
+            id: id.to_owned(),
+            kind,
+            file_name: Some(file_name.to_owned()),
+            inspection_id: None,
+            replace_id: Some(id.to_owned()),
+        }
+    }
+
+    #[test]
+    fn layout_without_asset_metadata_loads_and_stays_minimal() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("manifest.yaml"), b"manifest").unwrap();
+        fs::create_dir_all(root.join(".vectspace")).unwrap();
+        fs::write(
+            root.join(LAYOUT_RELATIVE_PATH),
+            br#"{"version":1,"scenes":{"main":{"nodes":{},"viewport":null}}}"#,
+        )
+        .unwrap();
+        let layout = read_layout(root).unwrap();
+        assert!(layout.asset_folders.is_empty());
+        assert!(layout.asset_metadata.is_empty());
+        assert!(layout.scenes.contains_key("main"));
+        // Re-serializing an untouched old layout must not invent the new
+        // editor-only fields.
+        let text = serde_json::to_string(&layout).unwrap();
+        assert!(!text.contains("asset_folders"), "{text}");
+        assert!(!text.contains("asset_metadata"), "{text}");
+        // A missing layout file keeps the historical default.
+        assert_eq!(
+            read_layout(&root.join("missing")).unwrap().version,
+            EditorLayout::default().version
+        );
+    }
+
+    #[test]
+    fn layout_normalization_repairs_cycles_and_keeps_orphan_metadata() {
+        let mut layout = EditorLayout::default();
+        layout.asset_folders.insert(
+            "a".to_owned(),
+            AssetFolderLayout {
+                parent_id: Some("b".to_owned()),
+                name: "A".to_owned(),
+                order: 0,
+            },
+        );
+        layout.asset_folders.insert(
+            "b".to_owned(),
+            AssetFolderLayout {
+                parent_id: Some("a".to_owned()),
+                name: "B".to_owned(),
+                order: 0,
+            },
+        );
+        layout.asset_folders.insert(
+            "dangling".to_owned(),
+            AssetFolderLayout {
+                parent_id: Some("missing".to_owned()),
+                name: "D".to_owned(),
+                order: 1,
+            },
+        );
+        layout.asset_folders.insert(
+            "bad id".to_owned(),
+            AssetFolderLayout {
+                parent_id: None,
+                name: "X".to_owned(),
+                order: 2,
+            },
+        );
+        layout.asset_folders.insert(
+            "noname".to_owned(),
+            AssetFolderLayout {
+                parent_id: None,
+                name: "   ".to_owned(),
+                order: 3,
+            },
+        );
+        layout.asset_metadata.insert(
+            "bg.gone".to_owned(),
+            AssetLayoutMetadata {
+                folder_id: Some("missing_folder".to_owned()),
+                display_name: Some("  旧图  ".to_owned()),
+                hidden: true,
+            },
+        );
+        layout.asset_metadata.insert(
+            "bg.kept".to_owned(),
+            AssetLayoutMetadata {
+                folder_id: Some("a".to_owned()),
+                display_name: None,
+                hidden: false,
+            },
+        );
+        layout
+            .asset_metadata
+            .insert("bg.empty".to_owned(), AssetLayoutMetadata::default());
+        normalize_asset_layout(&mut layout);
+
+        assert_eq!(layout.asset_folders["a"].parent_id, None);
+        assert_eq!(layout.asset_folders["b"].parent_id, None);
+        assert_eq!(layout.asset_folders["dangling"].parent_id, None);
+        assert!(!layout.asset_folders.contains_key("bad id"));
+        assert!(!layout.asset_folders.contains_key("noname"));
+        // A removed asset keeps its metadata harmless instead of failing the
+        // whole layout, but the folder link to a dropped/unknown folder is
+        // cleared while a live folder link survives.
+        let metadata = &layout.asset_metadata["bg.gone"];
+        assert_eq!(metadata.display_name.as_deref(), Some("旧图"));
+        assert!(metadata.folder_id.is_none());
+        assert!(metadata.hidden);
+        assert_eq!(
+            layout.asset_metadata["bg.kept"].folder_id.as_deref(),
+            Some("a")
+        );
+        assert!(!layout.asset_metadata.contains_key("bg.empty"));
+    }
+
+    #[test]
+    fn asset_folders_and_metadata_round_trip_through_the_layout_file() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("manifest.yaml"), b"manifest").unwrap();
+        fs::create_dir_all(root.join(".vectspace")).unwrap();
+        let mut layout = EditorLayout::default();
+        layout.asset_folders.insert(
+            "bg.root".to_owned(),
+            AssetFolderLayout {
+                parent_id: None,
+                name: "背景".to_owned(),
+                order: 0,
+            },
+        );
+        layout.asset_metadata.insert(
+            "bg.room".to_owned(),
+            AssetLayoutMetadata {
+                folder_id: Some("bg.root".to_owned()),
+                display_name: Some("客厅".to_owned()),
+                hidden: true,
+            },
+        );
+        fs::write(
+            root.join(LAYOUT_RELATIVE_PATH),
+            serde_json::to_vec(&layout).unwrap(),
+        )
+        .unwrap();
+        let reopened = read_layout(root).unwrap();
+        assert_eq!(reopened.asset_folders["bg.root"].name, "背景");
+        assert_eq!(
+            reopened.asset_metadata["bg.room"].display_name.as_deref(),
+            Some("客厅")
+        );
+        assert!(reopened.asset_metadata["bg.room"].hidden);
+    }
+
+    #[test]
+    fn replacement_target_requires_a_new_path_and_matching_actual_format() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        seed_asset_project(root);
+        let session = asset_session(root);
+        let incoming = root.join("incoming");
+        write_test_png(&incoming.join("room_v2.png"), 8, 8);
+        write_test_jpeg(&incoming.join("room_v2.jpg"), 8, 8);
+        let png_metadata = inspect_media_source(&incoming.join("room_v2.png")).unwrap();
+        let jpeg_metadata = inspect_media_source(&incoming.join("room_v2.jpg")).unwrap();
+
+        // Same id, same kind, same actual format, brand-new path.
+        let accepted = replacement_target(
+            &session,
+            &replacement_request("bg.room", AssetKind::Background, "room_v2.png"),
+            &png_metadata,
+            "backgrounds/room_v2.png",
+        )
+        .unwrap();
+        assert_eq!(accepted.old_relative_path, "backgrounds/room.png");
+        assert_eq!(accepted.old_kind, AssetKind::Background);
+
+        // The registered destination is never overwritten.
+        let same_path = replacement_target(
+            &session,
+            &replacement_request("bg.room", AssetKind::Background, "room.png"),
+            &png_metadata,
+            "backgrounds/room.png",
+        )
+        .unwrap_err();
+        assert!(same_path.message.contains("新的文件路径"), "{same_path:?}");
+
+        // A re-encoded upload must keep the registered format family.
+        let wrong_format = replacement_target(
+            &session,
+            &replacement_request("bg.room", AssetKind::Background, "room_v2.jpg"),
+            &jpeg_metadata,
+            "backgrounds/room_v2.jpg",
+        )
+        .unwrap_err();
+        assert!(wrong_format.message.contains("格式"), "{wrong_format:?}");
+
+        // Kind and existence are both enforced.
+        let wrong_kind = replacement_target(
+            &session,
+            &replacement_request("bg.room", AssetKind::Sprite, "room_v2.png"),
+            &png_metadata,
+            "sprites/room_v2.png",
+        )
+        .unwrap_err();
+        assert!(wrong_kind.message.contains("原始类型"), "{wrong_kind:?}");
+        let missing = replacement_target(
+            &session,
+            &replacement_request("bg.ghost", AssetKind::Background, "ghost.png"),
+            &png_metadata,
+            "backgrounds/ghost.png",
+        )
+        .unwrap_err();
+        assert!(missing.message.contains("不存在"), "{missing:?}");
+    }
+
+    #[test]
+    fn replacement_refuses_composite_animations_and_checks_frame_geometry() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        seed_animated_asset_project(root);
+        let session = asset_session(root);
+        assert_eq!(session.catalog.animations_referencing("bg.room"), ["blink"]);
+        let incoming = root.join("incoming");
+        write_test_png(&incoming.join("room_v3.png"), 8, 8);
+        write_test_png(&incoming.join("room_big.png"), 16, 16);
+        let matching = inspect_media_source(&incoming.join("room_v3.png")).unwrap();
+        let bigger = inspect_media_source(&incoming.join("room_big.png")).unwrap();
+
+        // Replacing a frame image is allowed while its animation keeps one
+        // uniform pixel size.
+        assert!(replacement_target(
+            &session,
+            &replacement_request("bg.room", AssetKind::Background, "room_v3.png"),
+            &matching,
+            "backgrounds/room_v3.png",
+        )
+        .is_ok());
+        let resized = replacement_target(
+            &session,
+            &replacement_request("bg.room", AssetKind::Background, "room_big.png"),
+            &bigger,
+            "backgrounds/room_big.png",
+        )
+        .unwrap_err();
+        assert!(resized.message.contains("尺寸"), "{resized:?}");
+
+        // Replacing the composite animated asset itself needs a helper
+        // explanation rather than a silent partial replacement.
+        let composite = replacement_target(
+            &session,
+            &replacement_request("anim.blink", AssetKind::Background, "blink.png"),
+            &matching,
+            "backgrounds/blink.png",
+        )
+        .unwrap_err();
+        assert!(composite.message.contains("合成动画"), "{composite:?}");
+    }
+
+    fn replacement_save_request(session: &ProjectSession, asset_path: &str) -> SaveProjectRequest {
+        let mut manifest = session.catalog.manifest.clone();
+        manifest.assets.get_mut("bg.room").unwrap().path = Some(asset_path.to_owned());
+        SaveProjectRequest {
+            manifest,
+            scenes: Vec::new(),
+            ui_motions: Vec::new(),
+            buttons: Vec::new(),
+            animations: Vec::new(),
+            actions: Vec::new(),
+            chapter_map: None,
+            layout: EditorLayout::default(),
+            expected_fingerprint: session.fingerprint.clone(),
+            import_tokens: vec!["import-1".to_owned()],
+        }
+    }
+
+    fn replacement_staged_import(root: &Path, old_path: &str) -> StagedImport {
+        StagedImport {
+            token: "import-1".to_owned(),
+            project_root: root.to_path_buf(),
+            id: "bg.room".to_owned(),
+            kind: AssetKind::Background,
+            relative_path: "backgrounds/room_v2.png".to_owned(),
+            staged_path: root.join(".vectspace/tmp/imports/import-1/room_v2.png"),
+            sha256: "0".repeat(64),
+            owns_staged_path: true,
+            reused_from: None,
+            replaces: Some(StagedReplacement {
+                old_relative_path: old_path.to_owned(),
+                old_kind: AssetKind::Background,
+            }),
+        }
+    }
+
+    #[test]
+    fn replacement_token_tracks_the_session_old_path() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        seed_asset_project(root);
+        let session = asset_session(root);
+        let root = session.root.clone();
+
+        // The manifest now points at the new staged path, the token records
+        // the old registration the session still holds.
+        let request = replacement_save_request(&session, "backgrounds/room_v2.png");
+        let imports = BTreeMap::from([(
+            "import-1".to_owned(),
+            replacement_staged_import(&root, "backgrounds/room.png"),
+        )]);
+        let resolved =
+            staged_imports_for_request(&imports, &root, &session.catalog.manifest.assets, &request)
+                .unwrap();
+        assert_eq!(resolved.len(), 1);
+
+        // An undo (or an external edit) that re-points the id at another file
+        // invalidates the capability instead of re-binding it.
+        let stale = BTreeMap::from([(
+            "import-1".to_owned(),
+            replacement_staged_import(&root, "backgrounds/moved.png"),
+        )]);
+        let error =
+            staged_imports_for_request(&stale, &root, &session.catalog.manifest.assets, &request)
+                .unwrap_err();
+        assert!(error.contains("已被修改"), "{error}");
+
+        // A token whose id is gone from the session fails closed too.
+        let mut without_room = session.catalog.manifest.assets.clone();
+        without_room.remove("bg.room");
+        let error =
+            staged_imports_for_request(&imports, &root, &without_room, &request).unwrap_err();
+        assert!(error.contains("已不存在"), "{error}");
+    }
+
+    #[test]
+    fn replacement_supersedes_an_earlier_staged_replacement() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        seed_asset_project(root);
+        let session = asset_session(root);
+        let root = session.root.clone();
+        let incoming = root.join("incoming");
+        write_test_png(&incoming.join("room_v2.png"), 8, 8);
+        write_test_png(&incoming.join("room_v3.png"), 8, 8);
+
+        let inspections = BTreeMap::from([
+            (
+                "insp-a".to_owned(),
+                InspectedImport {
+                    project_root: root.clone(),
+                    source_path: incoming.join("room_v2.png"),
+                    sha256: hash_file_streaming(&incoming.join("room_v2.png")).unwrap(),
+                },
+            ),
+            (
+                "insp-b".to_owned(),
+                InspectedImport {
+                    project_root: root.clone(),
+                    source_path: incoming.join("room_v3.png"),
+                    sha256: hash_file_streaming(&incoming.join("room_v3.png")).unwrap(),
+                },
+            ),
+        ]);
+        let request = |file_name: &str, inspection: &str| ImportAssetRequest {
+            id: "bg.room".to_owned(),
+            kind: AssetKind::Background,
+            file_name: Some(file_name.to_owned()),
+            inspection_id: Some(inspection.to_owned()),
+            replace_id: Some("bg.room".to_owned()),
+        };
+
+        // First replacement: stage `room_v2.png`.
+        let staged_a = prepare_asset_imports(
+            &session,
+            &BTreeMap::new(),
+            &inspections,
+            &[request("room_v2.png", "insp-a")],
+            1,
+        )
+        .unwrap();
+        assert_eq!(staged_a.len(), 1);
+        assert_eq!(staged_a[0].token, "import-1-0");
+        assert_eq!(staged_a[0].relative_path, "backgrounds/room_v2.png");
+        assert!(staged_a[0].staged_path.is_file());
+
+        // An undo restores the session's original path; staging a *different*
+        // file for the same id must be allowed (the superseded token stays for
+        // redo and its staged binary stays on disk).
+        let existing = BTreeMap::from([(staged_a[0].token.clone(), staged_a[0].clone())]);
+        let staged_b = prepare_asset_imports(
+            &session,
+            &existing,
+            &inspections,
+            &[request("room_v3.png", "insp-b")],
+            2,
+        )
+        .unwrap();
+        assert_eq!(staged_b[0].token, "import-2-0");
+        assert_eq!(staged_b[0].relative_path, "backgrounds/room_v3.png");
+        assert!(staged_a[0].staged_path.is_file());
+        assert!(staged_b[0].staged_path.is_file());
+
+        // Two replacements in one batch are still rejected.
+        let batched = prepare_asset_imports(
+            &session,
+            &BTreeMap::new(),
+            &inspections,
+            &[
+                request("room_v2.png", "insp-a"),
+                request("room_v3.png", "insp-b"),
+            ],
+            4,
+        )
+        .unwrap_err();
+        assert!(batched.message.contains("同一批次"), "{batched:?}");
+
+        // Distinct destination reservation: reusing the superseded token's
+        // path is rejected and the failed batch leaves no staged directory.
+        let collide = prepare_asset_imports(
+            &session,
+            &existing,
+            &inspections,
+            &[request("room_v2.png", "insp-a")],
+            3,
+        )
+        .unwrap_err();
+        assert!(collide.message.contains("已存在或重复"), "{collide:?}");
+        assert!(!root.join(".vectspace/tmp/imports/import-3-0").exists());
+
+        // The *original* on-disk path stays forbidden even though the current
+        // row now points at the staged path: the host never overwrites it.
+        let original = prepare_asset_imports(
+            &session,
+            &existing,
+            &inspections,
+            &[request("room.png", "insp-a")],
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            original.message.contains("不能覆盖") || original.message.contains("已存在或重复"),
+            "{original:?}"
+        );
+        assert!(root.join("assets/backgrounds/room.png").is_file());
+
+        // Save isolation: only the token whose new path matches the manifest
+        // resolves; the obsolete token fails closed instead of re-binding the
+        // id, and submitting both is rejected.
+        let imports = BTreeMap::from([
+            (staged_a[0].token.clone(), staged_a[0].clone()),
+            (staged_b[0].token.clone(), staged_b[0].clone()),
+        ]);
+        let mut save = replacement_save_request(&session, "backgrounds/room_v3.png");
+        save.import_tokens = vec![staged_b[0].token.clone()];
+        let resolved =
+            staged_imports_for_request(&imports, &root, &session.catalog.manifest.assets, &save)
+                .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].relative_path, "backgrounds/room_v3.png");
+
+        save.import_tokens = vec![staged_a[0].token.clone()];
+        let stale =
+            staged_imports_for_request(&imports, &root, &session.catalog.manifest.assets, &save)
+                .unwrap_err();
+        assert!(stale.contains("类型或目标路径已被修改"), "{stale}");
+
+        save.import_tokens = vec![staged_a[0].token.clone(), staged_b[0].token.clone()];
+        assert!(staged_imports_for_request(
+            &imports,
+            &root,
+            &session.catalog.manifest.assets,
+            &save
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn replacement_never_queues_the_old_binary_for_deletion() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let previous = fingerprint_manifest();
+        let mut next = previous.clone();
+        next.assets.get_mut("bg.room").unwrap().path = Some("backgrounds/room_v2.png".to_owned());
+        // Removing the manifest entry entirely still never deletes the binary:
+        // the editor only manages document files.
+        let mut removed = previous.clone();
+        removed.assets.remove("bg.room");
+        assert!(managed_deletions(root, &previous, &next).is_empty());
+        assert!(managed_deletions(root, &previous, &removed).is_empty());
     }
 }

@@ -28,7 +28,15 @@ import {
 } from "./imageAnimation";
 import { projectAnimationMap } from "./imageAnimationMap";
 import { expandSpriteActionNode } from "./timeline";
+import {
+  activeImportTokens as collectActiveImportTokens,
+  activePendingAssetIds as collectActivePendingAssetIds,
+  applyStagedAsset,
+  registerPendingImports,
+  type PendingAssetImport,
+} from "./assetLibrary";
 import { createProjectSectionState } from "./components/projectSections";
+import { AssetLayoutProvider } from "./components/AssetChooser";
 import {
   ProjectSidebar,
   type ImportDraft,
@@ -116,6 +124,12 @@ const ButtonWorkspace = lazy(() =>
 const ActionWorkspace = lazy(() =>
   import("./components/ActionWorkspace").then((module) => ({
     default: module.ActionWorkspace,
+  })),
+);
+
+const GameplayPreview = lazy(() =>
+  import("./components/GameplayPreview").then((module) => ({
+    default: module.GameplayPreview,
   })),
 );
 
@@ -238,6 +252,12 @@ export function App(): ReactElement {
     sceneId: string;
     nodeId: string;
   } | null>(null);
+  const [gameplayTarget, setGameplayTarget] = useState<{
+    sceneId: string;
+    nodeId: string | null;
+    /** Set by a node double-click to start immediately at that node. */
+    autoStart?: "scene" | "node" | "reset_node";
+  } | null>(null);
   const [uiMotionTarget, setUiMotionTarget] = useState<string | null>(null);
   const [actionTarget, setActionTarget] = useState<string | null>(null);
   const [uiMotionDialog, setUiMotionDialog] = useState<string | null>(null);
@@ -261,10 +281,18 @@ export function App(): ReactElement {
   const nodeClipboardRef = useRef<NodeClipboard | null>(null);
   const projectRef = useRef<EditorProject | null>(null);
   const editorStateRef = useRef(editorState);
-  const pendingImportsRef = useRef<Record<string, string>>({});
-  const [pendingImports, setPendingImports] = useState<Record<string, string>>(
-    {},
-  );
+  const pendingImportsRef = useRef<Record<string, PendingAssetImport>>({});
+  const [pendingImports, setPendingImports] = useState<
+    Record<string, PendingAssetImport>
+  >({});
+  // Editor-only bookkeeping for replacement destinations.  The host forbids
+  // writing over the original binary or any previously staged replacement
+  // path, so the UI must apply the same rules: the original path is remembered
+  // here even after the row starts pointing at a staged file (and it survives
+  // undo/redo and save).
+  const [reservedReplacementPaths, setReservedReplacementPaths] = useState<
+    Record<string, string[]>
+  >({});
   const savedContentRef = useRef("");
   const savedContentVersionRef = useRef("");
 
@@ -282,14 +310,29 @@ export function App(): ReactElement {
   // Keep staged import capabilities in every validation/preview request. A
   // newly imported asset is intentionally absent from the formal assets tree
   // until save, so omitting these tokens would make an otherwise valid
-  // unsaved map/timeline preview fail with “missing asset”.
+  // unsaved map/timeline preview fail with “missing asset”.  A token is only
+  // sent while the manifest still registers the same id, kind and path: an
+  // undo that restores a replaced asset's old path drops the obsolete
+  // capability instead of failing the whole save.
   const activeImportTokens = useMemo(
     () =>
       project === null
         ? []
-        : Object.entries(pendingImports)
-            .filter(([, id]) => project.manifest.assets[id] !== undefined)
-            .map(([token]) => token),
+        : collectActiveImportTokens(pendingImports, project.manifest),
+    [pendingImports, project],
+  );
+
+  // Logical ids whose staged binary has not been published by a save yet.
+  // The asset library shows a "待保存" badge for these rows.  Only tokens that
+  // still match the current manifest id/kind/path are "active": an undo that
+  // restores a replaced asset's old path hides the badge, and a redo brings it
+  // back (the registry keeps every token, so redo capabilities are never
+  // discarded).
+  const pendingAssetIds = useMemo(
+    () =>
+      project === null
+        ? []
+        : collectActivePendingAssetIds(pendingImports, project.manifest),
     [pendingImports, project],
   );
 
@@ -534,6 +577,7 @@ export function App(): ReactElement {
       const loaded = await editorApi.openProject(root);
       dispatchEditor({ type: "load", project: loaded });
       setPendingImports({});
+      setReservedReplacementPaths({});
       savedContentRef.current = contentDocumentFingerprint(loaded);
       savedContentVersionRef.current = loaded.manifest.content_version;
       const initialScene =
@@ -584,9 +628,10 @@ export function App(): ReactElement {
     setEditorBusy(true);
     setError(null);
     try {
-      const requestTokens = Object.entries(pendingImportsRef.current)
-        .filter(([, id]) => currentProject.manifest.assets[id] !== undefined)
-        .map(([token]) => token);
+      const requestTokens = collectActiveImportTokens(
+        pendingImportsRef.current,
+        currentProject.manifest,
+      );
       const request = projectRequest(currentProject, requestTokens);
       await editorApi.validateProject(request);
       const result = await editorApi.saveProject(request);
@@ -1349,8 +1394,8 @@ export function App(): ReactElement {
       return;
     }
     if (options.length === 1) {
-      if (!window.confirm(`删除节点 ${nodeId}？入口和指向它的连线将重定向。`))
-        return;
+      //if (!window.confirm(`删除节点 ${nodeId}？入口和指向它的连线将重定向。`))
+      //  return;
       executeDeleteNodes([nodeId], options[0].id);
       return;
     }
@@ -1671,14 +1716,26 @@ export function App(): ReactElement {
           kind: item.kind,
           file_name: item.fileName,
           inspection_id: item.inspectionId,
+          replace_id: item.replaceId ?? null,
         })),
       );
       const latestProject = editorStateRef.current.project;
       if (latestProject === null || latestProject.root !== importProject.root) {
         throw new Error("项目已切换；本次素材导入未附加到其他项目。");
       }
+      // A replacement intentionally reuses an existing logical id; only a
+      // brand-new registration may not collide with the current manifest.
+      const replacementIds = new Set(
+        imported
+          .filter(
+            (asset) =>
+              asset.replaced_from !== undefined && asset.replaced_from !== null,
+          )
+          .map((asset) => asset.id),
+      );
       const conflicts = imported
         .map((asset) => asset.id)
+        .filter((id) => !replacementIds.has(id))
         .filter((id) => latestProject.manifest.assets[id] !== undefined);
       if (conflicts.length > 0) {
         throw new Error(
@@ -1696,31 +1753,40 @@ export function App(): ReactElement {
         for (const asset of imported) {
           const sourceMetadata = items.find((item) => item.id === asset.id)
             ?.inspection?.metadata;
-          draft.manifest.assets[asset.id] = {
-            kind: asset.kind,
-            path: asset.path,
-          };
-          draft.assets.push({
-            ...asset,
-            size_bytes: asset.size_bytes,
-            metadata: sourceMetadata,
-          });
+          // One asset row per logical id: a replacement updates the existing
+          // row in place and never appends a duplicate.
+          applyStagedAsset(draft, asset, sourceMetadata ?? null);
         }
       });
-      const stagedTokens = Object.fromEntries(
-        imported
-          .filter(
-            (asset): asset is typeof asset & { token: string } =>
-              asset.token !== undefined && asset.token !== null,
-          )
-          .map((asset) => [asset.token, asset.id]),
-      );
-      if (Object.keys(stagedTokens).length > 0) {
+      if (
+        imported.some(
+          (asset) => asset.token !== undefined && asset.token !== null,
+        )
+      ) {
         setPendingImports((current) => {
-          const next = { ...current, ...stagedTokens };
+          const next = registerPendingImports(current, imported);
           // A Ctrl+S dispatched in the same browser turn must use the newly
           // minted capabilities rather than wait for React's layout effect.
           pendingImportsRef.current = next;
+          return next;
+        });
+      }
+      // Remember every replaced destination so a later replacement cannot
+      // reuse the original on-disk path or a superseded staged path, matching
+      // the host's reservation of both.
+      if (replacementIds.size > 0) {
+        setReservedReplacementPaths((current) => {
+          const next: Record<string, string[]> = { ...current };
+          for (const asset of imported) {
+            const paths = new Set(next[asset.id] ?? []);
+            if (
+              asset.replaced_from !== undefined &&
+              asset.replaced_from !== null
+            )
+              paths.add(asset.replaced_from);
+            if (asset.path !== "") paths.add(asset.path);
+            next[asset.id] = [...paths];
+          }
           return next;
         });
       }
@@ -1728,11 +1794,18 @@ export function App(): ReactElement {
         (asset) =>
           asset.reused_from !== undefined && asset.reused_from !== null,
       ).length;
-      setNotice(
-        reused > 0
-          ? `已暂存 ${imported.length} 个素材（${reused} 个复用已有文件）；保存项目后写入 manifest。`
-          : `已暂存 ${imported.length} 个素材；保存项目后写入 manifest。`,
-      );
+      const replaced = replacementIds.size;
+      if (replaced > 0) {
+        setNotice(
+          `已暂存 ${imported.length} 个素材（${replaced} 个替换原文件，旧文件保留在 assets 目录）；保存项目后写入 manifest。`,
+        );
+      } else {
+        setNotice(
+          reused > 0
+            ? `已暂存 ${imported.length} 个素材（${reused} 个复用已有文件）；保存项目后写入 manifest。`
+            : `已暂存 ${imported.length} 个素材；保存项目后写入 manifest。`,
+        );
+      }
     } catch (reason) {
       reportCommandError(reason);
       throw reason;
@@ -2129,12 +2202,18 @@ export function App(): ReactElement {
     longTextTarget === null
       ? undefined
       : longTextScene?.definition.nodes[longTextTarget.nodeId];
+  // Every full-screen workspace branch must share the editor-only asset
+  // layout, otherwise its choosers cannot apply hidden/display-name/folder
+  // policy.  Wrapping each early return keeps one provider for the whole App.
+  const withAssetLayout = (node: ReactElement): ReactElement => (
+    <AssetLayoutProvider layout={project.layout}>{node}</AssetLayoutProvider>
+  );
   if (
     longTextTarget !== null &&
     longTextScene !== undefined &&
     longTextNode?.type === "long_text"
   ) {
-    return (
+    return withAssetLayout(
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <LongTextWorkspace
@@ -2178,7 +2257,7 @@ export function App(): ReactElement {
           </div>
         )}
         {notice !== null && <div className="notice-toast">{notice}</div>}
-      </>
+      </>,
     );
   }
   if (
@@ -2186,7 +2265,7 @@ export function App(): ReactElement {
     project.chapter_map !== null &&
     project.chapter_map !== undefined
   ) {
-    return (
+    return withAssetLayout(
       <Suspense fallback={<WorkspaceFallback />}>
         <ChapterMapWorkspace
           animationMap={animationMap}
@@ -2245,11 +2324,11 @@ export function App(): ReactElement {
           selectionId={mapSelectionId}
           undoAvailable={past.length > 0}
         />
-      </Suspense>
+      </Suspense>,
     );
   }
   if (buttonTarget !== null && buttonFile !== undefined) {
-    return (
+    return withAssetLayout(
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <ButtonWorkspace
@@ -2283,11 +2362,11 @@ export function App(): ReactElement {
           </div>
         )}
         {notice !== null && <div className="notice-toast">{notice}</div>}
-      </>
+      </>,
     );
   }
   if (actionTarget !== null && actionFile !== undefined) {
-    return (
+    return withAssetLayout(
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <ActionWorkspace
@@ -2335,17 +2414,18 @@ export function App(): ReactElement {
           </div>
         )}
         {notice !== null && <div className="notice-toast">{notice}</div>}
-      </>
+      </>,
     );
   }
 
   if (uiMotionTarget !== null && uiMotionFile !== undefined) {
-    return (
+    return withAssetLayout(
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <UiMotionWorkspace
             animationMap={animationMap}
             assets={project.assets}
+            defaultFontId={project.manifest.default_font}
             dirty={dirty}
             file={uiMotionFile}
             onBack={() => {
@@ -2373,7 +2453,40 @@ export function App(): ReactElement {
           </div>
         )}
         {notice !== null && <div className="notice-toast">{notice}</div>}
-      </>
+      </>,
+    );
+  }
+
+  if (gameplayTarget !== null) {
+    return withAssetLayout(
+      <>
+        <Suspense fallback={<WorkspaceFallback />}>
+          <GameplayPreview
+            autoStart={gameplayTarget.autoStart}
+            importTokens={activeImportTokens}
+            key={`${gameplayTarget.sceneId}/${gameplayTarget.nodeId ?? ""}`}
+            nodeId={gameplayTarget.nodeId}
+            onError={setError}
+            project={project}
+            sceneId={gameplayTarget.sceneId}
+          />
+        </Suspense>
+        <button
+          className="gameplay-preview-back"
+          onClick={() => setGameplayTarget(null)}
+          type="button"
+        >
+          返回编辑器
+        </button>
+        {error !== null && (
+          <div className="error-toast" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              关闭
+            </button>
+          </div>
+        )}
+      </>,
     );
   }
 
@@ -2384,7 +2497,7 @@ export function App(): ReactElement {
       : timelineScene?.definition.nodes[timelineTarget.nodeId];
   if (timelineTarget !== null && timelineNode?.type === "timeline") {
     const previewKey = `${timelineTarget.sceneId}/${timelineTarget.nodeId}`;
-    return (
+    return withAssetLayout(
       <>
         <Suspense fallback={<WorkspaceFallback />}>
           <TimelineWorkspace
@@ -2422,616 +2535,670 @@ export function App(): ReactElement {
           </div>
         )}
         {notice !== null && <div className="notice-toast">{notice}</div>}
-      </>
+      </>,
     );
   }
 
   return (
-    <main
-      className={`editor-shell${panelsVisible ? "" : " panels-hidden"}`}
-      style={
-        {
-          "--left-sidebar-width": `${panelSizes.left}px`,
-          "--right-sidebar-width": `${panelSizes.right}px`,
-        } as CSSProperties
-      }
-    >
-      <header className="app-toolbar">
-        <div className="toolbar-brand">
-          <span>V</span>
-          <div>
-            <strong>VECTSPACE</strong>
-            <small>STORY EDITOR</small>
+    <AssetLayoutProvider layout={project.layout}>
+      <main
+        className={`editor-shell${panelsVisible ? "" : " panels-hidden"}`}
+        style={
+          {
+            "--left-sidebar-width": `${panelSizes.left}px`,
+            "--right-sidebar-width": `${panelSizes.right}px`,
+          } as CSSProperties
+        }
+      >
+        <header className="app-toolbar">
+          <div className="toolbar-brand">
+            <span>V</span>
+            <div>
+              <strong>VECTSPACE</strong>
+              <small>STORY EDITOR</small>
+            </div>
           </div>
-        </div>
-        <div className="toolbar-project">
-          <strong>{project.root.split(/[\\/]/).at(-1)}</strong>
-          <small>{activeSceneId}</small>
-          {dirty && <span className="dirty-dot" title="有未保存的更改" />}
-        </div>
-        <div className="toolbar-actions">
-          <button
-            aria-pressed={!panelsVisible}
-            onClick={() => setPanelsVisible((visible) => !visible)}
-            title="收起两侧面板，扩大编辑区域"
-            type="button"
-          >
-            {panelsVisible ? "专注编辑" : "显示面板"}
-          </button>
-          <button
-            disabled={busy}
-            onClick={() => openChapterMapWorkspace()}
-            type="button"
-          >
-            章节地图
-          </button>
-          <button
-            disabled={busy}
-            onClick={() => void openProject()}
-            type="button"
-          >
-            打开
-          </button>
-          <button
-            disabled={past.length === 0}
-            onClick={undo}
-            title="Ctrl+Z"
-            type="button"
-          >
-            撤销
-          </button>
-          <button
-            disabled={future.length === 0}
-            onClick={redo}
-            title="Ctrl+Y"
-            type="button"
-          >
-            重做
-          </button>
-          <button
-            className="primary-button"
-            disabled={busy || !dirty}
-            onClick={() => void saveProject()}
-            title="Ctrl+S"
-            type="button"
-          >
-            {busy ? "处理中…" : "保存项目"}
-          </button>
-        </div>
-      </header>
-
-      <ProjectSidebar
-        selectedAssetId={assetSelectionId}
-        activeTab={sidebarTab}
-        activeSceneId={activeSceneId}
-        diagnostics={diagnostics}
-        onAddScene={addScene}
-        onDeleteScene={deleteScene}
-        onImportAssets={importAssets}
-        onManifestChange={(manifest: ContentManifest) =>
-          commit((draft) => void (draft.manifest = manifest))
-        }
-        onRemoveAsset={(id) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          const references = findAssetReferences(currentProject, id);
-          if (references.length > 0) {
-            setError(
-              `素材 ${id} 仍被 ${references.length} 处内容引用（${references
-                .slice(0, 8)
-                .join(
-                  "、",
-                )}${references.length > 8 ? "…" : ""}），不能从清单移除。`,
-            );
-            return false;
-          }
-          commit((draft) => {
-            const animationId = draft.manifest.assets[id]?.animation;
-            Reflect.deleteProperty(draft.manifest.assets, id);
-            draft.assets = draft.assets.filter((asset) => asset.id !== id);
-            if (animationId === undefined) return;
-            // An animation document is only reachable through its asset, so
-            // removing the asset removes the document in the same commit.
-            // A hand-authored manifest may share one document between assets;
-            // keep it while another asset still references it.
-            const shared = Object.values(draft.manifest.assets).some(
-              (definition) => definition.animation === animationId,
-            );
-            if (shared) return;
-            const file = (draft.animations ?? []).find(
-              (candidate) => candidate.definition.id === animationId,
-            );
-            draft.animations = (draft.animations ?? []).filter(
-              (candidate) => candidate.definition.id !== animationId,
-            );
-            draft.manifest.animations = (
-              draft.manifest.animations ?? []
-            ).filter((path) => path !== file?.path);
-          });
-          return true;
-        }}
-        onCreateImageAnimation={createImageAnimation}
-        onSelectAsset={(id) => {
-          setAssetSelectionId(id);
-          setSidebarTab("assets");
-        }}
-        onAddVariable={(id, definition) => {
-          if (
-            !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
-            project.manifest.variables[id] !== undefined
-          ) {
-            setError("变量 ID 非法或已经存在。");
-            return false;
-          }
-          commit((draft) => {
-            draft.manifest.variables[id] = definition;
-          });
-          return true;
-        }}
-        onChangeVariable={(id, definition) =>
-          commit((draft) => {
-            draft.manifest.variables[id] = definition;
-          })
-        }
-        onDeleteVariable={(id) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          const references = countVariableReferences(currentProject, id);
-          if (references > 0) {
-            setError(`变量 ${id} 仍被 ${references} 处剧情引用，不能删除。`);
-            return;
-          }
-          commit((draft) => {
-            Reflect.deleteProperty(draft.manifest.variables, id);
-          });
-        }}
-        onRenameScene={(previousId, nextId) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          if (!/^[A-Za-z0-9._-]{1,128}$/.test(nextId)) {
-            setError("场景 ID 非法。");
-            return false;
-          }
-          if (
-            nextId !== previousId &&
-            currentProject.scenes.some((file) => file.definition.id === nextId)
-          ) {
-            setError("场景 ID 已经存在。");
-            return false;
-          }
-          if (
-            !window.confirm("重命名场景会更改文件路径并影响既有存档。继续吗？")
-          )
-            return true;
-          commit((draft) =>
-            renameScene(currentPlainProject(draft), previousId, nextId),
-          );
-          setActiveSceneId(nextId);
-          return true;
-        }}
-        onRenameVariable={(previousId, nextId) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          if (
-            !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
-            currentProject.manifest.variables[nextId] !== undefined
-          ) {
-            setError("新变量 ID 非法或已经存在。");
-            return false;
-          }
-          commit((draft) =>
-            renameVariable(currentPlainProject(draft), previousId, nextId),
-          );
-          return true;
-        }}
-        onAddCharacter={(id, definition) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          if (
-            !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
-            currentProject.manifest.characters[id] !== undefined
-          ) {
-            setError("角色 ID 非法或已经存在。");
-            return false;
-          }
-          commit((draft) => {
-            draft.manifest.characters[id] = definition;
-          });
-          return true;
-        }}
-        onChangeCharacter={(id, definition) =>
-          commit((draft) => {
-            draft.manifest.characters[id] = definition;
-          })
-        }
-        onDeleteCharacter={(id) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          const references = countCharacterReferences(currentProject, id);
-          if (references > 0) {
-            setError(`角色 ${id} 仍被 ${references} 句对话引用，不能删除。`);
-            return;
-          }
-          commit((draft) => {
-            Reflect.deleteProperty(draft.manifest.characters, id);
-          });
-        }}
-        onRenameCharacter={(previousId, nextId) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          if (
-            !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
-            currentProject.manifest.characters[nextId] !== undefined
-          ) {
-            setError("新角色 ID 非法或已经存在。");
-            return false;
-          }
-          commit((draft) =>
-            renameCharacter(currentPlainProject(draft), previousId, nextId),
-          );
-          return true;
-        }}
-        onCreateUiMotion={openCreateUiMotion}
-        onEditUiMotion={(motionId) => {
-          if (!flushBeforeNavigation()) return;
-          setUiMotionTarget(motionId);
-        }}
-        onDeleteUiMotion={deleteUiMotion}
-        onCreateButtonTemplate={openCreateButton}
-        onEditButtonTemplate={(buttonId) => {
-          if (!flushBeforeNavigation()) return;
-          setButtonTarget(buttonId);
-        }}
-        onDuplicateButtonTemplate={duplicateButtonTemplate}
-        onDeleteButtonTemplate={deleteButtonTemplate}
-        onCreateAction={(id) => {
-          if (!flushBeforeNavigation()) return false;
-          return createSpriteAction(id);
-        }}
-        onChangeAction={(id, definition) =>
-          commit((draft) => {
-            const file = (draft.actions ?? []).find(
-              (candidate) => candidate.definition.id === id,
-            );
-            if (file !== undefined) file.definition = definition;
-          })
-        }
-        onRenameAction={(previousId, nextId) => {
-          const currentProject = editorStateRef.current.project ?? project;
-          const normalized = nextId.trim();
-          if (
-            !/^[A-Za-z0-9._-]{1,128}$/.test(normalized) ||
-            (currentProject.actions ?? []).some(
-              (file) =>
-                file.definition.id !== previousId &&
-                file.definition.id === normalized,
-            ) ||
-            currentProject.manifest.assets[normalized] !== undefined ||
-            (currentProject.animations ?? []).some(
-              (file) => file.definition.id === normalized,
-            )
-          ) {
-            setError("动作 ID 非法、已经存在或与素材/图片动画冲突。");
-            return false;
-          }
-          const existingPath = (currentProject.actions ?? []).find(
-            (file) => file.definition.id === previousId,
-          )?.path;
-          const nextPath = `actions/${normalized.replaceAll(".", "_")}.yaml`;
-          if (
-            existingPath !== undefined &&
-            (currentProject.actions ?? []).some(
-              (file) => file.path === nextPath && file.path !== existingPath,
-            )
-          ) {
-            setError(`动作文件路径 ${nextPath} 已经存在。`);
-            return false;
-          }
-          commit((draft) => {
-            const renamed = renameSpriteAction(
-              currentPlainProject(draft),
-              previousId,
-              normalized,
-            );
-            draft.actions = renamed.actions;
-            draft.manifest.actions = renamed.manifest.actions;
-            draft.scenes = renamed.scenes;
-          });
-          setNotice(`已重命名立绘动作 ${previousId} → ${normalized}。`);
-          return true;
-        }}
-        onDuplicateAction={duplicateSpriteAction}
-        onDeleteAction={deleteSpriteAction}
-        onEditActionKeyframes={(id) => {
-          if (!flushBeforeNavigation()) return;
-          setActionTarget(id);
-        }}
-        onSelectScene={(sceneId) => {
-          if (!flushBeforeNavigation()) return;
-          setActiveSceneId(sceneId);
-          setSelectedNodeId(null);
-        }}
-        onNavigate={navigate}
-        onScrollOffset={handleSidebarScroll}
-        onTabChange={setSidebarTab}
-        onToggleSection={(sectionId) =>
-          setSidebarSections((current) => ({
-            ...current,
-            [sectionId]: !current[sectionId],
-          }))
-        }
-        project={project}
-        scrollStore={sidebarScrollRef}
-        sectionOpen={sidebarSections}
-      />
-      <ResizeHandle axis="left" onStart={startResize} onStep={resizeBy} />
-
-      <section className="workspace">
-        <div className="workspace-toolbar">
-          <div className="view-switch" role="group" aria-label="场景视图">
+          <div className="toolbar-project">
+            <strong>{project.root.split(/[\\/]/).at(-1)}</strong>
+            <small>{activeSceneId}</small>
+            {dirty && <span className="dirty-dot" title="有未保存的更改" />}
+          </div>
+          <div className="toolbar-actions">
             <button
-              className={sceneViewMode === "graph" ? "active" : ""}
-              onClick={() => {
-                if (!flushBeforeNavigation()) return;
-                setSceneViewMode("graph");
-              }}
+              aria-pressed={!panelsVisible}
+              onClick={() => setPanelsVisible((visible) => !visible)}
+              title="收起两侧面板，扩大编辑区域"
               type="button"
             >
-              剧情图
+              {panelsVisible ? "专注编辑" : "显示面板"}
             </button>
             <button
-              className={sceneViewMode === "script" ? "active" : ""}
-              onClick={() => {
-                if (!flushBeforeNavigation()) return;
-                setSceneViewMode("script");
-              }}
+              disabled={busy}
+              onClick={() => openChapterMapWorkspace()}
               type="button"
             >
-              脚本
+              章节地图
+            </button>
+            <button
+              disabled={busy}
+              onClick={() =>
+                setGameplayTarget({
+                  sceneId: activeSceneId,
+                  nodeId: selectedNodeId,
+                })
+              }
+              title="用真实运行时和表现层预览当前场景或所选节点"
+              type="button"
+            >
+              游戏预览
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => void openProject()}
+              type="button"
+            >
+              打开
+            </button>
+            <button
+              disabled={past.length === 0}
+              onClick={undo}
+              title="Ctrl+Z"
+              type="button"
+            >
+              撤销
+            </button>
+            <button
+              disabled={future.length === 0}
+              onClick={redo}
+              title="Ctrl+Y"
+              type="button"
+            >
+              重做
+            </button>
+            <button
+              className="primary-button"
+              disabled={busy || !dirty}
+              onClick={() => void saveProject()}
+              title="Ctrl+S"
+              type="button"
+            >
+              {busy ? "处理中…" : "保存项目"}
             </button>
           </div>
-          <select
-            aria-label="新节点类型"
-            value={addType}
-            onChange={(event) =>
-              setAddType(event.currentTarget.value as NodeType)
-            }
-          >
-            {NODE_TYPES.map((candidate) => (
-              <option key={candidate.type} value={candidate.type}>
-                {candidate.group} · {candidate.label}
-              </option>
-            ))}
-          </select>
-          <button onClick={addNode} type="button">
-            ＋ 添加节点
-          </button>
-        </div>
-        {activeScene !== undefined && sceneViewMode === "graph" ? (
-          <StoryGraph
-            diagnostics={diagnostics}
-            layout={project.layout.scenes[activeSceneId]}
-            onCopy={copyNode}
-            onConnect={(sourceId, handle, targetId) =>
-              commit((draft) => {
-                const file = findScene(draft, activeSceneId);
-                if (
-                  file === undefined ||
-                  file.definition.nodes[sourceId] === undefined
-                )
-                  return;
-                file.definition.nodes[sourceId] = setPortTarget(
-                  file.definition.nodes[sourceId],
-                  handle,
-                  targetId,
-                );
-              })
-            }
-            onMoveMany={(positions) =>
-              commit((draft) => {
-                ensureSceneLayout(draft.layout, activeSceneId).nodes =
-                  positions;
-              })
-            }
-            onMoveNode={(nodeId, position: NodePosition) =>
-              commit((draft) => {
-                ensureSceneLayout(draft.layout, activeSceneId).nodes[nodeId] =
-                  position;
-              })
-            }
-            onPaste={pasteNode}
-            onQuickInsert={quickInsertNode}
-            onOpen={(nodeId) => {
-              if (!flushBeforeNavigation()) return;
-              const currentProject = projectRef.current;
-              const currentScene =
-                currentProject === null
-                  ? undefined
-                  : findScene(currentProject, activeSceneId)?.definition;
-              const node = currentScene?.nodes[nodeId];
-              if (currentScene === undefined) return;
-              if (node?.type === "timeline") {
-                setLongTextTarget(null);
-                setTimelineTarget({ sceneId: activeSceneId, nodeId });
-              } else if (node?.type === "long_text") {
-                setTimelineTarget(null);
-                setUiMotionTarget(null);
-                setLongTextTarget({ sceneId: activeSceneId, nodeId });
-              }
-            }}
-            onSelect={setSelectedNodeId}
-            onViewport={(viewport) =>
-              commit((draft) => {
-                ensureSceneLayout(draft.layout, activeSceneId).viewport =
-                  viewport;
-              }, false)
-            }
-            scene={activeScene}
-            selectedNodeId={selectedNodeId}
-          />
-        ) : activeScene !== undefined ? (
-          <ScriptView
-            manifest={project.manifest}
-            onChange={changeNode}
-            onDelete={deleteNode}
-            onDeleteMany={deleteNodes}
-            onBatchSpeaker={batchChangeSpeaker}
-            onCommitAndInsertAfter={insertSayAfterWithText}
-            onBeginEdit={beginEdit}
-            onSetEditDraft={setEditDraft}
-            onSetEditError={setEditError}
-            onUpdateNode={updateNodeEdit}
-            onEditText={(nodeId, text) => {
-              const editId = `say:${activeSceneId}:${nodeId}`;
-              updateEdit(editId, (draft) => {
-                const file = findScene(draft, activeSceneId);
-                const node = file?.definition.nodes[nodeId];
-                if (node?.type === "say") node.text = text;
-              });
-              setEditDraft(editId, "text", text, false);
-            }}
-            onCommitEdit={commitEdit}
-            onCancelEdit={cancelEdit}
-            activeEdit={activeEdit}
-            onInsertAfter={insertSayAfter}
-            onInsertBatch={insertSayBatch}
-            onOpenGraph={(nodeId) => {
-              if (!flushBeforeNavigation()) return;
-              setSelectedNodeId(nodeId);
-              setSceneViewMode("graph");
-            }}
-            onNavigateToNode={(targetScene, nodeId) => {
-              if (!flushBeforeNavigation()) return;
-              if (
-                targetScene !== null &&
-                targetScene.length > 0 &&
-                targetScene !== activeSceneId &&
-                findScene(projectRef.current ?? project, targetScene) !==
-                  undefined
-              ) {
-                setActiveSceneId(targetScene);
-                setSceneViewMode("script");
-              }
-              setSelectedNodeId(nodeId);
-            }}
-            onSelect={setSelectedNodeId}
-            scene={activeScene}
-            selectedNodeId={selectedNodeId}
-          />
-        ) : (
-          <div className="empty-state">没有可编辑的场景</div>
-        )}
-      </section>
+        </header>
 
-      {activeScene !== undefined && (
-        <NodeInspector
-          key={`${activeSceneId}:${selectedNodeId ?? ""}`}
-          manifest={project.manifest}
-          nodeId={selectedNodeId}
-          onChange={changeNode}
-          onDelete={deleteNode}
-          onDuplicate={duplicateNode}
-          onConvertToTimeline={convertNodeToTimeline}
-          onConvertActionToTimeline={convertActionNodeToTimeline}
-          onSplitDialogue={splitDialogue}
-          onSplitLongText={splitLongText}
-          onOpenLongTextWorkspace={(nodeId) => {
-            if (!flushBeforeNavigation()) return;
-            setTimelineTarget(null);
-            setUiMotionTarget(null);
-            setLongTextTarget({ sceneId: activeSceneId, nodeId });
-          }}
-          onError={setError}
-          buttons={project.buttons ?? []}
-          animations={project.animations ?? []}
-          actions={project.actions ?? []}
-          assets={project.assets}
-          scenes={project.scenes.map((file) => file.definition)}
-          uiMotions={project.ui_motions}
-          previewProject={project}
-          previewAnimationMap={animationMap}
-          previewImportTokens={activeImportTokens}
-          previewVariableOverrides={choicePreviewSettings.variable_overrides}
-          previewChoices={choicePreviewSettings.choices}
-          onRename={(previousId, nextId) => {
-            if (
-              !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
-              activeScene.nodes[nextId] !== undefined
-            ) {
-              setError("新节点 ID 非法或已经存在。");
-              return;
+        <ProjectSidebar
+          selectedAssetId={assetSelectionId}
+          activeTab={sidebarTab}
+          activeSceneId={activeSceneId}
+          diagnostics={diagnostics}
+          onAddScene={addScene}
+          onDeleteScene={deleteScene}
+          onImportAssets={importAssets}
+          pendingAssetIds={pendingAssetIds}
+          reservedAssetPaths={reservedReplacementPaths}
+          onChangeAssetLayout={(mutate, label) =>
+            commit(
+              (draft) => {
+                draft.layout = mutate(draft.layout);
+              },
+              true,
+              label,
+            )
+          }
+          onManifestChange={(manifest: ContentManifest) =>
+            commit((draft) => void (draft.manifest = manifest))
+          }
+          onRemoveAsset={(id) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            const references = findAssetReferences(currentProject, id);
+            if (references.length > 0) {
+              setError(
+                `素材 ${id} 仍被 ${references.length} 处内容引用（${references
+                  .slice(0, 8)
+                  .join(
+                    "、",
+                  )}${references.length > 8 ? "…" : ""}），不能从清单移除。`,
+              );
+              return false;
             }
-            commit((draft) =>
-              renameNode(
-                currentPlainProject(draft),
-                activeSceneId,
-                previousId,
-                nextId,
-              ),
-            );
-            setSelectedNodeId(nextId);
-          }}
-          onSetEntry={(nodeId) =>
             commit((draft) => {
-              const file = findScene(draft, activeSceneId);
-              if (file !== undefined) file.definition.entry = nodeId;
+              const animationId = draft.manifest.assets[id]?.animation;
+              Reflect.deleteProperty(draft.manifest.assets, id);
+              draft.assets = draft.assets.filter((asset) => asset.id !== id);
+              if (animationId === undefined) return;
+              // An animation document is only reachable through its asset, so
+              // removing the asset removes the document in the same commit.
+              // A hand-authored manifest may share one document between assets;
+              // keep it while another asset still references it.
+              const shared = Object.values(draft.manifest.assets).some(
+                (definition) => definition.animation === animationId,
+              );
+              if (shared) return;
+              const file = (draft.animations ?? []).find(
+                (candidate) => candidate.definition.id === animationId,
+              );
+              draft.animations = (draft.animations ?? []).filter(
+                (candidate) => candidate.definition.id !== animationId,
+              );
+              draft.manifest.animations = (
+                draft.manifest.animations ?? []
+              ).filter((path) => path !== file?.path);
+            });
+            return true;
+          }}
+          onCreateImageAnimation={createImageAnimation}
+          onSelectAsset={(id) => {
+            setAssetSelectionId(id);
+            setSidebarTab("assets");
+          }}
+          onAddVariable={(id, definition) => {
+            if (
+              !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
+              project.manifest.variables[id] !== undefined
+            ) {
+              setError("变量 ID 非法或已经存在。");
+              return false;
+            }
+            commit((draft) => {
+              draft.manifest.variables[id] = definition;
+            });
+            return true;
+          }}
+          onChangeVariable={(id, definition) =>
+            commit((draft) => {
+              draft.manifest.variables[id] = definition;
             })
           }
-          scene={activeScene}
-        />
-      )}
-      <ResizeHandle axis="right" onStart={startResize} onStep={resizeBy} />
-      <footer className="editor-statusbar">
-        <span className={dirty ? "status-unsaved" : "status-saved"}>
-          {dirty ? "● 未保存" : "● 已保存"}
-        </span>
-        <span title={activeSceneId}>{activeSceneId}</span>
-        <span>{Object.keys(activeScene?.nodes ?? {}).length} 个节点</span>
-        <span className="status-help">右键节点查看更多操作 · Ctrl+S 保存</span>
-        <button
-          onClick={() => {
-            setPanelsVisible(true);
-            setSidebarTab("problems");
+          onDeleteVariable={(id) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            const references = countVariableReferences(currentProject, id);
+            if (references > 0) {
+              setError(`变量 ${id} 仍被 ${references} 处剧情引用，不能删除。`);
+              return;
+            }
+            commit((draft) => {
+              Reflect.deleteProperty(draft.manifest.variables, id);
+            });
           }}
-          type="button"
-        >
-          {diagnostics.length === 0
-            ? "检查通过"
-            : `${diagnostics.length} 个问题`}
-        </button>
-      </footer>
-
-      {error !== null && (
-        <div className="error-toast" role="alert">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} type="button">
-            关闭
-          </button>
-        </div>
-      )}
-      {notice !== null && <div className="notice-toast">{notice}</div>}
-      {uiMotionDialog !== null && (
-        <UiMotionEntryDialog
-          initialValue={uiMotionDialog}
-          onCancel={() => setUiMotionDialog(null)}
-          onSubmit={(value) => {
-            if (createUiMotion(value)) setUiMotionDialog(null);
+          onRenameScene={(previousId, nextId) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            if (!/^[A-Za-z0-9._-]{1,128}$/.test(nextId)) {
+              setError("场景 ID 非法。");
+              return false;
+            }
+            if (
+              nextId !== previousId &&
+              currentProject.scenes.some(
+                (file) => file.definition.id === nextId,
+              )
+            ) {
+              setError("场景 ID 已经存在。");
+              return false;
+            }
+            if (
+              !window.confirm(
+                "重命名场景会更改文件路径并影响既有存档。继续吗？",
+              )
+            )
+              return true;
+            commit((draft) =>
+              renameScene(currentPlainProject(draft), previousId, nextId),
+            );
+            setActiveSceneId(nextId);
+            return true;
           }}
-        />
-      )}
-      {buttonDialog !== null && (
-        <ButtonEntryDialog
-          initialValue={buttonDialog}
-          onCancel={() => setButtonDialog(null)}
-          onSubmit={(value) => {
-            if (createButtonTemplate(value)) setButtonDialog(null);
+          onRenameVariable={(previousId, nextId) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            if (
+              !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
+              currentProject.manifest.variables[nextId] !== undefined
+            ) {
+              setError("新变量 ID 非法或已经存在。");
+              return false;
+            }
+            commit((draft) =>
+              renameVariable(currentPlainProject(draft), previousId, nextId),
+            );
+            return true;
           }}
-        />
-      )}
-      {deleteRequest !== null && (
-        <DeleteNodesDialog
-          nodeIds={deleteRequest.nodeIds}
-          onCancel={() => setDeleteRequest(null)}
-          onConfirm={(fallback) =>
-            executeDeleteNodes(deleteRequest.nodeIds, fallback)
+          onAddCharacter={(id, definition) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            if (
+              !/^[A-Za-z0-9._-]{1,128}$/.test(id) ||
+              currentProject.manifest.characters[id] !== undefined
+            ) {
+              setError("角色 ID 非法或已经存在。");
+              return false;
+            }
+            commit((draft) => {
+              draft.manifest.characters[id] = definition;
+            });
+            return true;
+          }}
+          onChangeCharacter={(id, definition) =>
+            commit((draft) => {
+              draft.manifest.characters[id] = definition;
+            })
           }
-          options={deleteRequest.options}
+          onDeleteCharacter={(id) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            const references = countCharacterReferences(currentProject, id);
+            if (references > 0) {
+              setError(`角色 ${id} 仍被 ${references} 句对话引用，不能删除。`);
+              return;
+            }
+            commit((draft) => {
+              Reflect.deleteProperty(draft.manifest.characters, id);
+            });
+          }}
+          onRenameCharacter={(previousId, nextId) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            if (
+              !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
+              currentProject.manifest.characters[nextId] !== undefined
+            ) {
+              setError("新角色 ID 非法或已经存在。");
+              return false;
+            }
+            commit((draft) =>
+              renameCharacter(currentPlainProject(draft), previousId, nextId),
+            );
+            return true;
+          }}
+          onCreateUiMotion={openCreateUiMotion}
+          onEditUiMotion={(motionId) => {
+            if (!flushBeforeNavigation()) return;
+            setUiMotionTarget(motionId);
+          }}
+          onDeleteUiMotion={deleteUiMotion}
+          onCreateButtonTemplate={openCreateButton}
+          onEditButtonTemplate={(buttonId) => {
+            if (!flushBeforeNavigation()) return;
+            setButtonTarget(buttonId);
+          }}
+          onDuplicateButtonTemplate={duplicateButtonTemplate}
+          onDeleteButtonTemplate={deleteButtonTemplate}
+          onCreateAction={(id) => {
+            if (!flushBeforeNavigation()) return false;
+            return createSpriteAction(id);
+          }}
+          onChangeAction={(id, definition) =>
+            commit((draft) => {
+              const file = (draft.actions ?? []).find(
+                (candidate) => candidate.definition.id === id,
+              );
+              if (file !== undefined) file.definition = definition;
+            })
+          }
+          onRenameAction={(previousId, nextId) => {
+            const currentProject = editorStateRef.current.project ?? project;
+            const normalized = nextId.trim();
+            if (
+              !/^[A-Za-z0-9._-]{1,128}$/.test(normalized) ||
+              (currentProject.actions ?? []).some(
+                (file) =>
+                  file.definition.id !== previousId &&
+                  file.definition.id === normalized,
+              ) ||
+              currentProject.manifest.assets[normalized] !== undefined ||
+              (currentProject.animations ?? []).some(
+                (file) => file.definition.id === normalized,
+              )
+            ) {
+              setError("动作 ID 非法、已经存在或与素材/图片动画冲突。");
+              return false;
+            }
+            const existingPath = (currentProject.actions ?? []).find(
+              (file) => file.definition.id === previousId,
+            )?.path;
+            const nextPath = `actions/${normalized.replaceAll(".", "_")}.yaml`;
+            if (
+              existingPath !== undefined &&
+              (currentProject.actions ?? []).some(
+                (file) => file.path === nextPath && file.path !== existingPath,
+              )
+            ) {
+              setError(`动作文件路径 ${nextPath} 已经存在。`);
+              return false;
+            }
+            commit((draft) => {
+              const renamed = renameSpriteAction(
+                currentPlainProject(draft),
+                previousId,
+                normalized,
+              );
+              draft.actions = renamed.actions;
+              draft.manifest.actions = renamed.manifest.actions;
+              draft.scenes = renamed.scenes;
+            });
+            setNotice(`已重命名立绘动作 ${previousId} → ${normalized}。`);
+            return true;
+          }}
+          onDuplicateAction={duplicateSpriteAction}
+          onDeleteAction={deleteSpriteAction}
+          onEditActionKeyframes={(id) => {
+            if (!flushBeforeNavigation()) return;
+            setActionTarget(id);
+          }}
+          onSelectScene={(sceneId) => {
+            if (!flushBeforeNavigation()) return;
+            setActiveSceneId(sceneId);
+            setSelectedNodeId(null);
+          }}
+          onNavigate={navigate}
+          onScrollOffset={handleSidebarScroll}
+          onTabChange={setSidebarTab}
+          onToggleSection={(sectionId) =>
+            setSidebarSections((current) => ({
+              ...current,
+              [sectionId]: !current[sectionId],
+            }))
+          }
+          project={project}
+          scrollStore={sidebarScrollRef}
+          sectionOpen={sidebarSections}
         />
-      )}
-    </main>
+        <ResizeHandle axis="left" onStart={startResize} onStep={resizeBy} />
+
+        <section className="workspace">
+          <div className="workspace-toolbar">
+            <div className="view-switch" role="group" aria-label="场景视图">
+              <button
+                className={sceneViewMode === "graph" ? "active" : ""}
+                onClick={() => {
+                  if (!flushBeforeNavigation()) return;
+                  setSceneViewMode("graph");
+                }}
+                type="button"
+              >
+                剧情图
+              </button>
+              <button
+                className={sceneViewMode === "script" ? "active" : ""}
+                onClick={() => {
+                  if (!flushBeforeNavigation()) return;
+                  setSceneViewMode("script");
+                }}
+                type="button"
+              >
+                脚本
+              </button>
+            </div>
+            <select
+              aria-label="新节点类型"
+              value={addType}
+              onChange={(event) =>
+                setAddType(event.currentTarget.value as NodeType)
+              }
+            >
+              {NODE_TYPES.map((candidate) => (
+                <option key={candidate.type} value={candidate.type}>
+                  {candidate.group} · {candidate.label}
+                </option>
+              ))}
+            </select>
+            <button onClick={addNode} type="button">
+              ＋ 添加节点
+            </button>
+          </div>
+          {activeScene !== undefined && sceneViewMode === "graph" ? (
+            <StoryGraph
+              deleteDisabled={
+                deleteRequest !== null ||
+                uiMotionDialog !== null ||
+                buttonDialog !== null
+              }
+              diagnostics={diagnostics}
+              layout={project.layout.scenes[activeSceneId]}
+              onCopy={copyNode}
+              onDelete={deleteNode}
+              onConnect={(sourceId, handle, targetId) =>
+                commit((draft) => {
+                  const file = findScene(draft, activeSceneId);
+                  if (
+                    file === undefined ||
+                    file.definition.nodes[sourceId] === undefined
+                  )
+                    return;
+                  file.definition.nodes[sourceId] = setPortTarget(
+                    file.definition.nodes[sourceId],
+                    handle,
+                    targetId,
+                  );
+                })
+              }
+              onMoveMany={(positions) =>
+                commit((draft) => {
+                  ensureSceneLayout(draft.layout, activeSceneId).nodes =
+                    positions;
+                })
+              }
+              onMoveNode={(nodeId, position: NodePosition) =>
+                commit((draft) => {
+                  ensureSceneLayout(draft.layout, activeSceneId).nodes[nodeId] =
+                    position;
+                })
+              }
+              onPaste={pasteNode}
+              onQuickInsert={quickInsertNode}
+              onPreview={(nodeId) => {
+                // Ordinary nodes: double-click flushes pending edits and opens
+                // the live preview starting from the clicked node.  timeline /
+                // long_text still use `onOpen` for their workspace.
+                if (!flushBeforeNavigation()) return;
+                setGameplayTarget({
+                  sceneId: activeSceneId,
+                  nodeId,
+                  autoStart: "node",
+                });
+              }}
+              onOpen={(nodeId) => {
+                if (!flushBeforeNavigation()) return;
+                const currentProject = projectRef.current;
+                const currentScene =
+                  currentProject === null
+                    ? undefined
+                    : findScene(currentProject, activeSceneId)?.definition;
+                const node = currentScene?.nodes[nodeId];
+                if (currentScene === undefined) return;
+                if (node?.type === "timeline") {
+                  setLongTextTarget(null);
+                  setTimelineTarget({ sceneId: activeSceneId, nodeId });
+                } else if (node?.type === "long_text") {
+                  setTimelineTarget(null);
+                  setUiMotionTarget(null);
+                  setLongTextTarget({ sceneId: activeSceneId, nodeId });
+                }
+              }}
+              onSelect={setSelectedNodeId}
+              onViewport={(viewport) =>
+                commit((draft) => {
+                  ensureSceneLayout(draft.layout, activeSceneId).viewport =
+                    viewport;
+                }, false)
+              }
+              scene={activeScene}
+              selectedNodeId={selectedNodeId}
+            />
+          ) : activeScene !== undefined ? (
+            <ScriptView
+              deleteDisabled={
+                deleteRequest !== null ||
+                uiMotionDialog !== null ||
+                buttonDialog !== null
+              }
+              manifest={project.manifest}
+              onChange={changeNode}
+              onDelete={deleteNode}
+              onDeleteMany={deleteNodes}
+              onBatchSpeaker={batchChangeSpeaker}
+              onCommitAndInsertAfter={insertSayAfterWithText}
+              onBeginEdit={beginEdit}
+              onSetEditDraft={setEditDraft}
+              onSetEditError={setEditError}
+              onUpdateNode={updateNodeEdit}
+              onEditText={(nodeId, text) => {
+                const editId = `say:${activeSceneId}:${nodeId}`;
+                updateEdit(editId, (draft) => {
+                  const file = findScene(draft, activeSceneId);
+                  const node = file?.definition.nodes[nodeId];
+                  if (node?.type === "say") node.text = text;
+                });
+                setEditDraft(editId, "text", text, false);
+              }}
+              onCommitEdit={commitEdit}
+              onCancelEdit={cancelEdit}
+              activeEdit={activeEdit}
+              onInsertAfter={insertSayAfter}
+              onInsertBatch={insertSayBatch}
+              onOpenGraph={(nodeId) => {
+                if (!flushBeforeNavigation()) return;
+                setSelectedNodeId(nodeId);
+                setSceneViewMode("graph");
+              }}
+              onNavigateToNode={(targetScene, nodeId) => {
+                if (!flushBeforeNavigation()) return;
+                if (
+                  targetScene !== null &&
+                  targetScene.length > 0 &&
+                  targetScene !== activeSceneId &&
+                  findScene(projectRef.current ?? project, targetScene) !==
+                    undefined
+                ) {
+                  setActiveSceneId(targetScene);
+                  setSceneViewMode("script");
+                }
+                setSelectedNodeId(nodeId);
+              }}
+              onSelect={setSelectedNodeId}
+              scene={activeScene}
+              selectedNodeId={selectedNodeId}
+            />
+          ) : (
+            <div className="empty-state">没有可编辑的场景</div>
+          )}
+        </section>
+
+        {activeScene !== undefined && (
+          <NodeInspector
+            key={`${activeSceneId}:${selectedNodeId ?? ""}`}
+            manifest={project.manifest}
+            nodeId={selectedNodeId}
+            onChange={changeNode}
+            onDelete={deleteNode}
+            onDuplicate={duplicateNode}
+            onConvertToTimeline={convertNodeToTimeline}
+            onConvertActionToTimeline={convertActionNodeToTimeline}
+            onSplitDialogue={splitDialogue}
+            onSplitLongText={splitLongText}
+            onOpenLongTextWorkspace={(nodeId) => {
+              if (!flushBeforeNavigation()) return;
+              setTimelineTarget(null);
+              setUiMotionTarget(null);
+              setLongTextTarget({ sceneId: activeSceneId, nodeId });
+            }}
+            onError={setError}
+            buttons={project.buttons ?? []}
+            animations={project.animations ?? []}
+            actions={project.actions ?? []}
+            assets={project.assets}
+            scenes={project.scenes.map((file) => file.definition)}
+            uiMotions={project.ui_motions}
+            previewProject={project}
+            previewAnimationMap={animationMap}
+            previewImportTokens={activeImportTokens}
+            previewVariableOverrides={choicePreviewSettings.variable_overrides}
+            previewChoices={choicePreviewSettings.choices}
+            onRename={(previousId, nextId) => {
+              if (
+                !/^[A-Za-z0-9._-]{1,128}$/.test(nextId) ||
+                activeScene.nodes[nextId] !== undefined
+              ) {
+                setError("新节点 ID 非法或已经存在。");
+                return;
+              }
+              commit((draft) =>
+                renameNode(
+                  currentPlainProject(draft),
+                  activeSceneId,
+                  previousId,
+                  nextId,
+                ),
+              );
+              setSelectedNodeId(nextId);
+            }}
+            onSetEntry={(nodeId) =>
+              commit((draft) => {
+                const file = findScene(draft, activeSceneId);
+                if (file !== undefined) file.definition.entry = nodeId;
+              })
+            }
+            scene={activeScene}
+          />
+        )}
+        <ResizeHandle axis="right" onStart={startResize} onStep={resizeBy} />
+        <footer className="editor-statusbar">
+          <span className={dirty ? "status-unsaved" : "status-saved"}>
+            {dirty ? "● 未保存" : "● 已保存"}
+          </span>
+          <span title={activeSceneId}>{activeSceneId}</span>
+          <span>{Object.keys(activeScene?.nodes ?? {}).length} 个节点</span>
+          <span className="status-help">
+            右键节点查看更多操作 · Ctrl+S 保存
+          </span>
+          <button
+            onClick={() => {
+              setPanelsVisible(true);
+              setSidebarTab("problems");
+            }}
+            type="button"
+          >
+            {diagnostics.length === 0
+              ? "检查通过"
+              : `${diagnostics.length} 个问题`}
+          </button>
+        </footer>
+
+        {error !== null && (
+          <div className="error-toast" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              关闭
+            </button>
+          </div>
+        )}
+        {notice !== null && <div className="notice-toast">{notice}</div>}
+        {uiMotionDialog !== null && (
+          <UiMotionEntryDialog
+            initialValue={uiMotionDialog}
+            onCancel={() => setUiMotionDialog(null)}
+            onSubmit={(value) => {
+              if (createUiMotion(value)) setUiMotionDialog(null);
+            }}
+          />
+        )}
+        {buttonDialog !== null && (
+          <ButtonEntryDialog
+            initialValue={buttonDialog}
+            onCancel={() => setButtonDialog(null)}
+            onSubmit={(value) => {
+              if (createButtonTemplate(value)) setButtonDialog(null);
+            }}
+          />
+        )}
+        {deleteRequest !== null && (
+          <DeleteNodesDialog
+            nodeIds={deleteRequest.nodeIds}
+            onCancel={() => setDeleteRequest(null)}
+            onConfirm={(fallback) =>
+              executeDeleteNodes(deleteRequest.nodeIds, fallback)
+            }
+            options={deleteRequest.options}
+          />
+        )}
+      </main>
+    </AssetLayoutProvider>
   );
 }
 

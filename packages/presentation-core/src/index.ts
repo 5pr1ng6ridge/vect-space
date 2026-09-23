@@ -9,6 +9,8 @@ export * from "./sceneSurface";
 export * from "./sceneTextures";
 export * from "./timelineSession";
 export * from "./deferredSession";
+export * from "./gameplayHost";
+export * from "./sessionTransition";
 export * from "./motion";
 export * from "./types";
 export * from "./uiMotion";

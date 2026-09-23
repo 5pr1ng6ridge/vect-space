@@ -25,6 +25,25 @@ import {
   findAssetReferences,
   findButtonTemplateReferences,
 } from "./assetReferences";
+import {
+  assetChoiceOptions,
+  assetDisplayName,
+  assetFolderId,
+  buildAssetFolderTree,
+  createAssetFolder,
+  firstVisibleAssetId,
+  folderDisplayPath,
+  isAssetHidden,
+  isValidAssetFolderName,
+  moveAssetFolder,
+  moveAssetToFolder,
+  renameAssetFolder,
+  setAssetDisplayName,
+  setAssetHidden,
+  validateFolderMove,
+  type AssetFolderNode,
+} from "../assetLibrary";
+import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import { FrameSequencePreview } from "./FrameSequencePreview";
 import { ImageAnimationPanel } from "./ImageAnimationPanel";
 import type {
@@ -35,6 +54,7 @@ import type {
   ContentManifest,
   EditorAsset,
   EditorDiagnostic,
+  EditorLayout,
   EditorProject,
   AssetInspection,
   AssetMetadata,
@@ -57,6 +77,22 @@ interface ProjectSidebarProps {
   onManifestChange(manifest: ContentManifest): void;
   onImportAssets(items: ImportDraft[]): Promise<void>;
   onRemoveAsset(id: string): boolean;
+  /**
+   * Commit an editor-only layout change (virtual folders, display name,
+   * hidden flag).  Nothing here ever touches a manifest path or a binary.
+   */
+  onChangeAssetLayout?(
+    mutate: (layout: EditorLayout) => EditorLayout,
+    label: string,
+  ): void;
+  /** Asset ids whose staged binary has not been written by a save yet. */
+  pendingAssetIds?: readonly string[];
+  /**
+   * Editor-only reserved replacement destinations per asset id: the original
+   * on-disk path plus every earlier staged replacement path.  The host forbids
+   * all of them as destinations, so the picker mirrors that rule.
+   */
+  reservedAssetPaths?: Readonly<Record<string, readonly string[]>>;
   onCreateImageAnimation(draft: AnimationDraft): boolean;
   onSelectAsset?(id: string): void;
   selectedAssetId?: string | null;
@@ -204,6 +240,9 @@ export function ProjectSidebar({
   onManifestChange,
   onImportAssets,
   onRemoveAsset,
+  onChangeAssetLayout,
+  pendingAssetIds,
+  reservedAssetPaths,
   onCreateImageAnimation,
   onSelectAsset,
   selectedAssetId,
@@ -309,7 +348,10 @@ export function ProjectSidebar({
       )}
       {tab === "assets" && (
         <AssetsPanel
+          onChangeAssetLayout={onChangeAssetLayout}
           onCreateImageAnimation={onCreateImageAnimation}
+          pendingAssetIds={pendingAssetIds}
+          reservedAssetPaths={reservedAssetPaths}
           project={project}
           onImportAssets={onImportAssets}
           onRemoveAsset={onRemoveAsset}
@@ -602,6 +644,9 @@ function AssetsPanel({
   project,
   onImportAssets,
   onRemoveAsset,
+  onChangeAssetLayout,
+  pendingAssetIds = [],
+  reservedAssetPaths,
   onCreateImageAnimation,
   onScrollOffset,
   selectedAssetId,
@@ -610,16 +655,36 @@ function AssetsPanel({
   project: EditorProject;
   onImportAssets(items: ImportDraft[]): Promise<void>;
   onRemoveAsset(id: string): boolean;
+  onChangeAssetLayout?(
+    mutate: (layout: EditorLayout) => EditorLayout,
+    label: string,
+  ): void;
+  pendingAssetIds?: readonly string[];
+  reservedAssetPaths?: Readonly<Record<string, readonly string[]>>;
   onCreateImageAnimation(draft: AnimationDraft): boolean;
   onScrollOffset?(tab: SidebarTab, offset: number): void;
   selectedAssetId?: string | null;
   scrollStore?: SidebarScrollStore;
 }): ReactElement {
   const { assets, manifest } = project;
+  const layout = project.layout;
   const animations = project.animations ?? [];
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
   const [selected, setSelected] = useState<string | null>(null);
+  const [showHidden, setShowHidden] = useState(true);
+  const [folderFilter, setFolderFilter] = useState<string | null>("all");
+  const [collapsedFolders, setCollapsedFolders] = useState<readonly string[]>(
+    [],
+  );
+  const [folderDialog, setFolderDialog] = useState<
+    | { mode: "create"; parentId: string | null }
+    | { mode: "rename"; folderId: string }
+    | null
+  >(null);
+  const [folderMoveTarget, setFolderMoveTarget] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importQueue, setImportQueue] = useState<ImportDraft[] | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -637,14 +702,190 @@ function AssetsPanel({
   );
   const shown = useMemo(
     () =>
-      assets.filter(
-        (asset) =>
-          (kindFilter === "all" || asset.kind === kindFilter) &&
-          asset.id.toLowerCase().includes(query.toLowerCase()),
-      ),
-    [assets, kindFilter, query],
+      assetChoiceOptions({
+        assets,
+        layout,
+        kind: kindFilter === "all" ? undefined : kindFilter,
+        query,
+        folderId: folderFilter === "all" ? undefined : folderFilter,
+        // The asset manager is manager mode: hidden assets stay visible so
+        // they can be unhidden, renamed or edited.  The toggle only narrows
+        // that list for authors who want to see the runtime-effective set.
+        includeHidden: showHidden,
+        selectedIds: selected === null ? [] : [selected],
+      }),
+    [assets, layout, kindFilter, query, folderFilter, showHidden, selected],
   );
+  const folderTree = useMemo(() => buildAssetFolderTree(layout), [layout]);
+  const folderOptions = useMemo(() => flattenAssetFolders(layout), [layout]);
   const selectedAsset = assets.find((asset) => asset.id === selected);
+  const selectedHidden =
+    selectedAsset !== undefined && isAssetHidden(layout, selectedAsset.id);
+  const selectedFolderId =
+    selectedAsset === undefined
+      ? null
+      : assetFolderId(layout, selectedAsset.id);
+  const selectedDisplayName =
+    selectedAsset === undefined
+      ? null
+      : assetDisplayName(layout, selectedAsset.id);
+  const selectedPending =
+    selectedAsset !== undefined && pendingAssetIds.includes(selectedAsset.id);
+  // Every destination the host already reserves: all currently registered
+  // asset paths (including the row's current staged path) plus the editor-only
+  // "original + earlier staged" list.  A replacement may not reuse any of them.
+  const replacementReserved = useMemo(() => {
+    const keys = new Set<string>();
+    for (const asset of assets)
+      if (asset.path) keys.add(collisionKey(asset.path));
+    for (const definition of Object.values(manifest.assets))
+      if (definition.path) keys.add(collisionKey(definition.path));
+    for (const paths of Object.values(reservedAssetPaths ?? {}))
+      for (const path of paths) keys.add(collisionKey(path));
+    return keys;
+  }, [assets, manifest, reservedAssetPaths]);
+  const commitLayout = useCallback(
+    (mutate: (current: EditorLayout) => EditorLayout, label: string): void => {
+      if (onChangeAssetLayout === undefined) return;
+      onChangeAssetLayout(mutate, label);
+    },
+    [onChangeAssetLayout],
+  );
+  const moveAsset = (assetId: string, folderId: string | null): void => {
+    setFolderError(null);
+    commitLayout(
+      (current) => moveAssetToFolder(current, assetId, folderId),
+      "移动素材到文件夹",
+    );
+  };
+  const commitDisplayName = (value: string | null): void => {
+    if (selectedAsset === undefined) return;
+    commitLayout(
+      (current) => setAssetDisplayName(current, selectedAsset.id, value),
+      "重命名素材显示名称",
+    );
+    setNameDraft(null);
+  };
+  const moveFolder = (folderId: string, parentId: string | null): void => {
+    const check = validateFolderMove(layout, folderId, parentId);
+    if (!check.ok) {
+      setFolderError(check.reason);
+      return;
+    }
+    setFolderError(null);
+    commitLayout(
+      (current) => moveAssetFolder(current, folderId, parentId),
+      "移动素材文件夹",
+    );
+  };
+  const handleDrop = (
+    event: { preventDefault(): void; dataTransfer: DataTransfer | null },
+    folderId: string | null,
+  ): void => {
+    event.preventDefault();
+    const payload = readAssetDragPayload(event);
+    if (payload.assetId !== undefined) moveAsset(payload.assetId, folderId);
+    else if (payload.folderId !== undefined && payload.folderId !== folderId)
+      moveFolder(payload.folderId, folderId);
+  };
+  const assetById = useMemo(
+    () => new Map(assets.map((asset) => [asset.id, asset])),
+    [assets],
+  );
+  const renderFolder = (node: AssetFolderNode): ReactElement => {
+    const isCollapsed = collapsedFolders.includes(node.id);
+    const count = assets.filter(
+      (asset) => assetFolderId(layout, asset.id) === node.id,
+    ).length;
+    const hasChildren = node.children.length > 0;
+    return (
+      <div className="asset-folder-branch" key={node.id}>
+        <div
+          className={`asset-folder-row${folderFilter === node.id ? " active" : ""}`}
+          style={{ paddingLeft: `${node.depth * 14}px` }}
+        >
+          <button
+            aria-expanded={!isCollapsed}
+            aria-label={`${isCollapsed ? "展开" : "折叠"}文件夹 ${node.name}`}
+            className="asset-folder-toggle"
+            disabled={!hasChildren}
+            onClick={() =>
+              setCollapsedFolders((current) =>
+                isCollapsed
+                  ? current.filter((id) => id !== node.id)
+                  : [...current, node.id],
+              )
+            }
+            type="button"
+          >
+            {hasChildren ? (isCollapsed ? "▸" : "▾") : "·"}
+          </button>
+          <button
+            className="asset-folder-name"
+            draggable
+            onClick={() => setFolderFilter(node.id)}
+            onDragOver={(event) => event.preventDefault()}
+            onDragStart={(event) => {
+              event.dataTransfer.setData("application/x-vect-folder", node.id);
+              event.dataTransfer.effectAllowed = "move";
+            }}
+            onDrop={(event) => handleDrop(event, node.id)}
+            title={node.name}
+            type="button"
+          >
+            {node.name}
+          </button>
+          <span className="asset-folder-count">{count}</span>
+          <button
+            aria-label={`重命名文件夹 ${node.name}`}
+            className="asset-folder-action"
+            onClick={() => {
+              setFolderError(null);
+              setFolderDialog({ mode: "rename", folderId: node.id });
+            }}
+            type="button"
+          >
+            ✎
+          </button>
+          <button
+            aria-label={`在 ${node.name} 下新建子文件夹`}
+            className="asset-folder-action"
+            onClick={() => {
+              setFolderError(null);
+              setFolderDialog({ mode: "create", parentId: node.id });
+            }}
+            type="button"
+          >
+            ＋
+          </button>
+          <button
+            aria-label={`移动文件夹 ${node.name}`}
+            className="asset-folder-action"
+            onClick={() => {
+              setFolderError(null);
+              setFolderMoveTarget(node.id);
+            }}
+            type="button"
+          >
+            ⇄
+          </button>
+        </div>
+        {!isCollapsed && (
+          <>
+            {node.children.map(renderFolder)}
+            {node.children.length === 0 && count === 0 && (
+              <p
+                className="asset-folder-empty muted"
+                style={{ paddingLeft: `${(node.depth + 1) * 14 + 22}px` }}
+              >
+                （空文件夹）
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
   const { onScroll: onAssetListScroll, ref: assetListRef } = useSidebarScroller(
     "assets",
     scrollStore,
@@ -716,15 +957,80 @@ function AssetsPanel({
       setImportError(reason instanceof Error ? reason.message : String(reason));
     }
   };
+  /**
+   * Same-ID / new-path replacement.  The logical id and kind are locked, the
+   * destination must differ from the registered path and the actual format
+   * family must match the old binary; the host re-validates all of it, so this
+   * is a friendly pre-check rather than the authority.
+   */
+  const queueReplacement = async (asset: EditorAsset): Promise<void> => {
+    setImportError(null);
+    setInspecting(true);
+    try {
+      const paths = await editorApi.pickAssetFiles();
+      if (paths.length === 0) return;
+      const sourcePath = paths[0];
+      const instructions = await editorApi.inspectAssetImports([sourcePath]);
+      const inspection = instructions[0];
+      const fileName =
+        inspection?.source_name ?? sourcePath.split(/[\\/]/).at(-1) ?? "asset";
+      // Never prefill a destination the host would reject: the original
+      // binary and every earlier staged replacement path are reserved, so a
+      // colliding pick gets a free `_vN` suggestion up front.
+      const suggested = suggestReplacementFileName(
+        asset,
+        fileName,
+        replacementReserved,
+      );
+      const error = replacementError(
+        asset,
+        suggested,
+        inspection,
+        replacementReserved,
+      );
+      setImportQueue([
+        {
+          sourcePath,
+          fileName: suggested,
+          id: asset.id,
+          kind: asset.kind,
+          inspectionId: inspection?.inspection_id,
+          inspection,
+          replaceId: asset.id,
+          error,
+        },
+      ]);
+    } catch (reason) {
+      setImportError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInspecting(false);
+    }
+  };
   const updateImport = (index: number, update: Partial<ImportDraft>): void => {
     setImportQueue((current) =>
       current === null
         ? null
-        : current.map((item, candidate) =>
-            candidate === index
-              ? { ...item, ...update, error: undefined }
-              : item,
-          ),
+        : current.map((item, candidate) => {
+            if (candidate !== index) return item;
+            const merged: ImportDraft = { ...item, ...update };
+            if (merged.replaceId === undefined)
+              return { ...merged, error: undefined };
+            // A replacement error must follow the file-name edit live, so the
+            // dialog explains a same-path or different-format pick immediately.
+            const target = assets.find((asset) => asset.id === merged.id);
+            return {
+              ...merged,
+              error:
+                target === undefined
+                  ? "清单中不存在要替换的素材"
+                  : replacementError(
+                      target,
+                      merged.fileName,
+                      merged.inspection,
+                      replacementReserved,
+                    ),
+            };
+          }),
     );
   };
   const submitImport = async (): Promise<void> => {
@@ -745,13 +1051,33 @@ function AssetsPanel({
         errors.push("ID 只能包含字母、数字、点、下划线或连字符");
       if (!/^[^\\/:*?"<>|]{1,200}$/.test(item.fileName))
         errors.push("文件名不是安全的单个文件名");
-      if (item.id in manifest.assets) errors.push("ID 已存在");
+      // A replacement intentionally reuses an existing logical id; only a
+      // brand-new registration may not collide with the current manifest.
+      if (item.replaceId === undefined && item.id in manifest.assets)
+        errors.push("ID 已存在");
+      if (item.replaceId !== undefined && item.replaceId !== item.id)
+        errors.push("替换目标与逻辑 ID 不一致");
       if ((ids.get(item.id)?.length ?? 0) > 1) errors.push("清单中 ID 重复");
       const destination = `${assetFolder(item.kind)}/${item.fileName}`;
       if ((paths.get(destination.toLowerCase())?.length ?? 0) > 1)
         errors.push("目标路径重复");
       if (!supportedImportExtension(item.kind, item.fileName))
         errors.push("文件扩展名与素材类型不匹配");
+      if (item.replaceId !== undefined) {
+        const existing = assets.find((asset) => asset.id === item.id);
+        if (existing === undefined) errors.push("清单中不存在要替换的素材");
+        else if (existing.animation !== undefined)
+          errors.push("合成动画素材不能直接替换，请替换它的帧图片");
+        else {
+          const oldPath = existing.path ?? "";
+          if (collisionKey(oldPath) === collisionKey(destination))
+            errors.push("新文件路径必须与当前登记路径不同");
+          else if (replacementReserved.has(collisionKey(destination)))
+            errors.push("该目标路径已被原始文件或先前暂存的替换保留");
+          if (extensionFamily(item.fileName) !== extensionFamily(oldPath))
+            errors.push("新文件格式必须与旧文件一致");
+        }
+      }
       return {
         ...item,
         error: errors.length > 0 ? errors.join("；") : undefined,
@@ -786,7 +1112,10 @@ function AssetsPanel({
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault();
-        const paths = Array.from(event.dataTransfer.files)
+        // An internal asset/folder drag has no OS files; a real file drop
+        // carries a FileList.  Guard both so a synthetic drop never throws.
+        const files = event.dataTransfer?.files;
+        const paths = Array.from(files ?? [])
           .map((file) => (file as File & { path?: string }).path)
           .filter(
             (path): path is string =>
@@ -834,6 +1163,54 @@ function AssetsPanel({
       >
         创建帧动画
       </button>
+      <div className="asset-folder-tree">
+        <div className="asset-folder-toolbar">
+          <button
+            aria-label="新建根文件夹"
+            onClick={() => {
+              setFolderError(null);
+              setFolderDialog({ mode: "create", parentId: null });
+            }}
+            type="button"
+          >
+            ＋ 新建文件夹
+          </button>
+          <label className="asset-hidden-toggle">
+            <input
+              checked={showHidden}
+              onChange={(event) => setShowHidden(event.currentTarget.checked)}
+              type="checkbox"
+            />
+            显示已隐藏
+          </label>
+        </div>
+        <div className="asset-folder-roots">
+          <button
+            className={folderFilter === "all" ? "active" : ""}
+            onClick={() => setFolderFilter("all")}
+            type="button"
+          >
+            全部素材
+            <span className="asset-folder-count">{assets.length}</span>
+          </button>
+          <button
+            aria-label="未分组（根目录）"
+            className={folderFilter === null ? "active" : ""}
+            onClick={() => setFolderFilter(null)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => handleDrop(event, null)}
+            type="button"
+          >
+            未分组
+          </button>
+        </div>
+        {folderTree.map(renderFolder)}
+        {folderError !== null && (
+          <p className="inline-error" role="alert">
+            {folderError}
+          </p>
+        )}
+      </div>
       <div
         className="asset-list"
         data-sidebar-scroller="assets"
@@ -843,32 +1220,61 @@ function AssetsPanel({
         {assets.length === 0 && (
           <p className="muted">将文件拖到这里，或点击 ＋ 批量导入</p>
         )}
-        {shown.map((asset) => (
-          <button
-            className={selected === asset.id ? "active" : ""}
-            key={asset.id}
-            onClick={() => setSelected(asset.id)}
-            type="button"
-          >
-            <span className={`asset-kind asset-kind-${asset.kind}`}>
-              {asset.kind.slice(0, 2).toUpperCase()}
-            </span>
-            <span>
-              <strong>
-                {asset.id}
-                {asset.animation !== undefined && (
-                  <span className="animation-badge">动画</span>
-                )}
-              </strong>
-              <small>
-                {assetDescription(asset, manifest)} ·{" "}
-                {formatAssetSize(asset.size_bytes)} ·{" "}
-                {formatAssetMetadata(asset.metadata)} ·{" "}
-                {references.get(asset.id)?.length ?? 0} 处引用
-              </small>
-            </span>
-          </button>
-        ))}
+        {assets.length > 0 && shown.length === 0 && (
+          <p className="muted">当前筛选没有素材。</p>
+        )}
+        {shown.map((option) => {
+          const asset = assetById.get(option.id);
+          const pending = pendingAssetIds.includes(option.id);
+          return (
+            <button
+              className={selected === option.id ? "active" : ""}
+              draggable
+              key={option.id}
+              onClick={() => setSelected(option.id)}
+              onDragStart={(event) => {
+                event.dataTransfer.setData(
+                  "application/x-vect-asset",
+                  option.id,
+                );
+                event.dataTransfer.effectAllowed = "move";
+              }}
+              type="button"
+            >
+              <span className={`asset-kind asset-kind-${option.kind}`}>
+                {option.kind.slice(0, 2).toUpperCase()}
+              </span>
+              <span>
+                <strong>
+                  {option.label}
+                  {option.label !== option.id && (
+                    <small className="asset-id-chip">{option.id}</small>
+                  )}
+                  {asset?.animation !== undefined && (
+                    <span className="animation-badge">动画</span>
+                  )}
+                  {option.hidden && (
+                    <span className="asset-hidden-badge">已隐藏</span>
+                  )}
+                  {pending && (
+                    <span className="asset-pending-badge">待保存</span>
+                  )}
+                </strong>
+                <small>
+                  {option.folderPath !== ""
+                    ? `目录：${option.folderPath} · `
+                    : ""}
+                  {asset === undefined
+                    ? option.path
+                    : assetDescription(asset, manifest)}{" "}
+                  · {formatAssetSize(asset?.size_bytes)} ·{" "}
+                  {formatAssetMetadata(asset?.metadata)} ·{" "}
+                  {references.get(option.id)?.length ?? 0} 处引用
+                </small>
+              </span>
+            </button>
+          );
+        })}
       </div>
       {selectedAsset !== undefined && (
         <div className="asset-detail">
@@ -878,11 +1284,20 @@ function AssetsPanel({
             assets={assets}
           />
           <strong>
-            {selectedAsset.id}
+            {selectedDisplayName ?? selectedAsset.id}
             {selectedAsset.animation !== undefined && (
               <span className="animation-badge">动画</span>
             )}
+            {selectedHidden && (
+              <span className="asset-hidden-badge">已隐藏</span>
+            )}
+            {selectedPending && (
+              <span className="asset-pending-badge">待保存</span>
+            )}
           </strong>
+          {selectedDisplayName !== null && (
+            <small className="asset-id-chip">{selectedAsset.id}</small>
+          )}
           <code>
             {selectedAsset.animation === undefined
               ? selectedAsset.path
@@ -891,11 +1306,92 @@ function AssetsPanel({
           {selectedAsset.animation !== undefined && (
             <small>{animationSummary(selectedAsset, assets, animations)}</small>
           )}
+          {selectedDisplayName !== null && (
+            <small className="muted">
+              源文件路径（显示名称仅用于编辑器）：
+              {selectedAsset.path ?? "（未登记）"}
+            </small>
+          )}
           <small>
-            大小：{formatAssetSize(selectedAsset.size_bytes)} ·{" "}
-            {formatAssetMetadata(selectedAsset.metadata)} · 引用：
+            {formatAssetMetadata(selectedAsset.metadata)} · 大小：
+            {formatAssetSize(selectedAsset.size_bytes)} · 引用：
             {references.get(selectedAsset.id)?.length ?? 0} 处
           </small>
+          <small className="muted">
+            文件夹：
+            {folderDisplayPath(layout, selectedFolderId) || "（根目录）"}
+          </small>
+          <div className="asset-display-name">
+            <input
+              aria-label="显示名称"
+              onChange={(event) => setNameDraft(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitDisplayName(nameDraft);
+                }
+                if (event.key === "Escape") setNameDraft(null);
+              }}
+              placeholder={selectedAsset.id}
+              value={nameDraft ?? selectedDisplayName ?? ""}
+            />
+            <button
+              aria-label="保存显示名称"
+              disabled={nameDraft === null}
+              onClick={() => commitDisplayName(nameDraft)}
+              type="button"
+            >
+              保存名称
+            </button>
+          </div>
+          <label className="asset-folder-select">
+            移动到文件夹
+            <select
+              aria-label="移动到文件夹"
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                moveAsset(selectedAsset.id, value === "" ? null : value);
+              }}
+              value={selectedFolderId ?? ""}
+            >
+              <option value="">（根目录）</option>
+              {folderOptions.map((folder) => (
+                <option key={folder.id} value={folder.id}>
+                  {folder.path}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="asset-detail-actions">
+            <button
+              aria-pressed={selectedHidden}
+              onClick={() =>
+                commitLayout(
+                  (current) =>
+                    setAssetHidden(current, selectedAsset.id, !selectedHidden),
+                  selectedHidden ? "取消隐藏素材" : "隐藏素材",
+                )
+              }
+              type="button"
+            >
+              {selectedHidden ? "取消隐藏" : "隐藏素材"}
+            </button>
+            <button
+              disabled={
+                selectedAsset.animation !== undefined || inspecting || importing
+              }
+              onClick={() => void queueReplacement(selectedAsset)}
+              title="导入一个同格式文件，保留逻辑 ID，新文件写入新路径，旧文件不会被覆盖或删除"
+              type="button"
+            >
+              替换二进制文件…
+            </button>
+          </div>
+          {selectedAsset.animation !== undefined && (
+            <small className="muted">
+              合成动画素材不能直接替换，请替换它的帧图片。
+            </small>
+          )}
           {(references.get(selectedAsset.id)?.length ?? 0) > 0 && (
             <details className="asset-references">
               <summary>使用位置</summary>
@@ -928,10 +1424,18 @@ function AssetsPanel({
         <div
           className="asset-import-dialog"
           role="dialog"
-          aria-label="导入素材"
+          aria-label={
+            importQueue.some((item) => item.replaceId !== undefined)
+              ? "替换素材二进制"
+              : "导入素材"
+          }
         >
           <header>
-            <strong>导入素材 ({importQueue.length})</strong>
+            <strong>
+              {importQueue.some((item) => item.replaceId !== undefined)
+                ? `替换素材二进制 (${importQueue.length})`
+                : `导入素材 (${importQueue.length})`}
+            </strong>
             <button onClick={() => setImportQueue(null)} type="button">
               取消
             </button>
@@ -939,6 +1443,13 @@ function AssetsPanel({
           <p>
             确认逻辑 ID、类型和文件名后一次导入。保存项目才会写入 manifest。
           </p>
+          {importQueue.some((item) => item.replaceId !== undefined) && (
+            <p className="muted">
+              替换保留逻辑 ID
+              与引用关系，但必须写入一个不同路径的新文件；旧文件不会被
+              覆盖或删除，仍留在 assets 目录作为恢复副本。
+            </p>
+          )}
           {importError !== null && (
             <p className="inline-error" role="alert">
               {importError}
@@ -962,37 +1473,58 @@ function AssetsPanel({
                     {formatInspectionSize(item.inspection.size_bytes)}
                   </small>
                 )}
-                <input
-                  aria-label={`${item.fileName} 逻辑 ID`}
-                  onChange={(event) =>
-                    updateImport(index, {
-                      id: event.currentTarget.value.trim(),
-                    })
-                  }
-                  value={item.id}
-                />
-                <select
-                  aria-label={`${item.fileName} 类型`}
-                  onChange={(event) =>
-                    updateImport(index, {
-                      kind: event.currentTarget.value as AssetKind,
-                    })
-                  }
-                  value={item.kind}
-                >
-                  {ASSET_KINDS.map((kind) => (
-                    <option key={kind} value={kind}>
-                      {kind}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  aria-label={`${item.fileName} 文件名`}
-                  onChange={(event) =>
-                    updateImport(index, { fileName: event.currentTarget.value })
-                  }
-                  value={item.fileName}
-                />
+                {item.replaceId !== undefined ? (
+                  <>
+                    <small className="asset-id-chip">
+                      {item.id}（{item.kind}）
+                    </small>
+                    <input
+                      aria-label={`${item.fileName} 文件名`}
+                      onChange={(event) =>
+                        updateImport(index, {
+                          fileName: event.currentTarget.value,
+                        })
+                      }
+                      value={item.fileName}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <input
+                      aria-label={`${item.fileName} 逻辑 ID`}
+                      onChange={(event) =>
+                        updateImport(index, {
+                          id: event.currentTarget.value.trim(),
+                        })
+                      }
+                      value={item.id}
+                    />
+                    <select
+                      aria-label={`${item.fileName} 类型`}
+                      onChange={(event) =>
+                        updateImport(index, {
+                          kind: event.currentTarget.value as AssetKind,
+                        })
+                      }
+                      value={item.kind}
+                    >
+                      {ASSET_KINDS.map((kind) => (
+                        <option key={kind} value={kind}>
+                          {kind}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      aria-label={`${item.fileName} 文件名`}
+                      onChange={(event) =>
+                        updateImport(index, {
+                          fileName: event.currentTarget.value,
+                        })
+                      }
+                      value={item.fileName}
+                    />
+                  </>
+                )}
                 <button
                   aria-label={`移除 ${item.fileName}`}
                   onClick={() =>
@@ -1020,6 +1552,61 @@ function AssetsPanel({
           </button>
         </div>
       )}
+      {folderDialog !== null && folderDialog.mode === "create" && (
+        <TextEntryDialog
+          initialValue="新文件夹"
+          onCancel={() => setFolderDialog(null)}
+          onSubmit={(value) => {
+            const result = createAssetFolder(layout, {
+              name: value,
+              parentId: folderDialog.parentId,
+            });
+            if (!result.ok) {
+              setFolderError(result.reason);
+              return false;
+            }
+            setFolderError(null);
+            commitLayout(() => result.layout, "新建素材文件夹");
+            setFolderDialog(null);
+            return true;
+          }}
+          title="新建文件夹"
+        />
+      )}
+      {folderDialog !== null && folderDialog.mode === "rename" && (
+        <TextEntryDialog
+          initialValue={
+            (layout.asset_folders ?? {})[folderDialog.folderId]?.name ?? ""
+          }
+          onCancel={() => setFolderDialog(null)}
+          onSubmit={(value) => {
+            if (!isValidAssetFolderName(value)) {
+              setFolderError("文件夹名称必须为 1–120 个非控制字符。");
+              return false;
+            }
+            setFolderError(null);
+            commitLayout(
+              (current) =>
+                renameAssetFolder(current, folderDialog.folderId, value),
+              "重命名素材文件夹",
+            );
+            setFolderDialog(null);
+            return true;
+          }}
+          title="重命名文件夹"
+        />
+      )}
+      {folderMoveTarget !== null && (
+        <FolderMoveDialog
+          folderId={folderMoveTarget}
+          layout={layout}
+          onCancel={() => setFolderMoveTarget(null)}
+          onSubmit={(parentId) => {
+            moveFolder(folderMoveTarget, parentId);
+            setFolderMoveTarget(null);
+          }}
+        />
+      )}
       {animationPanel && (
         <ImageAnimationPanel
           assets={assets}
@@ -1032,6 +1619,204 @@ function AssetsPanel({
           onCreate={onCreateImageAnimation}
         />
       )}
+    </div>
+  );
+}
+
+interface AssetFolderChoice {
+  id: string;
+  path: string;
+}
+
+/** Flat folder list (id + display path) for folder selects. */
+function flattenAssetFolders(layout: EditorLayout): AssetFolderChoice[] {
+  const folders = layout.asset_folders ?? {};
+  const pathOf = (id: string): string[] => {
+    const seen = new Set<string>();
+    const names: string[] = [];
+    let current: string | null = id;
+    while (current !== null && !seen.has(current)) {
+      const folder: { parent_id: string | null; name: string } | undefined =
+        folders[current];
+      if (folder === undefined) break;
+      seen.add(current);
+      names.unshift(folder.name);
+      current = folder.parent_id ?? null;
+    }
+    return names;
+  };
+  return Object.keys(folders)
+    .map((id) => ({ id, path: pathOf(id).join(" / ") }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function readAssetDragPayload(event: { dataTransfer: DataTransfer | null }): {
+  assetId?: string;
+  folderId?: string;
+} {
+  const data = event.dataTransfer;
+  if (data === null || data === undefined) return {};
+  const assetId = data.getData("application/x-vect-asset");
+  const folderId = data.getData("application/x-vect-folder");
+  return {
+    assetId: assetId === "" ? undefined : assetId,
+    folderId: folderId === "" ? undefined : folderId,
+  };
+}
+
+/**
+ * Actual container format families.  The host re-decodes the upload and
+ * rejects a mismatch; this map is the editor's friendly pre-check so the
+ * dialog can explain the problem before staging anything.
+ */
+const EXTENSION_FAMILIES: Record<string, string> = {
+  png: "png",
+  jpg: "jpeg",
+  jpeg: "jpeg",
+  webp: "webp",
+  ogg: "ogg",
+  wav: "wav",
+  mp3: "mp3",
+  flac: "flac",
+  mp4: "mp4",
+  ttf: "font",
+  otf: "font",
+};
+
+function extensionFamily(fileNameOrPath: string): string {
+  const extension = fileNameOrPath.split(".").at(-1)?.toLowerCase() ?? "";
+  return EXTENSION_FAMILIES[extension] ?? extension;
+}
+
+/** Case-insensitive comparison key for an asset-relative path. */
+function collisionKey(path: string): string {
+  return path.replace(/\\/g, "/").toLowerCase();
+}
+
+/**
+ * A replacement must never target the current registration, the original
+ * on-disk binary, or any earlier staged replacement path.  The host reserves
+ * all of them, so the picker pre-checks the same set and suggests a free name.
+ */
+function replacementError(
+  asset: EditorAsset,
+  fileName: string,
+  inspection: AssetInspection | undefined,
+  forbidden: ReadonlySet<string>,
+): string | undefined {
+  const errors: string[] = [];
+  const currentPath = asset.path ?? "";
+  const destination = `${assetFolder(asset.kind)}/${fileName}`;
+  const destinationKey = collisionKey(destination);
+  if (collisionKey(currentPath) === destinationKey)
+    errors.push("新文件路径必须与当前登记路径不同。");
+  else if (forbidden.has(destinationKey))
+    errors.push(
+      "该目标路径已被原始文件或先前暂存的替换保留，请改用新的文件名（例如加 _v2）。",
+    );
+  if (!supportedImportExtension(asset.kind, fileName))
+    errors.push("文件扩展名与素材类型不匹配。");
+  else if (extensionFamily(fileName) !== extensionFamily(currentPath))
+    errors.push(
+      `新文件必须与旧文件格式一致（当前：${currentPath.split(".").at(-1) ?? "?"}）。`,
+    );
+  const inspectionError = inspection?.diagnostics
+    .filter((diagnostic) => diagnostic.severity === "error")
+    .map((diagnostic) => diagnostic.message)
+    .join("；");
+  if (inspectionError !== undefined && inspectionError !== "")
+    errors.push(inspectionError);
+  return errors.length > 0 ? errors.join("；") : undefined;
+}
+
+/** First free `stem_vN.ext` name for a replacement destination. */
+function suggestReplacementFileName(
+  asset: EditorAsset,
+  preferred: string,
+  forbidden: ReadonlySet<string>,
+): string {
+  const folder = assetFolder(asset.kind);
+  const dot = preferred.lastIndexOf(".");
+  const stem = dot > 0 ? preferred.slice(0, dot) : preferred;
+  const extension = dot > 0 ? preferred.slice(dot) : "";
+  let candidate = preferred;
+  let index = 2;
+  while (
+    forbidden.has(collisionKey(`${folder}/${candidate}`)) &&
+    index <= 999
+  ) {
+    candidate = `${stem}_v${index}${extension}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+/** Keyboard-accessible folder reparenting (the drag/drop alternative). */
+function FolderMoveDialog({
+  layout,
+  folderId,
+  onCancel,
+  onSubmit,
+}: {
+  layout: EditorLayout;
+  folderId: string;
+  onCancel(): void;
+  onSubmit(parentId: string | null): void;
+}): ReactElement {
+  const [parent, setParent] = useState<string>(
+    () => (layout.asset_folders ?? {})[folderId]?.parent_id ?? "",
+  );
+  const options = flattenAssetFolders(layout).filter(
+    (folder) =>
+      folder.id !== folderId &&
+      validateFolderMove(layout, folderId, folder.id).ok,
+  );
+  return (
+    <div
+      className="editor-dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+      role="presentation"
+    >
+      <form
+        className="editor-dialog"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit(parent === "" ? null : parent);
+        }}
+      >
+        <h3>移动文件夹</h3>
+        <label>
+          目标父文件夹
+          <select
+            aria-label="目标父文件夹"
+            onChange={(event) => setParent(event.currentTarget.value)}
+            value={parent}
+          >
+            <option value="">（根目录）</option>
+            {options.map((folder) => (
+              <option key={folder.id} value={folder.id}>
+                {folder.path}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="editor-dialog-actions">
+          <button onClick={onCancel} type="button">
+            取消
+          </button>
+          <button className="primary-button" type="submit">
+            确定
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -1054,6 +1839,12 @@ export interface ImportDraft {
   inspectionId?: string;
   inspection?: AssetInspection;
   error?: string;
+  /**
+   * Set when this upload replaces the binary of an existing asset.  It always
+   * equals `id`; the host keeps the logical id and references stable while
+   * publishing the new file at a different path.
+   */
+  replaceId?: string;
 }
 
 function TextEntryDialog({
@@ -1104,6 +1895,7 @@ function TextEntryDialog({
       >
         <h3>{title}</h3>
         <input
+          aria-label={title}
           ref={inputRef}
           onChange={(event) => {
             setValue(event.currentTarget.value);
@@ -1466,6 +2258,15 @@ function ProjectPanel({
     "project",
     scrollStore,
     onScrollOffset,
+  );
+  const assetLayout = useAssetLayout();
+  // A hidden asset must never be chosen silently: the first *visible* sprite
+  // seeds a new expression, and with none available the ＋ action is disabled
+  // with an explanation instead of falling back to a hidden asset.
+  const defaultExpressionSprite = firstVisibleAssetId(
+    project.assets,
+    assetLayout,
+    "sprite",
   );
   const isSectionOpen = (sectionId: ProjectSectionId): boolean =>
     sectionOpen?.[sectionId] ?? true;
@@ -1851,6 +2652,7 @@ function ProjectPanel({
               <header>
                 <span>表情图</span>
                 <button
+                  disabled={defaultExpressionSprite === null}
                   onClick={() => {
                     const expressions = { ...(definition.expressions ?? {}) };
                     let index = Object.keys(expressions).length + 1;
@@ -1859,10 +2661,12 @@ function ProjectPanel({
                       index += 1;
                       expressionId = `expression_${index}`;
                     }
-                    const firstSprite = project.assets.find(
-                      (asset) => asset.kind === "sprite",
-                    )?.id;
-                    if (firstSprite === undefined) return;
+                    const firstSprite = firstVisibleAssetId(
+                      project.assets,
+                      assetLayout,
+                      "sprite",
+                    );
+                    if (firstSprite === null) return;
                     expressions[expressionId] = {
                       asset: firstSprite,
                       anchor_x: 0.5,
@@ -1873,6 +2677,11 @@ function ProjectPanel({
                     };
                     onChangeCharacter(id, { ...definition, expressions });
                   }}
+                  title={
+                    defaultExpressionSprite === null
+                      ? "没有可用的立绘素材（或全部已隐藏）"
+                      : undefined
+                  }
                   type="button"
                 >
                   ＋
@@ -2520,18 +3329,13 @@ function CharacterExpressionEditor({
       </header>
       <label>
         <span>素材</span>
-        <select
-          onChange={(event) =>
-            onChange({ ...expression, asset: event.currentTarget.value })
-          }
-          value={expression.asset}
-        >
-          {spriteAssets.map((asset) => (
-            <option key={asset.id} value={asset.id}>
-              {asset.id}
-            </option>
-          ))}
-        </select>
+        <AssetChooser
+          assets={spriteAssets}
+          kind="sprite"
+          label="表情素材"
+          onChange={(value) => onChange({ ...expression, asset: value ?? "" })}
+          value={expression.asset || null}
+        />
       </label>
       <div className="field-grid compact-grid">
         <NumberInput

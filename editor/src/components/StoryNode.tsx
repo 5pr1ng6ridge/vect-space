@@ -25,6 +25,8 @@ export interface StoryNodeData extends Record<string, unknown> {
   entry: boolean;
   issueCount: number;
   onOpen(nodeId: string): void;
+  /** Start the live gameplay preview from this node (plain double-click). */
+  onPreview(nodeId: string): void;
   onSelect(nodeId: string): void;
   onQuickInsert(
     nodeId: string,
@@ -63,8 +65,13 @@ export const StoryNodeCard = memo(function StoryNodeCard({
       onClick={() => data.onSelect(data.nodeId)}
       onPointerDown={() => data.onSelect(data.nodeId)}
       onDoubleClick={() => {
-        if (data.node.type === "timeline" || data.node.type === "long_text")
+        // timeline / long_text keep their specialized full-screen workspaces;
+        // every other node opens the live gameplay preview from itself.
+        if (data.node.type === "timeline" || data.node.type === "long_text") {
           data.onOpen(data.nodeId);
+          return;
+        }
+        data.onPreview(data.nodeId);
       }}
       onContextMenu={(event) => {
         event.preventDefault();

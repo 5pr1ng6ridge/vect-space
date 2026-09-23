@@ -21,7 +21,7 @@ animations:
       scale_y:
       - at_ms: 0
         value: 1.0
-        easing: ease_out
+        easing: linear
       - at_ms: 180
         value: 1.05
         easing: linear

@@ -38,8 +38,13 @@ import {
   type SceneFrame,
 } from "@vectspace/presentation-core/scene-frame";
 import type { SceneSurface } from "@vectspace/presentation-core/scene-surface";
+import type { ButtonSnapshot } from "@vectspace/presentation-core/types";
 import type { TimelineSession } from "@vectspace/presentation-core/timeline-session";
 import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
+import { TemplateButton } from "@vectspace/presentation-react/button";
+// The shared gameplay stylesheet carries the `scene-button*` rules the real
+// button is styled with; a host-local copy is forbidden by the CSS contract.
+import "@vectspace/presentation-react/gameplay.css";
 import {
   createEditorTimelinePreview,
   disposeEditorTimelinePreview,
@@ -47,9 +52,9 @@ import {
   type EditorTimelinePreview,
 } from "./timelinePreview";
 import { buildAnimationMap } from "../imageAnimationMap";
-import { editorImageSource } from "../imageAnimationMap";
 import { ScreenEffectFields } from "./SpecFields";
-import { AnimatedImage } from "./AnimatedImage";
+import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import { firstVisibleAssetId } from "../assetLibrary";
 
 interface TimelineWorkspaceProps {
   project: EditorProject;
@@ -111,6 +116,10 @@ export function TimelineWorkspace({
   previewEnvironment,
 }: TimelineWorkspaceProps): ReactElement {
   const [localNode, setLocalNode] = useState(node);
+  const assetLayout = useAssetLayout();
+  // Hidden assets never seed a new default; video and SFX require a real asset.
+  const visibleVideo = firstVisibleAssetId(assets, assetLayout, "video");
+  const visibleSfx = firstVisibleAssetId(assets, assetLayout, "sfx");
   const [playhead, setPlayhead] = useState(0);
   const [playbackStart, setPlaybackStart] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -131,6 +140,23 @@ export function TimelineWorkspace({
     BuildNodePreviewResult,
     { status: "ready" }
   > | null>(null);
+  // The live-patch path must read the *current* ready preview, not a value
+  // captured by a render that may already be superseded.  A ref keeps the
+  // session patch one ordered step behind the authoritative node instead of
+  // silently returning when the React `preview` closure is stale.
+  const previewRef = useRef<Extract<
+    BuildNodePreviewResult,
+    { status: "ready" }
+  > | null>(null);
+  const setCurrentPreview = useCallback(
+    (
+      value: Extract<BuildNodePreviewResult, { status: "ready" }> | null,
+    ): void => {
+      previewRef.current = value;
+      setPreview(value);
+    },
+    [],
+  );
   const [contextStatus, setContextStatus] = useState("尚未建立真实上下文");
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
@@ -159,6 +185,17 @@ export function TimelineWorkspace({
   const contextRequestRef = useRef(0);
   const gestureCancelRef = useRef<(() => void) | null>(null);
   const parentNodeCommitRef = useRef<TimelineNode | null>(null);
+  // Monotonic id for the live-patch path.  A superseded async resource load
+  // (or its seek callback) must never clear a newer interactive override or
+  // seek a newer playhead, so every patch claims a request id and only the
+  // latest one may touch the session.
+  const patchRequestRef = useRef(0);
+  // True while a resource load started by the live-patch path is still in
+  // flight.  A newer patch (including an undo that restores the previous
+  // resource signature) must *supersede* that load instead of trusting
+  // `applyTimelineEdit`, otherwise the older load can still commit its stale
+  // resources after the request-id callback has been suppressed.
+  const loadPendingRef = useRef(false);
   const projectRef = useRef(project);
   const nodeRef = useRef(localNode);
   const playheadRef = useRef(playhead);
@@ -291,6 +328,9 @@ export function TimelineWorkspace({
       preview.session.setPlayingListener(null);
       surfaceRef.current = null;
       sessionRef.current = null;
+      // A pending patch-load belongs to the disposed session; the next
+      // session starts clean so the first patch may use the fast path.
+      loadPendingRef.current = false;
       lifecycle.release();
     };
   }, [handleDiagnostic, handlePreviewFrame, previewEnvironment]);
@@ -298,6 +338,9 @@ export function TimelineWorkspace({
   const buildContext = useCallback(
     async (nextSettings = settings): Promise<void> => {
       const requestId = ++contextRequestRef.current;
+      // A context rebuild prepares a whole new cue; any live-patch load is
+      // superseded by this rebuild's own loads.
+      loadPendingRef.current = false;
       setContextBusy(true);
       setContextError(null);
       setPendingChoice(null);
@@ -320,7 +363,7 @@ export function TimelineWorkspace({
         } else if (result.status === "unreachable") {
           setContextStatus("无法到达目标节点");
           setContextError(result.message);
-          setPreview(null);
+          setCurrentPreview(null);
         } else {
           const surface = surfaceRef.current;
           const session = sessionRef.current;
@@ -345,14 +388,14 @@ export function TimelineWorkspace({
             await session.seek(desiredPlayhead, "scrub");
             if (requestId !== contextRequestRef.current) return;
           }
-          setPreview(result);
+          setCurrentPreview(result);
           setContextStatus(
             `已捕获真实进入状态（${result.trace.length} 个边界）`,
           );
         }
       } catch (error) {
         if (requestId !== contextRequestRef.current) return;
-        setPreview(null);
+        setCurrentPreview(null);
         setFrame(null);
         setPlaying(false);
         setContextStatus("上下文构建失败");
@@ -361,7 +404,16 @@ export function TimelineWorkspace({
         if (requestId === contextRequestRef.current) setContextBusy(false);
       }
     },
-    [animationMap, importTokens, muted, sceneId, nodeId, settings, urls],
+    [
+      animationMap,
+      importTokens,
+      muted,
+      sceneId,
+      nodeId,
+      setCurrentPreview,
+      settings,
+      urls,
+    ],
   );
 
   useEffect(() => {
@@ -376,9 +428,10 @@ export function TimelineWorkspace({
 
   const patchLoadedCue = useCallback(
     (nextNode: TimelineNode): void => {
-      const current = preview;
+      const current = previewRef.current;
       const session = sessionRef.current;
       if (current === null || session === null) return;
+      const requestId = ++patchRequestRef.current;
       const update = structuredClone(current.update);
       const timelineCue = update.cues.find(
         (cue) => (cue as { type?: string }).type === "timeline",
@@ -401,7 +454,17 @@ export function TimelineWorkspace({
       // Ordinary keyframe edits only re-evaluate what is already prepared; a
       // change of artwork or video is a resource dependency and reloads the
       // context so the replacement pixels are prepared before they commit.
-      if (session.applyTimelineEdit(update)) {
+      // While a load is pending we always take the load path: a hot edit or an
+      // undo may have restored a different resource signature, and merely
+      // letting `applyTimelineEdit` succeed would leave the older pending load
+      // free to commit its stale textures.  `session.load` aborts the previous
+      // load (its own generation) and makes the newest cue authoritative.
+      if (!loadPendingRef.current && session.applyTimelineEdit(update)) {
+        // The committed keyframe is authoritative now.  Drop the transient
+        // interactive override before seeking so the preview shows what the
+        // timeline evaluates at the latest playhead instead of staying pinned
+        // to the edited pose until the workspace is rebuilt.
+        surfaceRef.current?.clearOverrides();
         void session
           .seek(desiredPlayhead, "scrub")
           .catch((error: unknown) =>
@@ -409,6 +472,7 @@ export function TimelineWorkspace({
           );
         return;
       }
+      loadPendingRef.current = true;
       void session
         .load({
           update,
@@ -417,13 +481,32 @@ export function TimelineWorkspace({
           world: "restore",
           animations: animationMap,
         })
-        .then(() => session.seek(desiredPlayhead, "scrub"))
+        .then((status) => {
+          if (sessionRef.current !== session) {
+            if (requestId === patchRequestRef.current)
+              loadPendingRef.current = false;
+            return;
+          }
+          // A newer patch owns the pending flag and the session now.
+          if (requestId !== patchRequestRef.current) return;
+          loadPendingRef.current = false;
+          // A superseded load reports `stale`; it left the newer load's state
+          // intact, so this callback must not clear overrides or seek.
+          if (status === "stale") return;
+          surfaceRef.current?.clearOverrides();
+          return session.seek(desiredPlayhead, "scrub");
+        })
         .catch((error: unknown) => {
-          if (sessionRef.current === session)
+          if (
+            requestId === patchRequestRef.current &&
+            sessionRef.current === session
+          ) {
+            loadPendingRef.current = false;
             onError(`时间轴预览刷新失败：${errorMessage(error)}`);
+          }
         });
     },
-    [animationMap, onError, preview, urls],
+    [animationMap, onError, urls],
   );
 
   useEffect(() => {
@@ -812,9 +895,8 @@ export function TimelineWorkspace({
       onError("同一时间线中不能重复添加同一按钮实例轨道。");
       return;
     }
-    const spriteAsset =
-      assets.find((asset) => asset.kind === "sprite")?.id ?? "";
-    const videoAsset = assets.find((asset) => asset.kind === "video")?.id ?? "";
+    const spriteAsset = firstVisibleAssetId(assets, assetLayout, "sprite");
+    const videoAsset = firstVisibleAssetId(assets, assetLayout, "video");
     const ambienceSlot =
       AMBIENCE_SLOTS.find(
         (slot) =>
@@ -830,6 +912,10 @@ export function TimelineWorkspace({
       onError("环境声轨道最多只能使用四个固定槽位。");
       return;
     }
+    if (newTrackType === "video" && videoAsset === null) {
+      onError("没有可用的视频素材（或全部已隐藏），无法新建视频轨。");
+      return;
+    }
     const track: TimelineTrack =
       newTrackType === "sprite"
         ? {
@@ -842,7 +928,7 @@ export function TimelineWorkspace({
         : newTrackType === "video"
           ? {
               type: "video",
-              asset: videoAsset,
+              asset: videoAsset ?? "",
               clip_start_ms: 0,
               clip_end_ms: null,
               loop: false,
@@ -863,6 +949,10 @@ export function TimelineWorkspace({
   };
 
   const addTimelineEvent = (kind: TimelineEvent["type"]): void => {
+    if (kind === "sfx" && visibleSfx === null) {
+      onError("没有可用的音效素材（或全部已隐藏），无法新建 SFX 事件。");
+      return;
+    }
     const current = nodeRef.current;
     const atMs = snapTime(playheadRef.current, snap, current.duration_ms);
     const used = new Set(current.events.map((event) => event.id));
@@ -875,7 +965,7 @@ export function TimelineWorkspace({
             type: "sfx",
             id: `${prefix}_${index}`,
             at_ms: atMs,
-            asset: assets.find((asset) => asset.kind === "sfx")?.id ?? "",
+            asset: visibleSfx ?? "",
             volume: 1,
           }
         : {
@@ -1062,6 +1152,16 @@ export function TimelineWorkspace({
     () => [...(frame?.objects ?? [])].sort((left, right) => left.z - right.z),
     [frame?.objects],
   );
+  // Buttons are placed by the DOM overlay in the game, above the camera-
+  // transformed Pixi world.  The editor mirrors that with the shared button
+  // component, its artwork coming from the runtime scene context and its
+  // placement from the session-evaluated frame, so scrubbing shows exactly the
+  // pose the game would show at that playhead.
+  const buttonObjects = useMemo(
+    () => objects.filter((object) => object.kind === "button"),
+    [objects],
+  );
+  const previewButtons = preview?.start_snapshot.world.buttons;
   const gizmoObjects = useMemo(() => {
     if (selectedId === null) return objects;
     const selected = objects.find((object) => object.id === selectedId);
@@ -1218,6 +1318,29 @@ export function TimelineWorkspace({
               width={DESIGN_WIDTH}
             />
             <div className="timeline-gizmo-layer">
+              {previewButtons !== undefined && buttonObjects.length > 0 && (
+                <div className="timeline-button-layer">
+                  {buttonObjects.map((object) => {
+                    const base = previewButtons[object.id];
+                    if (base === undefined) return null;
+                    return (
+                      <TemplateButton
+                        animations={animationMap}
+                        assets={urls}
+                        button={evaluatedButtonSnapshot(base, object)}
+                        className="scene-button"
+                        disabled
+                        key={object.id}
+                        onActivate={() => undefined}
+                        paused
+                        playbackRate={1}
+                        sessionKey={`${targetKey}:${object.id}`}
+                        style={buttonPreviewStyle(object)}
+                      />
+                    );
+                  })}
+                </div>
+              )}
               {gizmoObjects.map((object) => (
                 <div
                   className={`timeline-gizmo${selectedId === object.id ? " selected" : ""}`}
@@ -1227,18 +1350,6 @@ export function TimelineWorkspace({
                   }
                   style={gizmoStyle(object, frame?.camera)}
                 >
-                  {object.kind === "button" && object.asset !== "" && (
-                    <AnimatedImage
-                      alt=""
-                      className="timeline-button-preview"
-                      source={(() => {
-                        const asset = assets.find(
-                          (candidate) => candidate.id === object.asset,
-                        );
-                        return editorImageSource(asset, assets, animationMap);
-                      })()}
-                    />
-                  )}
                   <span>{object.id}</span>
                   {selectedId === object.id && (
                     <>
@@ -1362,10 +1473,28 @@ export function TimelineWorkspace({
                 ))}
               </select>
             )}
-            <button onClick={addTrack} type="button">
+            <button
+              disabled={newTrackType === "video" && visibleVideo === null}
+              onClick={addTrack}
+              title={
+                newTrackType === "video" && visibleVideo === null
+                  ? "没有可用的视频素材（或全部已隐藏），无法新建视频轨"
+                  : undefined
+              }
+              type="button"
+            >
               ＋轨道
             </button>
-            <button onClick={() => addTimelineEvent("sfx")} type="button">
+            <button
+              disabled={visibleSfx === null}
+              onClick={() => addTimelineEvent("sfx")}
+              title={
+                visibleSfx === null
+                  ? "没有可用的音效素材（或全部已隐藏），无法新建 SFX 事件"
+                  : undefined
+              }
+              type="button"
+            >
               ＋SFX
             </button>
             <button
@@ -1893,20 +2022,13 @@ function TimelineEventInspector({
         <>
           <label>
             素材
-            <select
-              value={event.asset}
-              onChange={(input) =>
-                onChange({ ...event, asset: input.currentTarget.value })
-              }
-            >
-              {assets
-                .filter((asset) => asset.kind === "sfx")
-                .map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.id}
-                  </option>
-                ))}
-            </select>
+            <AssetChooser
+              assets={assets}
+              kind="sfx"
+              label="音效素材"
+              onChange={(value) => onChange({ ...event, asset: value ?? "" })}
+              value={event.asset || null}
+            />
           </label>
           <label>
             音量
@@ -1975,6 +2097,56 @@ function selectedObjectAssetChanged(
   };
   const currentAsset = findAsset(current);
   return currentAsset !== undefined && findAsset(next) !== currentAsset;
+}
+
+/**
+ * Evaluated placement merged onto the runtime button definition.
+ *
+ * A timeline cue animates only the placement channels (`x`/`y`/`width`/
+ * `height`/`scale_x`/`scale_y`/`rotation_deg`/`opacity`/`z`); the artwork,
+ * `asset_mode`, `fit` and the per-state animations stay the template's.  The
+ * session-evaluated frame is authoritative for every channel it owns, so
+ * scrubbing reproduces exactly what the game would show at that playhead.
+ */
+function evaluatedButtonSnapshot(
+  base: ButtonSnapshot,
+  object: SceneObjectFrame,
+): ButtonSnapshot {
+  return {
+    ...base,
+    id: object.id,
+    x: object.x,
+    y: object.y,
+    width: object.width,
+    height: object.height,
+    scale_x: object.scale_x,
+    scale_y: object.scale_y,
+    rotation_deg: object.rotation_deg,
+    opacity: object.opacity,
+    z: object.z,
+  };
+}
+
+/**
+ * Placement for one evaluated button inside the scaled design layer.
+ *
+ * The layer keeps the 16:9 aspect of the 1920x1080 design surface, so
+ * percentage units map design pixels exactly and the shared `scene-button`
+ * layout stays identical to `ButtonLayer`'s design-pixel placement.  The
+ * preview never intercepts pointer events; the gizmo layer above owns the
+ * authoring gestures.
+ */
+function buttonPreviewStyle(object: SceneObjectFrame): CSSProperties {
+  return {
+    left: `${(object.x / DESIGN_WIDTH) * 100}%`,
+    top: `${(object.y / DESIGN_HEIGHT) * 100}%`,
+    width: `${(object.width / DESIGN_WIDTH) * 100}%`,
+    height: `${(object.height / DESIGN_HEIGHT) * 100}%`,
+    opacity: object.opacity,
+    transform: `translate3d(0, 0, 0) rotate(${object.rotation_deg}deg) scale(${object.scale_x}, ${object.scale_y})`,
+    zIndex: Math.round(object.z),
+    pointerEvents: "none",
+  };
 }
 
 function gizmoStyle(

@@ -2,4 +2,10 @@
 import type { WireAssetKind } from "./WireAssetKind";
 import type { WireU64 } from "./WireU64";
 
-export type WireImportedAsset = { id: string, kind: WireAssetKind, path: string, absolute_path: string, size_bytes: WireU64, token: string | null, reused_from: string | null, };
+export type WireImportedAsset = { id: string, kind: WireAssetKind, path: string, absolute_path: string, size_bytes: WireU64, token: string | null, reused_from: string | null, 
+/**
+ * Relative path of the previous binary when this record replaces an
+ * existing asset.  The old file is intentionally retained on disk as an
+ * unregistered recovery copy and is never part of the save deletions.
+ */
+replaced_from: string | null, };

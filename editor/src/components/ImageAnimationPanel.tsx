@@ -13,9 +13,12 @@ import {
   naturalSortFrameIds,
   totalDurationMs,
   validateAnimationDraft,
+  ANIMATION_FRAME_KINDS,
   type AnimationDraft,
 } from "../imageAnimation";
+import { assetChoiceOptions } from "../assetLibrary";
 import type { AnimationFrame, AssetKind, EditorAsset } from "../types";
+import { useAssetLayout } from "./AssetChooser";
 import { FrameSequencePreview } from "./FrameSequencePreview";
 
 const ANIMATION_KINDS: readonly AssetKind[] = ["sprite", "background", "gui"];
@@ -52,11 +55,23 @@ export function ImageAnimationPanel({
     () => new Map(assets.map((asset) => [asset.id, asset] as const)),
     [assets],
   );
-  const candidates = useMemo(
-    () => naturalSortFrameAssets(frameCandidates(assets)),
-    [assets],
-  );
+  const layout = useAssetLayout();
   const [picked, setPicked] = useState<string[]>([]);
+  const candidates = useMemo(() => {
+    // Hidden assets are not offered as new frames, but a frame that is
+    // already picked keeps its place (selectedHidden retention).
+    const allowed = new Set(
+      assetChoiceOptions({
+        assets,
+        layout,
+        kind: ANIMATION_FRAME_KINDS,
+        selectedIds: picked,
+      }).map((option) => option.id),
+    );
+    return naturalSortFrameAssets(
+      frameCandidates(assets).filter((asset) => allowed.has(asset.id)),
+    );
+  }, [assets, layout, picked]);
   const [durations, setDurations] = useState<Record<string, number>>({});
   const [unifiedText, setUnifiedText] = useState(
     String(DEFAULT_FRAME_DURATION_MS),

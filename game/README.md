@@ -132,12 +132,24 @@ Rules:
 - The node never blocks: the main runtime advances to `next` in the same update
   and emits a host control cue instead of a presentation cue. That cue is
   consumed by the desktop host and never reaches the presentation layer.
-- Only the **main** window's story runtime can open or re-point the window. A
-  Scene replay or the secondary window itself advances through the node normally
-  and opens nothing.
+- The **main** window's story runtime and a chapter-map **Scene replay** can both
+  open or re-point the window; the secondary window itself advances through the
+  node normally and opens nothing.
+- A replay owns the same single native window while it runs: its own
+  `open_window` opens or re-points that one window, and leaving the replayed
+  Scene, ending the replay or exiting it closes the window again. Replayed play
+  stays ephemeral: its variables and dialogue occurrences never reach the
+  official progress, the profile file, a save slot or the merged ledger.
 - Opening again **replaces** the Scene shown in the same native window (the
   secondary runtime is rebuilt with a fresh session token). A second window is
   never created.
+- One update may contain several requests, because the runtime keeps going past
+  every `open_window` node: the **last** one decides what the window shows, and
+  no intermediate window is ever created. A request is honoured even when the
+  same update also starts a new game or changes Scene — that Scene then owns the
+  window, so it is re-pointed instead of being closed first. A new game, a load,
+  a title return or a Scene change only closes the previous window when the same
+  update carries no request of its own.
 - The secondary window has normal gameplay — its own scene, presentation, audio
   and input — but no save, load, settings or history UI, and the host refuses
   those commands from it.
@@ -149,10 +161,12 @@ Rules:
   Secondary entries are never dropped when the secondary changes Scene, is
   replaced, or closes; only the main story's established reset points (a new
   game, a load, a main Scene change, or the explicit clear action) remove them.
-- The secondary is tied to the main Scene that owns it: a main new game, load,
-  return to the title, replay entry, main Scene change or shutdown closes it. A
-  user/native close of the secondary window is prevented; only the host may
-  remove it.
+- The secondary is tied to the runtime that owns it. A story-owned window is
+  closed by a main new game, load, return to the title, main Scene change or
+  shutdown; a replay-owned one is closed when that replay leaves its Scene,
+  ends, fails or is exited, and entering a replay closes a story-owned window
+  the replay does not take over. A user/native close of the secondary window is
+  prevented; only the host may remove it.
 - Saving captures both windows (and the merged history) in one slot; loading a
   slot restores both. Slots written before this feature still load: they simply
   restore the main snapshot without a secondary and without a stored history.

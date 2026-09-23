@@ -10,6 +10,7 @@
 import type { ReactElement } from "react";
 
 import { ColorField, Field, NumberField } from "./Fields";
+import { AssetChooser } from "./AssetChooser";
 import {
   defaultCurtainFill,
   defaultFlashEffect,
@@ -158,19 +159,20 @@ export function CurtainFillFields({
         />
       ) : (
         <Field label="gui 素材">
-          <select
-            value={value !== null && "asset" in value ? value.asset : ""}
-            onChange={(event) => onChange({ asset: event.currentTarget.value })}
-          >
-            <option value="">— 请选择 —</option>
-            {Object.entries(manifest.assets)
-              .filter(([, asset]) => asset.kind === "gui")
-              .map(([id]) => (
-                <option key={id} value={id}>
-                  {id}
-                </option>
-              ))}
-          </select>
+          <AssetChooser
+            assets={Object.entries(manifest.assets).map(([id, asset]) => ({
+              id,
+              kind: asset.kind,
+              path: asset.path,
+              animation: asset.animation,
+            }))}
+            kind="gui"
+            label="gui 素材"
+            onChange={(asset) => onChange({ asset: asset ?? "" })}
+            value={
+              value !== null && "asset" in value ? value.asset || null : null
+            }
+          />
         </Field>
       )}
     </>

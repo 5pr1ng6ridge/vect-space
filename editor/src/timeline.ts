@@ -382,8 +382,29 @@ export function copyTimelineKeyframes(
   node: TimelineNode,
   addresses: readonly TimelineKeyframeAddress[],
 ): TimelineKeyframeClipboard | null {
+  return copyTimelineKeyframesFrom(
+    node.tracks,
+    (track: TimelineTrack) => timelineTrackIdentity(track),
+    addresses,
+  );
+}
+
+/**
+ * Structural copy shared by every keyframe surface.
+ *
+ * `identityOf` resolves the stable track address the clipboard stores, so a
+ * story track and a button/UI-motion track can use the same clipboard code
+ * without sharing a schema.
+ */
+export function copyTimelineKeyframesFrom<
+  TTrack extends { channels: TimelineChannels },
+>(
+  tracks: readonly TTrack[],
+  identityOf: (track: TTrack, index: number) => string,
+  addresses: readonly TimelineKeyframeAddress[],
+): TimelineKeyframeClipboard | null {
   const resolved = addresses.flatMap((address) => {
-    const track = node.tracks[address.track];
+    const track = tracks[address.track];
     const frame = track?.channels[address.channel]?.[address.index];
     return track === undefined || frame === undefined
       ? []
@@ -393,7 +414,7 @@ export function copyTimelineKeyframes(
   if (!Number.isFinite(origin)) return null;
   return {
     items: resolved.map(({ track, channel, frame }) => ({
-      trackIdentity: timelineTrackIdentity(track),
+      trackIdentity: identityOf(track, tracks.indexOf(track)),
       channel,
       offsetMs: frame.at_ms - origin,
       frame: structuredClone(frame),
@@ -408,22 +429,62 @@ export function pasteTimelineKeyframes(
   snapMs: number,
   snapPointMs?: number,
 ): TimelinePasteResult {
-  const next = structuredClone(node);
+  const result = pasteTimelineKeyframesInto(
+    node,
+    (track: TimelineTrack) => timelineTrackIdentity(track),
+    (track: TimelineTrack) => timelineTrackChannels(track.type),
+    (track: TimelineTrack) => track.type !== "video",
+    clipboard,
+    playheadMs,
+    snapMs,
+    snapPointMs,
+  );
+  return {
+    node: result.document,
+    pasted: result.pasted,
+    skipped: result.skipped,
+  };
+}
+
+/**
+ * Structural paste shared by every keyframe surface.  The document is cloned
+ * and only `duration_ms`/`tracks[].channels` are inspected, so a caller's
+ * domain fields survive untouched.
+ */
+export function pasteTimelineKeyframesInto<
+  TTrack extends { channels: TimelineChannels },
+  TDocument extends { duration_ms: number; tracks: TTrack[] },
+>(
+  document: TDocument,
+  identityOf: (track: TTrack, index: number) => string,
+  channelsOf: (track: TTrack, index: number) => readonly string[],
+  allowInheritOf: (track: TTrack, index: number) => boolean,
+  clipboard: TimelineKeyframeClipboard,
+  playheadMs: number,
+  snapMs: number,
+  snapPointMs?: number,
+): {
+  document: TDocument;
+  pasted: TimelineKeyframeAddress[];
+  skipped: number;
+} {
+  const next = structuredClone(document);
   const targets: { track: number; channel: string; atMs: number }[] = [];
   let skipped = 0;
   const anchor = snapTimelineTime(playheadMs, snapMs, snapPointMs);
   for (const item of clipboard.items) {
     const trackIndex = next.tracks.findIndex(
-      (track) => timelineTrackIdentity(track) === item.trackIdentity,
+      (track, index) => identityOf(track, index) === item.trackIdentity,
     );
     const track = next.tracks[trackIndex];
     const atMs = snapTimelineTime(anchor + item.offsetMs, snapMs);
     if (
       track === undefined ||
-      !timelineTrackChannels(track.type).includes(item.channel) ||
+      !channelsOf(track, trackIndex).includes(item.channel) ||
       atMs < 0 ||
       atMs > next.duration_ms ||
-      (item.frame.value === "inherit" && (atMs !== 0 || track.type === "video"))
+      (item.frame.value === "inherit" &&
+        (atMs !== 0 || !allowInheritOf(track, trackIndex)))
     ) {
       skipped += 1;
       continue;
@@ -445,7 +506,7 @@ export function pasteTimelineKeyframes(
       ? []
       : [{ track: target.track, channel: target.channel, index }];
   });
-  return { node: next, pasted, skipped };
+  return { document: next, pasted, skipped };
 }
 
 export function snapTimelineTime(
@@ -460,7 +521,7 @@ export function snapTimelineTime(
     : grid;
 }
 
-function timelineTrackIdentity(track: TimelineTrack): string {
+export function timelineTrackIdentity(track: TimelineTrack): string {
   if (track.type === "sprite") return `sprite:${track.sprite_id}`;
   if (track.type === "button") return `button:${track.instance_id}`;
   if (track.type === "ambience") return `ambience:${track.slot}`;

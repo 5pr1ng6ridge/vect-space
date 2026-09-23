@@ -4,8 +4,8 @@ entry: establish
 nodes:
   JUMPSANDBOX:
     type: jump
-    scene: sandbox
-    target: boot
+    scene: ch0
+    target: background_start
   JUMP_BUTTONTEST:
     type: jump
     scene: button_test
@@ -128,14 +128,18 @@ nodes:
   establish:
     type: background
     background: bg.nvctsp
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 700
     easing: ease_in_out
     await: true
     next: dialogue_show
   flash_result:
     type: screen_effect
-    effect: flash
+    effect:
+      type: flash
+      color: "#FFFFFF"
+      peak_alpha: 0.88
     duration_ms: 260
     await: false
     next: camera_move
@@ -615,15 +619,21 @@ nodes:
         - at_ms: 0
           value: inherit
           easing: linear
-        - at_ms: 100
-          value: 960.0
+        - at_ms: 300
+          value: 1717.3096
+          easing: ease_out
+        - at_ms: 500
+          value: 1803.113
           easing: linear
         "y":
         - at_ms: 0
           value: inherit
           easing: linear
-        - at_ms: 100
-          value: 1080.0
+        - at_ms: 300
+          value: 31.709845
+          easing: ease_out
+        - at_ms: 500
+          value: -35.440414
           easing: linear
         z:
         - at_ms: 500

@@ -25,12 +25,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AudioManager } from "@vectspace/presentation-core/audio";
 import type {
+  ButtonSnapshot,
   RuntimeSnapshot,
   RuntimeUpdate,
 } from "@vectspace/presentation-core/types";
 import type {
   BuildNodePreviewResult,
   EditorAsset,
+  EditorLayout,
   EditorProject,
   TimelineNode,
 } from "../types";
@@ -46,6 +48,7 @@ import {
   createFramePump,
   createMemoryKit,
   createMemoryTextureLoader,
+  MemorySprite,
   type FramePump,
 } from "@vectspace/presentation-core/scene-test-kit";
 import {
@@ -53,6 +56,7 @@ import {
   type FakeMediaDom,
 } from "@vectspace/presentation-core/session-test-kit";
 import type { EditorPreviewEnvironment } from "./timelinePreview";
+import { AssetLayoutProvider } from "./AssetChooser";
 import { TimelineWorkspace } from "./TimelineWorkspace";
 
 type ReadyPreview = Extract<BuildNodePreviewResult, { status: "ready" }>;
@@ -182,6 +186,8 @@ interface SnapshotOptions {
   background?: string;
   spriteId?: string;
   spriteAsset?: string;
+  /** Real runtime button instances visible at node entry. */
+  buttons?: Record<string, ButtonSnapshot>;
 }
 
 function snapshot(options: SnapshotOptions = {}): RuntimeSnapshot {
@@ -207,7 +213,7 @@ function snapshot(options: SnapshotOptions = {}): RuntimeSnapshot {
           z: 1,
         },
       },
-      buttons: {},
+      buttons: options.buttons ?? {},
       camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
       dialogue_ui_visible: true,
       ui_motion_bindings: {},
@@ -386,7 +392,12 @@ function createDeferredLoader(): DeferredLoader {
     load: (url) =>
       new Promise((resolve) => {
         pending.set(url, () =>
-          resolve({ width: 64, height: 64, destroy: () => undefined }),
+          resolve({
+            url,
+            width: 64,
+            height: 64,
+            destroy: () => undefined,
+          } as unknown as SceneTextureLike),
         );
       }),
     release: (urls) => {
@@ -476,6 +487,17 @@ async function renderWorkspace(): Promise<{
   await waitForReady();
   stageRect(view.container);
   return { view, handle, onChangeSpy, renderKit };
+}
+
+function inspectorField(
+  container: HTMLElement,
+  label: string,
+): HTMLInputElement {
+  const inspector = container.querySelector(".timeline-object-inspector");
+  if (inspector === null) throw new Error("缺少选中对象检视器");
+  return within(inspector as HTMLElement).getByLabelText<HTMLInputElement>(
+    label,
+  );
 }
 
 function selectFirstObject(container: HTMLElement): void {
@@ -774,6 +796,105 @@ describe("TimelineWorkspace preview context", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/（1 个边界）/)).toBeNull();
   });
+
+  it("ignores a stale resource load so it cannot clear a newer override or seek", async () => {
+    const loader = createDeferredLoader();
+    const renderKit = createRenderKit(loader.load);
+    const node = timelineNode();
+    previewApi.handler = () => Promise.resolve(readyPreview(node));
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const project = makeProject({ [NODE_ID]: node });
+    const renderHost = (override?: TimelineNode): void => {
+      view.rerender(
+        <WorkspaceHost
+          environment={renderKit.environment}
+          nodeOverride={override}
+          onBack={() => {
+            handle.backCalls += 1;
+          }}
+          onState={(state) => {
+            handle.state = state;
+          }}
+          project={project}
+        />,
+      );
+    };
+    const view = render(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={project}
+      />,
+    );
+    // Resolve the initial context decode: sprites gate before the background.
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/sprite/alice.png")).toBe(true),
+    );
+    loader.release(["C:/game/sprite/alice.png"]);
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/bg/room.png")).toBe(true),
+    );
+    loader.release(["C:/game/bg/room.png"]);
+    await waitForReady();
+    stageRect(view.container);
+
+    // An uncommitted interactive override makes a stale clear observable.
+    fireEvent.click(screen.getByRole("button", { name: "自动关键帧" }));
+    selectFirstObject(view.container);
+    dragGizmo(selectedGizmo(view.container), 96);
+    const overrideLeft = gizmoLeft(view.container);
+
+    const withAsset = (asset: string): TimelineNode =>
+      timelineNode({
+        tracks: [
+          {
+            type: "sprite",
+            sprite_id: "alice",
+            asset,
+            remove_at_end: false,
+            channels: { x: [{ at_ms: 0, value: 100, easing: "linear" }] },
+          },
+          { type: "camera", channels: {} },
+        ],
+      });
+
+    // Resource change #1 starts a deferred load of the replacement texture.
+    renderHost(withAsset("sprite.bob"));
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/sprite/bob.png")).toBe(true),
+    );
+
+    // Resource change #2 supersedes it while #1 is still decoding.
+    renderHost(withAsset("bg.other"));
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/bg/other.png")).toBe(true),
+    );
+
+    // The superseded load finishes later: it must not clear the override or
+    // seek the newer state.
+    loader.release(["C:/game/sprite/bob.png"]);
+    await settle();
+    await settle();
+    expect(gizmoLeft(view.container)).toBe(overrideLeft);
+
+    // The latest load still applies its reset and seek (drain any texture the
+    // new context requests, including a re-requested background, and pump the
+    // deferred frame so the cleared override is rendered).
+    loader.release(["C:/game/bg/other.png"]);
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await settle();
+      renderKit.pump.step();
+      loader.release([...loader.pending.keys()]);
+    }
+    await waitFor(() =>
+      expect(gizmoLeft(view.container)).not.toBe(overrideLeft),
+    );
+  });
 });
 
 describe("TimelineWorkspace gestures and history", () => {
@@ -881,6 +1002,125 @@ describe("TimelineWorkspace gestures and history", () => {
     fireEvent.pointerUp(gizmo, { clientX: 96, clientY: 0 });
     expect(onChangeSpy).not.toHaveBeenCalled();
     expect(handle.state?.past).toHaveLength(0);
+  });
+});
+
+describe("TimelineWorkspace selected-object numeric edits", () => {
+  it("reflects a numeric edit in the live preview and keeps tracking the timeline", async () => {
+    const { view, handle, onChangeSpy } = await renderWorkspace();
+    selectFirstObject(view.container);
+    const beforeX = gizmoLeft(view.container);
+    const applyEdit = vi.spyOn(TimelineSession.prototype, "applyTimelineEdit");
+
+    // Typing into the selected-object inspector (not a gizmo drag) must patch
+    // the live session once, show the new pose immediately, and display the
+    // newly evaluated frame without leaving and re-entering the workspace.
+    fireEvent.change(inspectorField(view.container, "X"), {
+      target: { value: "300" },
+    });
+    expect(onChangeSpy).toHaveBeenCalledTimes(1);
+    expect(applyEdit).toHaveBeenCalledTimes(1);
+    expect(gizmoLeft(view.container)).not.toBe(beforeX);
+    expect(Number(inspectorField(view.container, "X").value)).toBe(300);
+    expect(currentNode(handle).tracks[0]?.channels.x).toEqual([
+      { at_ms: 0, value: 300, easing: "linear" },
+      { at_ms: 1000, value: 500, easing: "linear" },
+    ]);
+
+    // The committed keyframe is authoritative: scrubbing re-evaluates the
+    // channel instead of staying pinned to the edited pose by a stale
+    // interactive override (the defect only a workspace rebuild used to fix).
+    fireEvent.change(screen.getByLabelText("时间线播放头"), {
+      target: { value: "1000" },
+    });
+    await settle();
+    expect(Number(inspectorField(view.container, "X").value)).toBe(500);
+    expect(gizmoLeft(view.container)).toBe("26.041666666666668%");
+  });
+
+  it("applies repeated numeric edits to the same and other channels", async () => {
+    const { view, handle, onChangeSpy } = await renderWorkspace();
+    selectFirstObject(view.container);
+
+    fireEvent.change(inspectorField(view.container, "X"), {
+      target: { value: "300" },
+    });
+    await settle();
+    fireEvent.change(inspectorField(view.container, "X"), {
+      target: { value: "400" },
+    });
+    await settle();
+    expect(onChangeSpy).toHaveBeenCalledTimes(2);
+    expect(currentNode(handle).tracks[0]?.channels.x?.[0]).toEqual({
+      at_ms: 0,
+      value: 400,
+      easing: "linear",
+    });
+
+    // A second numeric channel writes its own keyframe with no rebuild.
+    fireEvent.change(inspectorField(view.container, "Scale"), {
+      target: { value: "2" },
+    });
+    await settle();
+    expect(currentNode(handle).tracks[0]?.channels.scale).toEqual([
+      { at_ms: 0, value: 2, easing: "linear" },
+    ]);
+    expect(onChangeSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("undoes a numeric edit from the parent and refreshes the preview", async () => {
+    const { view, handle } = await renderWorkspace();
+    selectFirstObject(view.container);
+    const beforeX = gizmoLeft(view.container);
+
+    fireEvent.change(inspectorField(view.container, "X"), {
+      target: { value: "300" },
+    });
+    await settle();
+    expect(currentNode(handle).tracks[0]?.channels.x?.[0]?.value).toBe(300);
+
+    // The parent (undo/redo) replaces the node externally; the strict preview
+    // must adopt the restored document instead of keeping the edit.
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    await waitFor(() => expect(gizmoLeft(view.container)).toBe(beforeX));
+    expect(currentNode(handle).tracks[0]?.channels.x?.[0]?.value).toBe(100);
+    expect(Number(inspectorField(view.container, "X").value)).toBe(100);
+  });
+
+  it("reads a committed numeric edit immediately when the workspace reopens", async () => {
+    const first = await renderWorkspace();
+    selectFirstObject(first.view.container);
+    fireEvent.change(inspectorField(first.view.container, "X"), {
+      target: { value: "300" },
+    });
+    await settle();
+    const committed = currentNode(first.handle);
+    expect(committed.tracks[0]?.channels.x?.[0]?.value).toBe(300);
+
+    // Leave the workspace (a real unmount/dispose) and reopen it on the
+    // persisted document.  The reopened preview must show the committed pose
+    // with no edit and no override leaked from the previous session.
+    cleanup();
+    const renderKit = createRenderKit();
+    previewApi.handler = () => Promise.resolve(readyPreview(committed));
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const view = render(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={makeProject({ [NODE_ID]: committed })}
+      />,
+    );
+    await waitForReady();
+    stageRect(view.container);
+    selectFirstObject(view.container);
+    expect(gizmoLeft(view.container)).toBe("15.625%");
+    expect(Number(inspectorField(view.container, "X").value)).toBe(300);
   });
 });
 
@@ -1275,5 +1515,519 @@ describe("TimelineWorkspace playback context replacement", () => {
     expect(playSfx).toHaveBeenCalledTimes(1);
     await stepPlayback(playback.pump, 100, 5);
     expect(playSfx).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("TimelineWorkspace creation asset policy", () => {
+  const VIDEO_ASSET: EditorAsset = {
+    id: "video.clip",
+    kind: "video",
+    path: "video/clip.mp4",
+    absolute_path: "C:/game/video/clip.mp4",
+  };
+  const SFX_ASSET: EditorAsset = {
+    id: "sfx.hit",
+    kind: "sfx",
+    path: "audio/hit.ogg",
+    absolute_path: "C:/game/audio/hit.ogg",
+  };
+
+  function projectWith(extra: readonly EditorAsset[]): EditorProject {
+    const project = makeProject({ [NODE_ID]: timelineNode() });
+    return { ...project, assets: [...ASSETS, ...extra] };
+  }
+
+  function renderWorkspaceWith(
+    project: EditorProject,
+    layout?: EditorLayout,
+  ): { view: ReturnType<typeof render>; handle: HostHandle } {
+    const renderKit = createRenderKit();
+    const node = timelineNode();
+    previewApi.handler = () => Promise.resolve(readyPreview(node));
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const host = (
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={project}
+      />
+    );
+    const view = render(
+      layout === undefined ? (
+        host
+      ) : (
+        <AssetLayoutProvider layout={layout}>{host}</AssetLayoutProvider>
+      ),
+    );
+    return { view, handle };
+  }
+
+  function allHiddenLayout(assets: readonly EditorAsset[]): EditorLayout {
+    return {
+      version: 1,
+      scenes: {},
+      asset_metadata: Object.fromEntries(
+        assets.map((asset) => [asset.id, { hidden: true }]),
+      ),
+    };
+  }
+
+  it("disables video/SFX creation for hidden assets and commits nothing", async () => {
+    const project = projectWith([VIDEO_ASSET, SFX_ASSET]);
+    const { handle } = renderWorkspaceWith(
+      project,
+      allHiddenLayout(project.assets),
+    );
+    await waitForReady();
+
+    fireEvent.change(screen.getByLabelText("新建轨道类型"), {
+      target: { value: "video" },
+    });
+    const addTrack = screen.getByRole("button", { name: "＋轨道" });
+    expect(addTrack).toBeDisabled();
+    fireEvent.click(addTrack);
+
+    const sfx = screen.getByRole("button", { name: "＋SFX" });
+    expect(sfx).toBeDisabled();
+    expect(sfx).toHaveAttribute("title", expect.stringContaining("音效"));
+    fireEvent.click(sfx);
+    await settle();
+
+    // No invalid empty asset row / event was written.
+    expect(handle.state?.past).toHaveLength(0);
+    expect(
+      currentNode(handle).tracks.some((track) => track.type === "video"),
+    ).toBe(false);
+    expect(currentNode(handle).events).toHaveLength(0);
+  });
+
+  it("creates video tracks and SFX events with a real visible asset", async () => {
+    const { handle } = renderWorkspaceWith(
+      projectWith([VIDEO_ASSET, SFX_ASSET]),
+    );
+    await waitForReady();
+
+    fireEvent.change(screen.getByLabelText("新建轨道类型"), {
+      target: { value: "video" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
+    await settle();
+    const video = currentNode(handle).tracks.find(
+      (track) => track.type === "video",
+    );
+    expect(video).toMatchObject({ asset: "video.clip" });
+
+    fireEvent.click(screen.getByRole("button", { name: "＋SFX" }));
+    await settle();
+    const event = currentNode(handle).events.find(
+      (candidate) => candidate.type === "sfx",
+    );
+    expect(event).toMatchObject({ asset: "sfx.hit" });
+  });
+});
+
+describe("TimelineWorkspace pending resource load supersession", () => {
+  /** Every texture currently displayed by a memory sprite, in render order. */
+  function spriteTextureUrls(renderKit: RenderKit): string[] {
+    const urls: string[] = [];
+    const visit = (value: unknown): void => {
+      if (value instanceof MemorySprite)
+        urls.push((value.texture as { url?: string }).url ?? value.label);
+      const children = (value as { children?: unknown[] }).children;
+      if (Array.isArray(children)) for (const child of children) visit(child);
+    };
+    for (const application of renderKit.kit.applications)
+      visit(application.stage);
+    return urls;
+  }
+
+  it("supersedes a pending load when an undo restores the previous signature", async () => {
+    const loader = createDeferredLoader();
+    const renderKit = createRenderKit(loader.load);
+    const original = timelineNode();
+    previewApi.handler = () => Promise.resolve(readyPreview(original));
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const project = makeProject({ [NODE_ID]: original });
+    const renderHost = (override: TimelineNode | undefined): void => {
+      view.rerender(
+        <WorkspaceHost
+          environment={renderKit.environment}
+          nodeOverride={override}
+          onBack={() => {
+            handle.backCalls += 1;
+          }}
+          onState={(state) => {
+            handle.state = state;
+          }}
+          project={project}
+        />,
+      );
+    };
+    const view = render(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={project}
+      />,
+    );
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/sprite/alice.png")).toBe(true),
+    );
+    loader.release(["C:/game/sprite/alice.png"]);
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/bg/room.png")).toBe(true),
+    );
+    loader.release(["C:/game/bg/room.png"]);
+    await waitForReady();
+    expect(spriteTextureUrls(renderKit)).toContain("C:/game/sprite/alice.png");
+
+    const withAsset = (asset: string): TimelineNode =>
+      timelineNode({
+        tracks: [
+          {
+            type: "sprite",
+            sprite_id: "alice",
+            asset,
+            remove_at_end: false,
+            channels: { x: [{ at_ms: 0, value: 100, easing: "linear" }] },
+          },
+          { type: "camera", channels: {} },
+        ],
+      });
+
+    // Hot edit to a new artwork starts a deferred resource load.
+    renderHost(withAsset("sprite.bob"));
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/sprite/bob.png")).toBe(true),
+    );
+
+    // The parent restores the previous signature (undo) while that load is
+    // still awaiting its texture.  The newest cue must supersede the pending
+    // load, so the old one can never commit its stale texture.
+    renderHost(undefined);
+    await settle();
+
+    // Finish the superseded load first, then drain every follow-up texture.
+    // If the pending load were allowed to commit, `bob` would appear in the
+    // sprite's texture history even though the document is back on `alice`.
+    loader.release(["C:/game/sprite/bob.png"]);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await settle();
+      renderKit.pump.step();
+      loader.release([...loader.pending.keys()]);
+    }
+
+    const urls = spriteTextureUrls(renderKit);
+    expect(urls.at(-1)).toBe("C:/game/sprite/alice.png");
+    expect(urls).not.toContain("C:/game/sprite/bob.png");
+    expect(currentNode(handle).tracks[0]).toMatchObject({
+      type: "sprite",
+      asset: "sprite.alice",
+    });
+  });
+
+  it("supersedes a pending load so a hot keyframe edit is not reverted", async () => {
+    const loader = createDeferredLoader();
+    const renderKit = createRenderKit(loader.load);
+    const original = timelineNode();
+    previewApi.handler = () => Promise.resolve(readyPreview(original));
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const project = makeProject({ [NODE_ID]: original });
+    const renderHost = (override: TimelineNode | undefined): void => {
+      view.rerender(
+        <WorkspaceHost
+          environment={renderKit.environment}
+          nodeOverride={override}
+          onBack={() => {
+            handle.backCalls += 1;
+          }}
+          onState={(state) => {
+            handle.state = state;
+          }}
+          project={project}
+        />,
+      );
+    };
+    const view = render(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={project}
+      />,
+    );
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/sprite/alice.png")).toBe(true),
+    );
+    loader.release(["C:/game/sprite/alice.png"]);
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/bg/room.png")).toBe(true),
+    );
+    loader.release(["C:/game/bg/room.png"]);
+    await waitForReady();
+    stageRect(view.container);
+    selectFirstObject(view.container);
+
+    const withAsset = (asset: string): TimelineNode =>
+      timelineNode({
+        tracks: [
+          {
+            type: "sprite",
+            sprite_id: "alice",
+            asset,
+            remove_at_end: false,
+            channels: { x: [{ at_ms: 0, value: 100, easing: "linear" }] },
+          },
+          { type: "camera", channels: {} },
+        ],
+      });
+
+    // Resource edit to a new artwork starts a deferred load.
+    renderHost(withAsset("sprite.bob"));
+    await waitFor(() =>
+      expect(loader.pending.has("C:/game/sprite/bob.png")).toBe(true),
+    );
+
+    // A hot keyframe edit while that load is pending keeps the same resource
+    // signature, so it can only survive if the newest cue supersedes the
+    // pending load.  Otherwise the old load commits its own cue and reverts
+    // the freshly typed value.
+    fireEvent.change(inspectorField(view.container, "X"), {
+      target: { value: "400" },
+    });
+    await settle();
+
+    // Finish the superseded load and drain every follow-up texture.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await settle();
+      renderKit.pump.step();
+      loader.release([...loader.pending.keys()]);
+    }
+
+    expect(Number(inspectorField(view.container, "X").value)).toBe(400);
+    expect(spriteTextureUrls(renderKit).at(-1)).toBe("C:/game/sprite/bob.png");
+  });
+});
+
+describe("TimelineWorkspace shared gameplay buttons", () => {
+  // A real `gui` artwork asset so the shared button resolves pixels exactly
+  // like the game's `ButtonLayer` would.
+  const GUI_ASSETS: EditorAsset[] = [
+    {
+      id: "gui.confirm",
+      kind: "gui",
+      path: "gui/confirm.png",
+      absolute_path: "C:/game/gui/confirm.png",
+    },
+  ];
+
+  function buttonSnapshot(
+    overrides: Partial<ButtonSnapshot> = {},
+  ): ButtonSnapshot {
+    return {
+      id: "confirm",
+      template: "demo.separate",
+      asset_mode: "separate",
+      fit: "contain",
+      normal: "gui.confirm",
+      hover: null,
+      pressed: null,
+      animations: {
+        normal: {
+          duration_ms: 400,
+          channels: {
+            offset_x: [{ at_ms: 0, value: 12, easing: "linear" }],
+          },
+        },
+      },
+      x: 100,
+      y: 200,
+      width: 300,
+      height: 120,
+      rotation_deg: 0,
+      scale_x: 1,
+      scale_y: 1,
+      opacity: 1,
+      z: 2,
+      visible: true,
+      enabled: true,
+      action: { sets: [] },
+      ...overrides,
+    };
+  }
+
+  function buttonNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
+    return timelineNode({
+      tracks: [
+        {
+          type: "button",
+          instance_id: "confirm",
+          channels: {
+            x: [
+              { at_ms: 0, value: 100, easing: "linear" },
+              { at_ms: 1000, value: 900, easing: "linear" },
+            ],
+            y: [{ at_ms: 0, value: 200, easing: "linear" }],
+          },
+        },
+        { type: "camera", channels: {} },
+      ],
+      ...overrides,
+    });
+  }
+
+  async function renderButtons(
+    buttons: Record<string, ButtonSnapshot>,
+    node: TimelineNode = buttonNode(),
+  ): Promise<{
+    view: ReturnType<typeof render>;
+    handle: HostHandle;
+    onChangeSpy: ReturnType<typeof vi.fn>;
+  }> {
+    const renderKit = createRenderKit();
+    const project: EditorProject = {
+      ...makeProject({ [NODE_ID]: node }),
+      assets: [...ASSETS, ...GUI_ASSETS],
+    };
+    previewApi.handler = () =>
+      Promise.resolve(readyPreview(node, { snapshot: { buttons } }));
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const onChangeSpy = vi.fn<(next: TimelineNode) => void>();
+    const view = render(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => {
+          handle.backCalls += 1;
+        }}
+        onChangeSpy={onChangeSpy}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={project}
+      />,
+    );
+    await waitForReady();
+    stageRect(view.container);
+    return { view, handle, onChangeSpy };
+  }
+
+  function previewButton(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(
+      ".timeline-button-layer .scene-button",
+    );
+  }
+
+  it("renders evaluated buttons through the real shared gameplay component", async () => {
+    const { view } = await renderButtons({ confirm: buttonSnapshot() });
+    const button = previewButton(view.container);
+    if (button === null) throw new Error("共享按钮未渲染");
+
+    // Real shared component + state machine class, never interactive.
+    expect(button.className).toContain("scene-button");
+    expect(button.className).toContain("scene-button-normal");
+    expect(button.disabled).toBe(true);
+    // The overlay never steals pointer events from the gizmos.
+    expect(button.style.pointerEvents).toBe("none");
+
+    // Placement is the session-evaluated frame, not the raw snapshot geometry.
+    expect(button.style.left).toBe(`${(100 / 1920) * 100}%`);
+    expect(button.style.top).toBe(`${(200 / 1080) * 100}%`);
+    expect(button.style.width).toBe(`${(300 / 1920) * 100}%`);
+    expect(button.style.height).toBe(`${(120 / 1080) * 100}%`);
+
+    // Artwork and `fit` come from the live runtime scene context.
+    const image = button.querySelector<HTMLImageElement>(
+      "img.scene-button-image",
+    );
+    expect(image?.getAttribute("src")).toBe("C:/game/gui/confirm.png");
+    expect(image?.style.objectFit).toBe("contain");
+
+    // The shared state machine's animation channels are applied (paused at 0).
+    const visual = button.querySelector<HTMLElement>(".scene-button-visual");
+    expect(visual?.style.transform).toContain("translate3d(12px, 0px, 0)");
+
+    // No hand-built artwork layer survives.
+    expect(view.container.querySelector(".timeline-button-preview")).toBeNull();
+  });
+
+  it("follows the session playhead deterministically when scrubbing", async () => {
+    const { view } = await renderButtons({ confirm: buttonSnapshot() });
+    const button = previewButton(view.container);
+    if (button === null) throw new Error("共享按钮未渲染");
+    expect(button.style.left).toBe(`${(100 / 1920) * 100}%`);
+
+    fireEvent.change(screen.getByLabelText("时间线播放头"), {
+      target: { value: "1000" },
+    });
+    await waitFor(() =>
+      expect(button.style.left).toBe(`${(900 / 1920) * 100}%`),
+    );
+
+    fireEvent.change(screen.getByLabelText("时间线播放头"), {
+      target: { value: "0" },
+    });
+    await waitFor(() =>
+      expect(button.style.left).toBe(`${(100 / 1920) * 100}%`),
+    );
+  });
+
+  it("keeps gizmo drag and keyframe writes for button tracks", async () => {
+    const { view, handle, onChangeSpy } = await renderButtons({
+      confirm: buttonSnapshot(),
+    });
+    // Select the button itself (the runtime context also seeds a sprite).
+    const list = view.container.querySelector(".timeline-object-list");
+    if (list === null) throw new Error("缺少对象列表");
+    fireEvent.click(
+      within(list as HTMLElement).getByRole("button", { name: /confirm/ }),
+    );
+    dragGizmo(selectedGizmo(view.container), 96);
+    expect(onChangeSpy).toHaveBeenCalledTimes(1);
+
+    const track = currentNode(handle).tracks.find(
+      (candidate) => candidate.type === "button",
+    );
+    expect(track?.channels.x).toEqual([
+      { at_ms: 0, value: 196, easing: "linear" },
+      { at_ms: 1000, value: 900, easing: "linear" },
+    ]);
+
+    // The shared button follows the committed keyframe.
+    const button = previewButton(view.container);
+    await waitFor(() =>
+      expect(button?.style.left).toBe(`${(196 / 1920) * 100}%`),
+    );
+  });
+
+  it("hides the shared artwork for an invisible runtime instance but keeps the gizmo", async () => {
+    const { view } = await renderButtons({
+      confirm: buttonSnapshot({ visible: false }),
+    });
+    expect(previewButton(view.container)).toBeNull();
+    expect(view.container.querySelector(".timeline-gizmo")).not.toBeNull();
+  });
+
+  it("renders no shared artwork for an instance missing from the runtime context", async () => {
+    const { view } = await renderButtons({});
+    expect(previewButton(view.container)).toBeNull();
+    const list = view.container.querySelector(".timeline-object-list");
+    if (list === null) throw new Error("缺少对象列表");
+    expect(
+      within(list as HTMLElement).getByRole("button", { name: /confirm/ }),
+    ).toBeInTheDocument();
   });
 });

@@ -490,9 +490,39 @@ forest:
 A `timeline` may contain one `ambience` track per fixed slot. Tracks automate
 only `volume`; when a timeline ends, is cancelled, or is replaced, the
 authoritative snapshot volume is restored. Replacing the same asset preserves
-its playback phase, while a different asset crossfades in isolation. Scene
+its playback phase — a same-asset `start` update rewrites gain, `loop_start_ms`
+and `loop_end_ms` in place and never seeks, so `start_ms` only applies to the
+initial start of that element — while a different asset crossfades in
+isolation. Scene
 boundaries stop every active slot. Loading older snapshots that omit ambience
-(or use `ambience: null`) remains compatible.
+(or use `ambience: null`) remains compatible. `loop_start_ms`/`loop_end_ms` are
+authored together: without them the element loops the whole file natively,
+while explicit bounds get a custom rewind that fires 25 ms before the loop end
+but is driven by `timeupdate`, whose cadence is browser-defined — it can be far
+coarser than 25 ms and overshoot the end, so it is not sample-accurate — and
+whose `ended` fallback recovers a loop that ends at the media's own EOF. The
+node inspector renders a per-node waveform editor for `bgm`/`ambience` `start`
+actions: draggable `start_ms`, `loop_start_ms` and `loop_end_ms` handles that
+commit one undo entry per drag, exact integer-ms fields, a whole-loop audition
+and a quick seam audition (it starts shortly before `loop_end_ms` so the first
+wrap is heard immediately). The audition uses a private `<audio>` element that
+never touches the shared buses, only makes sound after the author clicks an
+audition button, replays from the authored start after a natural EOF, follows
+loop-point edits (and their undo/redo) live on the same element at the next
+wrap — it never pauses just because a bound changed, and a removed custom loop
+falls back to the element's own whole-file loop — resumes a paused audition in
+the mode the author selected (Pause keeps the loop, Stop forces the next start
+back to a plain one-shot), ignores queued media events that arrive after Pause
+or Stop, and is released on node or asset change and on unmount. Waveform decoding is bounded before it happens: the
+duration and channel count must come from the host metadata or a time-bounded
+metadata probe before anything is fetched (an undeterminable length or channel
+layout is not fetched or decoded at all; the probe cannot supply channels), the
+pre-decode PCM estimate uses the larger of the decoder's own target sample rate
+and the reported input rate so a low-rate source cannot shrink the budget, the
+body is read only as a stream whose reader is cancelled at the byte cap — there
+is no `arrayBuffer()` fallback — and a failed or refused decode shows an honest
+fallback while numeric editing, the authored values and the private audio
+audition stay untouched.
 
 `game/scenes/ambience_lab.yaml` is a reachable acceptance scene in the chapter
 map. It starts all four slots, automates them independently, retunes slot 2 with

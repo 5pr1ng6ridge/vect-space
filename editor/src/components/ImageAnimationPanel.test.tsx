@@ -18,6 +18,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 import { ImageAnimationPanel } from "./ImageAnimationPanel";
+import { AssetLayoutProvider } from "./AssetChooser";
+import type { EditorLayout } from "../types";
 import { NodeInspector } from "./NodeInspector";
 import { editorApi } from "../api";
 import { projectRequest } from "../story";
@@ -111,6 +113,33 @@ describe("ImageAnimationPanel", () => {
     // Animated assets and non-image assets are never offered as frames.
     expect(labels.some((label) => label.includes("anim.existing"))).toBe(false);
     expect(labels.some((label) => label.includes("theme.ogg"))).toBe(false);
+  });
+
+  it("excludes hidden assets from new frame candidates but keeps picks", () => {
+    const layout: EditorLayout = {
+      version: 1,
+      scenes: {},
+      asset_metadata: { "img.odd": { hidden: true } },
+    };
+    const result = render(
+      <AssetLayoutProvider layout={layout}>
+        <ImageAnimationPanel
+          assets={ASSETS}
+          existingAnimationIds={new Set(["existing"])}
+          existingAnimationPaths={new Set(["animations/existing.yaml"])}
+          existingAssetIds={
+            new Set([...ASSETS.map((asset) => asset.id), "existing"])
+          }
+          onClose={() => undefined}
+          onCreate={() => true}
+        />
+      </AssetLayoutProvider>,
+    );
+    const labels = Array.from(
+      result.container.querySelectorAll(".animation-candidate-list button"),
+    ).map((button) => button.textContent ?? "");
+    expect(labels.some((label) => label.includes("odd.png"))).toBe(false);
+    expect(labels.some((label) => label.includes("blink2.png"))).toBe(true);
   });
 
   it("sorts picked frames naturally and reorders with the move buttons", () => {

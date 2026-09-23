@@ -63,7 +63,7 @@ fn repository_game_project_validates_including_animations() {
                 .actions
                 .get("sprite.bounce")
                 .expect("showcase action must be registered");
-            assert_eq!(bounce.duration_ms, 600);
+            assert_eq!(bounce.duration_ms, 200);
             assert!(bounce.channels.contains_key("y"));
             assert!(bounce.channels.contains_key("rotation_deg"));
 

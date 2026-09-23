@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createFakeMediaDom } from "./sessionTestKit";
+import { createFakeMediaDom, type FakeMediaDom } from "./sessionTestKit";
 import {
   TimelineSession,
   VIDEO_DRIFT_THRESHOLD_MS,
@@ -536,6 +536,46 @@ function createHarness(
     dom,
     audioPolicy: options.audioPolicy ?? "preview",
     decorations: options.decorations ?? "while-playing",
+    diagnostic: options.diagnostic ?? ((): void => undefined),
+    ...(options.videoAtEnd === undefined
+      ? {}
+      : { videoAtEnd: options.videoAtEnd }),
+  });
+  return { session, surface, audio, dom };
+}
+
+interface MediaHarness {
+  session: TimelineSession;
+  surface: FakeSurface;
+  audio: FakeAudio;
+  dom: FakeMediaDom;
+}
+
+/**
+ * Session harness backed by the richer in-memory media kit: a seek lands on a
+ * frame boundary and dispatches `seeked` by itself, which the playback/EOF
+ * cases need without manually pumping every event.
+ */
+function createMediaHarness(
+  options: {
+    durationSeconds?: number;
+    videoAtEnd?: "release" | "hold";
+    diagnostic?: (message: string) => void;
+    deferSeekEvents?: boolean;
+  } = {},
+): MediaHarness {
+  const surface = new FakeSurface();
+  const audio = new FakeAudio();
+  const dom = createFakeMediaDom({
+    durationSeconds: options.durationSeconds ?? 10,
+    deferSeekEvents: options.deferSeekEvents ?? false,
+  });
+  const session = new TimelineSession({
+    surface,
+    audio,
+    dom,
+    audioPolicy: "preview",
+    decorations: "while-playing",
     diagnostic: options.diagnostic ?? ((): void => undefined),
     ...(options.videoAtEnd === undefined
       ? {}
@@ -1592,6 +1632,331 @@ describe("TimelineSession video", () => {
     expect(await play).toBe("completed");
     expect(harness.surface.videos[0]?.released).toBe(true);
     expect(harness.dom.video.listeners.get("waiting")?.size ?? 0).toBe(0);
+    harness.session.dispose();
+  });
+
+  it("freezes a non-loop clip at its explicit end without re-seeking the tail", async () => {
+    const harness = createMediaHarness();
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(16, 10);
+    await advance(500, 5);
+
+    expect(harness.session.elapsedMs).toBeGreaterThan(2_000);
+    expect(media.paused).toBe(true);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+
+    // Holding the final frame must not keep seeking the tail back every frame.
+    const seeks = media.seeks.length;
+    await advance(500, 6);
+    expect(media.seeks.length).toBe(seeks);
+    expect(media.paused).toBe(true);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+
+    harness.session.cancel();
+    expect(await play).toBe("failed");
+    harness.session.dispose();
+  });
+
+  it("refreshes the terminal frame after an asynchronous end seek lands", async () => {
+    const harness = createMediaHarness({
+      deferSeekEvents: true,
+      durationSeconds: 10,
+    });
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    const handle = harness.surface.videos[0];
+    if (media === undefined || handle === undefined)
+      throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(16, 4);
+    await advance(500, 5);
+
+    expect(harness.session.elapsedMs).toBeGreaterThan(2_000);
+    expect(media.paused).toBe(true);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+
+    // The element's seek to the final frame has not landed yet.  The sticky
+    // terminal state means the texture must be uploaded when it does.
+    const beforeSettle = handle.updates;
+    media.settleSeeks();
+    await advance(0, 1);
+    expect(handle.updates).toBeGreaterThan(beforeSettle);
+    expect(handle.released).toBe(false);
+
+    // Holding the frame still must not seek the tail again.
+    const seeks = media.seeks.length;
+    await advance(500, 3);
+    expect(media.seeks.length).toBe(seeks);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+
+    harness.session.cancel();
+    expect(await play).toBe("failed");
+    harness.session.dispose();
+  });
+
+  it("refreshes the terminal frame after a playback seek to the clip end", async () => {
+    const harness = createMediaHarness({ deferSeekEvents: true });
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    const handle = harness.surface.videos[0];
+    if (media === undefined || handle === undefined)
+      throw new Error("缺少媒体元素");
+    await harness.session.seek(2_000, "playback");
+
+    expect(media.paused).toBe(true);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+    const beforeSettle = handle.updates;
+    media.settleSeeks();
+    await advance(0, 1);
+    expect(handle.updates).toBeGreaterThan(beforeSettle);
+
+    harness.session.cancel();
+    harness.session.dispose();
+  });
+
+  it("does not drive a released handle when the terminal seek lands late", async () => {
+    const harness = createMediaHarness({ deferSeekEvents: true });
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    const handle = harness.surface.videos[0];
+    if (media === undefined || handle === undefined)
+      throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(16, 4);
+    await advance(500, 5);
+    expect(media.paused).toBe(true);
+
+    const updates = handle.updates;
+    harness.session.cancel();
+    expect(await play).toBe("failed");
+    expect(handle.released).toBe(true);
+    const seeks = media.seeks.length;
+
+    // The pending seek lands after teardown: neither the released handle nor
+    // the released element may be touched.
+    media.settleSeeks();
+    await advance(0, 2);
+    expect(handle.updates).toBe(updates);
+    expect(media.seeks.length).toBe(seeks);
+    harness.session.dispose();
+  });
+
+  it("releases the terminal-seek listeners when the seek never lands", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = createMediaHarness({ deferSeekEvents: true });
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    // Preparation listeners only (waiting/stalled/playing/canplay/ended).
+    const beforeWait = media.listenerCount();
+    const play = harness.session.play();
+    await advance(16, 4);
+    await advance(500, 5);
+    expect(media.paused).toBe(true);
+
+    // The bounded terminal wait is pending: it owns a `seeked` and an `error`
+    // listener while the deferred seek has not landed.
+    expect(media.listeners.get("seeked")?.size ?? 0).toBe(1);
+    expect(media.listenerCount()).toBe(beforeWait + 2);
+
+    // The media never dispatches `seeked`: the wait's own timeout must run the
+    // same cleanup and clear its timer instead of stacking listeners.
+    vi.advanceTimersByTime(2_500);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    expect(media.listeners.get("seeked")?.size ?? 0).toBe(0);
+    expect(media.listeners.get("error")?.size ?? 0).toBe(0);
+    expect(media.listenerCount()).toBe(beforeWait);
+
+    harness.session.cancel();
+    await play;
+    harness.session.dispose();
+  });
+
+  it("does not accumulate terminal-seek listeners across repeated holds", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const harness = createMediaHarness({ deferSeekEvents: true });
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    const beforeWait = media.listenerCount();
+    const play = harness.session.play();
+    await advance(16, 4);
+    await advance(500, 5);
+    expect(media.listeners.get("seeked")?.size ?? 0).toBe(1);
+
+    // First bounded wait times out and releases everything.
+    vi.advanceTimersByTime(2_500);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    expect(media.listenerCount()).toBe(beforeWait);
+
+    // Seek back before the window end: the terminal hold resets.
+    const scrub = harness.session.seek(1_000, "scrub");
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    media.settleSeeks();
+    await scrub;
+    await advance(16, 2);
+    // The scrub's own seeked wait is cleaned up too.
+    expect(media.listeners.get("seeked")?.size ?? 0).toBe(0);
+    expect(media.listenerCount()).toBe(beforeWait);
+
+    // Crossing the end again starts exactly one new terminal wait; a leaked
+    // first wait would have made this two.
+    await advance(500, 5);
+    expect(media.listeners.get("seeked")?.size ?? 0).toBe(1);
+    expect(media.listenerCount()).toBe(beforeWait + 2);
+
+    vi.advanceTimersByTime(2_500);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    expect(media.listenerCount()).toBe(beforeWait);
+
+    harness.session.cancel();
+    await play;
+    harness.session.dispose();
+  });
+
+  it("resumes a non-loop clip after a backwards seek before its end", async () => {
+    const harness = createMediaHarness();
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(16, 10);
+    await advance(500, 5);
+    expect(media.paused).toBe(true);
+
+    await harness.session.seek(1_000, "scrub");
+    await advance(16, 2);
+    expect(media.paused).toBe(false);
+    expect(media.currentTime).toBeGreaterThanOrEqual(1);
+
+    // The terminal state was reset: crossing the end freezes it again.
+    await advance(500, 5);
+    expect(media.paused).toBe(true);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+
+    harness.session.cancel();
+    await play;
+    harness.session.dispose();
+  });
+
+  it("freezes at the media end when no clip end was authored", async () => {
+    const harness = createMediaHarness({ durationSeconds: 2 });
+    await harness.session.load({
+      update: update([VIDEO_TRACK], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(500, 6);
+
+    expect(harness.session.elapsedMs).toBeGreaterThan(2_000);
+    expect(media.paused).toBe(true);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+    const seeks = media.seeks.length;
+    await advance(500, 4);
+    expect(media.seeks.length).toBe(seeks);
+
+    harness.session.cancel();
+    await play;
+    harness.session.dispose();
+  });
+
+  it("presents an authored clip end past the file length up to the media end", async () => {
+    const harness = createMediaHarness({ durationSeconds: 2 });
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, clip_end_ms: 5_000 }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(500, 6);
+
+    expect(media.paused).toBe(true);
+    expect(media.currentTime).toBeCloseTo(2, 5);
+    const seeks = media.seeks.length;
+    await advance(500, 4);
+    expect(media.seeks.length).toBe(seeks);
+
+    harness.session.cancel();
+    await play;
+    harness.session.dispose();
+  });
+
+  it("holds a non-loop clip when the media dispatches its own EOF", async () => {
+    const harness = createMediaHarness({ durationSeconds: 2 });
+    await harness.session.load({
+      update: update([VIDEO_TRACK], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(16, 4);
+
+    // The browser's own EOF: the element pauses and dispatches `ended`.
+    media.paused = true;
+    media.currentTime = 2;
+    media.dispatch("ended");
+    expect(media.paused).toBe(true);
+
+    const seeks = media.seeks.length;
+    await advance(500, 4);
+    expect(media.paused).toBe(true);
+    expect(media.seeks.length).toBeLessThanOrEqual(seeks + 1);
+
+    harness.session.cancel();
+    await play;
+    harness.session.dispose();
+  });
+
+  it("wraps and resumes a looping clip whose media reached EOF", async () => {
+    const harness = createMediaHarness({ durationSeconds: 2 });
+    await harness.session.load({
+      update: update([{ ...VIDEO_TRACK, loop: true }], [], 10_000),
+      assets: ASSETS,
+    });
+    const media = harness.dom.videos[0];
+    if (media === undefined) throw new Error("缺少媒体元素");
+    const play = harness.session.play();
+    await advance(16, 4);
+
+    // The looping element has no native `loop`, so its EOF pauses it until the
+    // session rewinds and resumes it.
+    media.paused = true;
+    media.currentTime = 2;
+    media.dispatch("ended");
+    expect(media.paused).toBe(false);
+    await advance(16, 2);
+    expect(media.paused).toBe(false);
+
+    harness.session.cancel();
+    await play;
     harness.session.dispose();
   });
 });

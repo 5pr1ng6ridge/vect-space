@@ -18,6 +18,7 @@ import { isCanonicalIntegerText, scalarType } from "../scalars";
 import { assetUrl } from "../api";
 import { defaultCurtainFill } from "../presentationDefaults";
 import { animationSourceId } from "../imageAnimation";
+import { AssetChooser } from "./AssetChooser";
 import { FrameSequencePreview } from "./FrameSequencePreview";
 import type {
   AnimationFile,
@@ -51,9 +52,9 @@ import type { ChoicePrompt } from "@vectspace/presentation-core/types";
 import { CuePreview } from "./CuePreview";
 import type { CuePreviewEnvironment } from "./CuePreview";
 import { Field, NumberField } from "./Fields";
+import { AudioLoopEditor } from "./AudioLoopEditor";
 import { ChoicePresentationFields } from "./ChoicePresentationFields";
 import { ChoicePreview } from "./ChoicePreview";
-import { choiceIconOptions } from "../choicePresentation";
 import {
   CurtainFillFields,
   CurtainTransitionFields,
@@ -1135,35 +1136,32 @@ function renderFields(
                   </select>
                 </Field>
                 <Field label="图标（gui）">
-                  <select
-                    onChange={(event) =>
+                  <AssetChooser
+                    allowEmpty
+                    assets={Object.entries(manifest.assets).map(
+                      ([id, definition]) => ({
+                        id,
+                        kind: definition.kind,
+                        path: definition.path,
+                        animation: definition.animation,
+                      }),
+                    )}
+                    emptyLabel="无图标"
+                    kind="gui"
+                    label="图标（gui）"
+                    onChange={(icon) =>
                       update({
                         ...node,
                         choices: node.choices.map(
                           (candidate, candidateIndex) =>
                             candidateIndex === index
-                              ? {
-                                  ...candidate,
-                                  icon: event.currentTarget.value || null,
-                                }
+                              ? { ...candidate, icon }
                               : candidate,
                         ),
                       })
                     }
-                    value={choice.icon ?? ""}
-                  >
-                    <option value="">无图标</option>
-                    {choice.icon != null &&
-                      choice.icon !== "" &&
-                      manifest.assets[choice.icon] === undefined && (
-                        <option value={choice.icon}>缺失：{choice.icon}</option>
-                      )}
-                    {choiceIconOptions(manifest).map((asset) => (
-                      <option key={asset.id} value={asset.id}>
-                        {asset.id}
-                      </option>
-                    ))}
-                  </select>
+                    value={choice.icon ?? null}
+                  />
                 </Field>
                 <OptionalConditionEditor
                   label="显示条件"
@@ -1638,46 +1636,18 @@ function renderFields(
             value={node.volume}
           />
           {node.action === "start" && (
-            <>
-              <NumberField
-                label="起播 ms"
-                min={0}
-                onChange={(start_ms) => update({ ...node, start_ms })}
-                step={100}
-                value={node.start_ms ?? 0}
-              />
-              <BooleanField
-                label="自定义循环段"
-                onChange={(enabled) =>
-                  update({
-                    ...node,
-                    loop_start_ms: enabled ? 0 : null,
-                    loop_end_ms: enabled ? 1000 : null,
-                  })
-                }
-                value={node.loop_start_ms != null && node.loop_end_ms != null}
-              />
-              {node.loop_start_ms != null && node.loop_end_ms != null && (
-                <div className="field-grid">
-                  <NumberField
-                    label="循环起点 ms"
-                    min={0}
-                    onChange={(loop_start_ms) =>
-                      update({ ...node, loop_start_ms })
-                    }
-                    step={100}
-                    value={node.loop_start_ms}
-                  />
-                  <NumberField
-                    label="循环终点 ms"
-                    min={0}
-                    onChange={(loop_end_ms) => update({ ...node, loop_end_ms })}
-                    step={100}
-                    value={node.loop_end_ms}
-                  />
-                </div>
-              )}
-            </>
+            <AudioLoopEditor
+              asset={
+                assets.find((candidate) => candidate.id === node.asset) ?? null
+              }
+              label="BGM"
+              loopEndMs={node.loop_end_ms ?? null}
+              loopStartMs={node.loop_start_ms ?? null}
+              onChange={(patch) => update({ ...node, ...patch })}
+              onError={onError}
+              startMs={node.start_ms ?? 0}
+              volume={node.volume}
+            />
           )}
           <AwaitFields node={node} onChange={update} />
           <TargetSelect
@@ -1747,46 +1717,18 @@ function renderFields(
             value={node.volume}
           />
           {node.action === "start" && (
-            <>
-              <NumberField
-                label="起播 ms"
-                min={0}
-                onChange={(start_ms) => update({ ...node, start_ms })}
-                step={100}
-                value={node.start_ms ?? 0}
-              />
-              <BooleanField
-                label="自定义循环段"
-                onChange={(enabled) =>
-                  update({
-                    ...node,
-                    loop_start_ms: enabled ? 0 : null,
-                    loop_end_ms: enabled ? 1000 : null,
-                  })
-                }
-                value={node.loop_start_ms != null && node.loop_end_ms != null}
-              />
-              {node.loop_start_ms != null && node.loop_end_ms != null && (
-                <div className="field-grid">
-                  <NumberField
-                    label="循环起点 ms"
-                    min={0}
-                    onChange={(loop_start_ms) =>
-                      update({ ...node, loop_start_ms })
-                    }
-                    step={100}
-                    value={node.loop_start_ms}
-                  />
-                  <NumberField
-                    label="循环终点 ms"
-                    min={0}
-                    onChange={(loop_end_ms) => update({ ...node, loop_end_ms })}
-                    step={100}
-                    value={node.loop_end_ms}
-                  />
-                </div>
-              )}
-            </>
+            <AudioLoopEditor
+              asset={
+                assets.find((candidate) => candidate.id === node.asset) ?? null
+              }
+              label="环境声"
+              loopEndMs={node.loop_end_ms ?? null}
+              loopStartMs={node.loop_start_ms ?? null}
+              onChange={(patch) => update({ ...node, ...patch })}
+              onError={onError}
+              startMs={node.start_ms ?? 0}
+              volume={node.volume}
+            />
           )}
           <AwaitFields node={node} onChange={update} />
           <TargetSelect
@@ -2652,10 +2594,13 @@ function AssetSelect({
 }): ReactElement {
   const assets = useMemo(
     () =>
-      Object.entries(manifest.assets).filter(
-        ([, asset]) => asset.kind === kind,
-      ),
-    [kind, manifest.assets],
+      Object.entries(manifest.assets).map(([id, asset]) => ({
+        id,
+        kind: asset.kind,
+        path: asset.path,
+        animation: asset.animation,
+      })),
+    [manifest.assets],
   );
   const selectedDefinition = value == null ? undefined : manifest.assets[value];
   const animation =
@@ -2673,19 +2618,15 @@ function AssetSelect({
       : { width: metadata.width, height: metadata.height };
   return (
     <Field label={label}>
-      <select
+      <AssetChooser
+        allowEmpty={allowNone}
+        assets={assets}
         disabled={disabled}
-        value={value ?? ""}
-        onChange={(event) => onChange(event.currentTarget.value || null)}
-      >
-        {allowNone && <option value="">— 无 —</option>}
-        {!allowNone && <option value="">— 请选择 —</option>}
-        {assets.map(([id, definition]) => (
-          <option key={id} value={id}>
-            {definition.animation === undefined ? id : `${id}（动画）`}
-          </option>
-        ))}
-      </select>
+        kind={kind}
+        label={label}
+        onChange={onChange}
+        value={value ?? null}
+      />
       {animation !== undefined && (
         <FrameSequencePreview
           frames={animation.definition.frames.map((frame) => ({

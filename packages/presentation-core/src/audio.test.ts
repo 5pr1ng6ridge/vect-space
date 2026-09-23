@@ -595,6 +595,69 @@ describe("AudioManager four-slot ambience", () => {
     expect(manager.currentAmbienceVolume("slot_1")).toBe(0.75);
   });
 
+  it("leaves a whole-file loop to the native element, not the custom rewind", async () => {
+    const manager = new AudioManager(settings);
+    await manager.transitionBgm(loop("theme"), 0, { theme: "theme.mp3" });
+    const audio = FakeAudio.instances[0];
+    if (audio === undefined) throw new Error("missing bgm element");
+    expect(audio.loop).toBe(true);
+    audio.currentTime = audio.duration - 0.01;
+    audio.dispatch("timeupdate");
+    // The custom 25ms-early rewind must not truncate a native loop's tail.
+    expect(audio.currentTime).toBe(audio.duration - 0.01);
+    audio.currentTime = audio.duration;
+    audio.paused = true;
+    const plays = FakeAudio.playCalls;
+    audio.dispatch("ended");
+    expect(FakeAudio.playCalls).toBe(plays);
+  });
+
+  it("rewinds and resumes a bounded loop that reached the media EOF", async () => {
+    const manager = new AudioManager(settings);
+    await manager.transitionBgm(loop("theme", 1, 0, 100, 60_000), 0, {
+      theme: "theme.mp3",
+    });
+    const audio = FakeAudio.instances[0];
+    if (audio === undefined) throw new Error("missing bgm element");
+    expect(audio.loop).toBe(false);
+    audio.currentTime = audio.duration;
+    audio.paused = true;
+    const plays = FakeAudio.playCalls;
+    audio.dispatch("ended");
+    // `timeupdate` stops firing at EOF; only the ended fallback rewinds here.
+    expect(audio.currentTime).toBe(0.1);
+    expect(FakeAudio.playCalls).toBe(plays + 1);
+    expect(audio.paused).toBe(false);
+  });
+
+  it("does not revive a bounded loop while the manager is paused", async () => {
+    const manager = new AudioManager(settings);
+    await manager.transitionBgm(loop("theme", 1, 0, 100, 60_000), 0, {
+      theme: "theme.mp3",
+    });
+    const audio = FakeAudio.instances[0];
+    if (audio === undefined) throw new Error("missing bgm element");
+    await manager.setPaused(true);
+    audio.currentTime = audio.duration;
+    const plays = FakeAudio.playCalls;
+    audio.paused = true;
+    audio.dispatch("ended");
+    expect(FakeAudio.playCalls).toBe(plays);
+    expect(audio.paused).toBe(true);
+  });
+
+  it("removes the bounded-loop ended listener on stop", async () => {
+    const manager = new AudioManager(settings);
+    await manager.transitionBgm(loop("theme", 1, 0, 100, 60_000), 0, {
+      theme: "theme.mp3",
+    });
+    const audio = FakeAudio.instances[0];
+    if (audio === undefined) throw new Error("missing bgm element");
+    expect(audio.listeners.get("ended")?.size ?? 0).toBe(1);
+    await manager.transitionBgm(null, 0, { theme: "theme.mp3" });
+    expect(audio.listeners.get("ended")?.size ?? 0).toBe(0);
+  });
+
   it("crossfades replacement and releases the old track on stop", async () => {
     const manager = new AudioManager(settings);
     await manager.transitionAmbience("slot_2", loop("old", 0.8), 0, {
@@ -1238,5 +1301,130 @@ describe("AudioManager four-slot ambience", () => {
     expect(manager.currentAmbienceVolume("slot_1")).toBeUndefined();
     manager.destroy();
     expect(FakeAudioContext.instances[0]?.closed).toBe(true);
+  });
+});
+
+interface SameAssetBusCase {
+  label: string;
+  start(
+    manager: AudioManager,
+    state: LoopingAudioSnapshot,
+    assets: Readonly<Record<string, string>>,
+  ): Promise<void>;
+  volume(manager: AudioManager): number | undefined;
+}
+
+/**
+ * Re-authoring the same asset with `action: start` is the documented way to
+ * retune a running transport: the element, its playback phase and the current
+ * `play()` are reused, only gain, bounds and loop metadata change.  Both the
+ * BGM bus and a single ambience slot must behave identically, and `start_ms`
+ * only ever applies to the initial start.
+ */
+describe.each<SameAssetBusCase>([
+  {
+    label: "BGM",
+    start: (manager, state, assets) => manager.transitionBgm(state, 0, assets),
+    volume: (manager) => manager.currentBgmVolume(),
+  },
+  {
+    label: "same-slot ambience",
+    start: (manager, state, assets) =>
+      manager.transitionAmbience("slot_1", state, 0, assets),
+    volume: (manager) => manager.currentAmbienceVolume("slot_1"),
+  },
+])("AudioManager $label same-asset retune", ({ start, volume }) => {
+  const assets = { theme: "theme.mp3" };
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    installAudioMocks();
+  });
+
+  async function startBus(
+    manager: AudioManager,
+    state: LoopingAudioSnapshot,
+  ): Promise<FakeAudio> {
+    await start(manager, state, assets);
+    const audio = FakeAudio.instances[0];
+    if (audio === undefined) throw new Error("missing media element");
+    return audio;
+  }
+
+  it("applies start_ms only on the initial start and keeps the phase when retuned", async () => {
+    const manager = new AudioManager(settings);
+    const audio = await startBus(manager, loop("theme", 0.5, 125, 200, 500));
+    audio.dispatch("loadedmetadata");
+    expect(audio.currentTime).toBe(0.125);
+    const plays = FakeAudio.playCalls;
+
+    // The retune changes volume, start_ms and both loop points at once.
+    audio.currentTime = 12.345;
+    await start(manager, loop("theme", 0.75, 900, 300, 4_000));
+
+    expect(FakeAudio.instances).toHaveLength(1);
+    expect(audio.removed).toBe(false);
+    expect(audio.paused).toBe(false);
+    // start_ms is initial-start metadata, never a live seek.
+    expect(audio.currentTime).toBe(12.345);
+    expect(FakeAudio.playCalls).toBe(plays);
+    expect(audio.loop).toBe(false);
+    expect(volume(manager)).toBe(0.75);
+
+    // The new bounds are the ones the boundary check now uses.
+    audio.currentTime = 3.99;
+    audio.dispatch("timeupdate");
+    expect(audio.currentTime).toBe(0.3);
+  });
+
+  it("rewinds a cursor that the new bounds left outside the loop", async () => {
+    const manager = new AudioManager(settings);
+    const audio = await startBus(manager, loop("theme", 0.5, 0, 0, 5_000));
+    audio.currentTime = 12.345;
+
+    await start(manager, loop("theme", 0.5, 0, 1_000, 2_000));
+    // The edit itself never seeks…
+    expect(audio.currentTime).toBe(12.345);
+    // …but the next boundary check pulls the cursor back into the new range.
+    audio.dispatch("timeupdate");
+    expect(audio.currentTime).toBe(1);
+  });
+
+  it("lets a range ahead of the cursor play its gap once instead of seeking", async () => {
+    const manager = new AudioManager(settings);
+    const audio = await startBus(manager, loop("theme", 0.5, 0, 0, 1_000));
+    audio.currentTime = 0.2;
+
+    // New range entirely ahead of the cursor: the approved preserve-position
+    // rule never jumps just because of an edit.
+    await start(manager, loop("theme", 0.5, 0, 2_000, 3_000));
+    expect(audio.currentTime).toBe(0.2);
+    audio.currentTime = 0.9;
+    audio.dispatch("timeupdate");
+    expect(audio.currentTime).toBe(0.9);
+
+    // …and the wrap happens at the next boundary check.
+    audio.currentTime = 3;
+    audio.dispatch("timeupdate");
+    expect(audio.currentTime).toBe(2);
+  });
+
+  it("falls back to native whole-file looping when the custom bounds are removed", async () => {
+    const manager = new AudioManager(settings);
+    const audio = await startBus(manager, loop("theme", 0.5, 0, 1_000, 2_000));
+    expect(audio.loop).toBe(false);
+    audio.currentTime = 1.5;
+
+    const plays = FakeAudio.playCalls;
+    await start(manager, loop("theme", 0.5));
+
+    expect(FakeAudio.instances).toHaveLength(1);
+    expect(audio.paused).toBe(false);
+    expect(audio.loop).toBe(true);
+    expect(FakeAudio.playCalls).toBe(plays);
+    // The custom rewind stands down: the element loops the whole file itself.
+    audio.currentTime = audio.duration - 0.01;
+    audio.dispatch("timeupdate");
+    expect(audio.currentTime).toBe(audio.duration - 0.01);
   });
 });

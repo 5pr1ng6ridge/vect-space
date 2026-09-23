@@ -1031,8 +1031,9 @@ pub enum SceneNode {
     /// Ask the desktop host to show another Scene in the single secondary game
     /// window.  The node is deliberately non-blocking: the engine advances to
     /// `next` in the same update and only emits a window cue.  The host consumes
-    /// that cue for the committed main story runtime, so a replay or the
-    /// secondary engine itself can never open or re-point a window.
+    /// that cue for the committed runtime the cue belongs to — the main story,
+    /// or the chapter-map replay that is driving it — while the secondary engine
+    /// itself can never open or re-point a window.
     OpenWindow {
         scene: String,
         next: String,

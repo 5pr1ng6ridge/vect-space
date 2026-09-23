@@ -2247,7 +2247,7 @@ code {
 .timeline-editor {
   position: relative;
   display: grid;
-  grid-template-rows: minmax(180px, 1fr) auto 28px minmax(130px, 0.8fr);
+  grid-template-rows: minmax(180px, 1fr) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   background: #090d15;
@@ -2560,73 +2560,39 @@ code {
   font-size: 42px;
   letter-spacing: 0.2em;
 }
-.ui-preview-dialogue {
+/* Editor-only hit boxes over the real shared dialogue nodes.  The outline is
+   drawn on the selected target; the boxes themselves never render anything. */
+.ui-motion-gizmo-layer {
   position: absolute;
-  bottom: 0;
-  left: 0;
-  width: 1920px;
-  height: 387px;
-  color: #17213a;
-}
-.ui-preview-surface {
-  position: absolute;
+  z-index: 20;
   inset: 0;
-  width: 1920px;
-  height: 387px;
 }
-.ui-preview-frame {
+.ui-motion-target {
   position: absolute;
-  inset: 0;
-  width: 1920px;
-  height: 387px;
-  object-fit: fill;
+  cursor: move;
+  touch-action: none;
 }
-.ui-preview-name {
-  position: absolute;
-  top: -139px;
-  left: 100px;
-  width: 364px;
-  height: 243px;
-  font-size: 29px;
-  letter-spacing: 0.08em;
-}
-.ui-preview-name img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-.ui-preview-name > span {
-  position: absolute;
-  top: 78px;
-  left: 54px;
-  width: 246px;
-  text-align: center;
-}
-.ui-preview-text {
-  position: absolute;
-  top: 103px;
-  right: 172px;
-  bottom: 45px;
-  left: 176px;
-  font-size: 34px;
-  line-height: 1.72;
-  letter-spacing: 0.035em;
-}
-.ui-preview-indicator {
-  position: absolute;
-  right: 150px;
-  bottom: 44px;
-  color: #264b78;
-  font-size: 19px;
-}
-.ui-preview-dialogue.selected,
-.ui-preview-frame.selected,
-.ui-preview-name.selected,
-.ui-preview-text.selected,
-.ui-preview-indicator.selected {
+.ui-motion-target.selected {
   outline: 4px solid #67d9ff;
   outline-offset: 3px;
+}
+.ui-motion-preview-note {
+  position: absolute;
+  bottom: 8px;
+  left: 12px;
+  margin: 0;
+  color: #7f95ae;
+  font-size: 12px;
+  pointer-events: none;
+}
+.ui-motion-preview-font-error {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  margin: 0;
+  color: #ffb27a;
+  font-size: 12px;
+  pointer-events: none;
 }
 .ui-motion-inspector {
   overflow: auto;
@@ -2736,27 +2702,14 @@ code {
   font-size: 42px;
   letter-spacing: 0.16em;
 }
+/* Authored hit-area outline around the real shared `scene-button` preview;
+   the artwork itself is positioned by the shared component. */
 .button-preview-hit {
   position: absolute;
   top: 500px;
   left: 840px;
-  padding: 0;
   border: 2px dashed #67d9ff;
   background: rgb(103 217 255 / 7%);
-  cursor: pointer;
-}
-.button-preview-visual {
-  position: absolute;
-  inset: 0;
-  display: block;
-  transform-origin: center;
-}
-.button-preview-visual img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
 }
 .button-inspector {
   overflow: auto;
@@ -2950,16 +2903,15 @@ code {
   cursor: move;
   transform-origin: 50% 100%;
 }
-.timeline-button-preview {
+/* The real shared button overlay.  It sits above the Pixi canvas and below
+   the gizmos, and never intercepts pointer events (the gizmo layer owns the
+   authoring gestures).  The 16:9 layer mirrors the scaled design surface, so
+   the shared `scene-button` percentage placement maps design pixels exactly. */
+.timeline-button-layer {
   position: absolute;
   inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
-  opacity: 0.72;
+  z-index: 0;
   pointer-events: none;
-  user-select: none;
 }
 .timeline-gizmo.selected {
   z-index: 1000;
@@ -3240,7 +3192,7 @@ body.timeline-resizing {
   height: 100%;
 }
 .timeline-editor-compact {
-  grid-template-rows: 28px minmax(0, 1fr) !important;
+  grid-template-rows: minmax(0, 1fr) !important;
 }
 .timeline-editor-compact .timeline-tracks {
   padding-bottom: 6px;
@@ -3427,275 +3379,22 @@ body.timeline-resizing {
   pointer-events: none;
 }
 
-.long-text-workspace-box {
+.long-text-workspace-gizmo {
+  box-sizing: border-box;
   position: absolute;
-  z-index: 2;
-  min-width: 160px;
-  min-height: 240px;
+  z-index: 12;
   border: 2px dashed #71d8ff;
   outline: 1px solid rgb(3 13 24 / 70%);
-  background: rgb(3 10 18 / 8%);
   box-shadow: 0 0 0 1px rgb(113 216 255 / 18%);
-  cursor: move;
+  /* The frame is an editor overlay: the shared long-text panel underneath keeps
+     every wheel/drag interaction, so the gizmo only hit-tests its own handles. */
+  pointer-events: none;
   user-select: none;
 }
 
-.long-text-workspace-box.is-dragging {
+.long-text-workspace-gizmo.is-dragging {
   border-color: #fff0a8;
   background: rgb(255 240 168 / 7%);
-}
-
-.long-text-workspace-window {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.long-text-workspace-surface {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  will-change: transform;
-}
-
-.long-text-workspace-measure-root {
-  position: absolute;
-  top: -100000px;
-  left: -100000px;
-  visibility: hidden;
-  pointer-events: none;
-  line-height: 1.78;
-  letter-spacing: 0.035em;
-  overflow-wrap: anywhere;
-  word-break: break-all;
-}
-
-.long-text-workspace-text-clip {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  --long-text-fade: min(96px, 25%);
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 var(--long-text-fade),
-    #000 calc(100% - var(--long-text-fade)),
-    transparent 100%
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 var(--long-text-fade),
-    #000 calc(100% - var(--long-text-fade)),
-    transparent 100%
-  );
-}
-
-.long-text-workspace-paper-background {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  min-height: 100%;
-  overflow: hidden;
-  background-color: transparent;
-  background-position: center top;
-  background-repeat: repeat-y;
-  background-size: 100% 1340px;
-  box-shadow: none;
-  opacity: 0;
-}
-
-.long-text-workspace-paper-artwork {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
-  pointer-events: none;
-}
-
-.long-text-workspace-paper-background.is-entered {
-  opacity: 1;
-  transition: opacity 220ms ease-out;
-}
-
-.long-text-workspace-paper {
-  position: absolute;
-  top: 0;
-  left: 0;
-  box-sizing: border-box;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background-color: transparent;
-  background-position: center top;
-  background-repeat: repeat-y;
-  background-size: 100% 1340px;
-  box-shadow: none;
-  /* Keep the rendered pages on the same design size used by measurement. */
-  font-size: inherit;
-  line-height: 1.78;
-  letter-spacing: 0.035em;
-  overflow-wrap: anywhere;
-  word-break: break-all;
-  opacity: 0;
-}
-
-.long-text-workspace-paper.is-entered {
-  opacity: 1;
-  transition: opacity 220ms ease-out;
-}
-
-.long-text-workspace-paper-inner {
-  box-sizing: border-box;
-  position: relative;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  padding: var(--long-text-padding-y, 112px) var(--long-text-padding-x, 118px);
-}
-
-.long-text-workspace-paper-stage {
-  position: relative;
-  width: 100%;
-  height: 100%;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .long-text-workspace-paper-background,
-  .long-text-workspace-paper {
-    opacity: 1 !important;
-    transition: none !important;
-  }
-}
-
-.long-text-workspace-step {
-  min-height: 0;
-  margin: 0;
-  white-space: pre-wrap;
-}
-
-.long-text-workspace-step-fragment {
-  position: absolute;
-  right: 0;
-  left: 0;
-  overflow: hidden;
-}
-
-.long-text-workspace-step-fragment-content {
-  width: 100%;
-  will-change: transform;
-}
-
-.long-text-workspace-step + .long-text-workspace-step {
-  margin-top: 28px;
-}
-
-.long-text-workspace-step.page-break {
-  margin-top: var(--long-text-page-gap, 92px);
-  padding-top: 10px;
-  border-top: 1px dashed rgb(57 82 111 / 55%);
-}
-
-.long-text-workspace .markup-preview {
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  overflow: visible;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  line-height: inherit;
-}
-
-.long-text-workspace .markup-preview-character {
-  white-space: pre-wrap;
-}
-
-.long-text-workspace .markup-preview-content {
-  display: inline-block;
-}
-
-.long-text-workspace .markup-preview-math {
-  display: inline-block;
-  margin: 0 0.12em;
-  vertical-align: -0.08em;
-}
-
-.long-text-workspace .markup-preview-math.markup-display-math {
-  display: block;
-  margin: 0.5em auto;
-  text-align: center;
-}
-
-.long-text-workspace
-  .markup-preview-character.is-preview-reveal-typewriter
-  .markup-preview-content,
-.long-text-workspace .markup-preview-math.is-preview-reveal-typewriter {
-  animation: editor-text-reveal-fade 120ms ease-out both;
-}
-
-.long-text-workspace
-  .markup-preview-character.is-preview-reveal-drop_fade
-  .markup-preview-content,
-.long-text-workspace .markup-preview-math.is-preview-reveal-drop_fade {
-  animation: editor-text-reveal-drop 160ms cubic-bezier(0.18, 0.72, 0.24, 1)
-    both;
-}
-
-.long-text-workspace
-  .markup-preview-character.is-preview-reveal-line_sweep
-  .markup-preview-content,
-.long-text-workspace .markup-preview-math.is-preview-reveal-line_sweep {
-  animation: editor-text-reveal-line-sweep 160ms linear both;
-}
-
-@keyframes editor-text-reveal-fade {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes editor-text-reveal-drop {
-  from {
-    opacity: 0;
-    transform: translateY(-0.35em);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes editor-text-reveal-line-sweep {
-  from {
-    clip-path: inset(0 100% 0 0);
-  }
-  to {
-    clip-path: inset(0);
-  }
-}
-
-.long-text-workspace .markup-control {
-  display: none;
-}
-
-.long-text-workspace-box-label {
-  position: absolute;
-  top: -22px;
-  left: -2px;
-  padding: 3px 5px;
-  border-radius: 3px;
-  background: rgb(3 13 24 / 90%);
-  color: #a6e7ff;
-  font: 10px monospace;
-  pointer-events: none;
 }
 
 .long-text-workspace-resize {
@@ -3709,6 +3408,24 @@ body.timeline-resizing {
   background: #fff0a8;
   cursor: nwse-resize;
   pointer-events: auto;
+}
+
+.long-text-workspace-drag-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  height: 22px;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 0 0 3px;
+  background: rgb(3 13 24 / 90%);
+  color: #a6e7ff;
+  cursor: move;
+  font: 10px monospace;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
 }
 
 .long-text-workspace-hint {
@@ -4809,22 +4526,514 @@ body.timeline-resizing {
   color: #d7e6ff;
 }
 
-/* Static markup label units shared with the game surfaces. */
-.markup-unit {
-  visibility: inherit;
+/* Per-node BGM/ambience waveform and loop-point editor. */
+.audio-loop-editor {
+  display: flex;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  flex-direction: column;
+  gap: 8px;
 }
 
-.character-unit {
-  white-space: pre-wrap;
+.audio-loop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.markup-reveal-content {
-  display: inline-block;
+.audio-loop-head strong {
+  font-size: 11px;
 }
 
-.math-unit {
-  display: inline-block;
-  margin: 0 0.12em;
+.audio-loop-head small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.audio-loop-track {
+  position: relative;
+  height: 84px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #0d1017;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.audio-loop-waveform {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.audio-loop-waveform path {
+  fill: rgba(104, 215, 187, 0.45);
+}
+
+.audio-loop-axis {
+  stroke: var(--line);
+  stroke-width: 0.4;
+}
+
+.audio-loop-region {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(104, 215, 187, 0.16);
+  pointer-events: none;
+}
+
+.audio-loop-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #f0c674;
+  pointer-events: none;
+}
+
+.audio-loop-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  padding: 0 8px;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: center;
+}
+
+.audio-loop-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: ew-resize;
+  transform: translateX(-50%);
+  touch-action: none;
+}
+
+.audio-loop-handle::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background: var(--accent);
+  content: "";
+}
+
+.audio-loop-handle:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 1px;
+}
+
+.audio-loop-handle-start::before {
+  background: #f0c674;
+}
+
+.audio-loop-handle-loop_end::before {
+  background: #e06c75;
+}
+
+.audio-loop-transport {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.audio-loop-transport button {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+.audio-loop-position {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.audio-loop-error {
+  margin: 0;
+  color: #e06c75;
+  font-size: 10px;
+}
+
+.audio-loop-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.audio-loop-toggle {
+  font-size: 11px;
+}
+
+.audio-loop-audio {
+  display: none;
+}
+
+.audio-loop-hint {
+  margin: 0;
+  color: #8a93a8;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* Shared keyframe surface (story, action, button, UI motion). */
+.timeline-surface {
+  position: relative;
+  display: grid;
+  grid-template-rows: 28px minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+  background: #090d15;
+  color: #dfe8f7;
+}
+.timeline-surface-with-transport {
+  grid-template-rows: auto 28px minmax(0, 1fr);
+}
+.timeline-surface-empty {
+  margin: 12px;
+  color: #75839a;
+  font-size: 12px;
+}
+.button-timeline-surface {
+  border-top: 1px solid #26364d;
+  background: #0d1521;
+}
+.ui-motion-timeline-surface {
+  border-top: 1px solid #26364d;
+  background: #0d1521;
+}
+
+/* ------------------------------------------------------------------ *
+ * Asset library: virtual folders, metadata and the shared chooser.
+ * ------------------------------------------------------------------ */
+.asset-folder-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #222a39;
+}
+.asset-folder-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+.asset-hidden-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.asset-folder-roots {
+  display: flex;
+  gap: 4px;
+}
+.asset-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+}
+.asset-folder-row.active,
+.asset-folder-roots > button.active {
+  background: rgba(104, 215, 187, 0.09);
+}
+.asset-folder-toggle {
+  width: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.asset-folder-toggle:disabled {
+  opacity: 0.35;
+}
+.asset-folder-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 6px;
+  border: none;
+  background: transparent;
   color: inherit;
-  vertical-align: -0.08em;
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-folder-name:hover {
+  color: var(--accent);
+}
+.asset-folder-count {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.asset-folder-action {
+  padding: 2px 5px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.asset-folder-action:hover {
+  color: var(--accent);
+}
+.asset-folder-empty {
+  margin: 1px 0;
+  font-size: 10px;
+}
+.asset-id-chip {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 7px;
+  background: #1b2330;
+  color: var(--muted);
+  font-size: 10px;
+}
+.asset-hidden-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 7px;
+  background: rgba(220, 160, 90, 0.16);
+  color: #dca05a;
+  font-size: 9px;
+}
+.asset-pending-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 7px;
+  background: rgba(104, 215, 187, 0.16);
+  color: var(--accent);
+  font-size: 9px;
+}
+.asset-display-name {
+  display: flex;
+  gap: 6px;
+}
+.asset-display-name input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.asset-folder-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+.asset-detail-actions {
+  display: flex;
+  gap: 6px;
+}
+.asset-chooser {
+  position: relative;
+}
+.asset-chooser-trigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  text-align: left;
+}
+.asset-chooser-sub {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-chooser-caret {
+  color: var(--muted);
+  font-size: 10px;
+}
+.asset-chooser-popover {
+  position: absolute;
+  z-index: 40;
+  left: 0;
+  display: flex;
+  width: max(100%, 260px);
+  max-height: 340px;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #141a25;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+.asset-chooser-filters {
+  display: flex;
+  gap: 4px;
+}
+.asset-chooser-filters select {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.asset-chooser-list {
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.asset-chooser-option {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.asset-chooser-option.active,
+.asset-chooser-option:hover {
+  background: #1b2330;
+}
+.asset-chooser-option.selected {
+  background: rgba(104, 215, 187, 0.09);
+}
+.asset-chooser-option-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.asset-chooser-option-detail {
+  color: var(--muted);
+  font-size: 10px;
+}
+.asset-kind-chip {
+  margin-left: auto;
+  padding: 1px 5px;
+  border-radius: 7px;
+  background: #1b2330;
+  color: var(--muted);
+  font-size: 9px;
+}
+.asset-chooser-empty {
+  padding: 6px;
+  font-size: 11px;
+}
+.asset-chooser-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Gameplay preview workspace                                                */
+/*                                                                           */
+/* The inner 1920x1080 design surface renders the exact in-game dialogue,    */
+/* long-text, choice and button components (their skin lives in             */
+/* `@vectspace/presentation-react/gameplay`); only this editor chrome below  */
+/* is editor-local.                                                          */
+/* ------------------------------------------------------------------------- */
+
+.gameplay-preview {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+  overflow: auto;
+  background: #05090f;
+}
+
+.gameplay-preview-toolbar {
+  display: flex;
+  z-index: 2;
+  padding: 10px 16px;
+  border-bottom: 1px solid #1e2a3d;
+  background: #0a121d;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gameplay-preview-status {
+  margin-left: auto;
+  color: #8fb2dd;
+  font-size: 13px;
+}
+
+.gameplay-preview-notice,
+.gameplay-preview-gate {
+  margin: 8px 16px;
+  padding: 10px 12px;
+  border: 1px solid #2a3b55;
+  border-radius: 6px;
+  background: #0d1726;
+  color: #d7e5f7;
+  font-size: 14px;
+}
+
+.gameplay-preview-gate div {
+  display: flex;
+  margin-top: 8px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gameplay-preview-stage {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background: #000;
+}
+
+.gameplay-preview-design {
+  position: relative;
+  transform-origin: top left;
+}
+
+/* Non-intercepting design-coordinate readout over the scaled 1920x1080 content. */
+.gameplay-preview-coords {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgb(8 12 20 / 72%);
+  color: #bfe3ff;
+  font-family: ui-monospace, "Cascadia Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  user-select: none;
+}
+
+.gameplay-preview-placeholder,
+.gameplay-preview-end {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  margin: 0;
+  background: rgb(0 0 0 / 55%);
+  color: #cfe3fb;
+  font-size: 28px;
+  place-items: center;
+}
+
+.gameplay-preview-back {
+  position: fixed;
+  z-index: 5;
+  top: 12px;
+  right: 16px;
 }

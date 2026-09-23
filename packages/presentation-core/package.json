@@ -22,7 +22,10 @@
     "./scene-transitions": "./src/sceneTransitions.ts",
     "./scene-textures": "./src/sceneTextures.ts",
     "./timeline-session": "./src/timelineSession.ts",
+    "./video-clip": "./src/videoClip.ts",
     "./deferred-session": "./src/deferredSession.ts",
+    "./gameplay-host": "./src/gameplayHost.ts",
+    "./session-transition": "./src/sessionTransition.ts",
     "./motion": "./src/motion.ts",
     "./scene-test-kit": "./src/sceneTestKit.ts",
     "./session-test-kit": "./src/sessionTestKit.ts"

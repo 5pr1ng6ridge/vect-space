@@ -45,6 +45,11 @@ export interface FakeMediaElement {
   /** `removeAttribute("src")` was observed; the element was released. */
   released: boolean;
   dispatch(type: string): void;
+  /**
+   * Lands every `seeked` event that was deferred by
+   * `FakeMediaDomOptions.deferSeekEvents`, modelling a real asynchronous seek.
+   */
+  settleSeeks(): void;
   /** Total listeners still registered across every event. */
   listenerCount(): number;
 }
@@ -61,6 +66,12 @@ export interface FakeMediaDomOptions {
    * on the exact requested time.
    */
   seekGranularitySeconds?: number;
+  /**
+   * Keep every `seeked` event pending until `settleSeeks()` is called, so a
+   * test can model a seek that completes *after* the caller returned (the real
+   * browser behaviour that a synchronous fake hides).
+   */
+  deferSeekEvents?: boolean;
 }
 
 export function createFakeMediaDom(
@@ -68,12 +79,14 @@ export function createFakeMediaDom(
 ): FakeMediaDom {
   const duration = options.durationSeconds ?? 10;
   const granularity = options.seekGranularitySeconds ?? 1 / 30;
+  const deferSeeks = options.deferSeekEvents ?? false;
   const videos: FakeMediaElement[] = [];
   return {
     videos,
     createVideo: () => {
       const listeners = new Map<string, Set<() => void>>();
       const seeks: number[] = [];
+      const pendingSeeks: Array<() => void> = [];
       const record: FakeMediaElement = {
         element: null as unknown as HTMLVideoElement,
         listeners,
@@ -90,6 +103,9 @@ export function createFakeMediaDom(
         released: false,
         dispatch: (type: string) => {
           for (const listener of [...(listeners.get(type) ?? [])]) listener();
+        },
+        settleSeeks: () => {
+          for (const settle of pendingSeeks.splice(0)) settle();
         },
         listenerCount: () => {
           let total = 0;
@@ -146,7 +162,8 @@ export function createFakeMediaDom(
             Math.round(value / granularity) * granularity,
           );
           seeks.push(record.currentTime);
-          record.dispatch("seeked");
+          if (deferSeeks) pendingSeeks.push(() => record.dispatch("seeked"));
+          else record.dispatch("seeked");
         },
         addEventListener: (type: string, listener: () => void) => {
           const set = listeners.get(type) ?? new Set<() => void>();

@@ -681,6 +681,31 @@ export interface EditorLayout {
   version: number;
   scenes: Record<string, SceneLayout>;
   timeline_previews?: Record<string, TimelinePreviewSettings>;
+  /**
+   * Editor-only virtual asset folders keyed by a stable folder id.  Never
+   * written to the manifest; no asset file is ever moved by a folder edit.
+   */
+  asset_folders?: Record<string, AssetFolderLayout>;
+  /**
+   * Editor-only metadata keyed by the stable manifest asset id.  A missing or
+   * removed asset leaves its entry harmless instead of failing the layout.
+   */
+  asset_metadata?: Record<string, AssetLayoutMetadata>;
+}
+
+/** One editor-only virtual folder.  `parent_id: null` is a root folder. */
+export interface AssetFolderLayout {
+  parent_id: string | null;
+  name: string;
+  /** Deterministic sibling order; ties fall back to the folder id. */
+  order: number;
+}
+
+/** Editor-only metadata for one existing asset id. */
+export interface AssetLayoutMetadata {
+  folder_id?: string | null;
+  display_name?: string | null;
+  hidden?: boolean;
 }
 
 export interface TimelinePreviewSettings {
@@ -807,6 +832,51 @@ export type BuildNodePreviewResult =
       trace: StoryLocation[];
     };
 
+/** A resolved asset as returned by the live gameplay preview session. */
+export interface PreviewResolvedAsset {
+  id: string;
+  kind: string;
+  absolute_path: string;
+  animation?: {
+    id: string;
+    width: number;
+    height: number;
+    total_duration_ms: number;
+    frames: { asset: string; duration_ms: number; absolute_path: string }[];
+  } | null;
+}
+
+export type PreviewStartMode = "scene" | "node" | "reset_node";
+
+export interface PreviewSessionStartRequest {
+  project: SaveProjectRequest;
+  mode: PreviewStartMode;
+  scene_id: string;
+  node_id?: string;
+  variable_overrides: Record<string, ScalarValue>;
+  choices: PreviewChoiceDecision[];
+}
+
+export type PreviewSessionStartResult =
+  | {
+      status: "needs_choice";
+      location: StoryLocation;
+      visit: number;
+      choices: { id: string; label: string; enabled: boolean }[];
+      trace: StoryLocation[];
+    }
+  | {
+      status: "started";
+      session_id: string;
+      update: RuntimeUpdate;
+      assets: PreviewResolvedAsset[];
+    }
+  | {
+      status: "unreachable";
+      message: string;
+      trace: StoryLocation[];
+    };
+
 export interface ImportedAsset {
   id: string;
   kind: AssetKind;
@@ -816,6 +886,12 @@ export interface ImportedAsset {
   token?: string | null;
   /** Existing formal file reused by this new logical registration. */
   reused_from?: string | null;
+  /**
+   * Relative path of the previous binary when this record replaces an
+   * existing asset.  The old file stays on disk as an unregistered recovery
+   * copy and is never overwritten or deleted by the save transaction.
+   */
+  replaced_from?: string | null;
 }
 
 export interface ImportAssetRequest {
@@ -823,6 +899,12 @@ export interface ImportAssetRequest {
   kind: AssetKind;
   file_name?: string;
   inspection_id?: string;
+  /**
+   * Present when this upload replaces the binary of an existing asset.  Must
+   * equal `id`; the host keeps the logical id and reference set stable while
+   * publishing the new file at a different path.
+   */
+  replace_id?: string | null;
 }
 import type {
   RuntimeSnapshot,

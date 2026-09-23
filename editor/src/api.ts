@@ -6,11 +6,16 @@ import type {
   ImportAssetRequest,
   BuildNodePreviewRequest,
   BuildNodePreviewResult,
+  PreviewResolvedAsset,
+  PreviewSessionStartRequest,
+  PreviewSessionStartResult,
   SaveProjectRequest,
   SaveProjectResult,
   AssetInspection,
 } from "./types";
+import type { RuntimeUpdate } from "@vectspace/presentation-core/types";
 import type { ScalarValue, VariableType } from "./types";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import type { WireScalarValue } from "../../shared/generated/WireScalarValue";
 import { toCommandError } from "../../shared/commandError";
 
@@ -83,7 +88,123 @@ export const editorApi = {
       request: { source_paths: sourcePaths },
     }),
   buildNodePreview,
+  previewSessionStart,
+  previewSessionAdvance,
+  previewSessionChoose,
+  previewSessionClickButton,
+  previewSessionPresentationComplete,
+  previewSessionStop,
 };
+
+function encodePreviewOverrides(request: PreviewSessionStartRequest): unknown {
+  return {
+    project: encodeProjectRequest(request.project),
+    mode: request.mode,
+    scene_id: request.scene_id,
+    node_id: request.node_id ?? null,
+    variable_overrides: Object.fromEntries(
+      Object.entries(request.variable_overrides).map(([id, value]) => [
+        id,
+        toWireScalar(value, request.project.manifest.variables[id]?.type),
+      ]),
+    ),
+    choices: request.choices,
+  };
+}
+
+function previewSessionStart(
+  request: PreviewSessionStartRequest,
+): Promise<PreviewSessionStartResult> {
+  return command<unknown>("preview_session_start", {
+    request: encodePreviewOverrides(request),
+  }).then((value) => decodeWireValue(value) as PreviewSessionStartResult);
+}
+
+function previewSessionAdvance(request: {
+  session_id: string;
+  expected_revision: string;
+  source: "manual" | "auto" | "fast_forward" | "forced_auto";
+}): Promise<RuntimeUpdate> {
+  return command<unknown>("preview_session_advance", { request }).then(
+    (value) => decodeWireValue(value) as RuntimeUpdate,
+  );
+}
+
+function previewSessionChoose(request: {
+  session_id: string;
+  expected_revision: string;
+  choice_id: string;
+}): Promise<RuntimeUpdate> {
+  return command<unknown>("preview_session_choose", { request }).then(
+    (value) => decodeWireValue(value) as RuntimeUpdate,
+  );
+}
+
+function previewSessionClickButton(request: {
+  session_id: string;
+  expected_revision: string;
+  instance_id: string;
+}): Promise<RuntimeUpdate> {
+  return command<unknown>("preview_session_click_button", { request }).then(
+    (value) => decodeWireValue(value) as RuntimeUpdate,
+  );
+}
+
+function previewSessionPresentationComplete(request: {
+  session_id: string;
+  update_id: string;
+  outcome: "completed" | "skipped" | "failed";
+}): Promise<RuntimeUpdate> {
+  return command<unknown>("preview_session_presentation_complete", {
+    request,
+  }).then((value) => decodeWireValue(value) as RuntimeUpdate);
+}
+
+function previewSessionStop(sessionId: string): Promise<boolean> {
+  return command<boolean>("preview_session_stop", {
+    request: { session_id: sessionId },
+  });
+}
+
+export function previewAssetsToUrls(
+  assets: PreviewResolvedAsset[],
+): Record<string, string> {
+  return Object.fromEntries(
+    assets.map((asset) => [asset.id, convertFileSrc(asset.absolute_path)]),
+  );
+}
+
+export function previewAssetsToAnimations(
+  assets: PreviewResolvedAsset[],
+): AnimationMap {
+  const animations: Record<
+    string,
+    {
+      id: string;
+      width: number;
+      height: number;
+      total_duration_ms: number;
+      frames: { asset: string; duration_ms: number; url: string }[];
+    }
+  > = {};
+  for (const asset of assets) {
+    const animation = asset.animation;
+    if (animation === null || animation === undefined) continue;
+    if (animation.frames.length === 0) continue;
+    animations[asset.id] = {
+      id: animation.id,
+      width: animation.width,
+      height: animation.height,
+      total_duration_ms: animation.total_duration_ms,
+      frames: animation.frames.map((frame) => ({
+        asset: frame.asset,
+        duration_ms: frame.duration_ms,
+        url: convertFileSrc(frame.absolute_path),
+      })),
+    };
+  }
+  return animations;
+}
 
 function toWireScalar(
   value: ScalarValue,

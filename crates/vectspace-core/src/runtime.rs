@@ -511,6 +511,27 @@ impl RuntimeEngine {
         result
     }
 
+    /// Continue a live editor preview from the current location to the next
+    /// interactive boundary.
+    ///
+    /// [`preview_execute_current_node`] is a one-shot *static* preview: it stops
+    /// at the selected node's successor so the editor can inspect exactly that
+    /// node's update.  A live session must instead behave like gameplay: after
+    /// executing the selected node it keeps running immediate nodes
+    /// (background/set/ui/audio, non-awaited cues) until a real prompt or an
+    /// awaited presentation gate, so a selected immediate node never stalls on
+    /// an empty prompt.  The node at the current location is executed exactly
+    /// once.
+    pub fn preview_enter_current_node(
+        &mut self,
+        content: &ContentCatalog,
+    ) -> Result<RuntimeUpdate, RuntimeError> {
+        self.preview_target = None;
+        self.preview_skip_target_once = false;
+        let cues = self.run_until_boundary(content)?;
+        Ok(self.finish_update(cues, true))
+    }
+
     pub fn bootstrap(&mut self, content: &ContentCatalog) -> BootstrapPayload {
         let update = self.update_without_cues();
         BootstrapPayload {
@@ -578,6 +599,51 @@ impl RuntimeEngine {
         self.snapshot.location = StoryLocation {
             scene_id: scene_id.to_owned(),
             node_id: entry,
+        };
+        self.started = true;
+        self.pending_runtime_update = None;
+        self.dialogue_history.clear();
+        self.appended_history.clear();
+        let cues = self.run_until_boundary(content)?;
+        Ok(self.finish_update(cues, true))
+    }
+
+    /// Start an isolated editor preview directly at an arbitrary node.
+    ///
+    /// This is the explicit "reset and start here" fallback the editor offers
+    /// when a target cannot be reconstructed from the scene entry.  It builds
+    /// the same fresh preview snapshot and override set as
+    /// [`start_scene_preview`], validates the scene and node *before* touching
+    /// any runtime state, then positions the runtime at the target and executes
+    /// it.  No preceding authored node, action or choice runs, so the initial
+    /// world is the scene's declared defaults plus the supplied overrides.
+    #[allow(dead_code)]
+    pub fn start_node_preview(
+        &mut self,
+        content: &ContentCatalog,
+        scene_id: &str,
+        node_id: &str,
+    ) -> Result<RuntimeUpdate, RuntimeError> {
+        let scene = content
+            .scene(scene_id)
+            .map_err(|error| RuntimeError::Content(error.to_string()))?;
+        if !scene.nodes.contains_key(node_id) {
+            return Err(RuntimeError::Content(format!(
+                "节点不存在: {scene_id}/{node_id}"
+            )));
+        }
+        let previous_revision = self.snapshot.revision;
+        self.snapshot = initial_snapshot(content)?;
+        self.snapshot
+            .variables
+            .append(&mut self.initial_save_overrides);
+        self.snapshot.revision = self
+            .session_revision_override
+            .take()
+            .unwrap_or(previous_revision);
+        self.snapshot.location = StoryLocation {
+            scene_id: scene_id.to_owned(),
+            node_id: node_id.to_owned(),
         };
         self.started = true;
         self.pending_runtime_update = None;
@@ -1717,7 +1783,8 @@ impl RuntimeEngine {
                 SceneNode::OpenWindow { scene, next } => {
                     // Never blocking: the runtime only records the request and
                     // continues to `next`.  The desktop host decides whether to
-                    // act on it (main story runtime only) and strips the cue
+                    // act on it (the main story runtime, and the replay it is
+                    // running, but never the secondary engine) and strips the cue
                     // before the update reaches any WebView.
                     self.snapshot.location.node_id = next;
                     cues.push(
@@ -4121,10 +4188,11 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        ButtonAssetFit, ButtonAssetMode, ButtonClickAction, ButtonPostAction, ButtonTemplate,
-        ChapterMapDefinition, ChapterMapHotspot, LiteralOperand, SceneDefinition,
-        SpriteActionDefinition, SpriteActionEnd, SpriteActionKeyframe, TimelineEasing,
-        TimelineEasingPreset, VariableOperand, VariableOperation,
+        BackgroundTransitionSpec, ButtonAssetFit, ButtonAssetMode, ButtonClickAction,
+        ButtonPostAction, ButtonTemplate, ChapterMapDefinition, ChapterMapHotspot, ChoiceDefinition,
+        Easing, LiteralOperand, SceneDefinition, SpriteActionDefinition, SpriteActionEnd,
+        SpriteActionKeyframe, TimelineEasing, TimelineEasingPreset, VariableOperand,
+        VariableOperation,
     };
 
     #[derive(serde::Deserialize)]
@@ -5568,6 +5636,437 @@ mod tests {
         assert!(trace
             .iter()
             .all(|location| location.scene_id == "preview_boundary"));
+    }
+
+    #[test]
+    fn editor_node_preview_uses_scene_defaults_not_predecessor_state() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        // Reaching route_choice through the story normally requires ancestors
+        // (sprite nodes, conditions).  A direct reset must use the scene's
+        // declared defaults instead of replaying them.
+        runtime
+            .start_node_preview(&content, "prologue", "route_choice")
+            .unwrap();
+        assert_eq!(runtime.snapshot().location.scene_id, "prologue");
+        assert_eq!(runtime.snapshot().location.node_id, "route_choice");
+        assert!(runtime.snapshot().world.sprites.is_empty());
+    }
+
+    #[test]
+    fn editor_node_preview_starts_at_a_choice_without_resolving_it() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime
+            .start_node_preview(&content, "prologue", "route_choice")
+            .unwrap();
+        // Reaching this node normally requires a branch; a direct start must
+        // not guess one, so the runtime stays on the choice prompt itself.
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::Choice { .. }
+        ));
+        assert_eq!(runtime.snapshot().location.node_id, "route_choice");
+    }
+
+    #[test]
+    fn editor_node_preview_validates_before_mutating() {
+        let content = catalog();
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let before = runtime.snapshot().location.clone();
+        assert!(runtime
+            .start_node_preview(&content, "missing_scene", "x")
+            .is_err());
+        assert!(runtime
+            .start_node_preview(&content, "prologue", "missing_node")
+            .is_err());
+        assert_eq!(runtime.snapshot().location, before);
+    }
+
+    fn preview_scene(entry: &str, nodes: BTreeMap<String, SceneNode>) -> ContentCatalog {
+        let mut content = catalog();
+        content.scenes.insert(
+            "preview_live".to_owned(),
+            SceneDefinition {
+                schema_version: 2,
+                id: "preview_live".to_owned(),
+                entry: entry.to_owned(),
+                nodes,
+            },
+        );
+        content
+    }
+
+    fn preview_location(node_id: &str) -> StoryLocation {
+        StoryLocation {
+            scene_id: "preview_live".to_owned(),
+            node_id: node_id.to_owned(),
+        }
+    }
+
+    fn prompt_id(snapshot: &RuntimeSnapshot) -> String {
+        match &snapshot.prompt {
+            PromptSnapshot::Dialogue { prompt_id, .. }
+            | PromptSnapshot::LongText { prompt_id, .. }
+            | PromptSnapshot::Choice { prompt_id, .. } => prompt_id.clone(),
+            other => format!("<{other:?}>"),
+        }
+    }
+
+    fn say_node(text: &str, next: &str) -> SceneNode {
+        SceneNode::Say {
+            speaker: Some("test".to_owned()),
+            text: text.to_owned(),
+            mode: DialogueMode::Start,
+            page_id: None,
+            speed_cps: None,
+            reveal_animation: None,
+            next: next.to_owned(),
+        }
+    }
+
+    fn set_add_node(amount: i64, next: &str) -> SceneNode {
+        SceneNode::Set {
+            variable: "score".to_owned(),
+            op: VariableOperation::Add,
+            value: Some(MutationValue::Literal(ScalarValue::Integer(amount))),
+            next: next.to_owned(),
+        }
+    }
+
+    fn background_node(await_completion: bool, next: &str) -> SceneNode {
+        SceneNode::Background {
+            background: Some("bg.nvctsp".to_owned()),
+            transition: BackgroundTransitionSpec::Cut,
+            duration_ms: 0,
+            easing: Easing::Linear,
+            await_completion,
+            next: next.to_owned(),
+        }
+    }
+
+    fn dialogue_ui_node(visible: bool, next: &str) -> SceneNode {
+        SceneNode::DialogueUi {
+            visible,
+            motion: None,
+            duration_ms: None,
+            await_completion: false,
+            next: next.to_owned(),
+        }
+    }
+
+    fn two_way_choice_node(
+        first_next: &str,
+        second_next: &str,
+    ) -> SceneNode {
+        SceneNode::Choice {
+            presentation: None,
+            choices: vec![
+                ChoiceDefinition {
+                    id: "left".to_owned(),
+                    label: "left".to_owned(),
+                    next: first_next.to_owned(),
+                    visible_if: None,
+                    enabled_if: None,
+                    template: None,
+                    icon: None,
+                },
+                ChoiceDefinition {
+                    id: "right".to_owned(),
+                    label: "right".to_owned(),
+                    next: second_next.to_owned(),
+                    visible_if: None,
+                    enabled_if: None,
+                    template: None,
+                    icon: None,
+                },
+            ],
+        }
+    }
+
+    /// Reviewer hypothesis 1: "selected dialogue/long-text/choice/end nodes
+    /// auto-advance instead of landing on the target".  A selected dialogue at
+    /// the scene entry must reconstruct with an untouched prompt and only then
+    /// execute the node through the live continuation.
+    #[test]
+    fn editor_selected_preview_lands_on_a_dialogue_at_the_scene_entry() {
+        let content = preview_scene(
+            "line",
+            BTreeMap::from([
+                ("line".to_owned(), say_node("入口对白", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("line");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        let PreviewRunResult::Ready { snapshot, .. } = result else {
+            panic!("a selected dialogue at the scene entry must reconstruct");
+        };
+        assert_eq!(snapshot.location, target);
+        assert!(matches!(snapshot.prompt, PromptSnapshot::None));
+        // The live continuation executes the selected node once and lands on
+        // its real dialogue prompt.  The engine's convention is that a `say`
+        // node advances `location` to its successor while `prompt` carries the
+        // dialogue being shown, so the target is identified by the prompt id.
+        let update = runtime.preview_enter_current_node(&content).unwrap();
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        assert_eq!(prompt_id(runtime.snapshot()), "preview_live/line");
+        assert_eq!(prompt_id(&update.snapshot), "preview_live/line");
+        assert!(!update.requires_ack);
+    }
+
+    /// A selected interactive node reached through predecessors preserves the
+    /// world those predecessors built (variables, background, dialogue UI).
+    #[test]
+    fn editor_selected_preview_preserves_predecessor_state() {
+        let content = preview_scene(
+            "bg",
+            BTreeMap::from([
+                ("bg".to_owned(), background_node(false, "pre")),
+                ("pre".to_owned(), set_add_node(3, "ui")),
+                ("ui".to_owned(), dialogue_ui_node(true, "line")),
+                ("line".to_owned(), say_node("对白", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("line");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        assert!(matches!(result, PreviewRunResult::Ready { .. }));
+        runtime.preview_enter_current_node(&content).unwrap();
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        assert_eq!(
+            runtime.snapshot().variables.get("score"),
+            Some(&ScalarValue::Integer(3))
+        );
+        assert_eq!(
+            runtime.snapshot().world.background.as_deref(),
+            Some("bg.nvctsp")
+        );
+        assert!(runtime.snapshot().world.dialogue_ui_visible);
+    }
+
+    /// A selected choice node must land on the choice prompt itself (no
+    /// guessed branch / spurious `NeedsChoice` for the target).
+    #[test]
+    fn editor_selected_preview_lands_on_a_choice_target() {
+        let content = preview_scene(
+            "line",
+            BTreeMap::from([
+                ("line".to_owned(), say_node("对白", "pick")),
+                ("pick".to_owned(), two_way_choice_node("end", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("pick");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        assert!(matches!(result, PreviewRunResult::Ready { .. }));
+        runtime.preview_enter_current_node(&content).unwrap();
+        assert_eq!(runtime.snapshot().location, target);
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::Choice { .. }
+        ));
+    }
+
+    /// A selected end node is a real boundary: it needs a decision for any
+    /// choice on the path, and then lands on the end prompt.
+    #[test]
+    fn editor_selected_preview_lands_on_an_end_target_after_branching() {
+        let content = preview_scene(
+            "line",
+            BTreeMap::from([
+                ("line".to_owned(), say_node("对白", "pick")),
+                ("pick".to_owned(), two_way_choice_node("end", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("end");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        let PreviewRunResult::NeedsChoice { location, .. } = result else {
+            panic!("the path choice must be offered, not guessed");
+        };
+        assert_eq!(location, preview_location("pick"));
+
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let decisions = [PreviewChoiceDecision {
+            scene_id: "preview_live".to_owned(),
+            node_id: "pick".to_owned(),
+            visit: 1,
+            choice_id: "left".to_owned(),
+        }];
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &decisions)
+            .unwrap();
+        assert!(matches!(result, PreviewRunResult::Ready { .. }));
+        runtime.preview_enter_current_node(&content).unwrap();
+        assert!(matches!(runtime.snapshot().prompt, PromptSnapshot::End { .. }));
+    }
+
+    /// A selected long-text node reached through predecessors lands on the
+    /// long-text prompt (the real fixture has no `long_text` at an entry).
+    #[test]
+    fn editor_selected_preview_lands_on_a_long_text_target() {
+        let content = catalog();
+        let target = StoryLocation {
+            scene_id: "feature_lab".to_owned(),
+            node_id: "lecture".to_owned(),
+        };
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "feature_lab", &target, &[])
+            .unwrap();
+        assert!(
+            matches!(result, PreviewRunResult::Ready { .. }),
+            "long-text target must reconstruct: {result:?}"
+        );
+        runtime.preview_enter_current_node(&content).unwrap();
+        assert_eq!(runtime.snapshot().location, target);
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::LongText { .. }
+        ));
+    }
+
+    /// Immediate nodes must continue to the next real boundary; the selected
+    /// node itself runs exactly once.
+    #[test]
+    fn editor_live_continuation_runs_immediate_nodes_once_to_the_next_prompt() {
+        let content = preview_scene(
+            "bg",
+            BTreeMap::from([
+                ("bg".to_owned(), background_node(false, "pre")),
+                ("pre".to_owned(), set_add_node(1, "line")),
+                ("line".to_owned(), say_node("对白", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("pre");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        assert!(matches!(result, PreviewRunResult::Ready { .. }));
+        let update = runtime.preview_enter_current_node(&content).unwrap();
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        assert_eq!(prompt_id(runtime.snapshot()), "preview_live/line");
+        // Executed exactly once: the counter is 1, not 2.
+        assert_eq!(
+            runtime.snapshot().variables.get("score"),
+            Some(&ScalarValue::Integer(1))
+        );
+        assert!(!update.requires_ack);
+    }
+
+    /// Selected immediate background node at the entry continues to the next
+    /// prompt instead of stalling on `PromptSnapshot::None`.
+    #[test]
+    fn editor_selected_immediate_node_continues_to_a_prompt() {
+        let content = preview_scene(
+            "bg",
+            BTreeMap::from([
+                ("bg".to_owned(), background_node(false, "line")),
+                ("line".to_owned(), say_node("对白", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("bg");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        let result = runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        assert!(matches!(result, PreviewRunResult::Ready { .. }));
+        let update = runtime.preview_enter_current_node(&content).unwrap();
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        assert!(update
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::BackgroundTransition { .. })));
+    }
+
+    /// An awaited immediate node stops at its presentation gate; once the host
+    /// acknowledges it, the live continuation resumes to the prompt.
+    #[test]
+    fn editor_live_continuation_resumes_after_an_awaited_gate() {
+        let content = preview_scene(
+            "bg",
+            BTreeMap::from([
+                ("bg".to_owned(), background_node(true, "line")),
+                ("line".to_owned(), say_node("对白", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("bg");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        let gated = runtime.preview_enter_current_node(&content).unwrap();
+        assert!(gated.requires_ack);
+        assert!(matches!(gated.snapshot.prompt, PromptSnapshot::None));
+        let resumed = runtime
+            .presentation_complete(&content, gated.update_id, PresentationOutcome::Completed)
+            .unwrap();
+        assert!(matches!(
+            runtime.snapshot().prompt,
+            PromptSnapshot::Dialogue { .. }
+        ));
+        assert!(!resumed.requires_ack);
+    }
+
+    /// The static one-shot preview keeps its exact breakpoint semantics (no
+    /// fold of the successor's prompt and no double execution afterwards).
+    #[test]
+    fn editor_static_preview_breakpoint_is_unchanged() {
+        let content = preview_scene(
+            "bg",
+            BTreeMap::from([
+                ("bg".to_owned(), background_node(false, "pre")),
+                ("pre".to_owned(), set_add_node(1, "line")),
+                ("line".to_owned(), say_node("对白", "end")),
+                ("end".to_owned(), SceneNode::End),
+            ]),
+        );
+        let target = preview_location("pre");
+        let mut runtime = RuntimeEngine::new(&content).unwrap();
+        runtime
+            .preview_to_from_scene_entry(&content, "preview_live", &target, &[])
+            .unwrap();
+        let static_update = runtime.preview_execute_current_node(&content).unwrap();
+        assert!(matches!(static_update.snapshot.prompt, PromptSnapshot::None));
+        assert_eq!(
+            runtime.snapshot().variables.get("score"),
+            Some(&ScalarValue::Integer(1))
+        );
+        // Continuing from here must not execute `pre` a second time.
+        runtime.preview_enter_current_node(&content).unwrap();
+        assert_eq!(
+            runtime.snapshot().variables.get("score"),
+            Some(&ScalarValue::Integer(1))
+        );
     }
 
     fn test_timeline_ease(value: f32, easing: &crate::model::TimelineEasing) -> f32 {

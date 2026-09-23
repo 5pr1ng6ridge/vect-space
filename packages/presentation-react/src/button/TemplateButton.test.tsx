@@ -432,4 +432,54 @@ describe("TemplateButton", () => {
     rerender(renderButton());
     expect(screen.getByRole("button", { name: "confirm" })).toBeInTheDocument();
   });
+
+  it("renders a forced state for authoring previews regardless of the pointer", () => {
+    const onActivate = vi.fn();
+    render(
+      <TemplateButton
+        assets={{ normal: "normal.png", hover: "hover.png" }}
+        button={button({
+          asset_mode: "overlay",
+          normal: "normal",
+          hover: "hover",
+        })}
+        className="scene-button"
+        disabled
+        onActivate={onActivate}
+        sessionKey="session"
+        state="hover"
+      />,
+    );
+    const element = screen.getByRole("button", { name: "confirm" });
+    // The authored state (not the pointer state) selects the class, the
+    // overlay composition and the disabled/inert presentation.
+    expect(element).toHaveClass("scene-button-hover");
+    expect(element).toBeDisabled();
+    expect(element.querySelectorAll(".scene-button-image")).toHaveLength(2);
+    fireEvent.pointerEnter(element);
+    fireEvent.pointerDown(element, { button: 0, pointerId: 1 });
+    expect(element).toHaveClass("scene-button-hover");
+    expect(onActivate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pointer state machine when no state is forced", () => {
+    const onActivate = vi.fn();
+    render(
+      <TemplateButton
+        assets={{ normal: "normal.png", hover: "hover.png" }}
+        button={button({
+          asset_mode: "overlay",
+          normal: "normal",
+          hover: "hover",
+        })}
+        className="scene-button"
+        onActivate={onActivate}
+        sessionKey="session"
+      />,
+    );
+    const element = screen.getByRole("button", { name: "confirm" });
+    expect(element).toHaveClass("scene-button-normal");
+    fireEvent.pointerEnter(element);
+    expect(element).toHaveClass("scene-button-hover");
+  });
 });

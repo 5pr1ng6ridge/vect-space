@@ -6,6 +6,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
+    time::{Duration, Instant},
 };
 
 use save::{LoadedSlot, ProfileManager, SaveError, SaveManager, SecondaryState, SlotDocument};
@@ -30,7 +31,8 @@ struct EngineState {
     replay: Mutex<Option<ReplaySession>>,
     /// The single secondary game window's runtime.  `None` means no secondary is
     /// open.  The slot is only created, re-pointed or destroyed from a gated
-    /// main-story transition, never from a frontend request.
+    /// transition — a main-story one or a replay one — never from a frontend
+    /// request.
     secondary: Mutex<Option<SecondarySession>>,
     /// Serializes the check-and-act boundary when switching between the main
     /// story runtime and an isolated replay.  Without this lock, an advance
@@ -59,6 +61,39 @@ struct EngineState {
     profile: ProfileManager,
 }
 
+/// Who currently owns the single secondary window.  The owner answers two
+/// questions the host must never conflate:
+///
+/// * **lifecycle** — a story-owned window belongs to one main-story Scene and is
+///   closed when that Scene is left (or on a new game/load/title/shutdown); a
+///   replay-owned window belongs to one live replay and is closed when that
+///   replay leaves its own Scene, ends, fails or is exited.
+/// * **publishing** — a story-owned session publishes its shared maps and its
+///   dialogue occurrences to the main runtime and the profile file; a
+///   replay-owned session publishes them to the *replay* runtime only, so a
+///   save, a profile file or the official ledger can never observe replayed
+///   play.
+///
+/// The replay arm carries the replay generation so a delayed command from an
+/// ended replay can never mutate the slot of a newer owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SecondaryOwner {
+    /// The main story owns the window.
+    Story { scene_id: String },
+    /// One live replay owns the window, identified by its generation.
+    Replay { generation: u64 },
+}
+
+impl SecondaryOwner {
+    /// The main-story Scene that owns the window, if the main story owns it.
+    fn story_scene(&self) -> Option<&str> {
+        match self {
+            SecondaryOwner::Story { scene_id } => Some(scene_id),
+            SecondaryOwner::Replay { .. } => None,
+        }
+    }
+}
+
 /// The secondary window is deliberately a single, bounded slot: exactly one
 /// secondary may exist, and repeating `open_window` re-points this runtime in
 /// the same native window with a fresh token.
@@ -67,9 +102,8 @@ struct SecondarySession {
     runtime: RuntimeEngine,
     /// Scene currently shown by the secondary runtime.
     scene_id: String,
-    /// Main-story Scene that owns the window.  A main transition that leaves
-    /// this Scene (or a new game/load/title/shutdown) destroys the window.
-    owning_scene: String,
+    /// Story or replay that owns the window; see [`SecondaryOwner`].
+    owner: SecondaryOwner,
     /// Wire token identifying this secondary instance.
     token: u64,
     /// A runtime-gated presentation produced while this session was being
@@ -94,6 +128,20 @@ trait NativeWindowOps: Send + Sync {
     /// flag is false, because it may still be running an older session.
     fn show_secondary(&self, replaced: bool) -> Result<(), WireCommandError>;
     fn hide_secondary(&self) -> Result<(), WireCommandError>;
+    /// Reconcile the native window with the host's **logical slot** without
+    /// waiting for the event loop, and report whether the native state changed.
+    ///
+    /// Creation and destruction only enqueue a message when they run off the
+    /// event-loop thread (see [`TauriWindowOps`]), so native state and the slot
+    /// can drift apart in a way the host cannot observe from the call itself.
+    /// This is the host's recovery path for that asymmetry: a live slot whose
+    /// window is missing is rebuilt, and a window whose slot is gone is removed
+    /// again.  It never blocks on the event loop, and a label that is queued for
+    /// destruction is never adopted.
+    fn reconcile_secondary(&self, expected_live: bool) -> Result<bool, WireCommandError> {
+        let _ = expected_live;
+        Ok(false)
+    }
     /// True while the host itself is destroying the secondary, so the close
     /// guard can tell a host-initiated destruction from a user/native close
     /// request, which is always prevented.
@@ -103,13 +151,43 @@ trait NativeWindowOps: Send + Sync {
 }
 
 /// Production implementation over the real Tauri window APIs.
+///
+/// Every native call is made from an `async` command, i.e. off the IPC /
+/// event-loop callback thread.  On Windows a WebView2 creation pumps Windows
+/// messages and deadlocks the host when it runs inside a synchronous command
+/// (Tauri documents this on `WebviewWindowBuilder::build`).  Off the event-loop
+/// thread the very same call is *enqueue-only*: the runtime posts a
+/// `Message::CreateWindow`/destroy message and returns a handle immediately, so
+/// a native failure is logged by the runtime and cannot be reported here.
+/// [`NativeWindowOps::reconcile_secondary`] plus [`Self::closing_secondary`]
+/// are the host's answer to that asymmetry: the label stays registered between
+/// an enqueued `destroy` and the runtime processing it, and a label in that
+/// state is never handed to a new owner.
 struct TauriWindowOps {
     app: tauri::AppHandle,
+    /// True from the moment a host destroy has been enqueued until the runtime
+    /// has really processed it (observed as the label disappearing) or the
+    /// destroy call itself failed.
     closing_secondary: AtomicBool,
+    /// Monotonic stamp of the destroy enqueue that set `closing_secondary`, or
+    /// `None` while none is pending.  Read only by
+    /// [`TauriWindowOps::retry_pending_destroy_once`].  A stale stamp is
+    /// harmless: it is only ever read while `closing_secondary` is set, and every
+    /// new enqueue restamps it.
+    pending_destroy_since: Mutex<Option<Instant>>,
+    /// The monotonic clock.  Injected so the pending-destroy grace period is
+    /// testable without any real timer or sleep.
+    clock: fn() -> Instant,
 }
 
 impl NativeWindowOps for TauriWindowOps {
     fn show_secondary(&self, replaced: bool) -> Result<(), WireCommandError> {
+        // A label that is queued for destruction is never adopted, but a destroy
+        // the runtime never completed must not block every future window either:
+        // a later transition gets exactly one bounded re-attempt.
+        if self.closing_secondary.load(Ordering::Acquire) {
+            self.retry_pending_destroy_once();
+        }
         // `ensure_secondary_window` reuses any window the label already owns, so
         // the logical `replaced` flag is not enough to decide whether the
         // frontend needs refreshing: a window left behind by a failed cleanup
@@ -119,7 +197,7 @@ impl NativeWindowOps for TauriWindowOps {
             .app
             .get_webview_window(SECONDARY_WINDOW_LABEL)
             .is_some();
-        let window = ensure_secondary_window(&self.app)?;
+        let window = ensure_secondary_window(&self.app, &self.closing_secondary)?;
         if needs_session_refresh(replaced, reused) {
             // Tell the frontend to cancel the old presentation and re-bootstrap
             // under the new token.  A notification that is missed anyway is
@@ -136,10 +214,92 @@ impl NativeWindowOps for TauriWindowOps {
     }
 
     fn hide_secondary(&self) -> Result<(), WireCommandError> {
-        destroy_secondary_window(&self.app, &self.closing_secondary)
+        let result = destroy_secondary_window(&self.app, &self.closing_secondary);
+        // Stamp the pending destroy so the bounded retry knows when the label was
+        // handed to the runtime; a failed destroy is not pending at all.
+        let stamp = (result.is_ok() && self.closing_secondary.load(Ordering::Acquire))
+            .then(|| (self.clock)());
+        if let Ok(mut since) = self.pending_destroy_since.lock() {
+            *since = stamp;
+        }
+        result
     }
 
     fn is_closing_secondary(&self) -> bool {
+        // Also true while a host destroy is still queued: the window is on its
+        // way out, so a user close request does not have to be prevented.
+        self.closing_secondary.load(Ordering::Acquire)
+    }
+
+    fn reconcile_secondary(&self, expected_live: bool) -> Result<bool, WireCommandError> {
+        let present = self
+            .app
+            .get_webview_window(SECONDARY_WINDOW_LABEL)
+            .is_some();
+        if present {
+            if self.closing_secondary.load(Ordering::Acquire) {
+                // Queued for destruction: never adopt it, and make at most one
+                // bounded re-attempt so a destroy the runtime never completed
+                // cannot leave every future open refused.
+                return Ok(self.retry_pending_destroy_once());
+            }
+            if expected_live {
+                // The window exists and belongs to the live slot; a healthy
+                // secondary must keep playing, so only a *missing* window is
+                // re-created by this path.
+                return Ok(false);
+            }
+            // The slot is gone while the window is not, so the window is an
+            // orphan of a failed cleanup.  A label that is queued for
+            // destruction is left alone: the runtime is already removing it.
+            // `hide_secondary` also stamps the pending destroy for the bounded
+            // retry, exactly like every other accepted destroy.
+            self.hide_secondary()?;
+            return Ok(true);
+        }
+        // The label is free again, so any queued destroy has been processed and
+        // a missing window can be rebuilt without duplicating a label.
+        self.closing_secondary.store(false, Ordering::Release);
+        if !expected_live {
+            return Ok(false);
+        }
+        ensure_secondary_window(&self.app, &self.closing_secondary)?;
+        Ok(true)
+    }
+}
+
+impl TauriWindowOps {
+    /// The bounded, non-blocking liveness net for a destroy the runtime accepted
+    /// but never completed: at most one re-attempt per later transition, and only
+    /// after [`SECONDARY_PENDING_DESTROY_GRACE`].  It never waits, loops, spawns a
+    /// thread or talks to the event loop, and it never fails the caller — a
+    /// destroy that fails here leaves a window that the next show adopts with a
+    /// refresh.  Returns whether a destroy is still pending.
+    ///
+    /// This is **not** native-liveness recovery: a creation that fails *after*
+    /// the runtime registered the label stays indistinguishable from success (see
+    /// [`NativeWindowOps::reconcile_secondary`]).
+    fn retry_pending_destroy_once(&self) -> bool {
+        let now = (self.clock)();
+        let due = self
+            .pending_destroy_since
+            .lock()
+            .ok()
+            .and_then(|since| *since)
+            .is_some_and(|since| pending_destroy_retry_due(now.saturating_duration_since(since)));
+        if !due {
+            return self.closing_secondary.load(Ordering::Acquire);
+        }
+        // Restamp before the attempt, so this is the only attempt for this grace
+        // window even when the destroy is accepted again.
+        if let Ok(mut since) = self.pending_destroy_since.lock() {
+            *since = Some(now);
+        }
+        if let Err(error) = destroy_secondary_window(&self.app, &self.closing_secondary) {
+            // The window survives and is no longer queued, so a later show can
+            // adopt and refresh it again.
+            eprintln!("副窗口待关闭状态重试失败: {}", error.message);
+        }
         self.closing_secondary.load(Ordering::Acquire)
     }
 }
@@ -269,6 +429,20 @@ struct MainTransition {
     profile_written: bool,
 }
 
+/// A committed replay transaction.  The replay runtime, the secondary slot and
+/// the native window plan move together: the native step happens after the
+/// in-memory commit (window work can re-enter the platform event loop), and
+/// `previous_*` keeps the rollback data for the one case where that step fails,
+/// so a replay can never be reported as running with a missing or foreign
+/// window.
+#[derive(Debug)]
+struct ReplayTransition {
+    update: RuntimeUpdate,
+    plan: SecondaryPlan,
+    previous_replay: Option<ReplaySession>,
+    previous_secondary: SecondaryBaseline,
+}
+
 /// How the secondary slot looked before a transition, kept for rollback.
 #[derive(Debug)]
 enum SecondaryBaseline {
@@ -277,16 +451,38 @@ enum SecondaryBaseline {
     Untouched,
     /// The transition replaced or cleared the slot; the previous contents are
     /// restored on rollback.
-    Restore(Option<SecondarySession>),
+    Restore(Box<Option<SecondarySession>>),
+}
+
+impl SecondaryBaseline {
+    /// The previous session a rollback has to restore, if the transition touched
+    /// the slot at all.
+    fn restored_session(&self) -> Option<&Option<SecondarySession>> {
+        match self {
+            SecondaryBaseline::Restore(previous) => Some(previous),
+            SecondaryBaseline::Untouched => None,
+        }
+    }
+
+    /// Whether there was no live secondary before the transition, which is what
+    /// decides whether a failed show needs a native cleanup.
+    fn restored_without_secondary(&self) -> bool {
+        matches!(self.restored_session(), Some(previous) if previous.is_none())
+    }
 }
 
 /// A replay is deliberately kept separate from the player's runtime.  It
 /// borrows a cloned profile/default state at start and is never persisted.
-/// `ending` prevents a cross-scene jump from evaluating its destination.
+/// `ending` prevents a cross-scene jump from evaluating its destination;
+/// `generation` identifies this replay for as long as it lives, so a
+/// secondary slot and a delayed secondary command can always be attributed to
+/// the exact replay that owns them.
+#[derive(Debug, Clone)]
 struct ReplaySession {
     runtime: RuntimeEngine,
     scene_id: String,
     ending: bool,
+    generation: u64,
 }
 
 impl EngineState {
@@ -410,9 +606,12 @@ impl EngineState {
         let previous_secondary = match staged.plan {
             SecondaryPlan::None => SecondaryBaseline::Untouched,
             SecondaryPlan::Show { .. } => {
-                SecondaryBaseline::Restore(std::mem::replace(&mut *slot, staged.session))
+                SecondaryBaseline::Restore(Box::new(std::mem::replace(
+                    &mut *slot,
+                    staged.session,
+                )))
             }
-            SecondaryPlan::Hide => SecondaryBaseline::Restore(slot.take()),
+            SecondaryPlan::Hide => SecondaryBaseline::Restore(Box::new(slot.take())),
         };
         drop(slot);
         Ok(MainTransition {
@@ -440,6 +639,10 @@ impl EngineState {
             let cleanup_failures = self.rollback_main_transition(&transition);
             return Err(aggregate_transition_failure(error, cleanup_failures));
         }
+        // The native step only enqueued its work (see [`TauriWindowOps`]), so
+        // this is where a missing window or an orphaned one is corrected.
+        debug_assert_no_window_cue(&transition.update);
+        self.reconcile_secondary_window(&transition.plan);
         Ok(transition.update)
     }
 
@@ -463,7 +666,7 @@ impl EngineState {
     /// can report the whole picture from [`aggregate_transition_failure`].
     fn rollback_main_transition(&self, transition: &MainTransition) -> Vec<WireCommandError> {
         let mut failures = Vec::new();
-        if let SecondaryBaseline::Restore(previous) = &transition.previous_secondary {
+        if let Some(previous) = transition.previous_secondary.restored_session() {
             match self.secondary() {
                 Ok(mut slot) => *slot = previous.clone(),
                 Err(error) => failures.push(error),
@@ -483,10 +686,7 @@ impl EngineState {
         // instead of leaving an orphaned window behind; if that cleanup fails
         // too, the surviving window is reported rather than swallowed, and the
         // retry path refreshes it because it is a reused native window.
-        let restored_without_secondary = matches!(
-            &transition.previous_secondary,
-            SecondaryBaseline::Restore(None)
-        );
+        let restored_without_secondary = transition.previous_secondary.restored_without_secondary();
         if restored_without_secondary && matches!(transition.plan, SecondaryPlan::Show { .. }) {
             if let Err(error) = self.windows.hide_secondary() {
                 failures.push(WireCommandError::new(
@@ -513,17 +713,22 @@ impl EngineState {
         force_hide: bool,
     ) -> Result<StagedSecondary, WireCommandError> {
         let live = self.secondary()?.is_some();
-        // Leaving the owning Scene always tears the secondary down, exactly like
-        // a new game, a load, a return to the title or an isolated replay.
-        if force_hide || scene_changed {
-            return Ok(StagedSecondary::none(if live {
+        // A window request in this same update takes precedence over tearing the
+        // previous owner down: the Scene the update lands in owns the window it
+        // asks for, exactly like a repeated `open_window` inside one Scene.  This
+        // is what makes an entry path work — the new game's first update, or an
+        // update that opens a window and leaves the Scene in the same immediate
+        // chain — instead of silently dropping the request.
+        //
+        // Only when the update carries no request does leaving the owning Scene
+        // tear the secondary down, exactly like a new game, a load or a return to
+        // the title.
+        let Some(scene_id) = opened else {
+            return Ok(StagedSecondary::none(if (force_hide || scene_changed) && live {
                 SecondaryPlan::Hide
             } else {
                 SecondaryPlan::None
             }));
-        }
-        let Some(scene_id) = opened else {
-            return Ok(StagedSecondary::none(SecondaryPlan::None));
         };
         if !self.content.scenes.contains_key(&scene_id) {
             return Err(WireCommandError::new(
@@ -536,8 +741,15 @@ impl EngineState {
         let id_base = token
             .checked_mul(SECONDARY_ID_STRIDE)
             .ok_or_else(|| WireCommandError::new(WireCommandErrorCode::Internal, "副窗口编号耗尽"))?;
-        let mut session =
-            self.build_secondary_session(candidate, &scene_id, &owning_scene, token, id_base)?;
+        let mut session = self.build_secondary_session(
+            candidate,
+            &scene_id,
+            SecondaryOwner::Story {
+                scene_id: owning_scene,
+            },
+            token,
+            id_base,
+        )?;
         // The staged session keeps its own copy of the shared maps; the effects
         // of its opening evaluation are handed back so the caller can publish
         // them to the main candidate in the same transaction.
@@ -582,7 +794,7 @@ impl EngineState {
         &self,
         main: &RuntimeEngine,
         scene_id: &str,
-        owning_scene: &str,
+        owner: SecondaryOwner,
         token: u64,
         id_base: u64,
     ) -> Result<SecondarySession, WireCommandError> {
@@ -603,12 +815,113 @@ impl EngineState {
         Ok(SecondarySession {
             runtime,
             scene_id: scene_id.to_owned(),
-            owning_scene: owning_scene.to_owned(),
+            owner,
             token,
             // Only a runtime-gated opening presentation has to survive into the
             // first bootstrap: without it the secondary's gate could never be
             // acknowledged and gameplay would be blocked forever.
             initial_update: first.requires_ack.then_some(first),
+        })
+    }
+
+    /// The native window work an *in-replay* transition implies.  A replay only
+    /// ever touches the window it owns: a story-owned slot cannot be live while a
+    /// replay is running, and `closing` (the replay left the Scene that owns the
+    /// window, or is over) hides the slot that carries this replay's generation.
+    fn stage_replay_secondary(
+        &self,
+        candidate: &RuntimeEngine,
+        opened: Option<String>,
+        closing: bool,
+        generation: u64,
+    ) -> Result<StagedSecondary, WireCommandError> {
+        let (any_live, owned) = {
+            let slot = self.secondary()?;
+            (
+                slot.is_some(),
+                slot.as_ref().is_some_and(|session| {
+                    session.owner == SecondaryOwner::Replay { generation }
+                }),
+            )
+        };
+        if closing {
+            return Ok(StagedSecondary::none(if owned {
+                SecondaryPlan::Hide
+            } else {
+                SecondaryPlan::None
+            }));
+        }
+        let Some(scene_id) = opened else {
+            return Ok(StagedSecondary::none(SecondaryPlan::None));
+        };
+        self.stage_replay_open_window(candidate, &scene_id, generation, any_live)
+    }
+
+    /// The native window work a replay *entry* implies.  Entry is an ownership
+    /// boundary: the main story is suspended behind the replay, so a story-owned
+    /// window cannot outlive it — unless the replay's own entry opens a window,
+    /// in which case the very same native window is re-pointed to the replay
+    /// instead of being destroyed and rebuilt (a destroy is only queued, and the
+    /// label it leaves behind must never be adopted by a new owner).
+    fn stage_replay_entry_secondary(
+        &self,
+        candidate: &RuntimeEngine,
+        opened: Option<String>,
+        ending: bool,
+        generation: u64,
+    ) -> Result<StagedSecondary, WireCommandError> {
+        let any_live = self.secondary()?.is_some();
+        let Some(scene_id) = opened.filter(|_| !ending) else {
+            return Ok(StagedSecondary::none(if any_live {
+                SecondaryPlan::Hide
+            } else {
+                SecondaryPlan::None
+            }));
+        };
+        self.stage_replay_open_window(candidate, &scene_id, generation, any_live)
+    }
+
+    /// Stage a fresh-token re-point of the single secondary slot onto `scene_id`,
+    /// seeded from `candidate` — the replay runtime this command is about to
+    /// commit — and owned by the replay `generation`.  The staged session keeps
+    /// its own copy of the shared maps; the effects of its opening evaluation are
+    /// handed back so the caller can publish them into the replay runtime in the
+    /// same transaction.
+    fn stage_replay_open_window(
+        &self,
+        candidate: &RuntimeEngine,
+        scene_id: &str,
+        generation: u64,
+        any_live: bool,
+    ) -> Result<StagedSecondary, WireCommandError> {
+        if !self.content.scenes.contains_key(scene_id) {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Validation,
+                format!("open_window 指向未声明的场景 {scene_id}"),
+            ));
+        }
+        let token = self.bump_secondary_generation()?;
+        let id_base = token
+            .checked_mul(SECONDARY_ID_STRIDE)
+            .ok_or_else(|| WireCommandError::new(WireCommandErrorCode::Internal, "副窗口编号耗尽"))?;
+        let mut session = self.build_secondary_session(
+            candidate,
+            scene_id,
+            SecondaryOwner::Replay { generation },
+            token,
+            id_base,
+        )?;
+        let save_variables = session.runtime.snapshot().variables.clone();
+        let profile_variables = session.runtime.profile_variables_map().clone();
+        let appended_history = session.runtime.take_appended_history();
+        Ok(StagedSecondary {
+            session: Some(session),
+            // Re-pointing the one native window is what keeps the single-slot
+            // contract: a replay never creates a second window.
+            plan: SecondaryPlan::Show { replaced: any_live },
+            save_variables: Some(save_variables),
+            profile_variables: Some(profile_variables),
+            appended_history,
         })
     }
 
@@ -621,29 +934,173 @@ impl EngineState {
             .map_err(|_| WireCommandError::new(WireCommandErrorCode::Internal, "副窗口编号耗尽"))
     }
 
+    /// Run one isolated-replay command and perform its staged native work.
     fn transact_replay(
         &self,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
     ) -> Result<RuntimeUpdate, WireCommandError> {
-        let mut replay = self.replay()?;
-        let session = replay.as_mut().ok_or_else(|| {
-            WireCommandError::new(
-                WireCommandErrorCode::Runtime,
-                "当前没有正在进行的 Scene 重演",
-            )
-        })?;
-        let mut candidate = session.runtime.clone();
-        let update = operation(&mut candidate).map_err(WireCommandError::from)?;
-        if candidate.snapshot().location.scene_id != session.scene_id
-            || matches!(
-                candidate.snapshot().prompt,
-                vectspace_core::model::PromptSnapshot::End { .. }
-            )
-        {
-            session.ending = true;
+        self.finish_replay_transition(self.commit_replay(operation)?)
+    }
+
+    /// The pure half of a replay transaction: clone the replay runtime, run the
+    /// operation, consume the host-only window cue, stage the secondary work the
+    /// replay's new state implies and commit the replay runtime together with the
+    /// secondary slot.  No native API is touched here, so host tests can drive
+    /// every replay path without a window.
+    ///
+    /// A replay stays isolated from the player's runtime: it borrows a cloned
+    /// profile/default state at start and is never persisted, so the staged
+    /// session's startup effects are published to the *replay* runtime only —
+    /// never to `runtime`, [`Self::commit_runtime`] or the profile file.
+    fn commit_replay(
+        &self,
+        operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
+    ) -> Result<ReplayTransition, WireCommandError> {
+        let mut slot = self.replay()?;
+        let session = slot.take().ok_or_else(replay_missing)?;
+        let generation = session.generation;
+        let mut runtime = session.runtime.clone();
+        let mut update = match operation(&mut runtime).map_err(WireCommandError::from) {
+            Ok(update) => update,
+            Err(error) => {
+                // An invalid acknowledgement or a rejected operation leaves the
+                // live replay exactly where it was.
+                *slot = Some(session);
+                return Err(error);
+            }
+        };
+        let opened = take_open_window_request(&mut update);
+        debug_assert_no_window_cue(&update);
+        let crossed = runtime.snapshot().location.scene_id != session.scene_id;
+        let ended = matches!(
+            runtime.snapshot().prompt,
+            vectspace_core::model::PromptSnapshot::End { .. }
+        );
+        // A replay closes its window exactly like the main story closes its own:
+        // when it leaves the Scene that owns the window, or when it is over.  It
+        // only ever closes the slot that carries its own generation.
+        let closing = session.ending || crossed || ended;
+        let staged = match self.stage_replay_secondary(&runtime, opened, closing, generation) {
+            Ok(staged) => staged,
+            Err(error) => {
+                *slot = Some(session);
+                return Err(error);
+            }
+        };
+        if let Some(variables) = &staged.save_variables {
+            runtime.set_save_variables(variables.clone());
         }
-        session.runtime = candidate;
-        Ok(update)
+        if let Some(variables) = &staged.profile_variables {
+            runtime.set_profile_variables(variables.clone());
+        }
+        if !staged.appended_history.is_empty() {
+            runtime.extend_dialogue_history(staged.appended_history.clone());
+        }
+        let committed = ReplaySession {
+            runtime,
+            scene_id: session.scene_id.clone(),
+            ending: closing,
+            generation,
+        };
+        // Keep the *exact* previous session for rollback: the slot was taken at
+        // the top of this transaction, so replacing into it would report `None`
+        // and a failed native step would clear a replay that is still live.
+        *slot = Some(committed);
+        let previous_replay = Some(session);
+        drop(slot);
+        let mut secondary = self.secondary()?;
+        let previous_secondary = match staged.plan {
+            SecondaryPlan::None => SecondaryBaseline::Untouched,
+            SecondaryPlan::Show { .. } => {
+                SecondaryBaseline::Restore(Box::new(std::mem::replace(
+                    &mut *secondary,
+                    staged.session,
+                )))
+            }
+            SecondaryPlan::Hide => SecondaryBaseline::Restore(Box::new(secondary.take())),
+        };
+        drop(secondary);
+        Ok(ReplayTransition {
+            update,
+            plan: staged.plan,
+            previous_replay,
+            previous_secondary,
+        })
+    }
+
+    /// Perform the staged native work for a committed replay transition,
+    /// restoring the replay *and* the secondary slot when it fails, so a replay
+    /// can never keep running with a window that belongs to someone else.
+    fn finish_replay_transition(
+        &self,
+        transition: ReplayTransition,
+    ) -> Result<RuntimeUpdate, WireCommandError> {
+        if let Err(error) = self.apply_secondary_plan(transition.plan.clone()) {
+            let cleanup_failures = self.rollback_replay_state(
+                transition.previous_replay.clone(),
+                &transition.previous_secondary,
+                &transition.plan,
+            );
+            return Err(aggregate_transition_failure(error, cleanup_failures));
+        }
+        self.reconcile_secondary_window(&transition.plan);
+        Ok(transition.update)
+    }
+
+    /// Restore the replay slot and the secondary slot after a rolled-back replay
+    /// transaction.  Returns every cleanup failure instead of stopping at the
+    /// first one, so the caller can report the whole picture.
+    fn rollback_replay_state(
+        &self,
+        previous_replay: Option<ReplaySession>,
+        previous_secondary: &SecondaryBaseline,
+        plan: &SecondaryPlan,
+    ) -> Vec<WireCommandError> {
+        let mut failures = Vec::new();
+        if let Some(previous) = previous_secondary.restored_session() {
+            match self.secondary() {
+                Ok(mut slot) => *slot = previous.clone(),
+                Err(error) => failures.push(error),
+            }
+        }
+        match self.replay() {
+            Ok(mut slot) => *slot = previous_replay,
+            Err(error) => failures.push(error),
+        }
+        // A failed creation may have produced a window that never received a
+        // session; the restored memory has no secondary, so the native state has
+        // to be cleaned up again.  If that fails too, the surviving window is
+        // reported instead of swallowed.
+        let restored_without_secondary = previous_secondary.restored_without_secondary();
+        if restored_without_secondary && matches!(plan, SecondaryPlan::Show { .. }) {
+            if let Err(error) = self.windows.hide_secondary() {
+                failures.push(WireCommandError::new(
+                    WireCommandErrorCode::Internal,
+                    format!(
+                        "副窗口回滚清理失败，可能残留未受管理的原生窗口: {}",
+                        error.message
+                    ),
+                ));
+            }
+        }
+        failures
+    }
+
+    /// Best-effort recovery for the enqueue-only native contract.  A transition
+    /// that performed no native work asks the seam to reconcile the native window
+    /// with the slot that really exists, so a creation the runtime never
+    /// performed is retried and an orphan of a failed cleanup is removed.  It
+    /// never waits for the event loop and never fails the command (the logical
+    /// state is already consistent), so a failure is reported as a diagnostic
+    /// only.
+    fn reconcile_secondary_window(&self, plan: &SecondaryPlan) {
+        if !matches!(plan, SecondaryPlan::None) {
+            return;
+        }
+        let expected_live = matches!(self.secondary().map(|slot| slot.is_some()), Ok(true));
+        if let Err(error) = self.windows.reconcile_secondary(expected_live) {
+            eprintln!("副窗口原生窗口状态校正失败: {}", error.message);
+        }
     }
 
     fn check_secondary_session(
@@ -673,32 +1130,51 @@ impl EngineState {
         Ok(session.token)
     }
 
-    /// Run one secondary-window command.  The main runtime stays the authority
-    /// for the shared Save/Profile variable maps and for the merged dialogue
-    /// ledger:
+    /// Run one secondary-window command.  Where the session's shared effects go
+    /// is decided by its [`SecondaryOwner`]:
     ///
-    /// 1. the main runtime's maps are published into the secondary candidate
-    ///    *before* the operation is evaluated, so a secondary command always
-    ///    observes current shared state;
-    /// 2. on success the candidate's maps and its newly produced dialogue
-    ///    occurrences are published back to the main runtime;
-    /// 3. the profile is persisted from the main candidate, so a failed write
-    ///    leaves memory and disk agreeing and aborts the whole command.
+    /// * a **story-owned** session follows the main runtime: the main maps are
+    ///   published into the candidate *before* the operation is evaluated, the
+    ///   candidate's maps and its new dialogue occurrences are published back,
+    ///   and the profile is persisted from the main candidate (a failed write
+    ///   aborts the whole command);
+    /// * a **replay-owned** session follows its replay instead: the replay
+    ///   runtime's maps are the authority, everything is published back to the
+    ///   *replay* runtime only, and nothing reaches the main runtime, the profile
+    ///   file or the official ledger.
     ///
-    /// The secondary's own progression metadata (read/seen/completed) never
-    /// replaces the main runtime's, and its Scene boundary never resets the
-    /// shared Save map because the runtime is marked `shared_save_variables`.
+    /// Both branches keep the session's own progression metadata (read/seen/
+    /// completed) and never let its Scene boundary reset the shared Save map.
     fn transact_secondary(
         &self,
         expected_session_id: Option<&WireU64>,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
     ) -> Result<(RuntimeUpdate, u64), WireCommandError> {
         let token = self.check_secondary_session(expected_session_id)?;
+        let owner = {
+            let slot = self.secondary()?;
+            slot.as_ref()
+                .map(|session| session.owner.clone())
+                .ok_or_else(secondary_missing)?
+        };
+        match owner {
+            SecondaryOwner::Story { .. } => self.transact_secondary_against_story(token, operation),
+            SecondaryOwner::Replay { generation } => {
+                self.transact_secondary_against_replay(token, generation, operation)
+            }
+        }
+    }
+
+    /// A story-owned secondary command: publish into the main runtime and
+    /// persist the resulting profile, exactly like the single-window host.
+    fn transact_secondary_against_story(
+        &self,
+        token: u64,
+        operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
+    ) -> Result<(RuntimeUpdate, u64), WireCommandError> {
         let mut main = self.runtime()?;
         let mut slot = self.secondary()?;
-        let session = slot.as_mut().ok_or_else(|| {
-            WireCommandError::new(WireCommandErrorCode::Runtime, "当前没有正在运行的副窗口会话")
-        })?;
+        let session = slot.as_mut().ok_or_else(secondary_missing)?;
         if session.token != token {
             return Err(WireCommandError::new(
                 WireCommandErrorCode::StaleSession,
@@ -713,6 +1189,7 @@ impl EngineState {
         // A secondary update can never carry a window control cue to any
         // WebView, even if authored content reached this node in this runtime.
         take_open_window_request(&mut update);
+        debug_assert_no_window_cue(&update);
         main_candidate.set_save_variables(candidate.snapshot().variables.clone());
         main_candidate.set_profile_variables(candidate.profile_variables_map().clone());
         main_candidate.extend_dialogue_history(candidate.take_appended_history());
@@ -720,6 +1197,56 @@ impl EngineState {
         *main = main_candidate;
         session.runtime = candidate;
         session.scene_id = update.snapshot.location.scene_id.clone();
+        Ok((update, token))
+    }
+
+    /// A replay-owned secondary command: the replay runtime is the only
+    /// authority.  The command is refused when the owning replay is gone, so a
+    /// delayed request from an ended replay can never mutate a newer owner.
+    fn transact_secondary_against_replay(
+        &self,
+        token: u64,
+        generation: u64,
+        operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
+    ) -> Result<(RuntimeUpdate, u64), WireCommandError> {
+        let mut replay = self.replay()?;
+        let session = replay
+            .as_mut()
+            .filter(|session| session.generation == generation)
+            .ok_or_else(|| {
+                WireCommandError::new(
+                    WireCommandErrorCode::StaleSession,
+                    "重演会话已结束，请重新连接运行时",
+                )
+            })?;
+        let mut slot = self.secondary()?;
+        let secondary = slot.as_mut().ok_or_else(secondary_missing)?;
+        if secondary.token != token {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::StaleSession,
+                "副窗口会话已切换，请重新连接运行时",
+            ));
+        }
+        let mut candidate = secondary.runtime.clone();
+        candidate.set_save_variables(session.runtime.snapshot().variables.clone());
+        candidate.set_profile_variables(session.runtime.profile_variables_map().clone());
+        let mut update = operation(&mut candidate).map_err(WireCommandError::from)?;
+        take_open_window_request(&mut update);
+        debug_assert_no_window_cue(&update);
+        // Replay play stays ephemeral: the shared maps and the new occurrences
+        // are published to the replay runtime only.  Nothing is persisted, so a
+        // replayed line can never appear in a save, the profile file or the
+        // official ledger.
+        session
+            .runtime
+            .set_save_variables(candidate.snapshot().variables.clone());
+        session
+            .runtime
+            .set_profile_variables(candidate.profile_variables_map().clone());
+        let appended_history = candidate.take_appended_history();
+        session.runtime.extend_dialogue_history(appended_history);
+        secondary.runtime = candidate;
+        secondary.scene_id = update.snapshot.location.scene_id.clone();
         Ok((update, token))
     }
 
@@ -735,18 +1262,166 @@ impl EngineState {
         // allowing a stale story request to mutate the new session.
         self.check_session(expected_session_id)?;
         if self.replay()?.is_some() {
-            let mut update = self.transact_replay(operation)?;
-            take_open_window_request(&mut update);
+            // Every replay path consumes the host-only window cue and stages the
+            // window work it implies, so the cue can never reach the main window
+            // and a replay can really own the secondary.
+            let update = self.transact_replay(operation)?;
             return Ok((update, self.current_session_id(), WireSessionMode::Replay));
         }
         let update = self.transact_runtime(operation)?;
         Ok((update, self.current_session_id(), WireSessionMode::Story))
     }
 
-    /// Tear the secondary slot down outside a story transaction (replay entry
-    /// and returning to the title).  The native window is destroyed *before*
-    /// the slot is cleared, so a failed destroy leaves a live window that still
-    /// owns its session instead of a session whose window no longer exists.
+    fn enter_replay(&self, scene_id: &str) -> Result<RuntimeUpdate, WireCommandError> {
+        if self.replay()?.is_some() {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Runtime,
+                "已经存在正在进行的 Scene 重演",
+            ));
+        }
+        if self.content.chapter_map.is_none() {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Validation,
+                "当前内容未配置章节地图",
+            ));
+        }
+        let (profile, map) = {
+            let main = self.runtime()?;
+            (
+                main.profile_state(&self.content),
+                main.chapter_map(&self.content)
+                    .map_err(WireCommandError::from)?,
+            )
+        };
+        let hotspot = map
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .hotspots
+                    .iter()
+                    .find(|hotspot| hotspot.scene_id == scene_id)
+            })
+            .ok_or_else(|| {
+                WireCommandError::new(
+                    WireCommandErrorCode::Validation,
+                    "该 Scene 尚未揭示，不能重演",
+                )
+            })?;
+        if !hotspot.replayable {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Validation,
+                "该 Scene 尚未完成，不能重演",
+            ));
+        }
+        let map_definition = self
+            .content
+            .chapter_map
+            .as_ref()
+            .expect("chapter_map checked above");
+        let definition_hotspot = map_definition
+            .hotspots
+            .iter()
+            .find(|candidate| candidate.scene_id == scene_id)
+            .expect("validated hotspot exists");
+        let mut replay_runtime = RuntimeEngine::with_replay_overrides(
+            &self.content,
+            profile,
+            &definition_hotspot.variable_overrides,
+        )
+        .map_err(WireCommandError::from)?;
+        let generation = self
+            .replay_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_add(1)
+            .ok_or_else(|| {
+                WireCommandError::new(WireCommandErrorCode::Internal, "重演会话编号耗尽")
+            })?;
+        let id_base = generation
+            .checked_mul(REPLAY_ID_STRIDE)
+            .ok_or_else(|| {
+                WireCommandError::new(WireCommandErrorCode::Internal, "重演会话编号耗尽")
+            })?;
+        replay_runtime.prepare_session_ids(id_base, id_base, id_base);
+        let mut first = replay_runtime
+            .start_scene_preview(&self.content, scene_id)
+            .map_err(WireCommandError::from)?;
+        // The replay's entry is an entry path like the main story's: the
+        // host-only cue is consumed here (and the acknowledgement requirement is
+        // recomputed) instead of leaking to the main window, where the wire type
+        // could not even represent it.
+        let opened = take_open_window_request(&mut first);
+        debug_assert_no_window_cue(&first);
+        let ending = matches!(
+            first.snapshot.prompt,
+            vectspace_core::model::PromptSnapshot::End { .. }
+        );
+        let staged = self.stage_replay_entry_secondary(&replay_runtime, opened, ending, generation)?;
+        if let Some(variables) = &staged.save_variables {
+            replay_runtime.set_save_variables(variables.clone());
+        }
+        if let Some(variables) = &staged.profile_variables {
+            replay_runtime.set_profile_variables(variables.clone());
+        }
+        if !staged.appended_history.is_empty() {
+            replay_runtime.extend_dialogue_history(staged.appended_history.clone());
+        }
+        let previous_replay = (*self.replay()?).replace(ReplaySession {
+            runtime: replay_runtime,
+            scene_id: scene_id.to_owned(),
+            ending,
+            generation,
+        });
+        let mut secondary = self.secondary()?;
+        let previous_secondary = match staged.plan {
+            SecondaryPlan::None => SecondaryBaseline::Untouched,
+            SecondaryPlan::Show { .. } => {
+                SecondaryBaseline::Restore(Box::new(std::mem::replace(
+                    &mut *secondary,
+                    staged.session,
+                )))
+            }
+            SecondaryPlan::Hide => SecondaryBaseline::Restore(Box::new(secondary.take())),
+        };
+        drop(secondary);
+        if let Err(error) = self.apply_secondary_plan(staged.plan.clone()) {
+            let cleanup_failures =
+                self.rollback_replay_state(previous_replay, &previous_secondary, &staged.plan);
+            return Err(aggregate_transition_failure(error, cleanup_failures));
+        }
+        self.reconcile_secondary_window(&staged.plan);
+        // The generation only changes once the entry really committed, so a
+        // failed entry leaves the previous session id valid for the frontend.
+        self.bump_session_id()?;
+        Ok(first)
+    }
+
+    /// Leave the live replay.  A replay-owned secondary is closed *before* the
+    /// replay slot is cleared: a failed destroy keeps both, so the exit can be
+    /// retried instead of orphaning a window that no session owns any more.
+    fn exit_replay(&self) -> Result<(), WireCommandError> {
+        let Some(generation) = self.replay()?.as_ref().map(|session| session.generation) else {
+            return Ok(());
+        };
+        let owned = {
+            let slot = self.secondary()?;
+            slot.as_ref()
+                .is_some_and(|session| session.owner == SecondaryOwner::Replay { generation })
+        };
+        if owned {
+            // Native work with no runtime mutex held; the session gate is still
+            // held, so no other command can observe the gap.
+            self.windows.hide_secondary()?;
+            *self.secondary()? = None;
+        }
+        *self.replay()? = None;
+        self.bump_session_id()?;
+        Ok(())
+    }
+
+    /// Tear the secondary slot down outside a story transaction (returning to
+    /// the title).  The native window is destroyed *before* the slot is cleared,
+    /// so a failed destroy leaves a live window that still owns its session
+    /// instead of a session whose window no longer exists.
     fn close_secondary(&self) -> Result<(), WireCommandError> {
         let live = self.secondary()?.is_some();
         if !live {
@@ -798,7 +1473,7 @@ impl EngineState {
         let previous_profile = runtime.profile_state(&self.content);
         let profile_written = self.commit_runtime(&runtime, &candidate)?;
         let previous_secondary =
-            SecondaryBaseline::Restore(std::mem::replace(&mut *self.secondary()?, staged));
+            SecondaryBaseline::Restore(Box::new(std::mem::replace(&mut *self.secondary()?, staged)));
         let previous_runtime = std::mem::replace(&mut *runtime, candidate);
         drop(runtime);
         self.finish_transition(MainTransition {
@@ -842,7 +1517,9 @@ impl EngineState {
         Ok(SecondarySession {
             runtime,
             scene_id: stored.scene_id.clone(),
-            owning_scene: stored.owning_scene.clone(),
+            owner: SecondaryOwner::Story {
+                scene_id: stored.owning_scene.clone(),
+            },
             token,
             // Loading never evaluates the secondary's Scene, so no pending
             // presentation can be left behind by the restore.
@@ -933,6 +1610,21 @@ fn needs_session_refresh(replaced: bool, reused: bool) -> bool {
     replaced || reused
 }
 
+/// The error reported when a secondary command arrives without a live secondary
+/// session.  Kept in one place so every secondary path agrees.
+fn secondary_missing() -> WireCommandError {
+    WireCommandError::new(WireCommandErrorCode::Runtime, "当前没有正在运行的副窗口会话")
+}
+
+/// The error reported when a replay command arrives without a live replay.  Kept
+/// in one place so the entry, advance and acknowledgement paths agree.
+fn replay_missing() -> WireCommandError {
+    WireCommandError::new(
+        WireCommandErrorCode::Runtime,
+        "当前没有正在进行的 Scene 重演",
+    )
+}
+
 /// Report the native failure that forced a rollback together with every cleanup
 /// failure the rollback itself hit.  The first error keeps its code (callers
 /// branch on it) and its message stays first, so a caller that only reads the
@@ -967,9 +1659,15 @@ fn wire_secondary_update(token: u64, update: RuntimeUpdate) -> WireRuntimeUpdate
     WireRuntimeUpdate::with_session(update, WireU64::from(token), WireSessionMode::Secondary)
 }
 
-/// Consume the host control cue from an update.  The cue is a host instruction,
+/// Consume the host control cues from an update.  The cue is a host instruction,
 /// not a presentation instruction: it must never reach a WebView, and it must be
 /// consumed exactly once so a frontend retry cannot re-trigger the side effect.
+///
+/// One update can carry several requests because the runtime keeps going past
+/// every `open_window` node, and a repeated `open_window` replaces the single
+/// slot: the **last** request in the update is therefore the one that decides
+/// what the window shows.  The intermediate requests are deliberately not
+/// played — no intermediate secondary runtime is ever created.
 ///
 /// The acknowledgement requirement is recomputed from the cues that remain,
 /// because the runtime derives it from its own (pre-strip) cue list: an
@@ -981,9 +1679,7 @@ fn take_open_window_request(update: &mut RuntimeUpdate) -> Option<String> {
     let requires_ack_before = update.requires_ack;
     update.cues.retain(|cue| {
         if let PresentationCueKind::OpenWindow { scene } = &cue.kind {
-            if requested.is_none() {
-                requested = Some(scene.clone());
-            }
+            requested = Some(scene.clone());
             false
         } else {
             true
@@ -998,13 +1694,90 @@ fn take_open_window_request(update: &mut RuntimeUpdate) -> Option<String> {
     requested
 }
 
+/// The host-only window cue must never survive into an update that a WebView
+/// receives.  Every host path that returns an update asserts this in debug
+/// builds, so a new producer that forgets to consume the cue fails loudly in
+/// tests instead of silently turning the node into a no-op at the wire boundary.
+fn debug_assert_no_window_cue(update: &RuntimeUpdate) {
+    debug_assert!(
+        !update
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::OpenWindow { .. })),
+        "宿主控制提示必须在下发到 WebView 之前被消费"
+    );
+}
+
+/// How the native seam must treat the secondary label it observes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeShowAction {
+    /// The label is free: create the window.
+    Create,
+    /// The label is alive: reuse it, refreshing the frontend when the session
+    /// really changed.
+    Reuse,
+    /// The label is queued for destruction: refuse instead of adopting it, so a
+    /// new owner never receives a window the runtime is about to tear down.
+    RefusePendingDestroy,
+}
+
+/// Decide the native action from the observed label state.  Kept in one place so
+/// the real seam and the injected test seam cannot drift apart.
+fn native_show_action(label_present: bool, label_closing: bool) -> NativeShowAction {
+    if !label_present {
+        NativeShowAction::Create
+    } else if label_closing {
+        NativeShowAction::RefusePendingDestroy
+    } else {
+        NativeShowAction::Reuse
+    }
+}
+
+/// That is the host's bounded liveness net: a label that is queued for
+/// destruction is never adopted, but a destroy the runtime never completed is
+/// re-attempted **once** per later transition after this grace period.  It is a
+/// bound, never a wait: nothing sleeps, loops, spawns or blocks on the event
+/// loop.
+const SECONDARY_PENDING_DESTROY_GRACE: Duration = Duration::from_secs(2);
+
+/// Whether a destroy that has been queued for `elapsed` may be re-attempted.
+/// Kept in one place so the real seam and the injected test seam cannot drift
+/// apart, and so the bound is testable without any real time passing.
+fn pending_destroy_retry_due(elapsed: Duration) -> bool {
+    elapsed >= SECONDARY_PENDING_DESTROY_GRACE
+}
+
+const SECONDARY_CLOSING_MESSAGE: &str = "副窗口正在关闭，请稍后重试";
+
 /// Create the secondary window if it does not exist yet.  A failure is reported
 /// to the caller, which rolls the whole transition back instead of committing a
 /// session whose window is missing.
-fn ensure_secondary_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, WireCommandError> {
-    if let Some(window) = app.get_webview_window(SECONDARY_WINDOW_LABEL) {
-        return Ok(window);
+///
+/// A label that is queued for destruction is refused instead of adopted: the
+/// runtime keeps resolving a label until it processes the enqueued destroy, so
+/// adopting it would hand the new owner a window that is about to disappear.
+fn ensure_secondary_window(
+    app: &tauri::AppHandle,
+    closing_secondary: &AtomicBool,
+) -> Result<tauri::WebviewWindow, WireCommandError> {
+    let present = app.get_webview_window(SECONDARY_WINDOW_LABEL);
+    match native_show_action(
+        present.is_some(),
+        closing_secondary.load(Ordering::Acquire),
+    ) {
+        NativeShowAction::Reuse => {
+            return Ok(present.expect("checked present"));
+        }
+        NativeShowAction::RefusePendingDestroy => {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Runtime,
+                SECONDARY_CLOSING_MESSAGE,
+            ))
+        }
+        NativeShowAction::Create => {}
     }
+    // The label is free again, so any queued destroy has been processed.
+    closing_secondary.store(false, Ordering::Release);
     let window = WebviewWindowBuilder::new(
         app,
         SECONDARY_WINDOW_LABEL,
@@ -1035,16 +1808,26 @@ fn ensure_secondary_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindo
 /// transition may remove the window.  A failed destroy is reported to the
 /// caller, which rolls the transition back rather than dropping the session and
 /// leaving the window behind.
+///
+/// On success the call only *queues* the destroy (off the event-loop thread),
+/// so `closing_secondary` stays set until the label is observed gone: that is
+/// what stops a rapidly re-opened window from adopting a label the runtime is
+/// about to tear down.
 fn destroy_secondary_window(
     app: &tauri::AppHandle,
     closing_secondary: &AtomicBool,
 ) -> Result<(), WireCommandError> {
     let Some(window) = app.get_webview_window(SECONDARY_WINDOW_LABEL) else {
+        // The label is free: a queued destroy finished, or nothing was created.
+        closing_secondary.store(false, Ordering::Release);
         return Ok(());
     };
     closing_secondary.store(true, Ordering::Release);
     let result = window.destroy();
-    closing_secondary.store(false, Ordering::Release);
+    if result.is_err() {
+        // The window survives, so it is not queued for destruction after all.
+        closing_secondary.store(false, Ordering::Release);
+    }
     result.map_err(|error| {
         WireCommandError::new(
             WireCommandErrorCode::Internal,
@@ -1062,13 +1845,19 @@ fn wire_snapshot(
 }
 
 #[tauri::command]
-fn bootstrap(
+async fn bootstrap(
     window: tauri::WebviewWindow,
     state: State<'_, EngineState>,
 ) -> Result<WireBootstrapPayload, WireCommandError> {
     require_main(&window)?;
     let _gate = state.session_gate()?;
     let payload = state.runtime()?.bootstrap(&state.content);
+    // `RuntimeEngine::bootstrap` returns the cue-less snapshot by construction
+    // (`update_without_cues`), so there is never a host-only window cue on this
+    // path to consume or stage — the assertion keeps that contract explicit.  A
+    // story whose *entry* node opens a window is reached through
+    // `start_new_game`, not through the bootstrap.
+    debug_assert_no_window_cue(&payload.update);
     Ok(WireBootstrapPayload {
         update: wire_update(&state, payload.update, WireSessionMode::Story),
         asset_ids: payload.asset_ids,
@@ -1081,7 +1870,7 @@ fn bootstrap(
 /// The secondary window's own bootstrap.  It never loads settings, save slots,
 /// chapter maps or history: the secondary has normal gameplay and nothing else.
 #[tauri::command]
-fn secondary_bootstrap(
+async fn secondary_bootstrap(
     window: tauri::WebviewWindow,
     state: State<'_, EngineState>,
 ) -> Result<WireBootstrapPayload, WireCommandError> {
@@ -1091,7 +1880,7 @@ fn secondary_bootstrap(
 }
 
 #[tauri::command]
-fn start_new_game(
+async fn start_new_game(
     window: tauri::WebviewWindow,
     expected_session_id: Option<WireU64>,
     state: State<'_, EngineState>,
@@ -1117,7 +1906,7 @@ fn start_new_game(
 }
 
 #[tauri::command]
-fn advance(
+async fn advance(
     window: tauri::WebviewWindow,
     expected_revision: WireU64,
     source: AdvanceSource,
@@ -1138,7 +1927,7 @@ fn advance(
 }
 
 #[tauri::command]
-fn choose(
+async fn choose(
     window: tauri::WebviewWindow,
     choice_id: String,
     expected_revision: WireU64,
@@ -1159,7 +1948,7 @@ fn choose(
 }
 
 #[tauri::command]
-fn click_button(
+async fn click_button(
     window: tauri::WebviewWindow,
     instance_id: String,
     expected_revision: WireU64,
@@ -1180,7 +1969,7 @@ fn click_button(
 }
 
 #[tauri::command]
-fn presentation_complete(
+async fn presentation_complete(
     window: tauri::WebviewWindow,
     update_id: WireU64,
     outcome: PresentationOutcome,
@@ -1193,26 +1982,21 @@ fn presentation_complete(
     let update_id = update_id.parse().map_err(WireCommandError::from)?;
     let has_replay = state.replay()?.is_some();
     if has_replay {
+        // Every replay acknowledgement path goes through the replay transaction,
+        // which consumes the host-only cue and stages the window work the new
+        // replay state implies — including the ending path, whose boundary
+        // update is subject to the same host invariant.
         let ending = state
             .replay()?
             .as_ref()
             .is_some_and(|session| session.ending);
-        if ending {
-            let mut sessions = state.replay()?;
-            let session = sessions.as_mut().ok_or_else(|| {
-                WireCommandError::new(WireCommandErrorCode::Runtime, "重演会话已结束")
-            })?;
-            let update = session
-                .runtime
-                .finish_replay_boundary(update_id)
-                .map_err(WireCommandError::from)?;
-            session.ending = true;
-            return Ok(wire_update(&state, update, WireSessionMode::Replay));
-        }
-        let mut update = state.transact_replay(|runtime| {
-            runtime.presentation_complete(&state.content, update_id, outcome)
-        })?;
-        take_open_window_request(&mut update);
+        let update = if ending {
+            state.transact_replay(|runtime| runtime.finish_replay_boundary(update_id))?
+        } else {
+            state.transact_replay(|runtime| {
+                runtime.presentation_complete(&state.content, update_id, outcome)
+            })?
+        };
         return Ok(wire_update(&state, update, WireSessionMode::Replay));
     }
     let update = state.transact_runtime(|runtime| {
@@ -1222,7 +2006,7 @@ fn presentation_complete(
 }
 
 #[tauri::command]
-fn get_snapshot(
+async fn get_snapshot(
     window: tauri::WebviewWindow,
     state: State<'_, EngineState>,
 ) -> Result<WireRuntimeSnapshot, WireCommandError> {
@@ -1243,7 +2027,7 @@ fn get_snapshot(
 }
 
 #[tauri::command]
-fn secondary_snapshot(
+async fn secondary_snapshot(
     window: tauri::WebviewWindow,
     state: State<'_, EngineState>,
 ) -> Result<WireRuntimeSnapshot, WireCommandError> {
@@ -1261,7 +2045,7 @@ fn secondary_snapshot(
 }
 
 #[tauri::command]
-fn get_dialogue_history(
+async fn get_dialogue_history(
     window: tauri::WebviewWindow,
     state: State<'_, EngineState>,
 ) -> Result<Vec<WireDialogueHistoryEntry>, WireCommandError> {
@@ -1287,7 +2071,7 @@ fn get_dialogue_history(
 }
 
 #[tauri::command]
-fn clear_dialogue_history(
+async fn clear_dialogue_history(
     window: tauri::WebviewWindow,
     expected_session_id: Option<WireU64>,
     state: State<'_, EngineState>,
@@ -1313,7 +2097,7 @@ fn clear_dialogue_history(
 }
 
 #[tauri::command]
-fn get_chapter_map(
+async fn get_chapter_map(
     window: tauri::WebviewWindow,
     state: State<'_, EngineState>,
 ) -> Result<Option<ChapterMapSnapshot>, WireCommandError> {
@@ -1326,7 +2110,7 @@ fn get_chapter_map(
 }
 
 #[tauri::command]
-fn start_scene_replay(
+async fn start_scene_replay(
     window: tauri::WebviewWindow,
     scene_id: String,
     expected_session_id: Option<WireU64>,
@@ -1335,91 +2119,15 @@ fn start_scene_replay(
     require_main(&window)?;
     let _gate = state.session_gate()?;
     state.check_session(expected_session_id.as_ref())?;
-    if state.replay()?.is_some() {
-        return Err(WireCommandError::new(
-            WireCommandErrorCode::Runtime,
-            "已经存在正在进行的 Scene 重演",
-        ));
-    }
-    if state.content.chapter_map.is_none() {
-        return Err(WireCommandError::new(
-            WireCommandErrorCode::Validation,
-            "当前内容未配置章节地图",
-        ));
-    }
-    let main = state.runtime()?;
-    let map = main
-        .chapter_map(&state.content)
-        .map_err(WireCommandError::from)?;
-    let hotspot = map
-        .as_ref()
-        .and_then(|snapshot| {
-            snapshot
-                .hotspots
-                .iter()
-                .find(|hotspot| hotspot.scene_id == scene_id)
-        })
-        .ok_or_else(|| {
-            WireCommandError::new(
-                WireCommandErrorCode::Validation,
-                "该 Scene 尚未揭示，不能重演",
-            )
-        })?;
-    if !hotspot.replayable {
-        return Err(WireCommandError::new(
-            WireCommandErrorCode::Validation,
-            "该 Scene 尚未完成，不能重演",
-        ));
-    }
-    let profile = main.profile_state(&state.content);
-    let map_definition = state
-        .content
-        .chapter_map
-        .as_ref()
-        .expect("chapter_map checked above");
-    let definition_hotspot = map_definition
-        .hotspots
-        .iter()
-        .find(|candidate| candidate.scene_id == scene_id)
-        .expect("validated hotspot exists");
-    let mut replay_runtime = RuntimeEngine::with_replay_overrides(
-        &state.content,
-        profile,
-        &definition_hotspot.variable_overrides,
-    )
-    .map_err(WireCommandError::from)?;
-    let generation = state
-        .replay_generation
-        .fetch_add(1, Ordering::Relaxed)
-        .checked_add(1)
-        .ok_or_else(|| WireCommandError::new(WireCommandErrorCode::Internal, "重演会话编号耗尽"))?;
-    let id_base = generation
-        .checked_mul(REPLAY_ID_STRIDE)
-        .ok_or_else(|| WireCommandError::new(WireCommandErrorCode::Internal, "重演会话编号耗尽"))?;
-    replay_runtime.prepare_session_ids(id_base, id_base, id_base);
-    let first = replay_runtime
-        .start_scene_preview(&state.content, &scene_id)
-        .map_err(WireCommandError::from)?;
-    drop(main);
-    // An isolated replay never coexists with the secondary window: a replay has
-    // no story progression of its own to share with it.  The window is destroyed
-    // before the replay becomes active so a failed destroy aborts the entry
-    // instead of leaving an orphaned window behind a replay.
-    state.close_secondary()?;
-    *state.replay()? = Some(ReplaySession {
-        runtime: replay_runtime,
-        scene_id,
-        ending: matches!(
-            first.snapshot.prompt,
-            vectspace_core::model::PromptSnapshot::End { .. }
-        ),
-    });
-    state.bump_session_id()?;
-    Ok(wire_update(&state, first, WireSessionMode::Replay))
+    // Entry is one transaction over the replay runtime, the secondary slot and
+    // the native window plan, so a replay can really own the window its own
+    // `open_window` node opens or re-points without ever leaving an orphan.
+    let update = state.enter_replay(&scene_id)?;
+    Ok(wire_update(&state, update, WireSessionMode::Replay))
 }
 
 #[tauri::command]
-fn exit_scene_replay(
+async fn exit_scene_replay(
     window: tauri::WebviewWindow,
     expected_session_id: Option<WireU64>,
     state: State<'_, EngineState>,
@@ -1427,11 +2135,7 @@ fn exit_scene_replay(
     require_main(&window)?;
     let _gate = state.session_gate()?;
     state.check_session(expected_session_id.as_ref())?;
-    let had_replay = state.replay()?.is_some();
-    *state.replay()? = None;
-    if had_replay {
-        state.bump_session_id()?;
-    }
+    state.exit_replay()?;
     Ok(state.current_session_id().into())
 }
 
@@ -1441,7 +2145,7 @@ fn exit_scene_replay(
 /// the host generation makes late acknowledgements fail with
 /// `stale_session` instead of mutating that hidden runtime.
 #[tauri::command]
-fn invalidate_session(
+async fn invalidate_session(
     window: tauri::WebviewWindow,
     expected_session_id: Option<WireU64>,
     state: State<'_, EngineState>,
@@ -1483,7 +2187,7 @@ fn list_save_slots(
 }
 
 #[tauri::command]
-fn save_slot(
+async fn save_slot(
     window: tauri::WebviewWindow,
     request: SaveSlotRequest,
     expected_session_id: Option<WireU64>,
@@ -1515,9 +2219,18 @@ fn save_slot(
                     format!("副窗口仍在执行 update {update_id}，暂时不能存档"),
                 ));
             }
+            // Only a story-owned session is real progress.  Replay play is
+            // ephemeral by design, so a replay-owned secondary never reaches a
+            // slot (saving is already refused while a replay is live).
+            let Some(owning_scene) = session.owner.story_scene() else {
+                return Err(WireCommandError::new(
+                    WireCommandErrorCode::Runtime,
+                    "重演期间不能存档",
+                ));
+            };
             Some(SecondaryState {
                 scene_id: session.scene_id.clone(),
-                owning_scene: session.owning_scene.clone(),
+                owning_scene: owning_scene.to_owned(),
                 snapshot: session.runtime.snapshot().clone(),
                 profile: session.runtime.profile_state(&state.content),
             })
@@ -1540,7 +2253,7 @@ fn save_slot(
 }
 
 #[tauri::command]
-fn load_slot(
+async fn load_slot(
     window: tauri::WebviewWindow,
     slot: String,
     expected_session_id: Option<WireU64>,
@@ -1581,7 +2294,7 @@ fn save_settings(
 }
 
 #[tauri::command]
-fn secondary_advance(
+async fn secondary_advance(
     window: tauri::WebviewWindow,
     expected_revision: WireU64,
     source: AdvanceSource,
@@ -1598,7 +2311,7 @@ fn secondary_advance(
 }
 
 #[tauri::command]
-fn secondary_choose(
+async fn secondary_choose(
     window: tauri::WebviewWindow,
     choice_id: String,
     expected_revision: WireU64,
@@ -1615,7 +2328,7 @@ fn secondary_choose(
 }
 
 #[tauri::command]
-fn secondary_click_button(
+async fn secondary_click_button(
     window: tauri::WebviewWindow,
     instance_id: String,
     expected_revision: WireU64,
@@ -1632,7 +2345,7 @@ fn secondary_click_button(
 }
 
 #[tauri::command]
-fn secondary_presentation_complete(
+async fn secondary_presentation_complete(
     window: tauri::WebviewWindow,
     update_id: WireU64,
     outcome: PresentationOutcome,
@@ -1674,10 +2387,17 @@ fn disable_browser_features<R: tauri::Runtime>(
 
     window.with_webview(|webview| unsafe {
         let controller = webview.controller();
-        let core = controller
-            .CoreWebView2()
-            .expect("WebView2 CoreWebView2 interface is unavailable");
-        let settings = core.Settings().expect("WebView2 settings are unavailable");
+        // Best effort: this callback runs in a place the host cannot report back
+        // through `show_secondary`, and a panic here would abort the whole
+        // process, so a missing interface only degrades hardening.
+        let Ok(core) = controller.CoreWebView2() else {
+            eprintln!("副窗口 WebView2 CoreWebView2 接口不可用，跳过浏览器特性关闭");
+            return;
+        };
+        let Ok(settings) = core.Settings() else {
+            eprintln!("副窗口 WebView2 设置不可用，跳过浏览器特性关闭");
+            return;
+        };
         let _ = settings.SetAreDefaultContextMenusEnabled(false);
         let _ = settings.SetAreDevToolsEnabled(false);
         let _ = settings.SetIsZoomControlEnabled(false);
@@ -1757,6 +2477,8 @@ pub fn run() {
                 windows: Arc::new(TauriWindowOps {
                     app: app.handle().clone(),
                     closing_secondary: AtomicBool::new(false),
+                    pending_destroy_since: Mutex::new(None),
+                    clock: Instant::now,
                 }),
                 saves,
                 profile,
@@ -1833,14 +2555,15 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{collections::BTreeMap, fs, path::PathBuf};
 
     use tempfile::tempdir;
 
     use super::*;
     use vectspace_core::model::{
-        AdvanceSource, CueGate, DialogueHistoryEntry, MutationValue, PresentationCue,
-        PresentationCueKind, ScalarValue, SceneNode, VariableMap, VariableOperation,
+        AdvanceSource, ChapterMapDefinition, ChapterMapHotspot, ChapterMapReplay, ChapterMapReveal,
+        CueGate, DialogueHistoryEntry, MutationValue, PresentationCue, PresentationCueKind,
+        ScalarValue, SceneDefinition, SceneNode, VariableMap, VariableOperation,
     };
 
     fn history_entry(entry_id: u64, prompt_id: &str) -> DialogueHistoryEntry {
@@ -1872,6 +2595,19 @@ mod tests {
         fail_show_after_create: AtomicBool,
         /// Destruction fails, so a window that exists survives.
         fail_hide: AtomicBool,
+        /// Mirror of the production seam: a destroy that the runtime has accepted
+        /// but not processed yet.  The label stays registered, so a new owner
+        /// must not adopt it.
+        queued_destroy: AtomicBool,
+        /// Make `hide_secondary` model the real enqueue: the call succeeds and the
+        /// label survives until the test releases it.
+        defer_destroy: AtomicBool,
+        /// Model a queued destroy that the runtime never completes: a retried
+        /// destroy fails natively, so the window survives and stops being pending.
+        destroy_fails_asynchronously: AtomicBool,
+        /// Injected elapsed time since the pending destroy was enqueued, so the
+        /// bounded retry is testable without any real timer or sleep.
+        pending_destroy_elapsed_ms: AtomicU64,
         /// Native state: whether a secondary window exists right now.  This is
         /// deliberately independent of the host's logical slot, which is what
         /// makes the partial-create/cleanup-failure combination reproducible.
@@ -1884,6 +2620,47 @@ mod tests {
         reused_calls: AtomicU64,
         create_calls: AtomicU64,
         hide_calls: AtomicU64,
+        /// Recovery attempts for a live logical slot whose window is missing.
+        recover_calls: AtomicU64,
+        /// Bounded re-attempts of a destroy the runtime never completed.
+        destroy_retry_calls: AtomicU64,
+    }
+
+    impl RecordingWindowOps {
+        /// Let the runtime process a destroy that was only queued.
+        fn finish_queued_destroy(&self) {
+            self.queued_destroy.store(false, Ordering::Release);
+            self.window_alive.store(false, Ordering::Release);
+        }
+
+        /// Advance the injected monotonic clock of a pending destroy.
+        fn advance_pending_destroy(&self, elapsed: Duration) {
+            self.pending_destroy_elapsed_ms
+                .store(elapsed.as_millis() as u64, Ordering::Release);
+        }
+
+        /// Mirror of the production bounded retry: at most one re-attempt per
+        /// call, and only after the grace period.  Returns whether the destroy is
+        /// still pending afterwards.
+        fn retry_pending_destroy_once(&self) -> bool {
+            if !self.queued_destroy.load(Ordering::Acquire) {
+                return false;
+            }
+            let elapsed =
+                Duration::from_millis(self.pending_destroy_elapsed_ms.load(Ordering::Acquire));
+            if !pending_destroy_retry_due(elapsed) {
+                return true;
+            }
+            self.destroy_retry_calls.fetch_add(1, Ordering::AcqRel);
+            self.advance_pending_destroy(Duration::ZERO);
+            if self.destroy_fails_asynchronously.load(Ordering::Acquire) {
+                // The retried destroy fails natively: the window survives and is
+                // no longer queued, so a later show adopts and refreshes it.
+                self.queued_destroy.store(false, Ordering::Release);
+                return false;
+            }
+            true
+        }
     }
 
     impl NativeWindowOps for RecordingWindowOps {
@@ -1891,6 +2668,9 @@ mod tests {
             self.show_calls.fetch_add(1, Ordering::AcqRel);
             if replaced {
                 self.replaced_calls.fetch_add(1, Ordering::AcqRel);
+            }
+            if self.queued_destroy.load(Ordering::Acquire) {
+                self.retry_pending_destroy_once();
             }
             if self.fail_show.load(Ordering::Acquire) {
                 return Err(WireCommandError::new(
@@ -1906,10 +2686,21 @@ mod tests {
                 ));
             }
             let reused = self.window_alive.load(Ordering::Acquire);
-            if reused {
-                self.reused_calls.fetch_add(1, Ordering::AcqRel);
-            } else {
-                self.create_calls.fetch_add(1, Ordering::AcqRel);
+            // The same decision the production seam makes, so the injected
+            // failure paths cannot drift away from the real one.
+            match native_show_action(reused, self.queued_destroy.load(Ordering::Acquire)) {
+                NativeShowAction::RefusePendingDestroy => {
+                    return Err(WireCommandError::new(
+                        WireCommandErrorCode::Runtime,
+                        "测试: 副窗口正在关闭，拒绝复用待销毁的窗口",
+                    ));
+                }
+                NativeShowAction::Create => {
+                    self.create_calls.fetch_add(1, Ordering::AcqRel);
+                }
+                NativeShowAction::Reuse => {
+                    self.reused_calls.fetch_add(1, Ordering::AcqRel);
+                }
             }
             self.window_alive.store(true, Ordering::Release);
             // Mirrors the production rule: a window that already existed is
@@ -1928,8 +2719,35 @@ mod tests {
                     "测试: 无法关闭副窗口",
                 ));
             }
+            if self.defer_destroy.load(Ordering::Acquire) {
+                // The destroy was accepted but not processed: the label is still
+                // registered and must not be adopted by a new owner.
+                self.queued_destroy.store(true, Ordering::Release);
+                self.advance_pending_destroy(Duration::ZERO);
+                return Ok(());
+            }
+            self.queued_destroy.store(false, Ordering::Release);
             self.window_alive.store(false, Ordering::Release);
             Ok(())
+        }
+
+        fn reconcile_secondary(&self, expected_live: bool) -> Result<bool, WireCommandError> {
+            self.recover_calls.fetch_add(1, Ordering::AcqRel);
+            let alive = self.window_alive.load(Ordering::Acquire);
+            if alive && self.queued_destroy.load(Ordering::Acquire) {
+                // Queued for destruction: never adopted, and at most one bounded
+                // re-attempt per call.
+                return Ok(self.retry_pending_destroy_once());
+            }
+            if alive == expected_live {
+                return Ok(false);
+            }
+            if alive {
+                return self.hide_secondary().map(|()| true);
+            }
+            self.create_calls.fetch_add(1, Ordering::AcqRel);
+            self.window_alive.store(true, Ordering::Release);
+            Ok(true)
         }
     }
 
@@ -1988,8 +2806,10 @@ mod tests {
     }
 
     /// Drive a main-story transition whose update carries one `open_window`
-    /// control cue, which is what the real content would emit.  The game content
-    /// itself has no `open_window` node yet, so the cue is appended by hand.
+    /// control cue, which is what the real content would emit.  The cue is
+    /// appended by hand so this fixture never depends on authored content (the
+    /// working tree's chapter 0 does contain `open_window` nodes; the test stays
+    /// independent of that in-flight content edit).
     fn open_secondary_transition(
         state: &EngineState,
         scene_id: &str,
@@ -2043,6 +2863,60 @@ mod tests {
             "hold".to_owned(),
             SceneNode::Wait {
                 duration_ms: 10,
+                next: original_entry,
+            },
+        );
+        content
+    }
+
+    /// The story entry rewritten to a chain that opens the window and then leaves
+    /// the Scene, so a window request and a Scene change arrive in the same
+    /// update: the request must win over tearing the previous owner down.
+    fn open_window_then_jump_content() -> ContentCatalog {
+        let mut content = secondary_test_catalog();
+        let sandbox_entry = content
+            .scenes
+            .get("sandbox")
+            .expect("the sandbox scene exists")
+            .entry
+            .clone();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        scene.entry = "open_secondary".to_owned();
+        scene.nodes.insert(
+            "open_secondary".to_owned(),
+            SceneNode::OpenWindow {
+                scene: "ambience_lab".to_owned(),
+                next: "leave_scene".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "leave_scene".to_owned(),
+            SceneNode::Jump {
+                scene: Some("sandbox".to_owned()),
+                target: sandbox_entry,
+            },
+        );
+        content
+    }
+
+    /// The story entry rewritten to two consecutive `open_window` nodes, which
+    /// the runtime reports in one update because it keeps going past both.
+    fn open_window_chain_content() -> ContentCatalog {
+        let mut content = secondary_test_catalog();
+        let scene = content.scenes.get_mut("prologue").unwrap();
+        let original_entry = scene.entry.clone();
+        scene.entry = "open_first".to_owned();
+        scene.nodes.insert(
+            "open_first".to_owned(),
+            SceneNode::OpenWindow {
+                scene: "ambience_lab".to_owned(),
+                next: "open_second".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "open_second".to_owned(),
+            SceneNode::OpenWindow {
+                scene: "surface_parity".to_owned(),
                 next: original_entry,
             },
         );
@@ -2116,6 +2990,163 @@ mod tests {
             },
         );
         content
+    }
+
+    /// One hotspot that is visible and enterable without finishing the Scene, so
+    /// a replay can be started in a host test.
+    fn replay_hotspot(scene_id: &str) -> ChapterMapHotspot {
+        ChapterMapHotspot {
+            id: format!("hotspot_{scene_id}"),
+            scene_id: scene_id.to_owned(),
+            title: scene_id.to_owned(),
+            hover_text: None,
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+            z: 0,
+            asset: None,
+            reveal: ChapterMapReveal::Always,
+            replay: ChapterMapReplay::Always,
+            variable_overrides: VariableMap::default(),
+        }
+    }
+
+    fn replay_say(text: &str, next: &str) -> SceneNode {
+        SceneNode::Say {
+            speaker: None,
+            text: text.to_owned(),
+            mode: vectspace_core::model::DialogueMode::Start,
+            page_id: None,
+            speed_cps: None,
+            reveal_animation: None,
+            next: next.to_owned(),
+        }
+    }
+
+    /// A replay fixture built entirely in memory: its entry opens the single
+    /// secondary window, a second node re-points it, a third ends the replay,
+    /// and a second fixture Scene leaves its own Scene through a jump.  Nothing
+    /// here depends on the authored content of the working tree.
+    fn replay_test_content() -> ContentCatalog {
+        let mut content = secondary_test_catalog();
+        let sandbox_entry = content
+            .scenes
+            .get("sandbox")
+            .expect("the sandbox scene exists")
+            .entry
+            .clone();
+        let cross_entry = content
+            .scenes
+            .get("ambience_lab")
+            .expect("the ambience scene exists")
+            .entry
+            .clone();
+        content.scenes.insert(
+            "replay_lab".to_owned(),
+            SceneDefinition {
+                schema_version: 1,
+                id: "replay_lab".to_owned(),
+                entry: "open_child".to_owned(),
+                nodes: BTreeMap::from([
+                    (
+                        "open_child".to_owned(),
+                        SceneNode::OpenWindow {
+                            scene: "ambience_lab".to_owned(),
+                            next: "line".to_owned(),
+                        },
+                    ),
+                    ("line".to_owned(), replay_say("replay line", "open_again")),
+                    (
+                        "open_again".to_owned(),
+                        SceneNode::OpenWindow {
+                            scene: "surface_parity".to_owned(),
+                            next: "rest".to_owned(),
+                        },
+                    ),
+                    ("rest".to_owned(), replay_say("replay rest", "end")),
+                    ("end".to_owned(), SceneNode::End),
+                ]),
+            },
+        );
+        content.scenes.insert(
+            "replay_cross".to_owned(),
+            SceneDefinition {
+                schema_version: 1,
+                id: "replay_cross".to_owned(),
+                entry: "open_child".to_owned(),
+                nodes: BTreeMap::from([
+                    (
+                        "open_child".to_owned(),
+                        SceneNode::OpenWindow {
+                            scene: "ambience_lab".to_owned(),
+                            next: "line".to_owned(),
+                        },
+                    ),
+                    ("line".to_owned(), replay_say("cross line", "jump")),
+                    (
+                        "jump".to_owned(),
+                        SceneNode::Jump {
+                            scene: Some("sandbox".to_owned()),
+                            target: sandbox_entry,
+                        },
+                    ),
+                    ("end".to_owned(), SceneNode::End),
+                ]),
+            },
+        );
+        // Keep a scene whose entry is a dialogue reachable for the secondary
+        // scene, so every fixture replay opens the same authored window target.
+        let ambience = content.scenes.get_mut("ambience_lab").unwrap();
+        assert_eq!(ambience.entry, cross_entry);
+        content.chapter_map = Some(ChapterMapDefinition {
+            schema_version: 1,
+            width: 1920,
+            height: 1080,
+            view_x: 0,
+            view_y: 0,
+            background: None,
+            decorations: Vec::new(),
+            hotspots: vec![replay_hotspot("replay_lab"), replay_hotspot("replay_cross")],
+        });
+        content
+    }
+
+    /// The replay entry rewritten so the window it opens is followed by a
+    /// runtime-gated node: the authored combination whose acknowledgement must
+    /// survive the control-cue strip.
+    fn replay_gated_entry(mut content: ContentCatalog) -> ContentCatalog {
+        let scene = content.scenes.get_mut("replay_lab").unwrap();
+        scene.nodes.insert(
+            "open_child".to_owned(),
+            SceneNode::OpenWindow {
+                scene: "ambience_lab".to_owned(),
+                next: "hold".to_owned(),
+            },
+        );
+        scene.nodes.insert(
+            "hold".to_owned(),
+            SceneNode::Wait {
+                duration_ms: 10,
+                next: "line".to_owned(),
+            },
+        );
+        content
+    }
+
+    fn replay_state(
+        directory: &tempfile::TempDir,
+        content: ContentCatalog,
+        ops: &Arc<RecordingWindowOps>,
+    ) -> EngineState {
+        secondary_state_with_content(directory, content, ops.clone())
+    }
+
+    fn has_open_window_cue(update: &RuntimeUpdate) -> bool {
+        update
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::OpenWindow { .. }))
     }
 
     #[test]
@@ -2221,6 +3252,188 @@ mod tests {
         );
         assert!(!plain.requires_ack);
         assert!(plain.cues.is_empty());
+    }
+
+    #[test]
+    fn multiple_open_window_cues_in_one_update_keep_the_last_target() {
+        let catalog = secondary_test_catalog();
+        let snapshot = RuntimeEngine::new(&catalog).unwrap().snapshot().clone();
+        let mut update = RuntimeUpdate {
+            update_id: 7,
+            snapshot,
+            cues: vec![
+                PresentationCue {
+                    cue_id: 1,
+                    gate: CueGate::None,
+                    kind: PresentationCueKind::OpenWindow {
+                        scene: "ambience_lab".to_owned(),
+                    },
+                },
+                PresentationCue {
+                    cue_id: 2,
+                    gate: CueGate::None,
+                    kind: PresentationCueKind::OpenWindow {
+                        scene: "surface_parity".to_owned(),
+                    },
+                },
+                PresentationCue {
+                    cue_id: 3,
+                    gate: CueGate::Runtime,
+                    kind: PresentationCueKind::Delay { duration_ms: 10 },
+                },
+            ],
+            requires_ack: true,
+        };
+        // The runtime keeps going past every `open_window` node on the way to this
+        // update, and a repeated `open_window` replaces the one slot: the last
+        // request is the one that decides what the window shows.
+        assert_eq!(
+            take_open_window_request(&mut update).as_deref(),
+            Some("surface_parity")
+        );
+        assert!(update.cues.len() == 1);
+        assert_eq!(update.cues[0].gate, CueGate::Runtime);
+        assert!(update.requires_ack);
+    }
+
+    #[test]
+    fn a_new_game_entry_open_window_opens_the_window_instead_of_dropping_it() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = secondary_state_with_content(
+            &directory,
+            open_window_then_wait_content(),
+            ops.clone(),
+        );
+        // `start_new_game` is the story's real entry, and it forces the previous
+        // secondary down: a window request in that same update takes precedence.
+        let update = state
+            .transact_runtime_forced(
+                |runtime| runtime.start_new_game(&state.content),
+                true,
+            )
+            .unwrap();
+        assert!(!has_open_window_cue(&update));
+        assert!(update.requires_ack, "the following `wait` keeps its ack");
+        let slot = state.secondary().unwrap();
+        let session = slot
+            .as_ref()
+            .expect("the entry's open_window must open the window");
+        assert_eq!(session.scene_id, "ambience_lab");
+        assert!(matches!(session.owner, SecondaryOwner::Story { .. }));
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn an_entry_chain_that_opens_a_window_then_leaves_the_scene_keeps_the_request() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = secondary_state_with_content(
+            &directory,
+            open_window_then_jump_content(),
+            ops.clone(),
+        );
+        let update = state
+            .transact_runtime_forced(
+                |runtime| runtime.start_new_game(&state.content),
+                true,
+            )
+            .unwrap();
+        assert!(!has_open_window_cue(&update));
+        assert_eq!(update.snapshot.location.scene_id, "sandbox");
+        // The Scene the update landed in owns the window it asked for.
+        let slot = state.secondary().unwrap();
+        let session = slot
+            .as_ref()
+            .expect("the request wins over the Scene change in the same update");
+        assert_eq!(session.scene_id, "ambience_lab");
+        assert_eq!(
+            session.owner,
+            SecondaryOwner::Story {
+                scene_id: "sandbox".to_owned()
+            }
+        );
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_chain_of_open_window_nodes_shows_only_the_last_target() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = secondary_state_with_content(
+            &directory,
+            open_window_chain_content(),
+            ops.clone(),
+        );
+        let update = state
+            .transact_runtime(|runtime| runtime.start_new_game(&state.content))
+            .unwrap();
+        assert!(!has_open_window_cue(&update));
+        let slot = state.secondary().unwrap();
+        let session = slot
+            .as_ref()
+            .expect("the chain opens the one window");
+        // The last request wins and no intermediate secondary was ever created.
+        assert_eq!(session.scene_id, "surface_parity");
+        assert_eq!(ops.show_calls.load(Ordering::Acquire), 1);
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn the_pending_destroy_retry_is_a_bounded_grace_not_a_wait() {
+        assert!(!pending_destroy_retry_due(Duration::ZERO));
+        assert!(!pending_destroy_retry_due(Duration::from_millis(1999)));
+        assert!(pending_destroy_retry_due(SECONDARY_PENDING_DESTROY_GRACE));
+    }
+
+    #[test]
+    fn a_pending_destroy_is_retried_once_after_the_grace_period() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+        state.enter_replay("replay_lab").unwrap();
+
+        // The replay exits and the runtime accepts the destroy but never
+        // completes it: the label stays registered and queued for destruction.
+        ops.defer_destroy.store(true, Ordering::Release);
+        state.exit_replay().unwrap();
+        assert!(ops.queued_destroy.load(Ordering::Acquire));
+
+        // Before the grace period a queued label is never adopted and nothing is
+        // re-attempted.
+        assert!(state.enter_replay("replay_lab").is_err());
+        assert_eq!(ops.destroy_retry_calls.load(Ordering::Acquire), 0);
+
+        // After the grace period exactly one bounded retry runs on the next
+        // transition.  It fails natively here, so the window survives and is no
+        // longer pending: the transition adopts and refreshes it instead of being
+        // refused forever.
+        ops.advance_pending_destroy(Duration::from_secs(3));
+        ops.destroy_fails_asynchronously.store(true, Ordering::Release);
+        state.enter_replay("replay_lab").unwrap();
+        assert_eq!(ops.destroy_retry_calls.load(Ordering::Acquire), 1);
+        assert!(!ops.queued_destroy.load(Ordering::Acquire));
+        assert!(state.secondary().unwrap().is_some());
+
+        // A retry that is accepted again leaves the label queued and still not
+        // adopted: one attempt per transition, and one whole grace period between
+        // attempts.
+        ops.destroy_fails_asynchronously.store(false, Ordering::Release);
+        ops.defer_destroy.store(true, Ordering::Release);
+        state.exit_replay().unwrap();
+        ops.advance_pending_destroy(Duration::from_secs(3));
+        assert!(state.enter_replay("replay_lab").is_err());
+        assert_eq!(ops.destroy_retry_calls.load(Ordering::Acquire), 2);
+        assert!(ops.queued_destroy.load(Ordering::Acquire));
+        // Nothing adopted the pending-close label and no replay was installed.
+        assert!(state.replay().unwrap().is_none());
+        assert!(state.secondary().unwrap().is_none());
+
+        // Once the runtime really processes the destroy the label is free again.
+        ops.finish_queued_destroy();
+        ops.defer_destroy.store(false, Ordering::Release);
+        state.enter_replay("replay_lab").unwrap();
+        assert!(state.secondary().unwrap().is_some());
     }
 
     #[test]
@@ -3043,6 +4256,722 @@ mod tests {
         ops.fail_hide.store(false, Ordering::Release);
         state.close_secondary().unwrap();
         assert!(state.secondary().unwrap().is_none());
+    }
+
+    #[test]
+    fn every_gate_taking_ipc_command_runs_off_the_ipc_thread() {
+        // Tauri executes a synchronous `#[tauri::command]` inline in the WebView
+        // IPC callback — the event-loop thread on Windows — and only an
+        // `async fn` command on the async runtime.  Creating a WebView there
+        // deadlocks the host, and any command that blocks the event loop while
+        // another command holds the session gate stalls the whole app, so every
+        // command that takes the gate must be an async command.
+        let source = include_str!("lib.rs");
+        let source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the command section precedes the tests");
+        let mut async_commands = Vec::new();
+        let mut blocking_gate_commands = Vec::new();
+        for chunk in source.split("#[tauri::command]").skip(1) {
+            let signature = chunk.split('{').next().unwrap_or_default();
+            let name = signature
+                .split("fn ")
+                .nth(1)
+                .and_then(|rest| rest.split('(').next())
+                .expect("every command has a name")
+                .trim()
+                .to_owned();
+            if signature.contains("async fn ") {
+                async_commands.push(name);
+            } else if chunk.contains("session_gate()") {
+                blocking_gate_commands.push(name);
+            }
+        }
+        assert!(
+            blocking_gate_commands.is_empty(),
+            "这些命令会阻塞事件循环，必须改为 async: {blocking_gate_commands:?}"
+        );
+        // The commands that can reach the native window seam, and therefore the
+        // documented Windows WebView2 deadlock, are listed explicitly so a new
+        // one cannot be added as a synchronous command by accident.
+        for name in [
+            "bootstrap",
+            "secondary_bootstrap",
+            "start_new_game",
+            "advance",
+            "choose",
+            "click_button",
+            "presentation_complete",
+            "get_snapshot",
+            "secondary_snapshot",
+            "get_dialogue_history",
+            "clear_dialogue_history",
+            "get_chapter_map",
+            "start_scene_replay",
+            "exit_scene_replay",
+            "invalidate_session",
+            "save_slot",
+            "load_slot",
+            "secondary_advance",
+            "secondary_choose",
+            "secondary_click_button",
+            "secondary_presentation_complete",
+        ] {
+            assert!(
+                async_commands.iter().any(|command| command == name),
+                "{name} 必须在异步运行时不阻塞事件循环"
+            );
+        }
+        assert!(!async_commands.is_empty());
+    }
+
+    #[test]
+    fn native_show_action_refuses_a_label_queued_for_destruction() {
+        assert_eq!(native_show_action(false, false), NativeShowAction::Create);
+        assert_eq!(native_show_action(false, true), NativeShowAction::Create);
+        assert_eq!(native_show_action(true, false), NativeShowAction::Reuse);
+        assert_eq!(
+            native_show_action(true, true),
+            NativeShowAction::RefusePendingDestroy
+        );
+    }
+
+    #[test]
+    fn a_queued_native_destroy_cannot_be_adopted_by_a_new_owner() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+        state.enter_replay("replay_lab").unwrap();
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+
+        // The replay ends and closes its window, but the runtime has not
+        // processed the queued destroy yet: the label is still registered.
+        ops.defer_destroy.store(true, Ordering::Release);
+        state.exit_replay().unwrap();
+        assert!(ops.queued_destroy.load(Ordering::Acquire));
+
+        // A new owner must not adopt it: the entry fails and is rolled back
+        // instead of handing the new replay a window that is about to die.
+        let error = state.enter_replay("replay_lab").unwrap_err();
+        assert_eq!(error.code, WireCommandErrorCode::Runtime);
+        assert!(state.replay().unwrap().is_none());
+        assert!(state.secondary().unwrap().is_none());
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+
+        // Once the runtime has processed the destroy the label is free again.
+        ops.finish_queued_destroy();
+        state.enter_replay("replay_lab").unwrap();
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 2);
+        assert!(state.secondary().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_live_slot_without_a_native_window_is_recovered_by_the_next_transition() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = secondary_state_with_content(
+            &directory,
+            shared_state_secondary_content(),
+            ops.clone(),
+        );
+        state
+            .transact_runtime(|runtime| runtime.start_new_game(&state.content))
+            .unwrap();
+        assert!(state.secondary().unwrap().is_some());
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+
+        // The runtime accepted the creation but never performed it, which the
+        // enqueue-only native contract cannot report back to the host.
+        ops.window_alive.store(false, Ordering::Release);
+
+        // The next transition performs no native show, so it re-ensures the
+        // window instead of leaving the live slot without one.
+        state
+            .transact_runtime(|runtime| Ok(runtime.bootstrap(&state.content).update))
+            .unwrap();
+        assert_eq!(ops.recover_calls.load(Ordering::Acquire), 1);
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 2);
+        assert!(ops.window_alive.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn an_orphaned_native_window_is_cleaned_up_by_the_next_transition() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = secondary_state_with_content(
+            &directory,
+            shared_state_secondary_content(),
+            ops.clone(),
+        );
+        // Creation builds the window and then fails, and the rollback cannot
+        // destroy it either: the native window survives with no slot.
+        ops.fail_show_after_create.store(true, Ordering::Release);
+        ops.fail_hide.store(true, Ordering::Release);
+        assert!(state
+            .transact_runtime(|runtime| runtime.start_new_game(&state.content))
+            .is_err());
+        assert!(ops.window_alive.load(Ordering::Acquire));
+        assert!(state.secondary().unwrap().is_none());
+
+        // The next transition performs no native show, so it removes the orphan
+        // instead of leaving a window no session owns any more.
+        ops.fail_show_after_create.store(false, Ordering::Release);
+        ops.fail_hide.store(false, Ordering::Release);
+        state
+            .transact_runtime(|runtime| Ok(runtime.bootstrap(&state.content).update))
+            .unwrap();
+        assert_eq!(ops.recover_calls.load(Ordering::Acquire), 1);
+        assert!(!ops.window_alive.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn replay_entry_open_window_opens_the_window_and_never_leaks_the_cue() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+        let update = state.enter_replay("replay_lab").unwrap();
+        // Defect: the entry update used to be returned with its control cue still
+        // attached, which the wire type cannot even represent.
+        assert!(!has_open_window_cue(&update));
+        assert!(update
+            .cues
+            .iter()
+            .all(|cue| !matches!(cue.kind, PresentationCueKind::OpenWindow { .. })));
+
+        let slot = state.secondary().unwrap();
+        let session = slot.as_ref().expect("the entry opened the window");
+        assert_eq!(session.scene_id, "ambience_lab");
+        assert!(matches!(session.owner, SecondaryOwner::Replay { .. }));
+        let token = session.token;
+        drop(slot);
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+        assert!(ops.window_alive.load(Ordering::Acquire));
+
+        // The replay's own runtime started the window's Scene in its isolated ID
+        // namespace, and the window bootstraps under the replay-owned token.
+        let payload = state.secondary_bootstrap_payload().unwrap();
+        assert_eq!(payload.update.session_id, WireU64::from(token));
+        assert_eq!(payload.update.snapshot.location.scene_id, "ambience_lab");
+    }
+
+    #[test]
+    fn repeated_open_window_inside_a_replay_repoints_one_slot_with_a_fresh_token() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+        state.enter_replay("replay_lab").unwrap();
+        let first = state
+            .secondary()
+            .unwrap()
+            .as_ref()
+            .expect("the entry opened the window")
+            .token;
+
+        let revision = state
+            .replay()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .runtime
+            .snapshot()
+            .revision;
+        let update = state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        assert!(!has_open_window_cue(&update));
+
+        let slot = state.secondary().unwrap();
+        let session = slot.as_ref().expect("the re-point kept the one slot");
+        assert_eq!(session.scene_id, "surface_parity");
+        assert!(matches!(session.owner, SecondaryOwner::Replay { .. }));
+        assert_eq!(session.token, first + 1, "a replacement gets a fresh token");
+        drop(slot);
+        // One native window was re-pointed, not replaced by a second one.
+        assert_eq!(ops.create_calls.load(Ordering::Acquire), 1);
+        assert_eq!(ops.reused_calls.load(Ordering::Acquire), 1);
+        assert_eq!(ops.replaced_calls.load(Ordering::Acquire), 1);
+
+        // The replaced token is stale and cannot mutate the new session.
+        let stale = state
+            .transact_secondary(Some(&WireU64::from(first)), |runtime| {
+                let revision = runtime.snapshot().revision;
+                runtime.advance(&state.content, revision, AdvanceSource::Manual)
+            })
+            .unwrap_err();
+        assert_eq!(stale.code, WireCommandErrorCode::StaleSession);
+
+        // A command carrying the current token but an ended replay generation is
+        // refused before it can touch the new owner.
+        let wrong_generation = state
+            .transact_secondary_against_replay(first + 1, first + 999, |runtime| {
+                Ok(runtime.bootstrap(&state.content).update)
+            })
+            .unwrap_err();
+        assert_eq!(wrong_generation.code, WireCommandErrorCode::StaleSession);
+    }
+
+    #[test]
+    fn replay_owned_secondary_never_touches_the_main_runtime_or_the_profile() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+        state.enter_replay("replay_lab").unwrap();
+        let token = state
+            .secondary()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .token;
+        let before_main = state.runtime().unwrap().snapshot().clone();
+        let before_main_history = state.runtime().unwrap().dialogue_history().to_vec();
+        let before_profile_file = fs::read(directory.path().join("profile.json")).unwrap();
+
+        let (_, returned) = state
+            .transact_secondary(Some(&WireU64::from(token)), |runtime| {
+                runtime.set_save_variables(VariableMap::from([(
+                    "score".to_owned(),
+                    ScalarValue::Integer(9),
+                )]));
+                runtime.set_profile_variables(VariableMap::from([(
+                    "ending_seen".to_owned(),
+                    ScalarValue::Boolean(true),
+                )]));
+                let revision = runtime.snapshot().revision;
+                runtime.advance(&state.content, revision, AdvanceSource::Manual)
+            })
+            .unwrap();
+        assert_eq!(returned, token);
+
+        // Replay play is ephemeral: the main runtime, the official ledger and
+        // the profile file are untouched.
+        assert_eq!(state.runtime().unwrap().snapshot(), &before_main);
+        assert_eq!(
+            state.runtime().unwrap().dialogue_history(),
+            before_main_history.as_slice()
+        );
+        assert_eq!(
+            fs::read(directory.path().join("profile.json")).unwrap(),
+            before_profile_file
+        );
+        assert_ne!(
+            state
+                .runtime()
+                .unwrap()
+                .snapshot()
+                .variables
+                .get("score"),
+            Some(&ScalarValue::Integer(9)),
+            "a replay-owned secondary write must never reach the main Save map"
+        );
+
+        // ... while the replay runtime really did receive the write and the
+        // secondary's occurrence, so the in-replay history panel sees it.
+        let replay = state.replay().unwrap();
+        let session = replay.as_ref().unwrap();
+        assert_eq!(
+            session.runtime.snapshot().variables.get("score"),
+            Some(&ScalarValue::Integer(9))
+        );
+        assert_eq!(
+            session.runtime.profile_variables_map().get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
+        let replay_history = session.runtime.dialogue_history();
+        assert!(replay_history
+            .iter()
+            .any(|entry| entry.prompt_id.starts_with("ambience_lab/")));
+        // ... while the official ledger never sees a replayed occurrence.
+        assert!(!state
+            .runtime()
+            .unwrap()
+            .dialogue_history()
+            .iter()
+            .any(|entry| entry.prompt_id.starts_with("ambience_lab/")));
+    }
+
+    #[test]
+    fn replay_cross_scene_and_end_transitions_close_the_replay_window() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+
+        // Leaving the Scene that owns the window closes it, exactly like a main
+        // story transition does.
+        state.enter_replay("replay_cross").unwrap();
+        assert!(state.secondary().unwrap().is_some());
+        let revision = state
+            .replay()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .runtime
+            .snapshot()
+            .revision;
+        let crossed = state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        assert_ne!(crossed.snapshot.location.scene_id, "replay_cross");
+        assert!(state.secondary().unwrap().is_none());
+        assert!(!ops.window_alive.load(Ordering::Acquire));
+        assert!(state
+            .replay()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .ending);
+        state.exit_replay().unwrap();
+
+        // Reaching the end of the replay closes it too.
+        state.enter_replay("replay_lab").unwrap();
+        let revision = state
+            .replay()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .runtime
+            .snapshot()
+            .revision;
+        state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        assert!(state.secondary().unwrap().is_some());
+        let revision = state
+            .replay()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .runtime
+            .snapshot()
+            .revision;
+        let ended = state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        assert!(matches!(
+            ended.snapshot.prompt,
+            vectspace_core::model::PromptSnapshot::End { .. }
+        ));
+        assert!(state.secondary().unwrap().is_none());
+        assert!(state
+            .replay()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .ending);
+    }
+
+    #[test]
+    fn replay_exit_closes_the_window_and_a_failed_destroy_preserves_the_replay() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+        state.enter_replay("replay_lab").unwrap();
+
+        ops.fail_hide.store(true, Ordering::Release);
+        assert_eq!(state.exit_replay().unwrap_err().code, WireCommandErrorCode::Internal);
+        // The exit can be retried instead of orphaning the window.
+        assert!(state.replay().unwrap().is_some());
+        assert!(state.secondary().unwrap().is_some());
+
+        ops.fail_hide.store(false, Ordering::Release);
+        state.exit_replay().unwrap();
+        assert!(state.replay().unwrap().is_none());
+        assert!(state.secondary().unwrap().is_none());
+        assert!(!ops.window_alive.load(Ordering::Acquire));
+        assert_eq!(ops.hide_calls.load(Ordering::Acquire), 2);
+    }
+
+    /// Everything a rolled-back replay transaction must leave exactly as it was:
+    /// the live replay (generation and full snapshot), its ledger, the secondary
+    /// slot (token, owner and shared maps/ledger) and the untouched main runtime
+    /// with its persisted profile.
+    struct RollbackSnapshot {
+        generation: u64,
+        replay_scene: String,
+        replay_ending: bool,
+        replay_snapshot: vectspace_core::model::RuntimeSnapshot,
+        replay_history: Vec<DialogueHistoryEntry>,
+        secondary_token: u64,
+        secondary_scene: String,
+        secondary_owner: SecondaryOwner,
+        secondary_variables: VariableMap,
+        secondary_history: Vec<DialogueHistoryEntry>,
+        variables: VariableMap,
+        main_history: Vec<DialogueHistoryEntry>,
+        profile_file: Vec<u8>,
+    }
+
+    impl RollbackSnapshot {
+        fn capture(state: &EngineState, directory: &tempfile::TempDir) -> Self {
+            let replay = state.replay().unwrap();
+            let session = replay.as_ref().expect("a live replay");
+            let secondary = state.secondary().unwrap();
+            let secondary = secondary.as_ref().expect("a live secondary slot");
+            let main = state.runtime().unwrap();
+            Self {
+                generation: session.generation,
+                replay_scene: session.scene_id.clone(),
+                replay_ending: session.ending,
+                replay_snapshot: session.runtime.snapshot().clone(),
+                replay_history: session.runtime.dialogue_history().to_vec(),
+                secondary_token: secondary.token,
+                secondary_scene: secondary.scene_id.clone(),
+                secondary_owner: secondary.owner.clone(),
+                secondary_variables: secondary.runtime.snapshot().variables.clone(),
+                secondary_history: secondary.runtime.dialogue_history().to_vec(),
+                variables: main.snapshot().variables.clone(),
+                main_history: main.dialogue_history().to_vec(),
+                profile_file: fs::read(directory.path().join("profile.json")).unwrap(),
+            }
+        }
+
+        /// Assert that the failed transition left replay, secondary and official
+        /// state byte-for-byte where they were.
+        fn assert_restored(&self, state: &EngineState, directory: &tempfile::TempDir) {
+            let replay = state.replay().unwrap();
+            let session = replay
+                .as_ref()
+                .expect("a failed native step must not clear the live replay");
+            assert_eq!(session.generation, self.generation);
+            assert_eq!(session.scene_id, self.replay_scene);
+            assert_eq!(session.ending, self.replay_ending);
+            assert_eq!(session.runtime.snapshot(), &self.replay_snapshot);
+            assert_eq!(session.runtime.dialogue_history(), self.replay_history.as_slice());
+
+            let secondary = state.secondary().unwrap();
+            let secondary = secondary.as_ref().expect("the previous slot is restored");
+            assert_eq!(secondary.token, self.secondary_token);
+            assert_eq!(secondary.scene_id, self.secondary_scene);
+            assert_eq!(secondary.owner, self.secondary_owner);
+            assert_eq!(
+                secondary.runtime.snapshot().variables,
+                self.secondary_variables
+            );
+            assert_eq!(
+                secondary.runtime.dialogue_history(),
+                self.secondary_history.as_slice()
+            );
+
+            let main = state.runtime().unwrap();
+            assert_eq!(main.snapshot().variables, self.variables);
+            assert_eq!(main.dialogue_history(), self.main_history.as_slice());
+            drop(main);
+            assert_eq!(
+                fs::read(directory.path().join("profile.json")).unwrap(),
+                self.profile_file
+            );
+        }
+    }
+
+    fn replay_revision(state: &EngineState) -> u64 {
+        state
+            .replay()
+            .unwrap()
+            .as_ref()
+            .expect("a live replay")
+            .runtime
+            .snapshot()
+            .revision
+    }
+
+    #[test]
+    fn failed_repeated_replay_open_restores_the_live_replay_and_its_previous_slot() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+        state.enter_replay("replay_lab").unwrap();
+        let before = RollbackSnapshot::capture(&state, &directory);
+        let generation = before.generation;
+
+        // The re-point builds the native window and then the show fails: the
+        // partial native failure the seam cannot report a completion for.
+        ops.fail_show_after_create.store(true, Ordering::Release);
+        let revision = replay_revision(&state);
+        let error = state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap_err();
+        assert_eq!(error.code, WireCommandErrorCode::Internal);
+        before.assert_restored(&state, &directory);
+        assert_eq!(
+            state.replay().unwrap().as_ref().unwrap().generation,
+            generation
+        );
+
+        // The retry runs the same transition from the restored revision and
+        // finally re-points the one slot with a fresh token.
+        ops.fail_show_after_create.store(false, Ordering::Release);
+        let revision = replay_revision(&state);
+        state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        let slot = state.secondary().unwrap();
+        let session = slot.as_ref().expect("the retry kept the one slot");
+        assert_eq!(session.scene_id, "surface_parity");
+        // A replacement always carries a fresh token; the failed attempt also
+        // consumed one, which is what keeps a stale acknowledgement from ever
+        // colliding with a later instance.
+        assert!(session.token > before.secondary_token);
+        assert_eq!(session.owner, SecondaryOwner::Replay { generation });
+    }
+
+    #[test]
+    fn failed_cross_scene_and_end_hides_restore_the_live_replay() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(&directory, replay_test_content(), &ops);
+
+        // Leaving the owning Scene stages a Hide; when it fails the replay must
+        // keep running exactly where it was.
+        state.enter_replay("replay_cross").unwrap();
+        let before = RollbackSnapshot::capture(&state, &directory);
+        ops.fail_hide.store(true, Ordering::Release);
+        let revision = replay_revision(&state);
+        let error = state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap_err();
+        assert_eq!(error.code, WireCommandErrorCode::Internal);
+        before.assert_restored(&state, &directory);
+        assert!(!state.replay().unwrap().as_ref().unwrap().ending);
+        assert!(ops.window_alive.load(Ordering::Acquire));
+
+        ops.fail_hide.store(false, Ordering::Release);
+        let revision = replay_revision(&state);
+        state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        assert!(state.secondary().unwrap().is_none());
+        assert!(state.replay().unwrap().as_ref().unwrap().ending);
+        state.exit_replay().unwrap();
+
+        // The same for the ending Hide: the replay is not over until the window
+        // really closed.
+        state.enter_replay("replay_lab").unwrap();
+        let revision = replay_revision(&state);
+        state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        let before = RollbackSnapshot::capture(&state, &directory);
+        ops.fail_hide.store(true, Ordering::Release);
+        let revision = replay_revision(&state);
+        let error = state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap_err();
+        assert_eq!(error.code, WireCommandErrorCode::Internal);
+        before.assert_restored(&state, &directory);
+
+        ops.fail_hide.store(false, Ordering::Release);
+        let revision = replay_revision(&state);
+        let ended = state
+            .transact_replay(|runtime| runtime.advance(&state.content, revision, AdvanceSource::Manual))
+            .unwrap();
+        assert!(matches!(
+            ended.snapshot.prompt,
+            vectspace_core::model::PromptSnapshot::End { .. }
+        ));
+        assert!(state.secondary().unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_replay_entry_restores_the_story_owned_window() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = secondary_state_with_content(
+            &directory,
+            replay_test_content(),
+            ops.clone(),
+        );
+        // The story owns the window first: entry is an ownership handoff.
+        show_test_secondary(&state, "ambience_lab").unwrap();
+        let slot = state.secondary().unwrap();
+        let session = slot.as_ref().expect("the story opened the window");
+        let story_token = session.token;
+        let story_scene = session.scene_id.clone();
+        let owner = session.owner.clone();
+        assert!(matches!(owner, SecondaryOwner::Story { .. }));
+        drop(slot);
+        let before_main = state.runtime().unwrap().snapshot().clone();
+        let before_history = state.runtime().unwrap().dialogue_history().to_vec();
+        let before_profile_file = fs::read(directory.path().join("profile.json")).unwrap();
+        let before_secondary_history = state
+            .secondary()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .runtime
+            .dialogue_history()
+            .to_vec();
+
+        // The handoff's native show fails after creating the window, so the
+        // replay must not become the owner and the story's session must survive.
+        ops.fail_show_after_create.store(true, Ordering::Release);
+        assert_eq!(state.enter_replay("replay_lab").unwrap_err().code, WireCommandErrorCode::Internal);
+        assert!(state.replay().unwrap().is_none());
+        let slot = state.secondary().unwrap();
+        let session = slot
+            .as_ref()
+            .expect("the previous story owner must be restored");
+        assert_eq!(session.token, story_token);
+        assert_eq!(session.scene_id, story_scene);
+        assert_eq!(session.owner, owner);
+        assert_eq!(
+            session.runtime.dialogue_history(),
+            before_secondary_history.as_slice()
+        );
+        drop(slot);
+        assert_eq!(state.runtime().unwrap().snapshot(), &before_main);
+        assert_eq!(
+            state.runtime().unwrap().dialogue_history(),
+            before_history.as_slice()
+        );
+        assert_eq!(
+            fs::read(directory.path().join("profile.json")).unwrap(),
+            before_profile_file
+        );
+
+        // Once the native step works the entry really hands the same window to
+        // the replay, with a fresh identity.
+        ops.fail_show_after_create.store(false, Ordering::Release);
+        state.enter_replay("replay_lab").unwrap();
+        let slot = state.secondary().unwrap();
+        let session = slot.as_ref().expect("the replay now owns the window");
+        assert_eq!(session.scene_id, "ambience_lab");
+        assert_ne!(session.token, story_token);
+        assert!(matches!(session.owner, SecondaryOwner::Replay { .. }));
+    }
+
+    #[test]
+    fn a_replay_open_window_followed_by_a_gated_node_keeps_its_acknowledgement() {
+        let directory = tempdir().unwrap();
+        let ops = Arc::new(RecordingWindowOps::default());
+        let state = replay_state(
+            &directory,
+            replay_gated_entry(replay_test_content()),
+            &ops,
+        );
+        let first = state.enter_replay("replay_lab").unwrap();
+        // The control cue is gone, but the runtime-gated node that followed it
+        // still needs exactly its own acknowledgement.
+        assert!(!has_open_window_cue(&first));
+        assert!(first.requires_ack);
+        assert!(first
+            .cues
+            .iter()
+            .any(|cue| cue.gate == CueGate::Runtime));
+        assert_eq!(state.secondary().unwrap().as_ref().unwrap().scene_id, "ambience_lab");
+
+        // Acknowledging that exact update unblocks the replay, and the
+        // acknowledgement path also consumes the control cue.
+        let acknowledged = state
+            .transact_replay(|runtime| {
+                runtime.presentation_complete(
+                    &state.content,
+                    first.update_id,
+                    vectspace_core::model::PresentationOutcome::Completed,
+                )
+            })
+            .unwrap();
+        assert!(!has_open_window_cue(&acknowledged));
+        assert!(!acknowledged.requires_ack);
     }
 
     #[test]

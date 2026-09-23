@@ -57,6 +57,15 @@ export interface TemplateButtonProps {
   sessionKey: string;
   activation?: ButtonActivationMode;
   /**
+   * Forces the rendered state instead of the pointer state machine.
+   *
+   * Authoring previews (the editor button workspace) scrub one authored
+   * state at a time and must not depend on a real hover/press, so they pin
+   * this to the selected state.  Omitted, the pointer owns the state exactly
+   * as before, which keeps the game and choice behaviour untouched.
+   */
+  state?: ButtonState;
+  /**
    * Content rendered above the artwork (choice labels).  Story buttons pass
    * nothing and stay artwork-only.
    */
@@ -318,13 +327,14 @@ export function TemplateButton({
   style,
   sessionKey,
   activation = "manual",
+  state: forcedState,
   children,
   ariaLabel,
   dataChoiceId,
   fallbackClassName,
   onActivate,
 }: TemplateButtonProps): ReactElement | null {
-  const { state, focused, handlers } = useButtonInteraction({
+  const interaction = useButtonInteraction({
     enabled: button.enabled,
     visible: button.visible,
     disabled,
@@ -332,6 +342,8 @@ export function TemplateButton({
     activation,
     onActivate,
   });
+  const { focused, handlers } = interaction;
+  const state = forcedState ?? interaction.state;
   const animation = button.animations[state];
   // Runtime snapshots are cloned for every revision. Use the serialized
   // animation shape as the dependency so an unrelated story update does not

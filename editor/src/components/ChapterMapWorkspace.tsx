@@ -19,6 +19,8 @@ import type {
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { editorImageSource } from "../imageAnimationMap";
 import { AnimatedImage } from "./AnimatedImage";
+import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import { assetChoiceOptions, firstVisibleAssetId } from "../assetLibrary";
 import {
   clampMapCenter,
   containMapRect,
@@ -165,6 +167,19 @@ export function ChapterMapWorkspace({
   const [uncontrolledSelectionId, setUncontrolledSelectionId] = useState<
     string | null
   >(null);
+  const assetLayout = useAssetLayout();
+  // Hidden assets are not offered as new map decorations; a decoration that
+  // is already placed keeps its value (it is edited through the object
+  // inspector, which retains the current id).
+  const decorationOptions = useMemo(
+    () =>
+      assetChoiceOptions({
+        assets,
+        layout: assetLayout,
+        kind: ["gui", "sprite"],
+      }),
+    [assets, assetLayout],
+  );
   const controlledSelection = onSelectionChange !== undefined;
   const activeSelectionId = controlledSelection
     ? selectionId
@@ -620,9 +635,15 @@ export function ChapterMapWorkspace({
     at?: { x: number; y: number },
   ): void => {
     const currentMap = mapRef.current;
+    const fallback = firstVisibleAssetId(assets, assetLayout, [
+      "gui",
+      "sprite",
+    ]);
+    const resolvedId = assetId ?? fallback ?? undefined;
     const source =
-      assets.find((asset) => asset.id === assetId) ??
-      assets.find((asset) => validAsset(asset, ["gui", "sprite"]));
+      resolvedId === undefined
+        ? undefined
+        : assets.find((asset) => asset.id === resolvedId);
     if (source === undefined) return;
     let id = `decoration_${currentMap.decorations.length + 1}`;
     while (
@@ -1129,38 +1150,37 @@ export function ChapterMapWorkspace({
           ))}
           <button
             className="map-list-button"
-            disabled={assets.every(
-              (asset) => !validAsset(asset, ["gui", "sprite"]),
-            )}
+            disabled={decorationOptions.length === 0}
             onClick={() => addDecoration()}
             type="button"
           >
             ＋ 添加装饰
           </button>
           <h3>可拖放素材</h3>
-          {assets
-            .filter((asset) => validAsset(asset, ["gui", "sprite"]))
-            .map((asset) => (
-              <button
-                className="map-list-button"
-                draggable
-                key={asset.id}
-                onDragStart={(event) => {
-                  event.dataTransfer.setData(
-                    "application/x-vectspace-kind",
-                    "asset",
-                  );
-                  event.dataTransfer.setData(
-                    "application/x-vectspace-id",
-                    asset.id,
-                  );
-                }}
-                onClick={() => addDecoration(asset.id)}
-                type="button"
-              >
-                ＋ {asset.id}
-              </button>
-            ))}
+          {decorationOptions.map((option) => (
+            <button
+              className="map-list-button"
+              draggable
+              key={option.id}
+              onDragStart={(event) => {
+                event.dataTransfer.setData(
+                  "application/x-vectspace-kind",
+                  "asset",
+                );
+                event.dataTransfer.setData(
+                  "application/x-vectspace-id",
+                  option.id,
+                );
+              }}
+              onClick={() => addDecoration(option.id)}
+              type="button"
+            >
+              ＋ {option.label}
+              {option.label !== option.id && (
+                <small className="map-list-sub">{option.id}</small>
+              )}
+            </button>
+          ))}
           <h3>图层</h3>
           {sortMapLayer([
             ...map.decorations.map((item) => ({
@@ -1369,23 +1389,19 @@ export function ChapterMapWorkspace({
             <>
               <label>
                 房间背景
-                <select
-                  value={map.background ?? ""}
-                  onChange={(event) =>
+                <AssetChooser
+                  allowEmpty
+                  assets={assets}
+                  emptyLabel="无"
+                  kind="background"
+                  label="房间背景"
+                  onChange={(value) =>
                     updateMap((next) => {
-                      next.background = event.currentTarget.value || null;
+                      next.background = value;
                     })
                   }
-                >
-                  <option value="">无</option>
-                  {assets
-                    .filter((asset) => asset.kind === "background")
-                    .map((asset) => (
-                      <option key={asset.id} value={asset.id}>
-                        {asset.id}
-                      </option>
-                    ))}
-                </select>
+                  value={map.background ?? null}
+                />
               </label>
               <label>
                 房间宽度
@@ -1698,28 +1714,24 @@ export function ChapterMapWorkspace({
               )}
               <label>
                 素材
-                <select
-                  value={selectedObject.asset ?? ""}
-                  onChange={(event) =>
+                <AssetChooser
+                  allowEmpty={selection?.kind === "hotspot"}
+                  assets={assets.filter((asset) =>
+                    validAsset(asset, ["gui", "sprite"]),
+                  )}
+                  emptyLabel="默认卡片"
+                  kind={["gui", "sprite"]}
+                  label="素材"
+                  onChange={(value) =>
                     updateSelected({
                       asset:
                         selection?.kind === "hotspot"
-                          ? event.currentTarget.value || null
-                          : event.currentTarget.value,
+                          ? (value ?? null)
+                          : (value ?? ""),
                     })
                   }
-                >
-                  {selection?.kind === "hotspot" && (
-                    <option value="">默认卡片</option>
-                  )}
-                  {assets
-                    .filter((asset) => validAsset(asset, ["gui", "sprite"]))
-                    .map((asset) => (
-                      <option key={asset.id} value={asset.id}>
-                        {asset.id}
-                      </option>
-                    ))}
-                </select>
+                  value={selectedObject.asset ?? null}
+                />
               </label>
               <label>
                 X

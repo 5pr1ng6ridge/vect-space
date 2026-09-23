@@ -2,13 +2,338 @@ schema_version: 2
 id: ch0
 entry: background_start
 nodes:
+  ambience_background_start:
+    type: ambience
+    slot: slot_1
+    action: start
+    asset: am.bgs_rain
+    volume: 0.20000002
+    start_ms: 0
+    loop_start_ms: 0
+    loop_end_ms: 96572
+    duration_ms: 5000
+    await: false
+    next: sprite_ambience_background_start
   background_start:
     type: background
     background: bg.celeste_grok
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 2
     easing: ease_in_out
     await: false
+    next: ambience_background_start
+  long_text_say_say_say_start:
+    type: long_text
+    document: long_text_say_say_say_start_document
+    on_exit: keep_visible
+    pagination: continuous
+    font_size: 32.0
+    text_color: "#5BCEFA"
+    layout:
+      x: 340.0
+      "y": 0.0
+      width: 1240.0
+      height: 1080.0
+      padding_x: 52.0
+      padding_y: 112.0
+      page_height: 1340.0
+      page_gap: 92.0
+    steps:
+    - id: step_1
+      text: |
+        长文本滚动的灵感来自于 *妹妹，他人，妄想症* 这部作品。此前我只见过的传统视觉小说里只有单独的不可滚动页面。不过现在这个滚动系统写得比想象中的实现要复杂（）。
+      page_break_before: false
+    - id: step_2
+      text: 在好几年前，我还玩过一个玩法有学习世界语的百合vn。所以，我觉得，做一个数学题材的vn肯定也不错，毕竟大家都很喜欢数学，对，对吧（
+      page_break_before: false
+    - id: step_3
+      text: |-
+        设 $X_1,X_2,\dots$ 独立同分布，且
+        
+        $$\mathbb E X_i=\mu,\qquad \operatorname{Var}(X_i)=\sigma^2<\infty,\quad \sigma>0$$
+        
+        那么
+        
+        $$\frac{X_1+\cdots+X_n-n\mu}{\sigma\sqrt n}\xrightarrow{d}N(0,1)$$
+      page_break_before: false
+    speed_cps: 80.0
+    next: timeline_start
+  long_text_say_say_say_start_continue:
+    type: long_text
+    document: long_text_say_say_say_start_document
+    mode: continue
+    on_exit: keep_visible
+    steps:
+    - id: step_4
+      text: |
+        你这种情况我还真没见过，这样吧，你先向右走爬书柜交互一下弹球机吸进游戏机里进过场动画被蓝弹球弹被绿弹簧弹被蓝弹球弹被绿弹簧弹被蓝弹球弹被蓝弹球弹被蓝弹球弹被绿弹簧弹被绿弹簧弹进教学面起跳碰蓝弹球冲刺碰粉弹球冲两次碰白弹球超级弹碰黄弹球斜上冲吃水晶上冲hyper碰绿弹簧起飞斜上冲碰绿弹簧上冲碰绿弹簧被弹飞鸟叫一下：下蹲冲刺↓+冲刺键 向右demodash一下碰蓝弹球被弹飞上冲吃双冲水晶右冲向左demohyper一下超级弹跳起来demohyper吃月块加速接ultra飞过去进lv1
+      page_break_before: false
+    - id: step_5
+      text: （我发现这个长了之后会变得卡顿。）
+      page_break_before: false
+    - id: step_6
+      text: |
+        然后hyper碰绿弹簧起飞碰蓝弹球超级弹斜下冲碰绿弹簧起飞斜上冲碰蓝弹球左冲碰黄弹球超级弹ultra碰绿弹簧起飞左冲碰黄弹球斜下冲碰黄弹球斜上冲碰黄弹球上冲碰黄弹球超级弹连u上冲向左走碰黄弹球超级弹左下冲碰黄弹球上冲碰黄弹球超级弹往右走进lv2
+      page_break_before: false
+    - id: step_7
+      text: |
+        再hyper一下右冲碰蓝弹球再右冲穿弹球被弹一下碰绿弹簧起飞左上冲碰蓝弹球右上冲碰蓝弹球左上冲碰蓝弹球右冲碰粉弹球右冲等一会儿左下冲左上冲碰粉弹球被弹飞左上冲碰黄弹球超级弹ultra碰蓝弹球超级弹ultra碰蓝弹球超级弹ultra吃水晶demohyper吃月块加速接ultra碰白弹球超级弹ultra吃双冲水晶月块斜cb再左上冲碰黄弹球右上冲碰绿弹簧碰绿弹簧起飞右冲碰黄弹球超级弹向右拉右下冲碰绿弹簧ultra进lv3
+      page_break_before: false
+    - id: step_8
+      text: |
+        接着上冲碰绿弹簧左冲碰黄弹球吃硬币超级弹下冲碰蓝弹球吃硬币demohyper月块加速左冲碰蓝弹球超级弹右下冲碰绿弹簧右下冲吃水晶左冲碰蓝弹球右上冲碰绿弹簧下冲碰黄弹球吃硬币左上冲碰蓝弹球超级弹上冲蹭墙跳吃水晶右上冲碰蓝弹球超级弹左上冲碰蓝弹球回拉右冲碰蓝弹球超级弹上冲碰绿弹簧右上冲碰蓝弹球左下冲碰绿弹簧上冲掉下去碰蓝弹球右上冲碰蓝弹球左上冲碰蓝弹球左冲碰蓝弹球超级弹左冲碰蓝弹球demohyper吃月块加速接ultra左上冲碰蓝弹球超级弹ultra右上冲向右走进lv4
+      page_break_before: false
+    - id: step_9
+      text: |
+        然后hyper上冲碰蓝弹球吃硬币左冲碰粉弹球上冲向左demodash碰蓝弹球超级弹碰蓝弹球右冲穿弹球被蓝弹球上冲碰蓝弹球吃水晶上冲再上冲上穿弹球被蓝弹球弹左下冲碰黄弹球吃硬币右下冲碰黄弹球右冲碰粉弹球碰蓝弹球下冲右上冲撞粉弹球右移左冲左上冲碰蓝弹球下冲下穿弹球吃水晶左冲吃水晶左冲碰蓝弹球左冲穿弹球被弹飞右冲吃双冲水晶带上草莓上冲右冲碰弹球右冲穿弹球被弹球弹飞上冲碰蓝弹球吃水晶上冲再上冲上穿弹球对准位置下冲穿弹球吃水晶向右移动左冲碰蓝弹球上冲碰蓝弹球右冲碰蓝弹球右冲穿弹球被弹球弹左上冲碰蓝弹球左上冲超级弹ultra向右走结算草莓进lv5
+      page_break_before: false
+    - id: step_10
+      text: |
+        顺发短hyper兔子跳左上冲碰黄弹球下冲碰黄弹球下冲下穿弹球右冲碰蓝弹球左上冲抓墙跳向蓝弹球被弹飞下冲吃水晶左冲吃硬币碰白弹球站在消失平台上向右demodash碰弹球被向下弹左冲吃硬币碰蓝弹球下冲碰粉弹球右上冲上冲吃硬币碰蓝弹球向左demodash碰粉弹球下冲碰白弹球demohyper吃月块加速吃水晶下冲吃硬币碰黄弹球碰绿弹簧右冲碰粉弹球上冲吃硬币碰黄弹球左下冲碰黄弹球下冲吃水晶左冲碰黄弹球下冲穿弹球被另一个黄弹球弹上冲一下站在掉落块上面向左凌波碰黄弹球超级弹ultra向右走进lv6对轴上冲碰绿弹簧左冲碰蓝弹球超级弹右下冲碰蓝弹球获得冲刺掉下去右冲进b2
+      page_break_before: false
+    - id: step_11
+      text: |
+        跳下去右冲吃三个硬币撞弹球超级弹左冲吃硬币撞弹球超级弹右冲吃硬币撞弹球下冲撞弹球右冲吃硬币撞弹球下冲撞弹球下冲穿弹球吃双冲水晶吃硬币撞黄弹球上冲撞蓝弹球上冲吃水晶上冲上穿弹球撞弹球上冲撞弹球左上冲撞弹球右冲撞弹球右冲穿弹球被弹球弹吃硬币向左冲吃水晶向左冲撞弹球向左冲穿弹球被弹球弹被另一个弹球弹左上冲碰弹球上冲吃两个硬币撞弹球左冲吃硬币撞弹球被弹球弹上冲被弹球弹上冲撞弹球左上冲撞弹球下冲穿弹球吃三个硬币被弹球弹上冲被弹球弹左上冲被弹球弹上冲抓开关块爬上去跳一下向左走跳一下向左走跳一下向左走吃草莓结算草莓在机关块上做ultra跳到右面向右走上冲回到lv6
+      page_break_before: false
+    - id: step_12
+      text: |
+        上冲碰绿弹簧左冲碰蓝弹球超级弹ultra被蓝弹球弹上冲碰蓝弹球ultra右冲碰蓝弹球左上冲碰蓝弹球超级弹右上冲碰蓝弹球右上冲碰蓝弹球超级弹ultra左冲碰蓝弹球接左冲碰蓝弹球左冲碰绿弹簧被蓝弹球弹超级弹右上冲碰蓝弹球超级弹上冲碰绿弹簧左上冲碰蓝弹球右上冲碰蓝弹球左下冲碰蓝弹球超级弹右上冲碰蓝弹球左上冲碰蓝弹球超级弹右下冲碰蓝弹球左上冲被蓝弹球弹右冲碰蓝弹球右冲向右走进lv7上冲抓左边墙向上爬跳出去进b3
+      page_break_before: false
+    - id: step_13
+      text: |
+        往右走跳一下左冲碰绿弹簧接左冲被绿弹簧弹做春月加速右上冲碰绿弹簧接右下冲被绿弹簧弹做春月加速碰白弹球超级弹右上冲碰绿弹簧右下冲碰绿弹簧做春月加速左上冲碰绿弹簧不要春月加速左冲碰蓝弹球超级弹右下冲碰绿弹簧碰绿弹簧向右super再向右demodashhyper做月亮块加速接ultra右上冲碰绿弹簧接右上冲碰绿弹簧做春月加速右上冲碰绿弹簧接左冲碰绿弹簧做春月加速接左冲碰绿弹簧左冲碰绿弹簧做春月加速吃草莓被送回去结算草莓向左走回lv7
+      page_break_before: false
+    - id: step_14
+      text: |
+        向右hyperdash再向右demodash做月亮块加速接hyper再右下冲ultra右上冲碰绿弹簧被弹飞向右冲碰绿弹簧左冲碰绿弹簧起飞碰白弹球向右demodash做hyper接右下冲做ultra左下冲碰粉弹球超级弹右下冲接右上冲碰绿弹簧碰蓝弹球超级弹接右下冲做ultra右上冲碰黄弹球左上冲碰黄弹球右上冲做一个cb吃水晶右下冲做ultra接向右demodash吃月块加速做hyper接右下冲碰绿弹簧右上冲碰绿弹簧上冲碰绿弹簧上冲碰绿弹簧起飞碰白弹球超级弹接右下冲碰绿弹簧接右上冲碰黄弹球接左上冲碰绿弹簧碰黄弹球超级弹右下冲碰绿弹簧右下冲碰绿弹簧起飞接右上冲抓住墙向上爬向右走进lv8再向右走进b4
+      page_break_before: false
+    - id: step_15
+      text: |
+        然后做一个hyper抓theo碰蓝弹球冻结帧松抓带theo向右冲穿弹球把theo扔出去被蓝弹球弹上冲接theo碰水晶中性下放接上冲向theo下冲中性下放theo接左冲带上theo碰蓝弹球冻结帧松抓超级弹带theo右上冲碰绿弹簧起飞把theo扔出去让theo碰到theo屏障右上冲吃水晶向左冲抓theo碰蓝弹球冻结帧松抓带theo向右demodash做一个hyper吃月亮块加速把theo扔出去右上冲碰绿弹簧起飞带上theo再做一个中性下放向左走碰蓝弹球冻结帧松抓再带theo右上冲碰黄弹球冻结帧松抓带theo左上冲碰黄弹球冻结帧松抓超级弹带theo右下冲做一个ultra再右上冲做一个单冲抛接吃水晶中性下放theo上冲带theo碰蓝弹球把theo向右扔左上冲碰蓝弹球接右下冲接theo向右走抱着theo打开theo门吃草莓被泡泡传送回去向左走结算草莓回到lv8
+      page_break_before: false
+    - id: step_16
+      text: >-
+        向左走对准蓝弹球上冲接上冲上穿弹球再被弹球弹向左走碰白弹球再向左走碰白弹球再向右走碰白弹球再向左走碰白弹球左上冲碰蓝弹球左下冲碰白弹球超级弹碰蓝弹球右上冲碰白弹球预输入下冲吃水晶碰黄弹球左上冲碰黄弹球右下冲碰蓝弹球接右下冲斜穿弹球吃双冲水晶碰黄弹球碰蓝弹球碰白弹球右上冲碰白弹球接左上冲碰白弹球超级弹碰蓝弹球右冲碰蓝弹球右上冲吃双冲水晶碰蓝弹球右上冲接上冲斜上穿弹球被蓝弹球弹向左demodash碰蓝弹球超级弹右上冲碰蓝弹球向右偏一点下冲向下横穿弹球碰蓝弹球超级弹右上冲一直向右走进lv9
+      page_break_before: false
+    - id: step_17
+      text: |
+        向右走再跳对轴等蓝弹球向右super接左上冲碰蓝弹球超级弹接ultra上冲碰蓝弹球超级弹接右上冲斜cb吃绿水晶左冲撞蓝弹球再左冲撞蓝弹球超级弹接右下冲做ultra再右冲吃水晶向右demodash吃月亮块加速hyper接右下冲碰绿弹簧右上冲碰绿弹簧右冲碰绿弹簧向右走吃硬币接右下冲碰蓝弹球超级弹接左下冲ultra左上冲碰绿弹簧吃硬币左下冲碰绿弹簧接左下冲碰蓝弹球左下冲斜穿弹球吃水晶下冲吃水晶左冲吃硬币碰蓝弹球接右下冲做ultra接向右demodash吃月亮块加速接hyper接右下冲做ultra向右demodash碰蓝弹球超级弹碰黄弹球超级弹向左demodash吃硬币碰蓝弹球右冲碰蓝弹球接右冲穿弹球被蓝弹球弹上冲碰绿弹簧接右冲碰蓝弹球超级弹接左上冲碰蓝弹球下冲碰蓝弹球右冲碰粉弹球上冲接右冲碰粉弹球上冲碰蓝弹球接上冲吃水晶接上冲上穿弹球被蓝弹球弹左上冲碰白弹球碰白弹球碰白弹球碰绿弹簧碰白弹球碰白弹球碰绿弹簧吃硬币激活硬币块向左走向上爬在心上面上冲打碎易碎砖一直向上走上平台进b5
+      page_break_before: false
+    - id: step_18
+      text: >-
+        左冲吃硬币碰蓝弹球下冲碰蓝弹球左冲吃硬币碰蓝弹球下冲吃硬币碰蓝弹球右冲碰蓝弹球左上冲吃硬币碰蓝弹球左上冲吃硬币碰蓝弹球激活硬币块碰蓝弹球下冲碰蓝弹球接上冲吃草莓被送回去结算草莓向下走回到lv9结尾下冲吃心
+      page_break_before: false
+    speed_cps: 180.0
     next: start
+  open_window_sprite_say_say_say_start:
+    type: open_window
+    scene: surface_parity
+    next: long_text_say_say_say_start
+  say_say_say_start:
+    type: say
+    speaker: test
+    text: 我还没写好剧情。
+    mode: start
+    speed_cps: null
+    next: sprite_say_say_say_start
+  say_say_start:
+    type: say
+    speaker: test
+    text: 或者，试试Z.A.T.O，是非常美的免费视觉小说。
+    mode: start
+    page_id: say_say_start_page
+    speed_cps: null
+    next: say_say_say_start
+  say_start:
+    type: say
+    speaker: test
+    text: 嗨嗨， 你应该去玩玩omori，那是一部超级神作的rpg！
+    mode: start
+    speed_cps: null
+    reveal_animation: drop_fade
+    next: say_say_start
+  sprite_ambience_background_start:
+    type: timeline
+    duration_ms: 1000
+    await: false
+    skippable: false
+    tracks:
+    - type: sprite
+      sprite_id: character
+      asset: sprite.jelly
+      remove_at_end: false
+      channels:
+        opacity:
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+        - at_ms: 1000
+          value: 0.8
+          easing: linear
+        rotation_deg:
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+        - at_ms: 1000
+          value: 0.0
+          easing: linear
+        scale:
+        - at_ms: 0
+          value: 1.0
+          easing: linear
+        - at_ms: 1000
+          value: 1.0
+          easing: linear
+        scale_x:
+        - at_ms: 0
+          value: 1.0
+          easing: linear
+        - at_ms: 1000
+          value: 1.0
+          easing: linear
+        scale_y:
+        - at_ms: 0
+          value: 1.0
+          easing: linear
+        - at_ms: 1000
+          value: 1.0
+          easing: linear
+        x:
+        - at_ms: 0
+          value: 530.9823
+          easing: ease_out
+        - at_ms: 1000
+          value: 521.6558
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: 1206.8394
+          easing: ease_out
+        - at_ms: 1000
+          value: 1260.9326
+          easing: linear
+        z:
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+        - at_ms: 1000
+          value: 0.0
+          easing: linear
+    events: []
+    next: say_start
+  sprite_say_say_say_start:
+    type: timeline
+    duration_ms: 500
+    await: false
+    skippable: false
+    tracks:
+    - type: sprite
+      sprite_id: black
+      asset: sprite.black
+      remove_at_end: false
+      channels:
+        opacity:
+        - at_ms: 0
+          value: 0.0
+          easing: ease_in_out
+        - at_ms: 500
+          value: 0.8
+          easing: linear
+        rotation_deg:
+        - at_ms: 0
+          value: 0.0
+          easing: ease_in_out
+        - at_ms: 500
+          value: 0.0
+          easing: linear
+        scale:
+        - at_ms: 0
+          value: 1.0
+          easing: ease_in_out
+        - at_ms: 500
+          value: 1.0
+          easing: linear
+        scale_x:
+        - at_ms: 0
+          value: 1.0
+          easing: ease_in_out
+        - at_ms: 500
+          value: 1.0
+          easing: linear
+        scale_y:
+        - at_ms: 0
+          value: 1.0
+          easing: ease_in_out
+        - at_ms: 500
+          value: 1.0
+          easing: linear
+        x:
+        - at_ms: 0
+          value: 960.0
+          easing: ease_in_out
+        - at_ms: 500
+          value: 960.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: 1128.0
+          easing: ease_in_out
+        - at_ms: 500
+          value: 1078.1411
+          easing: linear
+        z:
+        - at_ms: 0
+          value: 0.0
+          easing: step
+        - at_ms: 500
+          value: 0.0
+          easing: linear
+    events: []
+    next: open_window_sprite_say_say_say_start
   start:
     type: end
+  timeline_start:
+    type: timeline
+    duration_ms: 1000
+    await: true
+    skippable: true
+    tracks:
+    - type: sprite
+      sprite_id: character
+      asset: null
+      remove_at_end: false
+      channels:
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 1000
+          value: 1616.5038
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 1000
+          value: 1231.2759
+          easing: linear
+        z:
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+    - type: sprite
+      sprite_id: black
+      asset: null
+      remove_at_end: false
+      channels:
+        x:
+        - at_ms: 0
+          value: 960.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: 1076.2759
+          easing: linear
+    events: []
+    next: long_text_say_say_say_start_continue
