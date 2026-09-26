@@ -129,7 +129,8 @@ export function expandSpriteActionTrack(
         : baseValue * relative;
       if (
         !Number.isFinite(absolute) ||
-        (["scale", "scale_x", "scale_y"].includes(channel) && absolute <= 0) ||
+        (channel === "scale" && absolute <= 0) ||
+        (["scale_x", "scale_y"].includes(channel) && absolute === 0) ||
         (channel === "opacity" && (absolute < 0 || absolute > 1))
       ) {
         throw new Error(`动作通道 ${channel} 的结果无效`);

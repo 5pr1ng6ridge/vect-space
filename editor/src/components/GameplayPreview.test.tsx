@@ -1049,6 +1049,47 @@ describe("GameplayPreview", () => {
     expect(screen.getByText("未开始")).toBeInTheDocument();
   });
 
+  it("fits the design stage within the height left below the toolbar", async () => {
+    const Original = globalThis.ResizeObserver;
+    let notify: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        notify = callback;
+      }
+      observe(): void {
+        /* Driven by the test. */
+      }
+      unobserve(): void {
+        /* Driven by the test. */
+      }
+      disconnect(): void {
+        /* Driven by the test. */
+      }
+    };
+    try {
+      const view = renderPreview();
+      await act(async () => {
+        await Promise.resolve();
+        notify?.(
+          [
+            {
+              contentRect: { width: 1920, height: 360 },
+            } as ResizeObserverEntry,
+          ],
+          {} as ResizeObserver,
+        );
+      });
+      const stage = view.container.querySelector<HTMLElement>(
+        ".gameplay-preview-stage",
+      );
+      expect(stage?.style.width).toBe("640px");
+      expect(stage?.style.height).toBe("360px");
+      view.unmount();
+    } finally {
+      globalThis.ResizeObserver = Original;
+    }
+  });
+
   it("maps pointer coordinates over the scaled stage and clears on leave", async () => {
     await startScene();
     const stage = document.querySelector<HTMLElement>(

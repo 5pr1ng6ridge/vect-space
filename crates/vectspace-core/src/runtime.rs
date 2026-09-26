@@ -2848,8 +2848,10 @@ fn action_channel_value(
     if !value.is_finite() {
         return Err(format!("动作通道 {channel} 的结果必须是有限数"));
     }
-    if matches!(channel, "scale" | "scale_x" | "scale_y") && value <= 0.0 {
-        return Err(format!("动作通道 {channel} 的结果必须为正数"));
+    if (channel == "scale" && value <= 0.0)
+        || (matches!(channel, "scale_x" | "scale_y") && value == 0.0)
+    {
+        return Err(format!("动作通道 {channel} 的结果缩放无效"));
     }
     if channel == "opacity" && !(0.0..=1.0).contains(&value) {
         return Err("动作 opacity 结果必须在 0 到 1 之间".to_owned());
@@ -2997,7 +2999,7 @@ fn apply_timeline_final_state(
                 if let Some(value) = final_channel(channels, "z") {
                     target.z = value.round() as i32;
                 }
-                if target.scale <= 0.0 || target.scale_x <= 0.0 || target.scale_y <= 0.0 {
+                if target.scale <= 0.0 || target.scale_x == 0.0 || target.scale_y == 0.0 {
                     return Err(format!("立绘 {sprite_id} 的最终缩放必须大于 0"));
                 }
                 snapshot.world.sprites.insert(sprite_id.clone(), target);
@@ -3068,8 +3070,8 @@ fn apply_timeline_final_state(
                     || button.height <= 0.0
                     || !button.scale_x.is_finite()
                     || !button.scale_y.is_finite()
-                    || button.scale_x <= 0.0
-                    || button.scale_y <= 0.0
+                    || button.scale_x == 0.0
+                    || button.scale_y == 0.0
                 {
                     return Err(format!("按钮 {instance_id} 的最终尺寸或缩放无效"));
                 }
@@ -3826,8 +3828,8 @@ fn validate_snapshot(
             || button.height <= 0.0
             || !button.scale_x.is_finite()
             || !button.scale_y.is_finite()
-            || button.scale_x <= 0.0
-            || button.scale_y <= 0.0
+            || button.scale_x == 0.0
+            || button.scale_y == 0.0
             || !button.opacity.is_finite()
             || !(0.0..=1.0).contains(&button.opacity)
         {
@@ -4124,8 +4126,8 @@ fn validate_snapshot(
             || !sprite.rotation_deg.is_finite()
             || !sprite.opacity.is_finite()
             || sprite.scale <= 0.0
-            || sprite.scale_x <= 0.0
-            || sprite.scale_y <= 0.0
+            || sprite.scale_x == 0.0
+            || sprite.scale_y == 0.0
             || !(0.0..=1.0).contains(&sprite.opacity)
         {
             return Err(RuntimeError::InvalidSnapshot(format!(

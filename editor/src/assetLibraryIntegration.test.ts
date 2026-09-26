@@ -82,6 +82,33 @@ function commit(
   });
 }
 
+it("keeps edits made while a save was in flight and rebases the fingerprint", () => {
+  const baseline = project();
+  const before = editorReducer(INITIAL_EDITOR_STATE, {
+    type: "load",
+    project: baseline,
+  });
+  const edited = commit(before, (draft) => {
+    draft.manifest.content_version = "2";
+  });
+  const snapshot = edited.project;
+  if (snapshot === null) throw new Error("missing project after edit");
+  const later = commit(edited, (draft) => {
+    draft.manifest.content_version = "3";
+  });
+  const saved = { ...snapshot, fingerprint: "saved-fp" };
+  const result = editorReducer(later, {
+    type: "mark_saved",
+    project: saved,
+    snapshot,
+    revision: edited.currentRevision,
+  });
+  expect(result.project?.manifest.content_version).toBe("3");
+  expect(result.project?.fingerprint).toBe("saved-fp");
+  expect(result.savedRevision).toBe(edited.currentRevision);
+  expect(result.dirty).toBe(true);
+});
+
 function layoutCommit(
   state: EditorState,
   mutate: (layout: EditorProject["layout"]) => EditorProject["layout"],

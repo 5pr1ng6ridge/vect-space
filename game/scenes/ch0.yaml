@@ -125,7 +125,7 @@ nodes:
         左冲吃硬币碰蓝弹球下冲碰蓝弹球左冲吃硬币碰蓝弹球下冲吃硬币碰蓝弹球右冲碰蓝弹球左上冲吃硬币碰蓝弹球左上冲吃硬币碰蓝弹球激活硬币块碰蓝弹球下冲碰蓝弹球接上冲吃草莓被送回去结算草莓向下走回到lv9结尾下冲吃心
       page_break_before: false
     speed_cps: 180.0
-    next: start
+    next: sprite_long_text_say_say_say_start_continue
   open_window_sprite_say_say_say_start:
     type: open_window
     scene: surface_parity
@@ -152,7 +152,7 @@ nodes:
     mode: start
     speed_cps: null
     reveal_animation: drop_fade
-    next: say_say_start
+    next: sprite_say_start
   sprite_ambience_background_start:
     type: timeline
     duration_ms: 1000
@@ -222,6 +222,47 @@ nodes:
           easing: linear
     events: []
     next: say_start
+  sprite_long_text_say_say_say_start_continue:
+    type: timeline
+    duration_ms: 500
+    await: false
+    skippable: false
+    tracks:
+    - type: sprite
+      sprite_id: character
+      asset: sprite.alli_smug
+      remove_at_end: false
+      channels:
+        opacity:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 500
+          value: 1.0
+          easing: linear
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 500
+          value: 960.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 500
+          value: 1080.0
+          easing: linear
+        z:
+        - at_ms: 0
+          value: inherit
+          easing: step
+        - at_ms: 500
+          value: 0.0
+          easing: linear
+    events: []
+    next: start
   sprite_say_say_say_start:
     type: timeline
     duration_ms: 500
@@ -271,16 +312,16 @@ nodes:
         x:
         - at_ms: 0
           value: 960.0
-          easing: ease_in_out
+          easing: linear
         - at_ms: 500
           value: 960.0
           easing: linear
         "y":
         - at_ms: 0
-          value: 1128.0
-          easing: ease_in_out
+          value: 1080.907
+          easing: linear
         - at_ms: 500
-          value: 1078.1411
+          value: 1081.2806
           easing: linear
         z:
         - at_ms: 0
@@ -291,6 +332,20 @@ nodes:
           easing: linear
     events: []
     next: open_window_sprite_say_say_say_start
+  sprite_say_start:
+    type: sprite
+    sprite_id: character
+    action: move
+    asset: sprite.alli_surprise
+    x: 960.0
+    "y": 1080.0
+    scale: 1.0
+    opacity: 1.0
+    z: 0
+    duration_ms: 500
+    easing: ease_in_out
+    await: false
+    next: say_say_start
   start:
     type: end
   timeline_start:
@@ -301,21 +356,32 @@ nodes:
     tracks:
     - type: sprite
       sprite_id: character
-      asset: null
+      asset: sprite.alli_neutral
       remove_at_end: false
       channels:
+        opacity:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 500
+          value: 1.0
+          easing: linear
+        scale:
+        - at_ms: 0
+          value: 1.0
+          easing: linear
         x:
         - at_ms: 0
           value: inherit
           easing: ease_out
-        - at_ms: 1000
+        - at_ms: 500
           value: 1616.5038
           easing: linear
         "y":
         - at_ms: 0
           value: inherit
-          easing: linear
-        - at_ms: 1000
+          easing: ease_out
+        - at_ms: 500
           value: 1231.2759
           easing: linear
         z:

@@ -269,6 +269,67 @@ function assetRow(id: string): HTMLElement {
   });
 }
 
+describe("asset explorer interactions", () => {
+  it("rubber-band selects visible rows from the tree background", () => {
+    const { container } = render(
+      <AssetLibraryHarness project={assetProject()} />,
+    );
+    const tree = container.querySelector<HTMLElement>(".asset-explorer-tree");
+    if (tree === null) throw new Error("missing explorer");
+    const rect = (top: number, bottom: number): DOMRect => ({
+      left: 0,
+      top,
+      right: 200,
+      bottom,
+      width: 200,
+      height: bottom - top,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(tree, "getBoundingClientRect").mockReturnValue(rect(0, 200));
+    vi.spyOn(assetRow("bg.room"), "getBoundingClientRect").mockReturnValue(
+      rect(20, 40),
+    );
+    vi.spyOn(assetRow("anim.blink"), "getBoundingClientRect").mockReturnValue(
+      rect(60, 80),
+    );
+    fireEvent.pointerDown(tree, { button: 0, clientX: 3, clientY: 3 });
+    fireEvent.pointerMove(window, { clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(window);
+    expect(screen.getByLabelText("批量移动到文件夹")).toBeInTheDocument();
+    expect(assetRow("bg.room")).toHaveClass("active");
+    expect(assetRow("anim.blink")).toHaveClass("active");
+  });
+
+  it("opens a context menu and reveals a registered file by ID", async () => {
+    const reveal = vi.spyOn(editorApi, "revealAsset").mockResolvedValue();
+    renderAssets();
+    fireEvent.contextMenu(assetRow("bg.room"), { clientX: 20, clientY: 30 });
+    const menu = screen.getByRole("menu", { name: "素材操作" });
+    fireEvent.click(
+      within(menu).getByRole("menuitem", { name: "打开文件所在位置" }),
+    );
+    await waitFor(() => expect(reveal).toHaveBeenCalledWith("bg.room"));
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("mounts a closable detail as a sibling panel when the shell provides one", () => {
+    const { container } = render(
+      <>
+        <aside id="asset-detail-column" />
+        <AssetLibraryHarness project={assetProject()} />
+      </>,
+    );
+    fireEvent.click(assetRow("bg.room"));
+    const column = container.querySelector("#asset-detail-column");
+    expect(column).toHaveTextContent("素材详情");
+    expect(column).toHaveTextContent("bg.room");
+    fireEvent.click(screen.getByRole("button", { name: "关闭素材详情" }));
+    expect(column).toBeEmptyDOMElement();
+  });
+});
+
 describe("virtual asset folders", () => {
   it("creates a root folder and a nested subfolder", () => {
     const onLayoutCommit = vi.fn();
@@ -360,6 +421,31 @@ describe("virtual asset folders", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("子文件夹");
   });
 
+  it("dissolves a folder without deleting its registered assets", () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderAssets();
+    fireEvent.click(screen.getByRole("button", { name: "删除文件夹 归档" }));
+    expect(screen.queryByRole("button", { name: "归档" })).toBeNull();
+    expect(assetRow("bg.old")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "撤销布局" }));
+    expect(screen.getByRole("button", { name: "归档" })).toBeInTheDocument();
+  });
+
+  it("drags multiple selected assets as one layout edit", () => {
+    const onLayoutCommit = vi.fn();
+    renderAssets({ onLayoutCommit });
+    fireEvent.click(assetRow("bg.room"));
+    fireEvent.click(assetRow("bg.old"), { ctrlKey: true });
+    const dt = fakeDataTransfer();
+    fireEvent.dragStart(assetRow("bg.old"), { dataTransfer: dt });
+    fireEvent.drop(screen.getByRole("button", { name: "归档" }), {
+      dataTransfer: dt,
+    });
+    expect(onLayoutCommit).toHaveBeenLastCalledWith("批量移动素材");
+    expect(assetRow("bg.room")).toHaveTextContent("目录：归档");
+    expect(assetRow("bg.old")).toHaveTextContent("目录：归档");
+  });
+
   it("moves a folder through the parent dialog", () => {
     renderAssets();
     fireEvent.click(
@@ -445,13 +531,14 @@ describe("display name, hidden policy and search", () => {
     expect(assetRow("bg.room")).toHaveTextContent("待保存");
   });
 
-  it("filters the manager list by folder", () => {
+  it("expands folders in the explorer while keeping root assets visible", () => {
     renderAssets();
+    expect(assetRow("bg.old")).toBeInTheDocument();
+    expect(assetRow("bg.room")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /折叠文件夹 归档/ }));
+    expect(screen.queryByRole("button", { name: /bg\.old/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "归档" }));
     expect(assetRow("bg.old")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /bg\.room/ })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /全部素材/ }));
-    expect(assetRow("bg.room")).toBeInTheDocument();
   });
 });
 

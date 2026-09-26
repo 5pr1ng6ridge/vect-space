@@ -14,13 +14,18 @@ import {
   selectGameplayFont,
   useGameplayFont,
   LongTextPanel,
+  SceneCanvas,
+  ButtonLayer,
   type LongTextPanelHandle,
 } from "@vectspace/presentation-react/gameplay";
 import type {
   LongTextPageSnapshot,
   LongTextPrompt,
   TextRevealAnimation,
+  RuntimeUpdate,
 } from "@vectspace/presentation-core/types";
+import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
+import { MUTED_PREVIEW_SETTINGS } from "./timelinePreview";
 import type {
   BuildNodePreviewResult,
   EditorAsset,
@@ -130,6 +135,15 @@ export function LongTextWorkspace({
   const [previewBackgroundId, setPreviewBackgroundId] = useState<string | null>(
     null,
   );
+  const [sceneUpdate, setSceneUpdate] = useState<RuntimeUpdate | null>(null);
+  const sceneUrls = useMemo(
+    () =>
+      Object.fromEntries(
+        assets.map((asset) => [asset.id, assetUrl(asset.absolute_path)]),
+      ),
+    [assets],
+  );
+  const uiMotionHost = useMemo(() => new UiMotionHost(), []);
   const [resolvedStepTexts, setResolvedStepTexts] = useState<
     Readonly<Record<string, string>>
   >({});
@@ -169,6 +183,26 @@ export function LongTextWorkspace({
       : backgroundChoice === "__none__"
         ? null
         : backgroundChoice;
+  const sceneDisplayUpdate = useMemo(
+    () =>
+      sceneUpdate === null
+        ? null
+        : {
+            ...sceneUpdate,
+            snapshot: {
+              ...sceneUpdate.snapshot,
+              world: {
+                ...sceneUpdate.snapshot.world,
+                background: backgroundId,
+              },
+            },
+            // This is an authoring still, not a second runtime presentation. Drawing
+            // only the resolved snapshot keeps inherited scene objects without
+            // replaying sounds or transitions when an author changes the background.
+            cues: [],
+          },
+    [sceneUpdate, backgroundId],
+  );
   const backgroundAsset =
     backgroundId === null ? undefined : assetsById.get(backgroundId);
   const backgroundSource = editorImageSource(
@@ -301,6 +335,7 @@ export function LongTextWorkspace({
       setPreviewUnavailable(true);
       setPreviewDocumentSteps([]);
       setPreviewPlaying(false);
+      setSceneUpdate(null);
       setPreviewReplayEpoch(0);
       setRevealCompleteKey(null);
       const savedSettings = previewSettings;
@@ -382,6 +417,7 @@ export function LongTextWorkspace({
           `已捕获真实进入状态（${result.trace.length} 个边界）`,
         );
         setPreviewUnavailable(false);
+        setSceneUpdate(result.update);
         setPreviewBackgroundId(result.update.snapshot.world.background);
       } catch (error: unknown) {
         if (generation !== previewRequestGeneration.current) return;
@@ -827,7 +863,36 @@ export function LongTextWorkspace({
               ref={designRef}
               style={designStyle}
             >
-              {backgroundSource === undefined ? (
+              {sceneUpdate !== null && !previewUnavailable ? (
+                <>
+                  <SceneCanvas
+                    animations={animationMap}
+                    assets={sceneUrls}
+                    key={backgroundChoice}
+                    onDiagnostic={setPreviewContextError}
+                    onSettled={() => undefined}
+                    paused
+                    playbackRate={1}
+                    settings={MUTED_PREVIEW_SETTINGS}
+                    suppressOneShots
+                    typingSfxActive={false}
+                    typingSfxCps={0}
+                    uiMotionHost={uiMotionHost}
+                    update={sceneDisplayUpdate}
+                    visible
+                  />
+                  <ButtonLayer
+                    animations={animationMap}
+                    assets={sceneUrls}
+                    disabled
+                    onClick={() => undefined}
+                    paused
+                    playbackRate={1}
+                    snapshot={sceneUpdate.snapshot}
+                    timeline={null}
+                  />
+                </>
+              ) : backgroundSource === undefined ? (
                 <div className="long-text-workspace-empty-background">
                   当前场景没有可达的背景节点
                 </div>

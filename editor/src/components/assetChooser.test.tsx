@@ -80,6 +80,49 @@ function optionIds(): (string | null)[] {
   return options().map((option) => option.getAttribute("data-asset-id"));
 }
 
+describe("AssetChooser node-field drops", () => {
+  const drop = (id: string): void => {
+    const trigger = screen.getByRole("button", { name: "素材" });
+    const target = trigger.closest(".asset-chooser");
+    if (target === null) throw new Error("missing chooser root");
+    fireEvent.drop(target, {
+      dataTransfer: {
+        getData: (type: string) =>
+          type === "application/x-vect-asset" ? id : "",
+      },
+    });
+  };
+
+  it("assigns only matching asset kinds, preserving the field on mismatch", () => {
+    const onChange = vi.fn();
+    renderChooser({ kind: "background", value: "bg.room", onChange });
+    drop("sp.hero");
+    expect(onChange).not.toHaveBeenCalled();
+    drop("bg.nested");
+    expect(onChange).toHaveBeenCalledWith("bg.nested");
+  });
+
+  it("rejects hidden assets and unknown drag IDs, even when the explorer shows them", () => {
+    const onChange = vi.fn();
+    renderChooser({ kind: "background", onChange });
+    drop("bg.old");
+    drop("other.id");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("adds a matching asset to a multi-value field", () => {
+    const onChange = vi.fn();
+    renderChooser({
+      multiple: true,
+      kind: "background",
+      value: ["bg.room"],
+      onChange,
+    });
+    drop("bg.nested");
+    expect(onChange).toHaveBeenCalledWith(["bg.room", "bg.nested"]);
+  });
+});
+
 describe("AssetChooser hidden policy", () => {
   it("excludes hidden assets from new choices and shows display names", () => {
     renderChooser({});

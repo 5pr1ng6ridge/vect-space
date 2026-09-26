@@ -1102,8 +1102,65 @@ fn open_project(
     Ok(project)
 }
 
+/// Reveal a host-validated registered asset (animation: its first frame).
+/// Never accept an arbitrary WebView path or launch a shell interpreter.
 #[tauri::command]
-fn save_project(
+fn reveal_asset(id: String, state: State<'_, EditorState>) -> Result<(), WireCommandError> {
+    let path = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| internal_command_error("编辑器项目锁已损坏"))?;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| validation_command_error("尚未打开项目"))?;
+        let resolved = session
+            .catalog
+            .resolve_assets(&[id])
+            .map_err(validation_command_error)?;
+        PathBuf::from(&resolved[0].absolute_path)
+    };
+    if !path.is_file() {
+        return Err(validation_command_error("素材文件尚未保存到磁盘或已被移走"));
+    }
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("explorer.exe");
+        command.arg(format!("/select,{}", path.display()));
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg("-R").arg(&path);
+        command
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(
+            path.parent()
+                .ok_or_else(|| validation_command_error("素材没有所在目录"))?,
+        );
+        command
+    };
+    command.spawn().map_err(io_command_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn save_project(
+    request: SaveProjectRequest,
+    app: AppHandle,
+) -> Result<SaveProjectResult, WireCommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_project_command(request, app.state::<EditorState>())
+    })
+    .await
+    .map_err(|error| internal_command_error(format!("保存任务失败: {error}")))?
+}
+
+fn save_project_command(
     request: SaveProjectRequest,
     state: State<'_, EditorState>,
 ) -> Result<SaveProjectResult, WireCommandError> {
@@ -1359,7 +1416,18 @@ fn save_project(
 }
 
 #[tauri::command]
-fn validate_project(
+async fn validate_project(
+    request: SaveProjectRequest,
+    app: AppHandle,
+) -> Result<Vec<EditorDiagnostic>, WireCommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_project_command(request, app.state::<EditorState>())
+    })
+    .await
+    .map_err(|error| internal_command_error(format!("验证任务失败: {error}")))?
+}
+
+fn validate_project_command(
     request: SaveProjectRequest,
     state: State<'_, EditorState>,
 ) -> Result<Vec<EditorDiagnostic>, WireCommandError> {
@@ -4560,6 +4628,13 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
             continue;
         };
         queue.extend(successors(&scene_id, node));
+        // Keep flow successors unchanged for immediate-cycle detection. The
+        // secondary window independently enters its scene alongside `next`.
+        if let SceneNode::OpenWindow { scene: target, .. } = node {
+            if let Some(window_scene) = catalog.scenes.get(target) {
+                queue.push_back((window_scene.id.clone(), window_scene.entry.clone()));
+            }
+        }
     }
 
     for (scene_id, scene) in &catalog.scenes {
@@ -4955,6 +5030,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_project_directory,
             pick_asset_files,
+            reveal_asset,
             open_project,
             save_project,
             validate_project,
@@ -5397,6 +5473,32 @@ mod tests {
         assert!(!diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unreachable_node"
                 && diagnostic.scene_id.as_deref() == Some("character_action_showcase")
+        }));
+    }
+
+    #[test]
+    fn reached_secondary_window_is_reachable_without_changing_flow_cycles() {
+        let root = demo_root().canonicalize().unwrap();
+        let mut catalog = ContentCatalog::from_root(root).unwrap();
+        let entry_id = catalog.manifest.entry_scene.clone();
+        let mut secondary = catalog.scenes[&entry_id].clone();
+        secondary.id = "secondary_reachability_test".to_owned();
+        secondary.entry = "entered".to_owned();
+        secondary.nodes = BTreeMap::from([("entered".to_owned(), SceneNode::End)]);
+        catalog.scenes.insert(secondary.id.clone(), secondary);
+        let entry = catalog.scenes[&entry_id].entry.clone();
+        let main_scene = catalog.scenes.get_mut(&entry_id).unwrap();
+        main_scene.nodes.insert("after_window_test".to_owned(), SceneNode::End);
+        main_scene.nodes.insert(
+            entry,
+            SceneNode::OpenWindow {
+                scene: "secondary_reachability_test".to_owned(),
+                next: "after_window_test".to_owned(),
+            },
+        );
+        assert!(!analyze_catalog(&catalog).iter().any(|diagnostic| {
+            diagnostic.code == "unreachable_node"
+                && diagnostic.scene_id.as_deref() == Some("secondary_reachability_test")
         }));
     }
 

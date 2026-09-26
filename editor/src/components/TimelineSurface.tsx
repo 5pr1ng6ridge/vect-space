@@ -313,7 +313,11 @@ export function TimelineSurface<TData>({
     const next = structuredClone(draft);
     for (const item of [...selected].sort(compareSelectionKeys)) {
       const [track, channel, frame] = item.split(":");
-      next.tracks[Number(track)]?.channels[channel]?.splice(Number(frame), 1);
+      const channels = next.tracks[Number(track)]?.channels;
+      const frames = channels?.[channel];
+      if (frames === undefined) continue;
+      frames.splice(Number(frame), 1);
+      if (frames.length === 0) delete channels?.[channel];
     }
     setSelected(new Set());
     onChange(next);

@@ -397,6 +397,33 @@ export function moveAssetFolder(
   };
 }
 
+/** Dissolve a folder without deleting assets or descendants. They move to its parent. */
+export function removeAssetFolder(
+  layout: EditorLayout,
+  folderId: string,
+): EditorLayout {
+  const folders = assetFolderMap(layout);
+  const folder = folders[folderId];
+  if (folder === undefined) return layout;
+  const parentId = folder.parent_id ?? null;
+  const nextFolders = { ...folders };
+  Reflect.deleteProperty(nextFolders, folderId);
+  for (const [id, child] of Object.entries(nextFolders)) {
+    if (child.parent_id === folderId)
+      nextFolders[id] = { ...child, parent_id: parentId };
+  }
+  const nextMetadata = { ...assetMetadataMap(layout) };
+  for (const [id, metadata] of Object.entries(nextMetadata)) {
+    if (metadata.folder_id === folderId)
+      nextMetadata[id] = { ...metadata, folder_id: parentId };
+  }
+  return {
+    ...layout,
+    asset_folders: nextFolders,
+    asset_metadata: nextMetadata,
+  };
+}
+
 export function renameAssetFolder(
   layout: EditorLayout,
   folderId: string,
@@ -561,6 +588,20 @@ export function moveAssetToFolder(
     ...metadata,
     folder_id: folderId,
   }));
+}
+
+/** One history entry for an entire multi-selection. */
+export function moveAssetsToFolder(
+  layout: EditorLayout,
+  assetIds: readonly string[],
+  folderId: string | null,
+): EditorLayout {
+  if (folderId !== null && assetFolderMap(layout)[folderId] === undefined)
+    return layout;
+  return [...new Set(assetIds)].reduce(
+    (current, id) => moveAssetToFolder(current, id, folderId),
+    layout,
+  );
 }
 
 export function setAssetDisplayName(

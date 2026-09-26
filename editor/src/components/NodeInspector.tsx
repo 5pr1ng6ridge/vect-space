@@ -2103,14 +2103,12 @@ function ButtonLayoutFields({
       />
       <OptionalNumber
         label="横向缩放"
-        min={0.001}
         onChange={(scale_x) => onChange({ ...node, scale_x })}
         step={0.05}
         value={node.scale_x ?? null}
       />
       <OptionalNumber
         label="纵向缩放"
-        min={0.001}
         onChange={(scale_y) => onChange({ ...node, scale_y })}
         step={0.05}
         value={node.scale_y ?? null}

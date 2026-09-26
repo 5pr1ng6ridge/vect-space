@@ -106,7 +106,19 @@ vi.mock("@vectspace/presentation-react/gameplay", async (importOriginal) => {
       );
     },
   );
-  return { ...actual, LongTextPanel };
+  return {
+    ...actual,
+    LongTextPanel,
+    SceneCanvas: ({ update }: { update: RuntimeUpdate | null }) => (
+      <div
+        data-testid="long-text-scene-canvas"
+        data-has-sprites={
+          Object.keys(update?.snapshot.world.sprites ?? {}).length
+        }
+      />
+    ),
+    ButtonLayer: () => <div data-testid="long-text-button-layer" />,
+  };
 });
 
 vi.mock("../api", async (importOriginal) => {
@@ -259,7 +271,19 @@ function snapshotWith(page: LongTextPageSnapshot): RuntimeSnapshot {
     variables: {},
     world: {
       background: "bg.room",
-      sprites: {},
+      sprites: {
+        portrait: {
+          asset: "sprite.portrait",
+          x: 960,
+          y: 900,
+          scale: 1,
+          scale_x: 1,
+          scale_y: 1,
+          rotation_deg: 0,
+          opacity: 1,
+          z: 1,
+        },
+      },
       buttons: {},
       camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
       dialogue_ui_visible: true,
@@ -419,6 +443,15 @@ afterEach(() => {
 });
 
 describe("LongTextWorkspace shared panel", () => {
+  it("includes inherited scene objects alongside the manuscript", async () => {
+    await renderWorkspace();
+    expect(screen.getByTestId("long-text-scene-canvas")).toHaveAttribute(
+      "data-has-sprites",
+      "1",
+    );
+    expect(screen.getByTestId("long-text-button-layer")).toBeInTheDocument();
+  });
+
   it("renders the shared LongTextPanel for the Rust document and drops the workspace copy", async () => {
     const { view } = await renderWorkspace();
 

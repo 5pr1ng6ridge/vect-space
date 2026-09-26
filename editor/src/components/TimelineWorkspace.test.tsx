@@ -1540,9 +1540,9 @@ describe("TimelineWorkspace creation asset policy", () => {
   function renderWorkspaceWith(
     project: EditorProject,
     layout?: EditorLayout,
+    node = timelineNode(),
   ): { view: ReturnType<typeof render>; handle: HostHandle } {
     const renderKit = createRenderKit();
-    const node = timelineNode();
     previewApi.handler = () => Promise.resolve(readyPreview(node));
     const handle: HostHandle = { state: null, backCalls: 0 };
     const host = (
@@ -1576,6 +1576,25 @@ describe("TimelineWorkspace creation asset policy", () => {
       ),
     };
   }
+
+  it("binds a newly created track to the selected inherited sprite", async () => {
+    const node = timelineNode({ tracks: [] });
+    const { view, handle } = renderWorkspaceWith(
+      makeProject({ [NODE_ID]: node }),
+      undefined,
+      node,
+    );
+    await waitForReady();
+    selectFirstObject(view.container);
+    fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
+    expect(currentNode(handle).tracks[0]).toMatchObject({
+      type: "sprite",
+      sprite_id: "alice",
+      asset: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
+    expect(currentNode(handle).tracks).toHaveLength(1);
+  });
 
   it("disables video/SFX creation for hidden assets and commits nothing", async () => {
     const project = projectWith([VIDEO_ASSET, SFX_ASSET]);

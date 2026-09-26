@@ -172,6 +172,7 @@ export function GameplayPreview({
   const ackedRef = useRef<Set<string>>(new Set());
   const canvasHandleRef = useRef<SceneCanvasHandle | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const dialogueRef = useRef<DialogueBoxHandle>(null);
   const longTextRef = useRef<LongTextPanelHandle>(null);
   const uiMotionHost = useMemo(() => new UiMotionHost(), []);
@@ -199,13 +200,18 @@ export function GameplayPreview({
   );
   const fontKey = fontAsset?.id ?? "system";
 
-  // Keep the design surface scaled into the available editor width.
+  // Fit both dimensions of the remaining space below the preview controls.
   useEffect(() => {
-    const element = stageRef.current;
+    const element = viewportRef.current;
     if (element === null) return;
     const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width ?? 0;
-      if (width > 0) setScale(width / DESIGN_WIDTH);
+      const { width, height } = entries[0]?.contentRect ?? {
+        width: 0,
+        height: 0,
+      };
+      if (width > 0 && height > 0) {
+        setScale(Math.min(width / DESIGN_WIDTH, height / DESIGN_HEIGHT));
+      }
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -724,139 +730,142 @@ export function GameplayPreview({
         </div>
       )}
 
-      <div
-        className="gameplay-preview-stage"
-        onPointerLeave={clearPointer}
-        onPointerMove={handleStagePointerMove}
-        ref={stageRef}
-        style={{ height: Math.round(DESIGN_HEIGHT * scale) }}
-      >
+      <div className="gameplay-preview-viewport" ref={viewportRef}>
         <div
-          className="gameplay-preview-design"
-          style={{
-            transform: `scale(${scale})`,
-            width: DESIGN_WIDTH,
-            height: DESIGN_HEIGHT,
-          }}
+          className="gameplay-preview-stage"
+          onPointerLeave={clearPointer}
+          onPointerMove={handleStagePointerMove}
+          ref={stageRef}
+          style={{ width: DESIGN_WIDTH * scale, height: DESIGN_HEIGHT * scale }}
         >
-          <SceneCanvas
-            animations={animations}
-            assets={assets}
-            onDiagnostic={onError}
-            onSettled={handleSettled}
-            paused={status !== "playing"}
-            playbackRate={1}
-            ref={attachCanvas}
-            settings={PREVIEW_SETTINGS}
-            suppressOneShots={false}
-            typingSfxActive={false}
-            typingSfxCps={PREVIEW_SETTINGS.text_speed_cps}
-            uiMotionHost={uiMotionHost}
-            update={status === "playing" ? update : null}
-            visible={status === "playing"}
-          />
-          {snapshot !== null && status === "playing" && (
-            <ButtonLayer
+          <div
+            className="gameplay-preview-design"
+            style={{
+              transform: `scale(${scale})`,
+              width: DESIGN_WIDTH,
+              height: DESIGN_HEIGHT,
+            }}
+          >
+            <SceneCanvas
               animations={animations}
               assets={assets}
-              disabled={busy || update?.requires_ack === true}
-              onClick={clickButton}
-              paused={false}
+              onDiagnostic={onError}
+              onSettled={handleSettled}
+              paused={status !== "playing"}
               playbackRate={1}
-              snapshot={snapshot}
-              timeline={timelineCue}
+              ref={attachCanvas}
+              settings={PREVIEW_SETTINGS}
+              suppressOneShots={false}
+              typingSfxActive={false}
+              typingSfxCps={PREVIEW_SETTINGS.text_speed_cps}
+              uiMotionHost={uiMotionHost}
+              update={status === "playing" ? update : null}
+              visible={status === "playing"}
             />
-          )}
-          {dialoguePage !== null && status === "playing" && (
-            <DialogueBox
-              defaultCps={PREVIEW_SETTINGS.text_speed_cps}
-              dialogueBoxSource={
-                resolveImageAsset("gui.dialogue_box", assets, animations) ??
-                null
-              }
-              disabled={busy}
-              fontReady={gameplayFont.ready}
-              initialCps={PREVIEW_SETTINGS.text_speed_cps}
-              key={`${scope}:${update?.update_id ?? "0"}:${dialogue?.prompt_id ?? ""}`}
-              measurementScale={scale}
-              motionHost={uiMotionHost}
-              nameBoxSource={
-                resolveImageAsset("gui.name_box", assets, animations) ?? null
-              }
-              onRevealComplete={setRevealCompleteKey}
-              onTypingChange={() => undefined}
-              page={dialoguePage}
-              prompt={dialogue}
-              ref={dialogueRef}
-              revealAnimation={PREVIEW_SETTINGS.text_reveal_animation}
-              revealImmediately={!hasTextRevealCue}
-              sessionKey={
-                dialogue === null
-                  ? undefined
-                  : `${update?.update_id ?? "0"}:${dialogue.prompt_id}`
-              }
-              visible={snapshot?.world.dialogue_ui_visible ?? false}
-            />
-          )}
-          {longTextPage !== null && status === "playing" && (
-            <LongTextPanel
-              defaultCps={PREVIEW_SETTINGS.text_speed_cps}
-              designScale={scale}
-              disabled={busy || longText === null}
-              fastForward={false}
-              fontKey={fontKey}
-              fontReady={gameplayFont.ready}
-              initialCps={PREVIEW_SETTINGS.text_speed_cps}
-              key={`${scope}:${longTextPage.document_id}`}
-              onRevealComplete={setRevealCompleteKey}
-              onTypingChange={() => undefined}
-              page={longTextPage}
-              paperSource={
-                longTextPage.paper === null || longTextPage.paper === undefined
-                  ? undefined
-                  : (resolveImageAsset(
-                      longTextPage.paper,
-                      assets,
-                      animations,
-                    ) ?? null)
-              }
-              prompt={longText}
-              ref={longTextRef}
-              revealAnimation={PREVIEW_SETTINGS.text_reveal_animation}
-              revealImmediately={!hasTextRevealCue}
-              sessionKey={
-                longText === null
-                  ? undefined
-                  : `${update?.update_id ?? "0"}:${longText.prompt_id}`
-              }
-              visible={longTextPage.visible !== false}
-            />
-          )}
-          {choice !== null && status === "playing" && (
-            <ChoiceLayer
-              animations={animations}
-              assets={assets}
-              disabled={busy || update?.requires_ack === true}
-              onChoose={choose}
-              onDiagnostic={(diagnostic) => onError(diagnostic.message)}
-              paused={false}
-              prompt={choice}
-            />
-          )}
-          {endPrompt && status === "playing" && (
-            <div className="gameplay-preview-end">场景结束</div>
-          )}
-          {status !== "playing" && (
-            <p className="gameplay-preview-placeholder">
-              选择一个起点开始预览：场景入口、所选节点，或重置后直接从此节点。
-            </p>
+            {snapshot !== null && status === "playing" && (
+              <ButtonLayer
+                animations={animations}
+                assets={assets}
+                disabled={busy || update?.requires_ack === true}
+                onClick={clickButton}
+                paused={false}
+                playbackRate={1}
+                snapshot={snapshot}
+                timeline={timelineCue}
+              />
+            )}
+            {dialoguePage !== null && status === "playing" && (
+              <DialogueBox
+                defaultCps={PREVIEW_SETTINGS.text_speed_cps}
+                dialogueBoxSource={
+                  resolveImageAsset("gui.dialogue_box", assets, animations) ??
+                  null
+                }
+                disabled={busy}
+                fontReady={gameplayFont.ready}
+                initialCps={PREVIEW_SETTINGS.text_speed_cps}
+                key={`${scope}:${update?.update_id ?? "0"}:${dialogue?.prompt_id ?? ""}`}
+                measurementScale={scale}
+                motionHost={uiMotionHost}
+                nameBoxSource={
+                  resolveImageAsset("gui.name_box", assets, animations) ?? null
+                }
+                onRevealComplete={setRevealCompleteKey}
+                onTypingChange={() => undefined}
+                page={dialoguePage}
+                prompt={dialogue}
+                ref={dialogueRef}
+                revealAnimation={PREVIEW_SETTINGS.text_reveal_animation}
+                revealImmediately={!hasTextRevealCue}
+                sessionKey={
+                  dialogue === null
+                    ? undefined
+                    : `${update?.update_id ?? "0"}:${dialogue.prompt_id}`
+                }
+                visible={snapshot?.world.dialogue_ui_visible ?? false}
+              />
+            )}
+            {longTextPage !== null && status === "playing" && (
+              <LongTextPanel
+                defaultCps={PREVIEW_SETTINGS.text_speed_cps}
+                designScale={scale}
+                disabled={busy || longText === null}
+                fastForward={false}
+                fontKey={fontKey}
+                fontReady={gameplayFont.ready}
+                initialCps={PREVIEW_SETTINGS.text_speed_cps}
+                key={`${scope}:${longTextPage.document_id}`}
+                onRevealComplete={setRevealCompleteKey}
+                onTypingChange={() => undefined}
+                page={longTextPage}
+                paperSource={
+                  longTextPage.paper === null ||
+                  longTextPage.paper === undefined
+                    ? undefined
+                    : (resolveImageAsset(
+                        longTextPage.paper,
+                        assets,
+                        animations,
+                      ) ?? null)
+                }
+                prompt={longText}
+                ref={longTextRef}
+                revealAnimation={PREVIEW_SETTINGS.text_reveal_animation}
+                revealImmediately={!hasTextRevealCue}
+                sessionKey={
+                  longText === null
+                    ? undefined
+                    : `${update?.update_id ?? "0"}:${longText.prompt_id}`
+                }
+                visible={longTextPage.visible !== false}
+              />
+            )}
+            {choice !== null && status === "playing" && (
+              <ChoiceLayer
+                animations={animations}
+                assets={assets}
+                disabled={busy || update?.requires_ack === true}
+                onChoose={choose}
+                onDiagnostic={(diagnostic) => onError(diagnostic.message)}
+                paused={false}
+                prompt={choice}
+              />
+            )}
+            {endPrompt && status === "playing" && (
+              <div className="gameplay-preview-end">场景结束</div>
+            )}
+            {status !== "playing" && (
+              <p className="gameplay-preview-placeholder">
+                选择一个起点开始预览：场景入口、所选节点，或重置后直接从此节点。
+              </p>
+            )}
+          </div>
+          {pointer !== null && (
+            <div className="gameplay-preview-coords" aria-hidden="true">
+              X {Math.round(pointer.x)} · Y {Math.round(pointer.y)}
+            </div>
           )}
         </div>
-        {pointer !== null && (
-          <div className="gameplay-preview-coords" aria-hidden="true">
-            X {Math.round(pointer.x)} · Y {Math.round(pointer.y)}
-          </div>
-        )}
       </div>
     </section>
   );

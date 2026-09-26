@@ -324,12 +324,12 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
           if (
             (channel === "scale_x" || channel === "scale_y") &&
             typeof frame.value === "number" &&
-            frame.value <= 0
+            frame.value === 0
           )
             diagnostics.push(
               error(
                 "invalid_button_range",
-                `按钮模板 ${template.id} 缩放必须大于 0`,
+                `按钮模板 ${template.id} 缩放不能为 0`,
               ),
             );
           previous = frame.at_ms;
@@ -648,10 +648,8 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
           frame.at_ms < 0 ||
           frame.at_ms <= previous ||
           frame.at_ms > definition.duration_ms ||
-          ((channel === "scale" ||
-            channel === "scale_x" ||
-            channel === "scale_y") &&
-            value <= 0) ||
+          (channel === "scale" && value <= 0) ||
+          ((channel === "scale_x" || channel === "scale_y") && value === 0) ||
           (channel === "opacity" && (value < 0 || value > 1)) ||
           (frame.parameter != null && parameters[frame.parameter] === undefined)
         ) {
@@ -1851,17 +1849,12 @@ function validateNode(
             }
             if (
               !inherited &&
-              [
-                "scale",
-                "scale_x",
-                "scale_y",
-                "zoom",
-                "width",
-                "height",
-              ].includes(channel) &&
-              (frame.value as number) <= 0
+              ((["scale", "zoom", "width", "height"].includes(channel) &&
+                (frame.value as number) <= 0) ||
+                (["scale_x", "scale_y"].includes(channel) &&
+                  (frame.value as number) === 0))
             ) {
-              issue("invalid_timeline_range", `${channel} 关键帧必须大于 0`);
+              issue("invalid_timeline_range", `${channel} 关键帧缩放无效`);
             }
             if (typeof frame.easing === "object") {
               const [x1, y1, x2, y2] = frame.easing.cubic_bezier;
@@ -2045,10 +2038,8 @@ function validateButtonLayout(
     issue("invalid_button_layout", "按钮宽度必须为正数");
   if (node.height != null && node.height <= 0)
     issue("invalid_button_layout", "按钮高度必须为正数");
-  if (node.scale_x != null && node.scale_x <= 0)
-    issue("invalid_button_layout", "横向缩放必须为正数");
-  if (node.scale_y != null && node.scale_y <= 0)
-    issue("invalid_button_layout", "纵向缩放必须为正数");
+  if (node.scale_x === 0) issue("invalid_button_layout", "横向缩放不能为 0");
+  if (node.scale_y === 0) issue("invalid_button_layout", "纵向缩放不能为 0");
   if (node.opacity != null && (node.opacity < 0 || node.opacity > 1))
     issue("invalid_button_layout", "透明度必须在 0–1 之间");
 }
@@ -2214,12 +2205,12 @@ function validateUiMotionPreset(
         if (
           ["scale_x", "scale_y"].includes(channel) &&
           typeof frame.value === "number" &&
-          frame.value <= 0
+          frame.value === 0
         ) {
           output.push(
             error(
               "invalid_ui_motion_range",
-              `UI 动效 ${preset.id} 的缩放必须大于 0`,
+              `UI 动效 ${preset.id} 的缩放不能为 0`,
             ),
           );
         }
@@ -2467,6 +2458,12 @@ function reachabilityWarnings(
     if (node === undefined) continue;
     for (const port of outputPorts(node)) {
       queue.push([port.targetScene ?? sceneId, port.target]);
+    }
+    // The secondary runtime enters its own scene while the main flow follows next.
+    if (node.type === "open_window") {
+      const windowScene = sceneById.get(node.scene);
+      if (windowScene !== undefined)
+        queue.push([windowScene.id, windowScene.entry]);
     }
   }
   const warnings: EditorDiagnostic[] = [];

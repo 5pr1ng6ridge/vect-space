@@ -879,17 +879,25 @@ export function TimelineWorkspace({
 
   const addTrack = (): void => {
     const current = nodeRef.current;
-    if (newTrackType === "button" && selectedButtonInstanceId === "") {
+    const selected =
+      selectedId === null
+        ? undefined
+        : frame?.objects.find((object) => object.id === selectedId);
+    const trackType = selected?.kind ?? newTrackType;
+    if (
+      trackType === "button" &&
+      selected === undefined &&
+      selectedButtonInstanceId === ""
+    ) {
       onError("当前场景没有可添加到时间线的按钮实例。");
       return;
     }
     if (
-      newTrackType === "button" &&
-      selectedButtonInstanceId !== "" &&
+      trackType === "button" &&
       current.tracks.some(
         (track) =>
           track.type === "button" &&
-          track.instance_id === selectedButtonInstanceId,
+          track.instance_id === (selected?.id ?? selectedButtonInstanceId),
       )
     ) {
       onError("同一时间线中不能重复添加同一按钮实例轨道。");
@@ -905,30 +913,74 @@ export function TimelineWorkspace({
           ),
       ) ?? "slot_1";
     if (
-      newTrackType === "ambience" &&
+      trackType === "ambience" &&
       current.tracks.filter((track) => track.type === "ambience").length >=
         AMBIENCE_SLOTS.length
     ) {
       onError("环境声轨道最多只能使用四个固定槽位。");
       return;
     }
-    if (newTrackType === "video" && videoAsset === null) {
+    if (
+      trackType === "video" &&
+      selected === undefined &&
+      videoAsset === null
+    ) {
       onError("没有可用的视频素材（或全部已隐藏），无法新建视频轨。");
       return;
     }
+    if (
+      trackType === "video" &&
+      current.tracks.some((track) => track.type === "video")
+    ) {
+      onError("一条时间线只能有一条视频轨。");
+      return;
+    }
+    if (
+      (trackType === "camera" || trackType === "bgm") &&
+      current.tracks.some((track) => track.type === trackType)
+    ) {
+      onError(`一条时间线只能有一条${trackType}轨。`);
+      return;
+    }
+    const spriteId =
+      selected?.kind === "sprite"
+        ? selected.id
+        : (() => {
+            const used = new Set([
+              ...current.tracks
+                .filter((track) => track.type === "sprite")
+                .map((track) => track.sprite_id),
+              ...(frame?.objects ?? []).map((object) => object.id),
+            ]);
+            let index = 1;
+            while (used.has(`sprite_${index}`)) index += 1;
+            return `sprite_${index}`;
+          })();
+    if (
+      trackType === "sprite" &&
+      current.tracks.some(
+        (track) => track.type === "sprite" && track.sprite_id === spriteId,
+      )
+    ) {
+      onError("选中的立绘已有时间线轨道。");
+      return;
+    }
     const track: TimelineTrack =
-      newTrackType === "sprite"
+      trackType === "sprite"
         ? {
             type: "sprite",
-            sprite_id: `sprite_${current.tracks.length + 1}`,
-            asset: spriteAsset,
+            sprite_id: spriteId,
+            asset: selected?.kind === "sprite" ? null : spriteAsset,
             remove_at_end: false,
             channels: {},
           }
-        : newTrackType === "video"
+        : trackType === "video"
           ? {
               type: "video",
-              asset: videoAsset ?? "",
+              asset:
+                selected?.kind === "video"
+                  ? selected.asset
+                  : (videoAsset ?? ""),
               clip_start_ms: 0,
               clip_end_ms: null,
               loop: false,
@@ -936,15 +988,18 @@ export function TimelineWorkspace({
               audio_enabled: true,
               channels: {},
             }
-          : newTrackType === "button"
+          : trackType === "button"
             ? {
                 type: "button",
-                instance_id: selectedButtonInstanceId || "button_1",
+                instance_id:
+                  selected?.kind === "button"
+                    ? selected.id
+                    : selectedButtonInstanceId,
                 channels: {},
               }
-            : newTrackType === "ambience"
+            : trackType === "ambience"
               ? { type: "ambience", slot: ambienceSlot, channels: {} }
-              : { type: newTrackType, channels: {} };
+              : { type: trackType, channels: {} };
     commitNode({ ...current, tracks: [...current.tracks, track] });
   };
 
@@ -1474,10 +1529,16 @@ export function TimelineWorkspace({
               </select>
             )}
             <button
-              disabled={newTrackType === "video" && visibleVideo === null}
+              disabled={
+                selectedObject === undefined &&
+                newTrackType === "video" &&
+                visibleVideo === null
+              }
               onClick={addTrack}
               title={
-                newTrackType === "video" && visibleVideo === null
+                selectedObject === undefined &&
+                newTrackType === "video" &&
+                visibleVideo === null
                   ? "没有可用的视频素材（或全部已隐藏），无法新建视频轨"
                   : undefined
               }

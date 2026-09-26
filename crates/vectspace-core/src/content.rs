@@ -1167,8 +1167,9 @@ fn validate_action_document(action: &SpriteActionDefinition) -> Result<(), Conte
             if keyframe.at_ms > action.duration_ms
                 || previous.is_some_and(|at| keyframe.at_ms <= at)
                 || !keyframe.value.is_finite()
-                || (matches!(channel.as_str(), "scale" | "scale_x" | "scale_y")
-                    && keyframe.value <= 0.0)
+                || (channel == "scale" && keyframe.value <= 0.0)
+                || (matches!(channel.as_str(), "scale_x" | "scale_y")
+                    && keyframe.value == 0.0)
                 || (channel == "opacity" && !(0.0..=1.0).contains(&keyframe.value))
             {
                 return Err(ContentError::Validation(format!(
@@ -2376,7 +2377,7 @@ fn validate_scenes(
                         }
                     }
                     for (label, value) in [("scale_x", *scale_x), ("scale_y", *scale_y)] {
-                        if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                        if value.is_some_and(|value| !value.is_finite() || value == 0.0) {
                             return node_error(
                                 scene_id,
                                 node_id,
@@ -2428,13 +2429,13 @@ fn validate_scenes(
                             );
                         }
                     }
-                    for (label, value) in [
-                        ("width", *width),
-                        ("height", *height),
-                        ("scale_x", *scale_x),
-                        ("scale_y", *scale_y),
-                    ] {
+                    for (label, value) in [("width", *width), ("height", *height)] {
                         if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                            return node_error(scene_id, node_id, &format!("按钮 {label} 必须是有限正数"));
+                        }
+                    }
+                    for (label, value) in [("scale_x", *scale_x), ("scale_y", *scale_y)] {
+                        if value.is_some_and(|value| !value.is_finite() || value == 0.0) {
                             return node_error(
                                 scene_id,
                                 node_id,
@@ -2732,12 +2733,11 @@ fn validate_timeline_channels(
                         &format!("时间线通道 {name} 必须在 0 到 1 之间"),
                     );
                 }
-                if matches!(
-                    name.as_str(),
-                    "scale" | "scale_x" | "scale_y" | "zoom" | "width" | "height"
-                ) && value <= 0.0
+                if (matches!(name.as_str(), "scale" | "zoom" | "width" | "height")
+                    && value <= 0.0)
+                    || (matches!(name.as_str(), "scale_x" | "scale_y") && value == 0.0)
                 {
-                    return node_error(scene_id, node_id, &format!("时间线通道 {name} 必须大于 0"));
+                    return node_error(scene_id, node_id, &format!("时间线通道 {name} 缩放无效"));
                 }
             }
             if let TimelineEasing::CubicBezier { cubic_bezier } = &keyframe.easing {
@@ -4875,6 +4875,43 @@ mod tests {
         let options = serde_saphyr::options! { strict_booleans: true };
         let result = serde_saphyr::from_str_with_options::<ContentManifest>(yaml, options);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn axis_scale_keyframes_allow_mirroring_but_not_zero() {
+        for channel in ["scale_x", "scale_y"] {
+            let frames = |value| {
+                BTreeMap::from([(
+                    channel.to_owned(),
+                    vec![TimelineKeyframe {
+                        at_ms: 0,
+                        value: TimelineKeyframeValue::Number(value),
+                        easing: TimelineEasing::Preset(TimelineEasingPreset::Linear),
+                    }],
+                )])
+            };
+            let mut count = 0;
+            assert!(validate_timeline_channels(
+                &frames(-1.0),
+                &[channel],
+                100,
+                "scene",
+                "node",
+                &mut count,
+                true
+            )
+            .is_ok());
+            assert!(validate_timeline_channels(
+                &frames(0.0),
+                &[channel],
+                100,
+                "scene",
+                "node",
+                &mut count,
+                true
+            )
+            .is_err());
+        }
     }
 
     #[test]

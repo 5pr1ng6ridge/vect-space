@@ -12,8 +12,10 @@ import {
   type ReactNode,
 } from "react";
 
+import { ASSET_DRAG_TYPE, draggedAssetId } from "../assetDrag";
 import {
   assetChoiceOptions,
+  isAssetHidden,
   type AssetChoiceOption,
   type AssetFileLike,
 } from "../assetLibrary";
@@ -347,6 +349,32 @@ export function AssetChooser(props: AssetChooserProps): ReactElement {
   return (
     <div
       className={`asset-chooser${className === undefined ? "" : ` ${className}`}`}
+      onDragOver={(event) => {
+        if (
+          disabled ||
+          !Array.from(event.dataTransfer.types).includes(ASSET_DRAG_TYPE)
+        )
+          return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={(event) => {
+        // Consume internal drops even when the kind is incompatible: never
+        // bubble to a parent drop target or disturb the current field value.
+        if (!event.dataTransfer.getData(ASSET_DRAG_TYPE)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (disabled) return;
+        const id = draggedAssetId(event.dataTransfer, assets, kinds);
+        if (
+          id === null ||
+          (!includeHidden &&
+            isAssetHidden(layout, id) &&
+            !(props.multiple ? props.value.includes(id) : props.value === id))
+        )
+          return;
+        choose({ id });
+      }}
       ref={containerRef}
     >
       <button

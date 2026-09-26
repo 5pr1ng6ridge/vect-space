@@ -8,7 +8,9 @@
   --chrome-height: 64px;
   --status-height: 30px;
   grid-template-columns:
-    min(var(--left-sidebar-width), 24vw) minmax(0, 1fr)
+    calc(
+      min(var(--left-sidebar-width), 24vw) + var(--asset-detail-width)
+    ) minmax(0, 1fr)
     min(var(--right-sidebar-width), 30vw);
   grid-template-rows: var(--chrome-height) minmax(0, 1fr) var(--status-height);
   background: #101217;
@@ -64,6 +66,7 @@
 }
 
 .project-sidebar {
+  width: min(var(--left-sidebar-width), 24vw);
   min-width: 0;
 }
 .sidebar-tabs {
@@ -228,7 +231,9 @@
   width: 6px;
 }
 .resize-handle-left {
-  left: calc(min(var(--left-sidebar-width), 24vw) - 3px);
+  left: calc(
+    min(var(--left-sidebar-width), 24vw) + var(--asset-detail-width) - 3px
+  );
 }
 .resize-handle-right {
   right: calc(min(var(--right-sidebar-width), 30vw) - 3px);
@@ -272,7 +277,7 @@
 .editor-shell.panels-hidden {
   grid-template-columns: 0 minmax(0, 1fr) 0;
 }
-.panels-hidden > .project-sidebar,
+.panels-hidden > .left-panels,
 .panels-hidden > .inspector,
 .panels-hidden > .resize-handle {
   display: none;
@@ -306,7 +311,9 @@
 @media (max-width: 760px) {
   .editor-shell {
     --chrome-height: 98px;
-    grid-template-columns: min(var(--left-sidebar-width), 32vw) minmax(0, 1fr) 0;
+    grid-template-columns: calc(
+        min(var(--left-sidebar-width), 32vw) + var(--asset-detail-width)
+      ) minmax(0, 1fr) 0;
     grid-template-rows:
       var(--chrome-height) minmax(0, 1fr) minmax(120px, 30%)
       var(--status-height);
@@ -322,6 +329,12 @@
   }
   .toolbar-actions button {
     flex-shrink: 0;
+  }
+  .left-panels > .project-sidebar {
+    width: min(var(--left-sidebar-width), 32vw);
+  }
+  .editor-shell:not(.panels-hidden):has(.asset-detail-column:not(:empty)) {
+    --asset-detail-width: min(220px, 32vw);
   }
   .editor-shell > .inspector {
     grid-column: 1 / -1;
@@ -342,7 +355,9 @@
     display: none;
   }
   .resize-handle-left {
-    left: calc(min(var(--left-sidebar-width), 32vw) - 3px);
+    left: calc(
+      min(var(--left-sidebar-width), 32vw) + var(--asset-detail-width) - 3px
+    );
     bottom: calc(30% + var(--status-height));
   }
   .sidebar-tabs {

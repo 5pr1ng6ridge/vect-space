@@ -813,6 +813,43 @@ describe("story graph mapping", () => {
     expect(codes).toContain("invalid_long_text_font_size");
   });
 
+  it("allows negative axis scale for a timeline mirror but rejects zero", () => {
+    const mirrored = project();
+    mirrored.scenes[0].definition.nodes.mirror = {
+      type: "timeline",
+      duration_ms: 100,
+      await: true,
+      skippable: true,
+      tracks: [
+        {
+          type: "sprite",
+          sprite_id: "mirror",
+          asset: null,
+          remove_at_end: false,
+          channels: { scale_x: [{ at_ms: 0, value: -1, easing: "linear" }] },
+        },
+      ],
+      events: [],
+      next: "end",
+    };
+    expect(
+      validateLive(mirrored).some(
+        (issue) => issue.code === "invalid_timeline_range",
+      ),
+    ).toBe(false);
+    const node = mirrored.scenes[0].definition.nodes.mirror;
+    if (node.type !== "timeline" || node.tracks[0]?.type !== "sprite")
+      throw new Error("missing track");
+    const scaleFrame = node.tracks[0].channels.scale_x?.[0];
+    if (scaleFrame === undefined) throw new Error("missing scale keyframe");
+    scaleFrame.value = 0;
+    expect(
+      validateLive(mirrored).some(
+        (issue) => issue.code === "invalid_timeline_range",
+      ),
+    ).toBe(true);
+  });
+
   it("surfaces timeline and BGM data Rust would reject on save", () => {
     const invalid = project();
     invalid.scenes[0].definition.nodes.bad_bgm = {
@@ -1016,6 +1053,31 @@ describe("chapter map reachability", () => {
     // The room map is a real entry point, so a chapter reachable only through
     // it must not be flagged as unreachable from the story entry.
     expect(unreachable(projectWithMap("always", "always"))).toEqual([]);
+  });
+
+  it("counts only a reached secondary-window entry and its descendants", () => {
+    const opened = project();
+    opened.scenes[0].definition.nodes.start = {
+      type: "open_window",
+      scene: "extras",
+      next: "end",
+    };
+    opened.scenes.push({
+      path: "scenes/extras.yaml",
+      definition: {
+        schema_version: 2,
+        id: "extras",
+        entry: "entry",
+        nodes: {
+          entry: { type: "jump", scene: null, target: "finish" },
+          finish: { type: "end" },
+        },
+      },
+    });
+    expect(unreachable(opened)).not.toContain("extras/entry");
+    expect(unreachable(opened)).not.toContain("extras/finish");
+    opened.scenes[0].definition.nodes.start = { type: "end" };
+    expect(unreachable(opened)).toContain("extras/entry");
   });
 
   it("still reports a chapter that is hidden or locked behind completion", () => {

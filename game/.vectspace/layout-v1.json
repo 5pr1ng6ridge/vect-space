@@ -1,29 +1,122 @@
 {
   "version": 1,
   "scenes": {
+    "ambience_lab": {
+      "nodes": {},
+      "viewport": {
+        "x": 36.46564544592343,
+        "y": -113.67782215792045,
+        "zoom": 1.0338285194973316
+      }
+    },
     "ch0": {
       "nodes": {
+        "ambience_background_start": {
+          "x": 392.0,
+          "y": 12.0
+        },
         "background_start": {
-          "x": -304.0,
-          "y": 112.0
+          "x": 12.0,
+          "y": 12.0
+        },
+        "long_text_say_say_say_start": {
+          "x": 3052.0,
+          "y": 12.0
+        },
+        "long_text_say_say_say_start_continue": {
+          "x": 3812.0,
+          "y": 12.0
+        },
+        "open_window_sprite_say_say_say_start": {
+          "x": 2672.0,
+          "y": 12.0
+        },
+        "say_say_say_start": {
+          "x": 1912.0,
+          "y": 12.0
+        },
+        "say_say_start": {
+          "x": 1532.0,
+          "y": 12.0
+        },
+        "say_start": {
+          "x": 1152.0,
+          "y": 12.0
+        },
+        "sprite_ambience_background_start": {
+          "x": 772.0,
+          "y": 12.0
+        },
+        "sprite_long_text_say_say_say_start_continue": {
+          "x": 4160.0,
+          "y": 192.0
+        },
+        "sprite_say_say_say_start": {
+          "x": 2292.0,
+          "y": 12.0
+        },
+        "sprite_say_start": {
+          "x": 1492.0,
+          "y": 192.0
         },
         "start": {
-          "x": 120.0,
-          "y": 120.0
+          "x": 4192.0,
+          "y": 12.0
+        },
+        "timeline_start": {
+          "x": 3432.0,
+          "y": 12.0
         }
       },
       "viewport": {
-        "x": 535.4955328007427,
-        "y": 131.00900396390298,
-        "zoom": 0.9000000000000004
+        "x": -892.4801837423433,
+        "y": 191.84930532158353,
+        "zoom": 0.7412319155408176
       }
     },
     "character_action_showcase": {
-      "nodes": {},
+      "nodes": {
+        "alli_show": {
+          "x": 392.0,
+          "y": 12.0
+        },
+        "alli_smug": {
+          "x": 1532.0,
+          "y": 12.0
+        },
+        "bounce": {
+          "x": 1912.0,
+          "y": 12.0
+        },
+        "end": {
+          "x": 3052.0,
+          "y": 12.0
+        },
+        "finish_line": {
+          "x": 2672.0,
+          "y": 12.0
+        },
+        "hello": {
+          "x": 1152.0,
+          "y": 12.0
+        },
+        "room": {
+          "x": 12.0,
+          "y": 12.0
+        },
+        "sat_show": {
+          "x": 772.0,
+          "y": 12.0
+        },
+        "stopmotion": {
+          "x": 2292.0,
+          "y": 12.0
+        }
+      },
       "viewport": {
-        "x": -246.2681844103563,
-        "y": 282.73848403039835,
-        "zoom": 1.1875571196956058
+        "x": -1370.2284289275638,
+        "y": 473.4642923985928,
+        "zoom": 0.6714656393947974
       }
     },
     "presentation_showcase": {
@@ -235,9 +328,9 @@
         }
       },
       "viewport": {
-        "x": -8398.389223367963,
-        "y": -501.9990710760392,
-        "zoom": 1.0446606759553505
+        "x": 318.9007219742309,
+        "y": -78.17189354469917,
+        "zoom": 0.6000000000000005
       }
     },
     "sandbox": {
@@ -334,11 +427,48 @@
       }
     },
     "surface_parity": {
-      "nodes": {},
+      "nodes": {
+        "alli_show": {
+          "x": 392.0,
+          "y": 12.0
+        },
+        "camera_push": {
+          "x": 772.0,
+          "y": 12.0
+        },
+        "end": {
+          "x": 2672.0,
+          "y": 12.0
+        },
+        "frames_timeline": {
+          "x": 1532.0,
+          "y": 12.0
+        },
+        "say_frames_timeline": {
+          "x": 1872.0,
+          "y": 192.0
+        },
+        "settle": {
+          "x": 2292.0,
+          "y": 12.0
+        },
+        "stage": {
+          "x": 12.0,
+          "y": 12.0
+        },
+        "stage_timeline": {
+          "x": 1152.0,
+          "y": 12.0
+        },
+        "video_timeline": {
+          "x": 1912.0,
+          "y": 12.0
+        }
+      },
       "viewport": {
-        "x": -48.56586999319495,
-        "y": 222.6742699384618,
-        "zoom": 0.5169142597486658
+        "x": 363.29516227456907,
+        "y": 299.4265549798466,
+        "zoom": 1.342931278789595
       }
     },
     "test_scene": {
@@ -382,6 +512,14 @@
         "zoom": 0.7542072648913443
       }
     },
+    "transition_lab": {
+      "nodes": {},
+      "viewport": {
+        "x": 174.66576981069136,
+        "y": -1132.539976482889,
+        "zoom": 1.1875571196956054
+      }
+    },
     "ui_motion_regression": {
       "nodes": {},
       "viewport": {
@@ -392,6 +530,10 @@
     }
   },
   "timeline_previews": {
+    "ch0/timeline_start": {
+      "variable_overrides": {},
+      "choices": []
+    },
     "prologue/sprite_move_jelly": {
       "variable_overrides": {},
       "choices": []
@@ -418,6 +560,155 @@
           "choice_id": "option_1"
         }
       ]
+    }
+  },
+  "asset_folders": {
+    "sm": {
+      "parent_id": null,
+      "name": "sm",
+      "order": 0
+    }
+  },
+  "asset_metadata": {
+    "sprite.stopmotion_01": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_02": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_03": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_04": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_05": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_06": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_07": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_08": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_09": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_10": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_11": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_12": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_13": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_14": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_15": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_16": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_17": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_18": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_19": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_20": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_21": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_22": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_23": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_24": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_25": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_26": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_27": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
+    },
+    "sprite.stopmotion_28": {
+      "folder_id": "sm",
+      "display_name": null,
+      "hidden": false
     }
   }
 }

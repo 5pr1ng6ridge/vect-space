@@ -64,6 +64,9 @@ export const editorApi = {
     command<string | null>("pick_project_directory"),
   pickAssetFiles: (): Promise<string[]> =>
     command<string[]>("pick_asset_files"),
+  revealAsset: async (id: string): Promise<void> => {
+    await command<null>("reveal_asset", { id });
+  },
   openProject: async (root: string): Promise<EditorProject> =>
     decodeEditorProject(await command<unknown>("open_project", { root })),
   saveProject: async (

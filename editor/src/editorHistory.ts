@@ -62,7 +62,12 @@ export type EditorMutation = (draft: EditorProject) => unknown;
 
 export type EditorAction =
   | { type: "load"; project: EditorProject }
-  | { type: "mark_saved"; project: EditorProject }
+  | {
+      type: "mark_saved";
+      project: EditorProject;
+      snapshot?: EditorProject;
+      revision?: number;
+    }
   | {
       type: "edit";
       mutation: EditorMutation;
@@ -169,19 +174,42 @@ export function editorReducer(
         nextRevision: 0,
         activeEdit: null,
       };
-    case "mark_saved":
+    case "mark_saved": {
+      // Edits can continue while I/O is in flight. Never replace a newer
+      // document with the save response for an older snapshot. Only rebase its
+      // fingerprint and published asset paths; a later save persists the edits.
+      const unchanged =
+        action.snapshot === undefined || state.project === action.snapshot;
+      const current = state.project;
+      const published = new Map(
+        action.project.assets.map((asset) => [asset.id, asset]),
+      );
       return {
         ...state,
-        project: action.project,
-        // Saving establishes a new clean baseline but must not discard the
-        // user's undo/redo history.  Undoing a change made before the save
-        // correctly makes the document dirty again because its revision is
-        // now different from savedRevision.
-        savedRevision: state.currentRevision,
-        dirty: false,
-        ephemeralDirty: false,
-        activeEdit: null,
+        project: unchanged
+          ? action.project
+          : current === null
+            ? null
+            : {
+                ...current,
+                fingerprint: action.project.fingerprint,
+                assets: current.assets.map((asset) => {
+                  const saved = published.get(asset.id);
+                  return saved !== undefined &&
+                    current.manifest.assets[asset.id]?.path ===
+                      action.project.manifest.assets[asset.id]?.path
+                    ? saved
+                    : asset;
+                }),
+              },
+        savedRevision: action.revision ?? state.currentRevision,
+        dirty:
+          !unchanged ||
+          state.currentRevision !== (action.revision ?? state.currentRevision),
+        ephemeralDirty: unchanged ? false : state.ephemeralDirty,
+        activeEdit: unchanged ? null : state.activeEdit,
       };
+    }
     case "edit":
       if (state.project === null) return state;
       {

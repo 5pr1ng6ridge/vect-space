@@ -261,14 +261,15 @@ code {
 /* Main layout */
 .editor-shell {
   --left-sidebar-width: 278px;
+  --asset-detail-width: 0px;
   --right-sidebar-width: 370px;
   position: relative;
   display: grid;
   width: 100%;
   height: 100%;
-  grid-template-columns: var(--left-sidebar-width) minmax(420px, 1fr) var(
-      --right-sidebar-width
-    );
+  grid-template-columns: calc(
+      var(--left-sidebar-width) + var(--asset-detail-width)
+    ) minmax(420px, 1fr) var(--right-sidebar-width);
   grid-template-rows: 58px minmax(0, 1fr);
   background: #0b0d12;
 }
@@ -306,7 +307,7 @@ code {
 }
 
 .resize-handle-left {
-  left: calc(var(--left-sidebar-width) - 4px);
+  left: calc(var(--left-sidebar-width) + var(--asset-detail-width) - 4px);
 }
 
 .resize-handle-right {
@@ -396,7 +397,28 @@ code {
 }
 
 /* Sidebar */
+.editor-shell:not(.panels-hidden):has(.asset-detail-column:not(:empty)) {
+  --asset-detail-width: 320px;
+}
+.left-panels {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  grid-column: 1;
+  grid-row: 2;
+}
+.asset-detail-column {
+  width: var(--asset-detail-width);
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  flex: none;
+}
 .project-sidebar {
+  width: var(--left-sidebar-width);
+  flex: none;
   display: flex;
   min-height: 0;
   border-right: 1px solid var(--line);
@@ -2780,9 +2802,9 @@ code {
 
 @media (max-width: 1280px) {
   .editor-shell {
-    grid-template-columns: var(--left-sidebar-width) minmax(380px, 1fr) var(
-        --right-sidebar-width
-      );
+    grid-template-columns: calc(
+        var(--left-sidebar-width) + var(--asset-detail-width)
+      ) minmax(380px, 1fr) var(--right-sidebar-width);
   }
   .workspace-hint {
     display: none;
@@ -4716,8 +4738,89 @@ body.timeline-resizing {
 }
 
 /* ------------------------------------------------------------------ *
- * Asset library: virtual folders, metadata and the shared chooser.
+ * Asset library: explorer tree, metadata and the shared chooser.
  * ------------------------------------------------------------------ */
+.asset-explorer-tree {
+  position: relative;
+  min-height: 120px;
+  flex: 1 1 auto;
+  user-select: none;
+}
+.asset-explorer-file {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 7px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.asset-explorer-file > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+}
+.asset-explorer-file small {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-explorer-file.active {
+  background: rgba(104, 215, 187, 0.14);
+}
+.asset-selection-box {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: rgba(104, 215, 187, 0.18);
+}
+.asset-context-menu {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  width: 200px;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #202733;
+  box-shadow: 0 8px 30px #0009;
+}
+.asset-context-menu button {
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.asset-context-menu button:hover:not(:disabled) {
+  background: rgba(104, 215, 187, 0.15);
+}
+.asset-detail-column .asset-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+.asset-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+.asset-detail-header button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
 .asset-folder-tree {
   display: flex;
   flex-direction: column;
@@ -4991,9 +5094,18 @@ body.timeline-resizing {
   flex-wrap: wrap;
 }
 
+.gameplay-preview-viewport {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+}
+
 .gameplay-preview-stage {
   position: relative;
-  width: 100%;
+  flex: none;
   overflow: hidden;
   background: #000;
 }

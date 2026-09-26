@@ -54,7 +54,7 @@ function Harness(): ReactElement {
         onChannelNameChange={setChannelName}
         onPlayheadChange={() => undefined}
         playhead={0}
-        showTransport={false}
+        showTransport
       />
       <output data-testid="doc">{JSON.stringify(document.tracks)}</output>
     </>
@@ -75,6 +75,15 @@ describe("TimelineSurface channel guard", () => {
     // allowed channel instead of rendering an invalid selection.
     expect(selectors[0]).toHaveValue("z");
     expect(selectors[1]).toHaveValue("x");
+  });
+
+  it("removes the channel after deleting its last keyframe", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getAllByRole("button", { name: "＋关键帧" })[0]);
+    expect(trackChannels()[0]?.channels).toHaveProperty("z");
+    fireEvent.pointerDown(screen.getByRole("button", { name: "z 0ms" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除关键帧" }));
+    expect(trackChannels()[0]?.channels).not.toHaveProperty("z");
   });
 
   it("never adds an unsupported channel to a track", () => {

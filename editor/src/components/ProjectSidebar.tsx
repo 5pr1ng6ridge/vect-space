@@ -8,6 +8,8 @@ import {
   type ReactNode,
   type UIEventHandler,
 } from "react";
+import { createPortal } from "react-dom";
+import { ASSET_DRAG_TYPE } from "../assetDrag";
 import { assetUrl, editorApi } from "../api";
 import {
   animationSourceId,
@@ -36,12 +38,14 @@ import {
   isAssetHidden,
   isValidAssetFolderName,
   moveAssetFolder,
-  moveAssetToFolder,
+  moveAssetsToFolder,
+  removeAssetFolder,
   renameAssetFolder,
   setAssetDisplayName,
   setAssetHidden,
   validateFolderMove,
   type AssetFolderNode,
+  type AssetChoiceOption,
 } from "../assetLibrary";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import { FrameSequencePreview } from "./FrameSequencePreview";
@@ -94,7 +98,7 @@ interface ProjectSidebarProps {
    */
   reservedAssetPaths?: Readonly<Record<string, readonly string[]>>;
   onCreateImageAnimation(draft: AnimationDraft): boolean;
-  onSelectAsset?(id: string): void;
+  onSelectAsset?(id: string | null): void;
   selectedAssetId?: string | null;
   onAddVariable(id: string, definition: VariableDefinition): boolean;
   onChangeVariable(id: string, definition: VariableDefinition): void;
@@ -356,6 +360,7 @@ export function ProjectSidebar({
           onImportAssets={onImportAssets}
           onRemoveAsset={onRemoveAsset}
           onScrollOffset={onScrollOffset}
+          onSelectAsset={onSelectAsset}
           selectedAssetId={selectedAssetId}
           scrollStore={scrollStore}
         />
@@ -649,11 +654,13 @@ function AssetsPanel({
   reservedAssetPaths,
   onCreateImageAnimation,
   onScrollOffset,
+  onSelectAsset,
   selectedAssetId,
   scrollStore,
 }: {
   project: EditorProject;
   onImportAssets(items: ImportDraft[]): Promise<void>;
+  onSelectAsset?(id: string | null): void;
   onRemoveAsset(id: string): boolean;
   onChangeAssetLayout?(
     mutate: (layout: EditorLayout) => EditorLayout,
@@ -672,6 +679,20 @@ function AssetsPanel({
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
+  const [contextMenu, setContextMenu] = useState<{
+    kind: "asset" | "folder" | "root";
+    id: string | null;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [selectionBox, setSelectionBox] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const explorerRef = useRef<HTMLDivElement>(null);
   const [showHidden, setShowHidden] = useState(true);
   const [folderFilter, setFolderFilter] = useState<string | null>("all");
   const [collapsedFolders, setCollapsedFolders] = useState<readonly string[]>(
@@ -707,14 +728,15 @@ function AssetsPanel({
         layout,
         kind: kindFilter === "all" ? undefined : kindFilter,
         query,
-        folderId: folderFilter === "all" ? undefined : folderFilter,
+        // Rows live under their own folder in the tree; selecting a folder
+        // expands it rather than filtering all other folders away.
         // The asset manager is manager mode: hidden assets stay visible so
         // they can be unhidden, renamed or edited.  The toggle only narrows
         // that list for authors who want to see the runtime-effective set.
         includeHidden: showHidden,
-        selectedIds: selected === null ? [] : [selected],
+        selectedIds,
       }),
-    [assets, layout, kindFilter, query, folderFilter, showHidden, selected],
+    [assets, layout, kindFilter, query, showHidden, selectedIds],
   );
   const folderTree = useMemo(() => buildAssetFolderTree(layout), [layout]);
   const folderOptions = useMemo(() => flattenAssetFolders(layout), [layout]);
@@ -754,7 +776,12 @@ function AssetsPanel({
   const moveAsset = (assetId: string, folderId: string | null): void => {
     setFolderError(null);
     commitLayout(
-      (current) => moveAssetToFolder(current, assetId, folderId),
+      (current) =>
+        moveAssetsToFolder(
+          current,
+          selectedIds.includes(assetId) ? selectedIds : [assetId],
+          folderId,
+        ),
       "移动素材到文件夹",
     );
   };
@@ -784,7 +811,15 @@ function AssetsPanel({
   ): void => {
     event.preventDefault();
     const payload = readAssetDragPayload(event);
-    if (payload.assetId !== undefined) moveAsset(payload.assetId, folderId);
+    const draggedAssets = payload.assetIds;
+    if (draggedAssets !== undefined) {
+      setFolderError(null);
+      commitLayout(
+        (current) => moveAssetsToFolder(current, draggedAssets, folderId),
+        "批量移动素材",
+      );
+    } else if (payload.assetId !== undefined)
+      moveAsset(payload.assetId, folderId);
     else if (payload.folderId !== undefined && payload.folderId !== folderId)
       moveFolder(payload.folderId, folderId);
   };
@@ -792,6 +827,110 @@ function AssetsPanel({
     () => new Map(assets.map((asset) => [asset.id, asset])),
     [assets],
   );
+  const selectAsset = (id: string, additive = false, range = false): void => {
+    const index = shown.findIndex((item) => item.id === id);
+    const anchor = shown.findIndex((item) => item.id === selected);
+    if (range && anchor >= 0) {
+      const ids = shown
+        .slice(Math.min(anchor, index), Math.max(anchor, index) + 1)
+        .map((item) => item.id);
+      setSelectedIds((current) => [...new Set([...current, ...ids])]);
+    } else if (additive) {
+      setSelectedIds((current) =>
+        current.includes(id)
+          ? current.filter((item) => item !== id)
+          : [...current, id],
+      );
+    } else setSelectedIds([id]);
+    setSelected(id);
+    onSelectAsset?.(id);
+  };
+  const revealAsset = (id: string): void => {
+    void editorApi.revealAsset(id).catch((reason: unknown) => {
+      setFolderError(reason instanceof Error ? reason.message : String(reason));
+    });
+  };
+  useEffect(() => {
+    if (contextMenu === null) return;
+    const dismiss = (): void => setContextMenu(null);
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") dismiss();
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [contextMenu]);
+  const renderAsset = (
+    option: AssetChoiceOption,
+    depth: number,
+  ): ReactElement => {
+    const asset = assetById.get(option.id);
+    const pending = pendingAssetIds.includes(option.id);
+    return (
+      <button
+        className={`asset-explorer-file${selectedIds.includes(option.id) ? " active" : ""}`}
+        data-explorer-asset-id={option.id}
+        draggable
+        key={option.id}
+        onClick={(event) =>
+          selectAsset(option.id, event.ctrlKey || event.metaKey, event.shiftKey)
+        }
+        onContextMenu={(event) => {
+          event.preventDefault();
+          if (!selectedIds.includes(option.id)) selectAsset(option.id);
+          setContextMenu({
+            kind: "asset",
+            id: option.id,
+            x: event.clientX,
+            y: event.clientY,
+          });
+        }}
+        onDragStart={(event) => {
+          event.dataTransfer.setData(ASSET_DRAG_TYPE, option.id);
+          if (selectedIds.includes(option.id) && selectedIds.length > 1) {
+            event.dataTransfer.setData(
+              "application/x-vect-assets",
+              JSON.stringify(selectedIds),
+            );
+          }
+          event.dataTransfer.effectAllowed = "copyMove";
+        }}
+        style={{ paddingLeft: `${(depth + 1) * 14 + 6}px` }}
+        type="button"
+      >
+        <span className={`asset-kind asset-kind-${option.kind}`}>
+          {option.kind.slice(0, 2).toUpperCase()}
+        </span>
+        <span>
+          <strong>
+            {option.label}
+            {option.label !== option.id && (
+              <small className="asset-id-chip">{option.id}</small>
+            )}
+            {asset?.animation !== undefined && (
+              <span className="animation-badge">动画</span>
+            )}
+            {option.hidden && (
+              <span className="asset-hidden-badge">已隐藏</span>
+            )}
+            {pending && <span className="asset-pending-badge">待保存</span>}
+          </strong>
+          <small>
+            {option.folderPath !== "" ? `目录：${option.folderPath} · ` : ""}
+            {asset === undefined
+              ? option.path
+              : assetDescription(asset, manifest)}{" "}
+            · {formatAssetSize(asset?.size_bytes)} ·{" "}
+            {formatAssetMetadata(asset?.metadata)} ·{" "}
+            {references.get(option.id)?.length ?? 0} 处引用
+          </small>
+        </span>
+      </button>
+    );
+  };
   const renderFolder = (node: AssetFolderNode): ReactElement => {
     const isCollapsed = collapsedFolders.includes(node.id);
     const count = assets.filter(
@@ -802,13 +941,22 @@ function AssetsPanel({
       <div className="asset-folder-branch" key={node.id}>
         <div
           className={`asset-folder-row${folderFilter === node.id ? " active" : ""}`}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setContextMenu({
+              kind: "folder",
+              id: node.id,
+              x: event.clientX,
+              y: event.clientY,
+            });
+          }}
           style={{ paddingLeft: `${node.depth * 14}px` }}
         >
           <button
             aria-expanded={!isCollapsed}
             aria-label={`${isCollapsed ? "展开" : "折叠"}文件夹 ${node.name}`}
             className="asset-folder-toggle"
-            disabled={!hasChildren}
+            disabled={!hasChildren && count === 0}
             onClick={() =>
               setCollapsedFolders((current) =>
                 isCollapsed
@@ -818,12 +966,19 @@ function AssetsPanel({
             }
             type="button"
           >
-            {hasChildren ? (isCollapsed ? "▸" : "▾") : "·"}
+            {hasChildren || count > 0 ? (isCollapsed ? "▸" : "▾") : "·"}
           </button>
           <button
             className="asset-folder-name"
             draggable
-            onClick={() => setFolderFilter(node.id)}
+            onClick={() => {
+              setFolderFilter(node.id);
+              setCollapsedFolders((current) =>
+                current.includes(node.id)
+                  ? current.filter((id) => id !== node.id)
+                  : [...current, node.id],
+              );
+            }}
             onDragOver={(event) => event.preventDefault()}
             onDragStart={(event) => {
               event.dataTransfer.setData("application/x-vect-folder", node.id);
@@ -859,6 +1014,27 @@ function AssetsPanel({
             ＋
           </button>
           <button
+            aria-label={`删除文件夹 ${node.name}`}
+            className="asset-folder-action"
+            onClick={() => {
+              if (
+                !window.confirm(
+                  `删除文件夹「${node.name}」？素材及子文件夹会移动到上级，不删除素材文件。`,
+                )
+              )
+                return;
+              commitLayout(
+                (current) => removeAssetFolder(current, node.id),
+                "删除素材文件夹",
+              );
+              if (folderFilter === node.id)
+                setFolderFilter(node.parentId ?? "all");
+            }}
+            type="button"
+          >
+            ×
+          </button>
+          <button
             aria-label={`移动文件夹 ${node.name}`}
             className="asset-folder-action"
             onClick={() => {
@@ -873,6 +1049,9 @@ function AssetsPanel({
         {!isCollapsed && (
           <>
             {node.children.map(renderFolder)}
+            {shown
+              .filter((option) => option.folderId === node.id)
+              .map((option) => renderAsset(option, node.depth))}
             {node.children.length === 0 && count === 0 && (
               <p
                 className="asset-folder-empty muted"
@@ -890,6 +1069,13 @@ function AssetsPanel({
     "assets",
     scrollStore,
     onScrollOffset,
+  );
+  const setExplorerRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      explorerRef.current = element;
+      assetListRef(element);
+    },
+    [assetListRef],
   );
   useEffect(() => {
     if (
@@ -1106,6 +1292,11 @@ function AssetsPanel({
       setImporting(false);
     }
   };
+  const menuAssetId = contextMenu?.id ?? "";
+  const mountDetail = (detail: ReactElement): ReactNode => {
+    const target = document.getElementById("asset-detail-column");
+    return target === null ? detail : createPortal(detail, target);
+  };
   return (
     <div
       className="sidebar-body asset-sidebar"
@@ -1175,6 +1366,38 @@ function AssetsPanel({
           >
             ＋ 新建文件夹
           </button>
+          {selectedIds.length > 1 && (
+            <label>
+              已选 {selectedIds.length} 项 · 移动到
+              <select
+                aria-label="批量移动到文件夹"
+                onChange={(event) => {
+                  const destination = event.currentTarget.value;
+                  setFolderError(null);
+                  commitLayout(
+                    (current) =>
+                      moveAssetsToFolder(
+                        current,
+                        selectedIds,
+                        destination === "" ? null : destination,
+                      ),
+                    "批量移动素材",
+                  );
+                }}
+                value="__choose__"
+              >
+                <option disabled value="__choose__">
+                  选择文件夹…
+                </option>
+                <option value="">未分组</option>
+                {folderOptions.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.path}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="asset-hidden-toggle">
             <input
               checked={showHidden}
@@ -1184,10 +1407,16 @@ function AssetsPanel({
             显示已隐藏
           </label>
         </div>
+        <small className="muted">
+          当前文件夹是虚拟分组；移动素材不会移动磁盘文件。
+        </small>
         <div className="asset-folder-roots">
           <button
             className={folderFilter === "all" ? "active" : ""}
-            onClick={() => setFolderFilter("all")}
+            onClick={() => {
+              setFolderFilter("all");
+              setCollapsedFolders([]);
+            }}
             type="button"
           >
             全部素材
@@ -1197,6 +1426,15 @@ function AssetsPanel({
             aria-label="未分组（根目录）"
             className={folderFilter === null ? "active" : ""}
             onClick={() => setFolderFilter(null)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setContextMenu({
+                kind: "root",
+                id: null,
+                x: event.clientX,
+                y: event.clientY,
+              });
+            }}
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => handleDrop(event, null)}
             type="button"
@@ -1204,222 +1442,441 @@ function AssetsPanel({
             未分组
           </button>
         </div>
-        {folderTree.map(renderFolder)}
-        {folderError !== null && (
-          <p className="inline-error" role="alert">
-            {folderError}
-          </p>
-        )}
       </div>
+      {folderError !== null && (
+        <p className="inline-error" role="alert">
+          {folderError}
+        </p>
+      )}
       <div
-        className="asset-list"
+        className="asset-list asset-explorer-tree"
         data-sidebar-scroller="assets"
         onScroll={onAssetListScroll}
-        ref={assetListRef}
+        onContextMenu={(event) => {
+          if (
+            event.target instanceof Element &&
+            event.target.closest("button,.asset-folder-row")
+          )
+            return;
+          event.preventDefault();
+          setContextMenu({
+            kind: "root",
+            id: null,
+            x: event.clientX,
+            y: event.clientY,
+          });
+        }}
+        onPointerDown={(event) => {
+          if (
+            event.button !== 0 ||
+            (event.target instanceof Element &&
+              event.target.closest("button,input,select"))
+          )
+            return;
+          const container = explorerRef.current;
+          if (container === null) return;
+          const startX = event.clientX;
+          const startY = event.clientY;
+          let moved = false;
+          const move = (pointer: PointerEvent): void => {
+            if (
+              Math.abs(pointer.clientX - startX) +
+                Math.abs(pointer.clientY - startY) <
+              4
+            )
+              return;
+            moved = true;
+            const rect = container.getBoundingClientRect();
+            const left = Math.max(rect.left, Math.min(startX, pointer.clientX));
+            const right = Math.min(
+              rect.right,
+              Math.max(startX, pointer.clientX),
+            );
+            const top = Math.max(rect.top, Math.min(startY, pointer.clientY));
+            const bottom = Math.min(
+              rect.bottom,
+              Math.max(startY, pointer.clientY),
+            );
+            setSelectionBox({
+              left: left - rect.left,
+              top: top - rect.top + container.scrollTop,
+              width: Math.max(0, right - left),
+              height: Math.max(0, bottom - top),
+            });
+            const ids = Array.from(
+              container.querySelectorAll<HTMLElement>(
+                "[data-explorer-asset-id]",
+              ),
+            )
+              .filter((row) => {
+                const bounds = row.getBoundingClientRect();
+                return (
+                  bounds.right >= left &&
+                  bounds.left <= right &&
+                  bounds.bottom >= top &&
+                  bounds.top <= bottom
+                );
+              })
+              .map((row) => row.dataset.explorerAssetId)
+              .filter((id): id is string => id !== undefined);
+            setSelectedIds(ids);
+            setSelected(ids.at(-1) ?? null);
+          };
+          const finish = (): void => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", finish);
+            setSelectionBox(null);
+            onSelectAsset?.(null);
+            if (!moved) {
+              setSelectedIds([]);
+              setSelected(null);
+            }
+          };
+          window.addEventListener("pointermove", move);
+          window.addEventListener("pointerup", finish, { once: true });
+          window.addEventListener("pointercancel", finish, { once: true });
+        }}
+        ref={setExplorerRef}
       >
+        {folderTree.map(renderFolder)}
         {assets.length === 0 && (
           <p className="muted">将文件拖到这里，或点击 ＋ 批量导入</p>
         )}
         {assets.length > 0 && shown.length === 0 && (
           <p className="muted">当前筛选没有素材。</p>
         )}
-        {shown.map((option) => {
-          const asset = assetById.get(option.id);
-          const pending = pendingAssetIds.includes(option.id);
-          return (
-            <button
-              className={selected === option.id ? "active" : ""}
-              draggable
-              key={option.id}
-              onClick={() => setSelected(option.id)}
-              onDragStart={(event) => {
-                event.dataTransfer.setData(
-                  "application/x-vect-asset",
-                  option.id,
-                );
-                event.dataTransfer.effectAllowed = "move";
-              }}
-              type="button"
-            >
-              <span className={`asset-kind asset-kind-${option.kind}`}>
-                {option.kind.slice(0, 2).toUpperCase()}
-              </span>
-              <span>
-                <strong>
-                  {option.label}
-                  {option.label !== option.id && (
-                    <small className="asset-id-chip">{option.id}</small>
-                  )}
-                  {asset?.animation !== undefined && (
-                    <span className="animation-badge">动画</span>
-                  )}
-                  {option.hidden && (
-                    <span className="asset-hidden-badge">已隐藏</span>
-                  )}
-                  {pending && (
-                    <span className="asset-pending-badge">待保存</span>
-                  )}
-                </strong>
-                <small>
-                  {option.folderPath !== ""
-                    ? `目录：${option.folderPath} · `
-                    : ""}
-                  {asset === undefined
-                    ? option.path
-                    : assetDescription(asset, manifest)}{" "}
-                  · {formatAssetSize(asset?.size_bytes)} ·{" "}
-                  {formatAssetMetadata(asset?.metadata)} ·{" "}
-                  {references.get(option.id)?.length ?? 0} 处引用
-                </small>
-              </span>
-            </button>
-          );
-        })}
-      </div>
-      {selectedAsset !== undefined && (
-        <div className="asset-detail">
-          <AssetPreview
-            animations={animations}
-            asset={selectedAsset}
-            assets={assets}
+        {shown
+          .filter((option) => option.folderId === null)
+          .map((option) => renderAsset(option, 0))}
+        {selectionBox !== null && (
+          <div
+            aria-hidden="true"
+            className="asset-selection-box"
+            style={selectionBox}
           />
-          <strong>
-            {selectedDisplayName ?? selectedAsset.id}
-            {selectedAsset.animation !== undefined && (
-              <span className="animation-badge">动画</span>
-            )}
-            {selectedHidden && (
-              <span className="asset-hidden-badge">已隐藏</span>
-            )}
-            {selectedPending && (
-              <span className="asset-pending-badge">待保存</span>
-            )}
-          </strong>
-          {selectedDisplayName !== null && (
-            <small className="asset-id-chip">{selectedAsset.id}</small>
+        )}
+      </div>
+      {contextMenu !== null && (
+        <div
+          aria-label="素材操作"
+          className="asset-context-menu"
+          onPointerDown={(event) => event.stopPropagation()}
+          role="menu"
+          style={{
+            left: Math.min(contextMenu.x, window.innerWidth - 205),
+            top: Math.min(contextMenu.y, window.innerHeight - 230),
+          }}
+        >
+          {contextMenu.kind === "asset" && contextMenu.id !== null && (
+            <>
+              <button
+                disabled={pendingAssetIds.includes(menuAssetId)}
+                onClick={() => {
+                  revealAsset(menuAssetId);
+                  setContextMenu(null);
+                }}
+                role="menuitem"
+                type="button"
+              >
+                打开文件所在位置
+              </button>
+              <button
+                onClick={() => {
+                  void navigator.clipboard?.writeText(menuAssetId);
+                  setContextMenu(null);
+                }}
+                role="menuitem"
+                type="button"
+              >
+                复制素材 ID
+              </button>
+              <button
+                onClick={() => {
+                  selectAsset(menuAssetId);
+                  setContextMenu(null);
+                }}
+                role="menuitem"
+                type="button"
+              >
+                查看／编辑详情
+              </button>
+              <button
+                onClick={() => {
+                  commitLayout(
+                    (current) =>
+                      setAssetHidden(
+                        current,
+                        menuAssetId,
+                        !isAssetHidden(current, menuAssetId),
+                      ),
+                    "切换素材隐藏状态",
+                  );
+                  setContextMenu(null);
+                }}
+                role="menuitem"
+                type="button"
+              >
+                {isAssetHidden(layout, contextMenu.id)
+                  ? "取消隐藏"
+                  : "隐藏素材"}
+              </button>
+              <button
+                onClick={() => {
+                  if (
+                    window.confirm("从 manifest 移除此素材？磁盘文件会保留。")
+                  ) {
+                    if (onRemoveAsset(menuAssetId)) {
+                      setSelected(null);
+                      setSelectedIds([]);
+                      onSelectAsset?.(null);
+                    }
+                  }
+                  setContextMenu(null);
+                }}
+                role="menuitem"
+                type="button"
+              >
+                从清单移除
+              </button>
+            </>
           )}
-          <code>
-            {selectedAsset.animation === undefined
-              ? selectedAsset.path
-              : `动画：${selectedAsset.animation}`}
-          </code>
-          {selectedAsset.animation !== undefined && (
-            <small>{animationSummary(selectedAsset, assets, animations)}</small>
+          {contextMenu.kind !== "asset" && (
+            <>
+              <button
+                onClick={() => {
+                  setFolderDialog({ mode: "create", parentId: contextMenu.id });
+                  setContextMenu(null);
+                }}
+                role="menuitem"
+                type="button"
+              >
+                新建文件夹
+              </button>
+              {contextMenu.kind === "folder" && contextMenu.id !== null && (
+                <>
+                  <button
+                    onClick={() => {
+                      if (
+                        contextMenu.id !== null &&
+                        layout.asset_folders?.[contextMenu.id] !== undefined
+                      ) {
+                        setFolderDialog({
+                          mode: "rename",
+                          folderId: contextMenu.id,
+                        });
+                      }
+                      setContextMenu(null);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    重命名文件夹
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          "删除文件夹？素材及子文件夹会移动到上级，不删除素材文件。",
+                        )
+                      ) {
+                        commitLayout(
+                          (current) => removeAssetFolder(current, menuAssetId),
+                          "删除素材文件夹",
+                        );
+                      }
+                      setContextMenu(null);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    删除文件夹
+                  </button>
+                </>
+              )}
+            </>
           )}
-          {selectedDisplayName !== null && (
-            <small className="muted">
-              源文件路径（显示名称仅用于编辑器）：
-              {selectedAsset.path ?? "（未登记）"}
-            </small>
-          )}
-          <small>
-            {formatAssetMetadata(selectedAsset.metadata)} · 大小：
-            {formatAssetSize(selectedAsset.size_bytes)} · 引用：
-            {references.get(selectedAsset.id)?.length ?? 0} 处
-          </small>
-          <small className="muted">
-            文件夹：
-            {folderDisplayPath(layout, selectedFolderId) || "（根目录）"}
-          </small>
-          <div className="asset-display-name">
-            <input
-              aria-label="显示名称"
-              onChange={(event) => setNameDraft(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  commitDisplayName(nameDraft);
-                }
-                if (event.key === "Escape") setNameDraft(null);
-              }}
-              placeholder={selectedAsset.id}
-              value={nameDraft ?? selectedDisplayName ?? ""}
-            />
-            <button
-              aria-label="保存显示名称"
-              disabled={nameDraft === null}
-              onClick={() => commitDisplayName(nameDraft)}
-              type="button"
-            >
-              保存名称
-            </button>
-          </div>
-          <label className="asset-folder-select">
-            移动到文件夹
-            <select
-              aria-label="移动到文件夹"
-              onChange={(event) => {
-                const value = event.currentTarget.value;
-                moveAsset(selectedAsset.id, value === "" ? null : value);
-              }}
-              value={selectedFolderId ?? ""}
-            >
-              <option value="">（根目录）</option>
-              {folderOptions.map((folder) => (
-                <option key={folder.id} value={folder.id}>
-                  {folder.path}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="asset-detail-actions">
-            <button
-              aria-pressed={selectedHidden}
-              onClick={() =>
-                commitLayout(
-                  (current) =>
-                    setAssetHidden(current, selectedAsset.id, !selectedHidden),
-                  selectedHidden ? "取消隐藏素材" : "隐藏素材",
-                )
-              }
-              type="button"
-            >
-              {selectedHidden ? "取消隐藏" : "隐藏素材"}
-            </button>
-            <button
-              disabled={
-                selectedAsset.animation !== undefined || inspecting || importing
-              }
-              onClick={() => void queueReplacement(selectedAsset)}
-              title="导入一个同格式文件，保留逻辑 ID，新文件写入新路径，旧文件不会被覆盖或删除"
-              type="button"
-            >
-              替换二进制文件…
-            </button>
-          </div>
-          {selectedAsset.animation !== undefined && (
-            <small className="muted">
-              合成动画素材不能直接替换，请替换它的帧图片。
-            </small>
-          )}
-          {(references.get(selectedAsset.id)?.length ?? 0) > 0 && (
-            <details className="asset-references">
-              <summary>使用位置</summary>
-              <ul>
-                {references.get(selectedAsset.id)?.map((location) => (
-                  <li key={location}>{location}</li>
-                ))}
-              </ul>
-            </details>
-          )}
-          {(references.get(selectedAsset.id)?.length ?? 0) > 0 && (
-            <small className="inline-error">
-              该素材仍被引用（可展开上方“使用位置”查看，帧动画也会列入），需先解除引用才能移除。
-            </small>
-          )}
-          <button
-            className="danger-button"
-            onClick={() => {
-              if (window.confirm("从 manifest 移除此素材？磁盘文件会保留。")) {
-                if (onRemoveAsset(selectedAsset.id)) setSelected(null);
-              }
-            }}
-            type="button"
-          >
-            从清单移除
-          </button>
         </div>
       )}
+      {selectedAsset !== undefined &&
+        mountDetail(
+          <div className="asset-detail">
+            <header className="asset-detail-header">
+              <span>素材详情</span>
+              <button
+                aria-label="关闭素材详情"
+                onClick={() => {
+                  setSelected(null);
+                  setSelectedIds([]);
+                  onSelectAsset?.(null);
+                }}
+                type="button"
+              >
+                ✕
+              </button>
+            </header>
+            <AssetPreview
+              animations={animations}
+              asset={selectedAsset}
+              assets={assets}
+            />
+            <strong>
+              {selectedDisplayName ?? selectedAsset.id}
+              {selectedAsset.animation !== undefined && (
+                <span className="animation-badge">动画</span>
+              )}
+              {selectedHidden && (
+                <span className="asset-hidden-badge">已隐藏</span>
+              )}
+              {selectedPending && (
+                <span className="asset-pending-badge">待保存</span>
+              )}
+            </strong>
+            {selectedDisplayName !== null && (
+              <small className="asset-id-chip">{selectedAsset.id}</small>
+            )}
+            <code>
+              {selectedAsset.animation === undefined
+                ? selectedAsset.path
+                : `动画：${selectedAsset.animation}`}
+            </code>
+            {selectedAsset.animation !== undefined && (
+              <small>
+                {animationSummary(selectedAsset, assets, animations)}
+              </small>
+            )}
+            {selectedDisplayName !== null && (
+              <small className="muted">
+                源文件路径（显示名称仅用于编辑器）：
+                {selectedAsset.path ?? "（未登记）"}
+              </small>
+            )}
+            <small>
+              {formatAssetMetadata(selectedAsset.metadata)} · 大小：
+              {formatAssetSize(selectedAsset.size_bytes)} · 引用：
+              {references.get(selectedAsset.id)?.length ?? 0} 处
+            </small>
+            <small className="muted">
+              文件夹：
+              {folderDisplayPath(layout, selectedFolderId) || "（根目录）"}
+            </small>
+            <div className="asset-display-name">
+              <input
+                aria-label="显示名称"
+                onChange={(event) => setNameDraft(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitDisplayName(nameDraft);
+                  }
+                  if (event.key === "Escape") setNameDraft(null);
+                }}
+                placeholder={selectedAsset.id}
+                value={nameDraft ?? selectedDisplayName ?? ""}
+              />
+              <button
+                aria-label="保存显示名称"
+                disabled={nameDraft === null}
+                onClick={() => commitDisplayName(nameDraft)}
+                type="button"
+              >
+                保存名称
+              </button>
+            </div>
+            <label className="asset-folder-select">
+              移动到文件夹
+              <select
+                aria-label="移动到文件夹"
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  moveAsset(selectedAsset.id, value === "" ? null : value);
+                }}
+                value={selectedFolderId ?? ""}
+              >
+                <option value="">（根目录）</option>
+                {folderOptions.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.path}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="asset-detail-actions">
+              <button
+                disabled={selectedPending}
+                onClick={() => revealAsset(selectedAsset.id)}
+                type="button"
+              >
+                打开文件所在位置
+              </button>
+              <button
+                aria-pressed={selectedHidden}
+                onClick={() =>
+                  commitLayout(
+                    (current) =>
+                      setAssetHidden(
+                        current,
+                        selectedAsset.id,
+                        !selectedHidden,
+                      ),
+                    selectedHidden ? "取消隐藏素材" : "隐藏素材",
+                  )
+                }
+                type="button"
+              >
+                {selectedHidden ? "取消隐藏" : "隐藏素材"}
+              </button>
+              <button
+                disabled={
+                  selectedAsset.animation !== undefined ||
+                  inspecting ||
+                  importing
+                }
+                onClick={() => void queueReplacement(selectedAsset)}
+                title="导入一个同格式文件，保留逻辑 ID，新文件写入新路径，旧文件不会被覆盖或删除"
+                type="button"
+              >
+                替换二进制文件…
+              </button>
+            </div>
+            {selectedAsset.animation !== undefined && (
+              <small className="muted">
+                合成动画素材不能直接替换，请替换它的帧图片。
+              </small>
+            )}
+            {(references.get(selectedAsset.id)?.length ?? 0) > 0 && (
+              <details className="asset-references">
+                <summary>使用位置</summary>
+                <ul>
+                  {references.get(selectedAsset.id)?.map((location) => (
+                    <li key={location}>{location}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {(references.get(selectedAsset.id)?.length ?? 0) > 0 && (
+              <small className="inline-error">
+                该素材仍被引用（可展开上方“使用位置”查看，帧动画也会列入），需先解除引用才能移除。
+              </small>
+            )}
+            <button
+              className="danger-button"
+              onClick={() => {
+                if (
+                  window.confirm("从 manifest 移除此素材？磁盘文件会保留。")
+                ) {
+                  if (onRemoveAsset(selectedAsset.id)) {
+                    setSelected(null);
+                    onSelectAsset?.(null);
+                  }
+                }
+              }}
+              type="button"
+            >
+              从清单移除
+            </button>
+          </div>,
+        )}
       {importQueue !== null && (
         <div
           className="asset-import-dialog"
@@ -1652,14 +2109,34 @@ function flattenAssetFolders(layout: EditorLayout): AssetFolderChoice[] {
 
 function readAssetDragPayload(event: { dataTransfer: DataTransfer | null }): {
   assetId?: string;
+  assetIds?: string[];
   folderId?: string;
 } {
   const data = event.dataTransfer;
   if (data === null || data === undefined) return {};
   const assetId = data.getData("application/x-vect-asset");
   const folderId = data.getData("application/x-vect-folder");
+  let assetIds: string[] | undefined;
+  try {
+    const parsed: unknown = JSON.parse(
+      data.getData("application/x-vect-assets"),
+    );
+    if (
+      Array.isArray(parsed) &&
+      parsed.length > 0 &&
+      parsed.every((id) => typeof id === "string")
+    ) {
+      assetIds = parsed.filter((id) => id === assetId);
+      // Only accept a multi-drag that includes its actual drag origin.
+      if (assetIds.length !== 1) assetIds = undefined;
+      else assetIds = parsed;
+    }
+  } catch {
+    /* Old single-item payload. */
+  }
   return {
     assetId: assetId === "" ? undefined : assetId,
+    assetIds,
     folderId: folderId === "" ? undefined : folderId,
   };
 }
