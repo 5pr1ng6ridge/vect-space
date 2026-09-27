@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  hitTestSceneFrame,
+  worldPointToStage,
+} from "@vectspace/presentation-core/scene-frame";
+import type { SceneWorldSnapshot } from "@vectspace/presentation-core/scene-surface";
+
+import {
   buildBackgroundPreviewRequest,
   buildCurtainPreviewRequest,
   buildScreenEffectPreviewRequest,
+  buildWorldPreviewRequest,
+  sceneFrameFromWorld,
   storyVisualStateAtNode,
 } from "./presentationPreview";
 import type {
@@ -226,5 +234,57 @@ describe("preview request builders", () => {
       duration_ms: 200,
     });
     expect(request.duration_ms).toBe(200);
+  });
+});
+
+describe("static world previews", () => {
+  const world: SceneWorldSnapshot = {
+    background: "bg.a",
+    sprites: {
+      lumi: {
+        asset: "sprite.lumi",
+        x: 1000,
+        y: 1060,
+        scale: 1,
+        scale_x: 1,
+        scale_y: 1,
+        rotation_deg: 0,
+        flip_x: false,
+        anchor_x: 0.5,
+        anchor_y: 1,
+        opacity: 1,
+        z: 0,
+      },
+    },
+    camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
+    curtain: { covered: false, fill: null },
+  };
+
+  it("builds a cue-less request for a resolved runtime world", () => {
+    expect(buildWorldPreviewRequest(world)).toEqual({
+      world,
+      cue: null,
+      duration_ms: 0,
+    });
+  });
+
+  it("evaluates the world into the hit-testable frame the stage shows", () => {
+    const frame = sceneFrameFromWorld(world, {
+      spriteSize: () => ({ width: 200, height: 400 }),
+    });
+    expect(frame.objects).toHaveLength(1);
+    expect(frame.objects[0]).toMatchObject({
+      id: "lumi",
+      kind: "sprite",
+      x: 1000,
+      y: 1060,
+      width: 200,
+      height: 400,
+    });
+    // The anchor-relative box is what a stage gesture hit-tests against.
+    const onSprite = worldPointToStage({ x: 1000, y: 1060 }, frame.camera);
+    expect(hitTestSceneFrame(frame, onSprite)?.id).toBe("lumi");
+    const offSprite = worldPointToStage({ x: 1000, y: 40 }, frame.camera);
+    expect(hitTestSceneFrame(frame, offSprite)).toBeNull();
   });
 });

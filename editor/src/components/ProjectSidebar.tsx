@@ -48,6 +48,28 @@ import {
   type AssetChoiceOption,
 } from "../assetLibrary";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import {
+  Clapperboard,
+  FolderInput,
+  CopyPlus,
+  MousePointerClick,
+  Pencil,
+  PersonStanding,
+  Plus,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
+import { IconButton } from "../ui/Button";
+import { LibraryRow } from "./LibraryRow";
+import { ColorSwatch, DeferredInput } from "./Fields";
+import { ID_RULE_HINT, idUnavailableReason } from "../app/ids";
+import { isComposing } from "../ui/keyboard";
+import { ASSET_KIND_ICONS } from "../ui/assetIcons";
+import {
+  ASSET_KIND_LABELS,
+  VARIABLE_SCOPE_LABELS,
+  VARIABLE_TYPE_LABELS,
+} from "../labels";
 import { FrameSequencePreview } from "./FrameSequencePreview";
 import { ImageAnimationPanel } from "./ImageAnimationPanel";
 import type {
@@ -65,8 +87,6 @@ import type {
   ScalarValue,
   VariableDefinition,
   VariableType,
-  SpriteActionDefinition,
-  SpriteActionKeyframe,
 } from "../types";
 
 interface ProjectSidebarProps {
@@ -116,7 +136,6 @@ interface ProjectSidebarProps {
   onDuplicateButtonTemplate(id: string): void;
   onDeleteButtonTemplate(id: string): void;
   onCreateAction(id: string): boolean;
-  onChangeAction(id: string, definition: SpriteActionDefinition): void;
   onRenameAction(previousId: string, nextId: string): boolean;
   onDuplicateAction(id: string): void;
   onDeleteAction(id: string): void;
@@ -132,13 +151,39 @@ interface ProjectSidebarProps {
   /** App-owned expand/collapse state for the five project sections. */
   sectionOpen?: Partial<Record<ProjectSectionId, boolean>>;
   onToggleSection?(id: ProjectSectionId): void;
+  /** Save-independent expanded state for individual character/variable cards. */
+  sidebarItemOpen?: Readonly<Record<string, boolean>>;
+  onToggleSidebarItem?(key: string): void;
   /** App-owned, save-independent sidebar scroll offsets keyed by tab. */
   scrollStore?: SidebarScrollStore;
+  /** The App shell renders its own activity bar; show only the panel. */
+  hideTabs?: boolean;
   /** Records the live offset of whichever tab is scrolled. */
   onScrollOffset?(tab: SidebarTab, offset: number): void;
 }
 
-export type SidebarTab = "scenes" | "assets" | "project" | "problems";
+export type SidebarTab =
+  | "scenes"
+  | "assets"
+  | "characters"
+  | "variables"
+  | "library"
+  | "project"
+  | "problems";
+
+const PANEL_TITLES: Record<SidebarTab, string> = {
+  scenes: "场景",
+  assets: "素材库",
+  characters: "角色",
+  variables: "剧情变量",
+  library: "资源库",
+  project: "项目设置",
+  problems: "问题",
+};
+
+/** The project-settings slices the activity bar can show on their own. */
+export type ProjectPanelView =
+  "project" | "characters" | "variables" | "library";
 
 /**
  * Restore the host-owned scroll offset for `tab` exactly when the element that
@@ -178,12 +223,6 @@ function useSidebarScroller(
   return { onScroll, ref };
 }
 
-/**
- * Accessible collapsible section for the project tab.  The title toggle is a
- * real button that owns `aria-expanded`/`aria-controls`; per-section action
- * buttons stay siblings of it so they keep working while collapsed, and the
- * body stays mounted (hidden) so its ids keep resolving.
- */
 function CollapsibleSection({
   id,
   title,
@@ -266,7 +305,6 @@ export function ProjectSidebar({
   onDuplicateButtonTemplate,
   onDeleteButtonTemplate,
   onCreateAction,
-  onChangeAction,
   onRenameAction,
   onDuplicateAction,
   onDeleteAction,
@@ -276,7 +314,10 @@ export function ProjectSidebar({
   onScrollOffset,
   sectionOpen,
   onToggleSection,
+  sidebarItemOpen,
+  onToggleSidebarItem,
   scrollStore,
+  hideTabs = false,
 }: ProjectSidebarProps): ReactElement {
   const [internalTab, setInternalTab] = useState<SidebarTab>("scenes");
   const tab = activeTab ?? internalTab;
@@ -294,49 +335,58 @@ export function ProjectSidebar({
   );
   return (
     <aside className="project-sidebar">
-      <div className="sidebar-tabs">
-        <button
-          className={tab === "scenes" ? "active" : ""}
-          onClick={() => setTab("scenes")}
-          type="button"
-        >
-          场景
-        </button>
-        <button
-          className={tab === "assets" ? "active" : ""}
-          onClick={() => setTab("assets")}
-          type="button"
-        >
-          素材
-        </button>
-        <button
-          className={tab === "project" ? "active" : ""}
-          onClick={() => setTab("project")}
-          type="button"
-        >
-          项目
-        </button>
-        <button
-          className={tab === "problems" ? "active" : ""}
-          onClick={() => setTab("problems")}
-          type="button"
-        >
-          问题
-          {diagnostics.length > 0 && (
-            <span className="sidebar-tab-count">{diagnostics.length}</span>
-          )}
-          {errorCount > 0 && (
-            <span className="sidebar-tab-count sidebar-tab-count-error">
-              {errorCount}
-            </span>
-          )}
-        </button>
-      </div>
-      <ProjectSearch
-        onNavigate={onNavigate}
-        onSelectAsset={onSelectAsset}
-        project={project}
-      />
+      {!hideTabs && (
+        <div className="sidebar-tabs">
+          <button
+            className={tab === "scenes" ? "active" : ""}
+            onClick={() => setTab("scenes")}
+            type="button"
+          >
+            场景
+          </button>
+          <button
+            className={tab === "assets" ? "active" : ""}
+            onClick={() => setTab("assets")}
+            type="button"
+          >
+            素材
+          </button>
+          <button
+            className={tab === "project" ? "active" : ""}
+            onClick={() => setTab("project")}
+            type="button"
+          >
+            项目
+          </button>
+          <button
+            className={tab === "problems" ? "active" : ""}
+            onClick={() => setTab("problems")}
+            type="button"
+          >
+            问题
+            {diagnostics.length > 0 && (
+              <span className="sidebar-tab-count">{diagnostics.length}</span>
+            )}
+            {errorCount > 0 && (
+              <span className="sidebar-tab-count sidebar-tab-count-error">
+                {errorCount}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
+      {hideTabs && tab !== "characters" && tab !== "variables" && (
+        <header className="panel-header">
+          <h2>{PANEL_TITLES[tab]}</h2>
+        </header>
+      )}
+      {!hideTabs && (
+        <ProjectSearch
+          onNavigate={onNavigate}
+          onSelectAsset={onSelectAsset}
+          project={project}
+        />
+      )}
       {tab === "scenes" && (
         <ScenesPanel
           activeSceneId={activeSceneId}
@@ -365,7 +415,10 @@ export function ProjectSidebar({
           scrollStore={scrollStore}
         />
       )}
-      {tab === "project" && (
+      {(tab === "project" ||
+        tab === "characters" ||
+        tab === "variables" ||
+        tab === "library") && (
         <ProjectPanel
           manifest={project.manifest}
           onChange={onManifestChange}
@@ -385,16 +438,18 @@ export function ProjectSidebar({
           onDuplicateButtonTemplate={onDuplicateButtonTemplate}
           onDeleteButtonTemplate={onDeleteButtonTemplate}
           onCreateAction={onCreateAction}
-          onChangeAction={onChangeAction}
           onRenameAction={onRenameAction}
           onDuplicateAction={onDuplicateAction}
           onDeleteAction={onDeleteAction}
           onEditActionKeyframes={onEditActionKeyframes}
           onScrollOffset={onScrollOffset}
           onToggleSection={onToggleSection}
+          sidebarItemOpen={sidebarItemOpen}
+          onToggleSidebarItem={onToggleSidebarItem}
           project={project}
           scrollStore={scrollStore}
           sectionOpen={sectionOpen}
+          view={hideTabs ? tab : "all"}
         />
       )}
       {tab === "problems" && (
@@ -555,18 +610,18 @@ function ScenesPanel({
         <input
           aria-label="搜索场景"
           onChange={(event) => setQuery(event.currentTarget.value)}
-          placeholder="搜索场景…"
+          placeholder="筛选场景…"
           value={query}
         />
-        <button
-          aria-label="添加场景"
+        <IconButton
+          icon={Plus}
+          label="添加场景"
           onClick={() => {
             setDialog({ title: "新场景 ID", value: "new_scene", mode: "add" });
           }}
-          type="button"
-        >
-          ＋
-        </button>
+          tooltip="新建场景"
+          variant="secondary"
+        />
       </div>
       <div
         className="scene-list"
@@ -579,6 +634,7 @@ function ScenesPanel({
           const issueCount = diagnostics.filter(
             (diagnostic) => diagnostic.scene_id === scene.id,
           ).length;
+          const entry = project.manifest.entry_scene === scene.id;
           return (
             <article
               className={`scene-row${activeSceneId === scene.id ? " active" : ""}`}
@@ -589,17 +645,24 @@ function ScenesPanel({
                 onClick={() => onSelectScene(scene.id)}
                 type="button"
               >
-                <span className="scene-icon">◇</span>
-                <span>
+                <Clapperboard aria-hidden="true" className="scene-icon" />
+                <span className="scene-text">
                   <strong>{scene.id}</strong>
-                  <small>{Object.keys(scene.nodes).length} 个节点</small>
+                  <small>
+                    {Object.keys(scene.nodes).length} 个节点
+                    {entry ? " · 项目入口" : ""}
+                  </small>
                 </span>
-                {project.manifest.entry_scene === scene.id && <em>入口</em>}
-                {issueCount > 0 && <b>{issueCount}</b>}
+                {issueCount > 0 && (
+                  <span className="scene-issues" title={`${issueCount} 个问题`}>
+                    {issueCount}
+                  </span>
+                )}
               </button>
               <div className="scene-row-actions">
-                <button
-                  aria-label="重命名场景"
+                <IconButton
+                  icon={Pencil}
+                  label="重命名场景"
                   onClick={() => {
                     setDialog({
                       title: "新的场景 ID",
@@ -608,21 +671,23 @@ function ScenesPanel({
                       previous: scene.id,
                     });
                   }}
-                  type="button"
-                >
-                  ✎
-                </button>
-                <button
-                  aria-label="删除场景"
+                  size="sm"
+                />
+                <IconButton
+                  disabled={entry}
+                  icon={Trash2}
+                  label="删除场景"
                   onClick={() => onDeleteScene(scene.id)}
-                  type="button"
-                >
-                  ×
-                </button>
+                  size="sm"
+                  tooltip={entry ? "项目入口场景不能删除" : "从项目移除场景"}
+                />
               </div>
             </article>
           );
         })}
+        {scenes.length === 0 && (
+          <p className="library-empty">没有匹配的场景。</p>
+        )}
       </div>
       {dialog !== null && (
         <TextEntryDialog
@@ -638,7 +703,13 @@ function ScenesPanel({
             if (accepted) setDialog(null);
             return accepted;
           }}
+          hint={ID_RULE_HINT}
           title={dialog.title}
+          validate={(value) =>
+            idUnavailableReason("scene", value, project, {
+              previous: dialog.previous,
+            })
+          }
         />
       )}
     </div>
@@ -872,6 +943,7 @@ function AssetsPanel({
     return (
       <button
         className={`asset-explorer-file${selectedIds.includes(option.id) ? " active" : ""}`}
+        data-allow-context-menu="true"
         data-explorer-asset-id={option.id}
         draggable
         key={option.id}
@@ -901,9 +973,7 @@ function AssetsPanel({
         style={{ paddingLeft: `${(depth + 1) * 14 + 6}px` }}
         type="button"
       >
-        <span className={`asset-kind asset-kind-${option.kind}`}>
-          {option.kind.slice(0, 2).toUpperCase()}
-        </span>
+        <AssetKindIcon kind={option.kind} />
         <span>
           <strong>
             {option.label}
@@ -931,6 +1001,23 @@ function AssetsPanel({
       </button>
     );
   };
+  // "全部" shows everything; "未分组" only root-level assets; a folder only
+  // the assets inside its own subtree.  Folder rows always stay visible so
+  // the tree remains the navigation for the filter.
+  const filterFolderIds = useMemo(() => {
+    if (folderFilter === "all" || folderFilter === null) return null;
+    const ids = new Set<string>();
+    const collect = (node: AssetFolderNode | undefined): void => {
+      if (node === undefined) return;
+      ids.add(node.id);
+      node.children.forEach(collect);
+    };
+    collect(findFolderNode(folderTree, folderFilter));
+    return ids;
+  }, [folderFilter, folderTree]);
+  const folderAssetsVisible = (folderId: string): boolean =>
+    folderFilter === "all" ||
+    (filterFolderIds !== null && filterFolderIds.has(folderId));
   const renderFolder = (node: AssetFolderNode): ReactElement => {
     const isCollapsed = collapsedFolders.includes(node.id);
     const count = assets.filter(
@@ -941,6 +1028,7 @@ function AssetsPanel({
       <div className="asset-folder-branch" key={node.id}>
         <div
           className={`asset-folder-row${folderFilter === node.id ? " active" : ""}`}
+          data-allow-context-menu="true"
           onContextMenu={(event) => {
             event.preventDefault();
             setContextMenu({
@@ -972,11 +1060,11 @@ function AssetsPanel({
             className="asset-folder-name"
             draggable
             onClick={() => {
+              // Selecting a folder filters the list to its subtree and makes
+              // sure that subtree is visible; the chevron toggles collapse.
               setFolderFilter(node.id);
               setCollapsedFolders((current) =>
-                current.includes(node.id)
-                  ? current.filter((id) => id !== node.id)
-                  : [...current, node.id],
+                current.filter((id) => id !== node.id),
               );
             }}
             onDragOver={(event) => event.preventDefault()}
@@ -991,38 +1079,30 @@ function AssetsPanel({
             {node.name}
           </button>
           <span className="asset-folder-count">{count}</span>
-          <button
-            aria-label={`重命名文件夹 ${node.name}`}
-            className="asset-folder-action"
+          <IconButton
             onClick={() => {
               setFolderError(null);
               setFolderDialog({ mode: "rename", folderId: node.id });
             }}
-            type="button"
-          >
-            ✎
-          </button>
-          <button
-            aria-label={`在 ${node.name} 下新建子文件夹`}
-            className="asset-folder-action"
+            icon={Pencil}
+            label={`重命名文件夹 ${node.name}`}
+            size="sm"
+            variant="ghost"
+          />
+          <IconButton
             onClick={() => {
               setFolderError(null);
               setFolderDialog({ mode: "create", parentId: node.id });
             }}
-            type="button"
-          >
-            ＋
-          </button>
-          <button
-            aria-label={`删除文件夹 ${node.name}`}
-            className="asset-folder-action"
+            icon={Plus}
+            label={`在 ${node.name} 下新建子文件夹`}
+            size="sm"
+            variant="ghost"
+          />
+          <IconButton
             onClick={() => {
-              if (
-                !window.confirm(
-                  `删除文件夹「${node.name}」？素材及子文件夹会移动到上级，不删除素材文件。`,
-                )
-              )
-                return;
+              // Folders are editor-only grouping: removing one moves its
+              // contents up a level and is undoable, so it needs no prompt.
               commitLayout(
                 (current) => removeAssetFolder(current, node.id),
                 "删除素材文件夹",
@@ -1030,27 +1110,29 @@ function AssetsPanel({
               if (folderFilter === node.id)
                 setFolderFilter(node.parentId ?? "all");
             }}
-            type="button"
-          >
-            ×
-          </button>
-          <button
-            aria-label={`移动文件夹 ${node.name}`}
-            className="asset-folder-action"
+            icon={Trash2}
+            label={`删除文件夹 ${node.name}`}
+            size="sm"
+          />
+          <IconButton
             onClick={() => {
               setFolderError(null);
               setFolderMoveTarget(node.id);
             }}
-            type="button"
-          >
-            ⇄
-          </button>
+            icon={FolderInput}
+            label={`移动文件夹 ${node.name}`}
+            size="sm"
+            variant="ghost"
+          />
         </div>
         {!isCollapsed && (
           <>
             {node.children.map(renderFolder)}
             {shown
-              .filter((option) => option.folderId === node.id)
+              .filter(
+                (option) =>
+                  option.folderId === node.id && folderAssetsVisible(node.id),
+              )
               .map((option) => renderAsset(option, node.depth))}
             {node.children.length === 0 && count === 0 && (
               <p
@@ -1332,7 +1414,7 @@ function AssetsPanel({
           <option value="all">全部</option>
           {ASSET_KINDS.map((kind) => (
             <option key={kind} value={kind}>
-              {kind}
+              {ASSET_KIND_LABELS[kind]}
             </option>
           ))}
         </select>
@@ -1425,6 +1507,7 @@ function AssetsPanel({
           <button
             aria-label="未分组（根目录）"
             className={folderFilter === null ? "active" : ""}
+            data-allow-context-menu="true"
             onClick={() => setFolderFilter(null)}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -1450,6 +1533,7 @@ function AssetsPanel({
       )}
       <div
         className="asset-list asset-explorer-tree"
+        data-allow-context-menu="true"
         data-sidebar-scroller="assets"
         onScroll={onAssetListScroll}
         onContextMenu={(event) => {
@@ -1546,9 +1630,10 @@ function AssetsPanel({
         {assets.length > 0 && shown.length === 0 && (
           <p className="muted">当前筛选没有素材。</p>
         )}
-        {shown
-          .filter((option) => option.folderId === null)
-          .map((option) => renderAsset(option, 0))}
+        {(folderFilter === "all" || folderFilter === null) &&
+          shown
+            .filter((option) => option.folderId === null)
+            .map((option) => renderAsset(option, 0))}
         {selectionBox !== null && (
           <div
             aria-hidden="true"
@@ -1622,19 +1707,21 @@ function AssetsPanel({
                   : "隐藏素材"}
               </button>
               <button
+                disabled={(references.get(menuAssetId)?.length ?? 0) > 0}
                 onClick={() => {
-                  if (
-                    window.confirm("从 manifest 移除此素材？磁盘文件会保留。")
-                  ) {
-                    if (onRemoveAsset(menuAssetId)) {
-                      setSelected(null);
-                      setSelectedIds([]);
-                      onSelectAsset?.(null);
-                    }
+                  if (onRemoveAsset(menuAssetId)) {
+                    setSelected(null);
+                    setSelectedIds([]);
+                    onSelectAsset?.(null);
                   }
                   setContextMenu(null);
                 }}
                 role="menuitem"
+                title={
+                  (references.get(menuAssetId)?.length ?? 0) > 0
+                    ? "该素材仍被引用，需先解除引用才能移除"
+                    : undefined
+                }
                 type="button"
               >
                 从清单移除
@@ -1675,16 +1762,10 @@ function AssetsPanel({
                   </button>
                   <button
                     onClick={() => {
-                      if (
-                        window.confirm(
-                          "删除文件夹？素材及子文件夹会移动到上级，不删除素材文件。",
-                        )
-                      ) {
-                        commitLayout(
-                          (current) => removeAssetFolder(current, menuAssetId),
-                          "删除素材文件夹",
-                        );
-                      }
+                      commitLayout(
+                        (current) => removeAssetFolder(current, menuAssetId),
+                        "删除素材文件夹",
+                      );
                       setContextMenu(null);
                     }}
                     role="menuitem"
@@ -1836,7 +1917,7 @@ function AssetsPanel({
                 title="导入一个同格式文件，保留逻辑 ID，新文件写入新路径，旧文件不会被覆盖或删除"
                 type="button"
               >
-                替换二进制文件…
+                替换文件…
               </button>
             </div>
             {selectedAsset.animation !== undefined && (
@@ -1861,14 +1942,11 @@ function AssetsPanel({
             )}
             <button
               className="danger-button"
+              disabled={(references.get(selectedAsset.id)?.length ?? 0) > 0}
               onClick={() => {
-                if (
-                  window.confirm("从 manifest 移除此素材？磁盘文件会保留。")
-                ) {
-                  if (onRemoveAsset(selectedAsset.id)) {
-                    setSelected(null);
-                    onSelectAsset?.(null);
-                  }
+                if (onRemoveAsset(selectedAsset.id)) {
+                  setSelected(null);
+                  onSelectAsset?.(null);
                 }
               }}
               type="button"
@@ -1883,23 +1961,21 @@ function AssetsPanel({
           role="dialog"
           aria-label={
             importQueue.some((item) => item.replaceId !== undefined)
-              ? "替换素材二进制"
+              ? "替换素材文件"
               : "导入素材"
           }
         >
           <header>
             <strong>
               {importQueue.some((item) => item.replaceId !== undefined)
-                ? `替换素材二进制 (${importQueue.length})`
+                ? `替换素材文件（${importQueue.length}）`
                 : `导入素材 (${importQueue.length})`}
             </strong>
             <button onClick={() => setImportQueue(null)} type="button">
               取消
             </button>
           </header>
-          <p>
-            确认逻辑 ID、类型和文件名后一次导入。保存项目才会写入 manifest。
-          </p>
+          <p>确认素材 ID、类型和文件名后导入；保存项目时才会正式写入。</p>
           {importQueue.some((item) => item.replaceId !== undefined) && (
             <p className="muted">
               替换保留逻辑 ID
@@ -1967,7 +2043,7 @@ function AssetsPanel({
                     >
                       {ASSET_KINDS.map((kind) => (
                         <option key={kind} value={kind}>
-                          {kind}
+                          {ASSET_KIND_LABELS[kind]}
                         </option>
                       ))}
                     </select>
@@ -1982,8 +2058,7 @@ function AssetsPanel({
                     />
                   </>
                 )}
-                <button
-                  aria-label={`移除 ${item.fileName}`}
+                <IconButton
                   onClick={() =>
                     setImportQueue(
                       (current) =>
@@ -1992,10 +2067,10 @@ function AssetsPanel({
                         ) ?? null,
                     )
                   }
-                  type="button"
-                >
-                  ×
-                </button>
+                  icon={Trash2}
+                  label={`移除 ${item.fileName}`}
+                  size="sm"
+                />
               </div>
             ))}
           </div>
@@ -2086,6 +2161,30 @@ interface AssetFolderChoice {
 }
 
 /** Flat folder list (id + display path) for folder selects. */
+function findFolderNode(
+  nodes: readonly AssetFolderNode[],
+  id: string,
+): AssetFolderNode | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    const nested = findFolderNode(node.children, id);
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
+}
+
+function AssetKindIcon({ kind }: { kind: AssetKind }): ReactElement {
+  const Icon = ASSET_KIND_ICONS[kind];
+  return (
+    <span
+      className={`asset-kind asset-kind-${kind}`}
+      title={ASSET_KIND_LABELS[kind]}
+    >
+      <Icon aria-hidden="true" />
+    </span>
+  );
+}
+
 function flattenAssetFolders(layout: EditorLayout): AssetFolderChoice[] {
   const folders = layout.asset_folders ?? {};
   const pathOf = (id: string): string[] => {
@@ -2329,26 +2428,35 @@ function TextEntryDialog({
   initialValue,
   onSubmit,
   onCancel,
+  validate,
+  hint,
 }: {
   title: string;
   initialValue: string;
   onSubmit(value: string): boolean;
   onCancel(): void;
+  /** Live check; its message is shown inline and blocks submission. */
+  validate?(value: string): string | null;
+  hint?: string;
 }): ReactElement {
   const [value, setValue] = useState(initialValue);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => inputRef.current?.focus(), []);
+  const trimmed = value.trim();
+  const problem =
+    trimmed.length === 0 ? "输入不能为空。" : (validate?.(trimmed) ?? null);
   const submit = (): void => {
-    const trimmed = value.trim();
-    if (trimmed.length === 0) {
-      setError("输入不能为空。");
+    if (problem !== null) {
+      setError(problem);
       return;
     }
     const accepted = onSubmit(trimmed);
     if (!accepted) setError("输入未通过校验，请修正后重试。");
     else setError(null);
   };
+  const message =
+    validate !== undefined && trimmed.length > 0 ? problem : error;
   return (
     <div
       className="editor-dialog-backdrop"
@@ -2360,7 +2468,7 @@ function TextEntryDialog({
       <form
         className="editor-dialog"
         onKeyDown={(event) => {
-          if (event.key === "Escape") {
+          if (event.key === "Escape" && !isComposing(event)) {
             event.preventDefault();
             onCancel();
           }
@@ -2372,15 +2480,23 @@ function TextEntryDialog({
       >
         <h3>{title}</h3>
         <input
+          aria-invalid={message !== null}
           aria-label={title}
           ref={inputRef}
           onChange={(event) => {
             setValue(event.currentTarget.value);
             setError(null);
           }}
+          spellCheck={false}
           value={value}
         />
-        {error !== null && <p className="inline-error">{error}</p>}
+        {message !== null ? (
+          <p className="inline-error" role="alert">
+            {message}
+          </p>
+        ) : (
+          hint !== undefined && <small className="muted">{hint}</small>
+        )}
         <div className="editor-dialog-actions">
           <button onClick={onCancel} type="button">
             取消
@@ -2679,7 +2795,6 @@ function ProjectPanel({
   onDuplicateButtonTemplate,
   onDeleteButtonTemplate,
   onCreateAction,
-  onChangeAction,
   onRenameAction,
   onDuplicateAction,
   onDeleteAction,
@@ -2689,6 +2804,9 @@ function ProjectPanel({
   scrollStore,
   sectionOpen,
   onToggleSection,
+  sidebarItemOpen,
+  onToggleSidebarItem,
+  view = "all",
 }: {
   manifest: ContentManifest;
   onChange(manifest: ContentManifest): void;
@@ -2708,7 +2826,6 @@ function ProjectPanel({
   onDuplicateButtonTemplate(id: string): void;
   onDeleteButtonTemplate(id: string): void;
   onCreateAction(id: string): boolean;
-  onChangeAction(id: string, definition: SpriteActionDefinition): void;
   onRenameAction(previousId: string, nextId: string): boolean;
   onDuplicateAction(id: string): void;
   onDeleteAction(id: string): void;
@@ -2718,7 +2835,13 @@ function ProjectPanel({
   scrollStore?: SidebarScrollStore;
   sectionOpen?: Partial<Record<ProjectSectionId, boolean>>;
   onToggleSection?(id: ProjectSectionId): void;
+  sidebarItemOpen?: Readonly<Record<string, boolean>>;
+  onToggleSidebarItem?(key: string): void;
+  /** Which slice of the project settings to show; "all" stacks every section. */
+  view?: "all" | ProjectPanelView;
 }): ReactElement {
+  const show = (group: ProjectPanelView): boolean =>
+    view === "all" || view === group;
   const [dialog, setDialog] = useState<{
     title: string;
     value: string;
@@ -2750,569 +2873,660 @@ function ProjectPanel({
   const toggleSection = (sectionId: ProjectSectionId): void => {
     onToggleSection?.(sectionId);
   };
+  const isSidebarItemOpen = (itemKey: string): boolean =>
+    sidebarItemOpen?.[itemKey] ?? true;
+  const toggleSidebarItem = (itemKey: string): void => {
+    onToggleSidebarItem?.(itemKey);
+  };
   return (
     <div
-      className="sidebar-body project-settings"
+      className={`sidebar-body project-settings project-view-${view}`}
       data-sidebar-scroller="project"
       onScroll={onSettingsScroll}
       ref={settingsRef}
     >
-      <label>
-        <span>内容版本</span>
-        <DeferredTextInput
-          value={manifest.content_version}
-          onCommit={(content_version) =>
-            onChange({ ...manifest, content_version })
+      {show("project") && (
+        <>
+          <label>
+            <span>内容版本</span>
+            <DeferredTextInput
+              value={manifest.content_version}
+              onCommit={(content_version) =>
+                onChange({ ...manifest, content_version })
+              }
+            />
+            <small>改变后旧存档将不再兼容</small>
+          </label>
+          <label>
+            <span>默认语言</span>
+            <DeferredTextInput
+              value={manifest.default_locale}
+              onCommit={(default_locale) =>
+                onChange({ ...manifest, default_locale })
+              }
+            />
+          </label>
+          <label>
+            <span>项目入口场景</span>
+            <select
+              value={manifest.entry_scene}
+              onChange={(event) =>
+                onChange({
+                  ...manifest,
+                  entry_scene: event.currentTarget.value,
+                })
+              }
+            >
+              {project.scenes.map((file) => (
+                <option key={file.definition.id} value={file.definition.id}>
+                  {file.definition.id}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
+      {show("library") && (
+        <CollapsibleSection
+          actions={
+            <IconButton
+              icon={Plus}
+              label="新建 UI 动效"
+              onClick={onCreateUiMotion}
+              size="sm"
+            />
           }
-        />
-        <small>改变后旧存档将不再兼容</small>
-      </label>
-      <label>
-        <span>默认语言</span>
-        <DeferredTextInput
-          value={manifest.default_locale}
-          onCommit={(default_locale) =>
-            onChange({ ...manifest, default_locale })
-          }
-        />
-      </label>
-      <label>
-        <span>项目入口场景</span>
-        <select
-          value={manifest.entry_scene}
-          onChange={(event) =>
-            onChange({ ...manifest, entry_scene: event.currentTarget.value })
-          }
+          className="ui-motion-settings"
+          id="ui-motion"
+          onToggle={() => toggleSection("ui-motion")}
+          open={isSectionOpen("ui-motion")}
+          title="UI 动效"
         >
-          {project.scenes.map((file) => (
-            <option key={file.definition.id} value={file.definition.id}>
-              {file.definition.id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <CollapsibleSection
-        actions={
-          <button onClick={onCreateUiMotion} type="button">
-            ＋
-          </button>
-        }
-        className="ui-motion-settings"
-        id="ui-motion"
-        onToggle={() => toggleSection("ui-motion")}
-        open={isSectionOpen("ui-motion")}
-        title="UI 动效"
-      >
-        <label>
-          <span>对话框出现默认动效</span>
-          <select
-            value={manifest.ui_motion_defaults.dialogue_show ?? ""}
-            onChange={(event) =>
-              onChange({
-                ...manifest,
-                ui_motion_defaults: {
-                  ...manifest.ui_motion_defaults,
-                  dialogue_show: event.currentTarget.value || null,
-                },
-              })
-            }
-          >
-            <option value="">无（立即出现）</option>
-            {project.ui_motions.map(({ definition }) => (
-              <option key={definition.id} value={definition.id}>
-                {definition.id}
-              </option>
+          <label>
+            <span>对话框出现默认动效</span>
+            <select
+              value={manifest.ui_motion_defaults.dialogue_show ?? ""}
+              onChange={(event) =>
+                onChange({
+                  ...manifest,
+                  ui_motion_defaults: {
+                    ...manifest.ui_motion_defaults,
+                    dialogue_show: event.currentTarget.value || null,
+                  },
+                })
+              }
+            >
+              <option value="">无（立即出现）</option>
+              {project.ui_motions.map(({ definition }) => (
+                <option key={definition.id} value={definition.id}>
+                  {definition.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>对话框收起默认动效</span>
+            <select
+              value={manifest.ui_motion_defaults.dialogue_hide ?? ""}
+              onChange={(event) =>
+                onChange({
+                  ...manifest,
+                  ui_motion_defaults: {
+                    ...manifest.ui_motion_defaults,
+                    dialogue_hide: event.currentTarget.value || null,
+                  },
+                })
+              }
+            >
+              <option value="">无（立即收起）</option>
+              {project.ui_motions.map(({ definition }) => (
+                <option key={definition.id} value={definition.id}>
+                  {definition.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="library-list">
+            {project.ui_motions.map(({ definition, path }) => (
+              <LibraryRow
+                actions={[
+                  {
+                    id: "delete",
+                    label: "从项目移除",
+                    icon: Trash2,
+                    danger: true,
+                    onSelect: () => onDeleteUiMotion(definition.id),
+                  },
+                ]}
+                editLabel={`编辑 UI 动效 ${definition.id}`}
+                icon={Sparkles}
+                key={definition.id}
+                meta={`${definition.duration_ms} ms · ${path}`}
+                onOpen={() => onEditUiMotion(definition.id)}
+                title={definition.id}
+              />
             ))}
-          </select>
-        </label>
-        <label>
-          <span>对话框收起默认动效</span>
-          <select
-            value={manifest.ui_motion_defaults.dialogue_hide ?? ""}
-            onChange={(event) =>
-              onChange({
-                ...manifest,
-                ui_motion_defaults: {
-                  ...manifest.ui_motion_defaults,
-                  dialogue_hide: event.currentTarget.value || null,
-                },
-              })
-            }
-          >
-            <option value="">无（立即收起）</option>
-            {project.ui_motions.map(({ definition }) => (
-              <option key={definition.id} value={definition.id}>
-                {definition.id}
-              </option>
+            {project.ui_motions.length === 0 && (
+              <p className="library-empty">
+                还没有 UI 动效。创建后可在对话框与 UI 动效节点中复用。
+              </p>
+            )}
+          </div>
+        </CollapsibleSection>
+      )}
+      {show("library") && (
+        <CollapsibleSection
+          actions={
+            <IconButton
+              icon={Plus}
+              label="新建按钮模板"
+              onClick={onCreateButtonTemplate}
+              size="sm"
+            />
+          }
+          className="button-template-settings"
+          id="button-template"
+          onToggle={() => toggleSection("button-template")}
+          open={isSectionOpen("button-template")}
+          title="按钮模板"
+        >
+          <div className="library-list">
+            {(project.buttons ?? []).map(({ definition }) => {
+              const references = findButtonTemplateReferences(
+                project,
+                definition.id,
+              );
+              return (
+                <LibraryRow
+                  actions={[
+                    {
+                      id: "duplicate",
+                      label: "创建副本",
+                      icon: CopyPlus,
+                      onSelect: () => onDuplicateButtonTemplate(definition.id),
+                    },
+                    { kind: "separator", id: "sep" },
+                    {
+                      id: "delete",
+                      label: "从项目移除",
+                      icon: Trash2,
+                      danger: true,
+                      disabled: references.length > 0,
+                      hint: `仍被 ${references.length} 处剧情引用`,
+                      onSelect: () => onDeleteButtonTemplate(definition.id),
+                    },
+                  ]}
+                  editLabel={`编辑按钮模板 ${definition.id}`}
+                  icon={MousePointerClick}
+                  key={definition.id}
+                  meta={`${definition.width} × ${definition.height} · ${
+                    references.length === 0
+                      ? "未被引用"
+                      : `${references.length} 处引用`
+                  }`}
+                  onOpen={() => onEditButtonTemplate(definition.id)}
+                  title={definition.id}
+                />
+              );
+            })}
+            {(project.buttons ?? []).length === 0 && (
+              <p className="library-empty">
+                还没有按钮模板。创建后可在「创建按钮」节点中生成多个实例。
+              </p>
+            )}
+          </div>
+        </CollapsibleSection>
+      )}
+      {show("library") && (
+        <CollapsibleSection
+          actions={
+            <IconButton
+              onClick={() => {
+                let index = (project.actions ?? []).length + 1;
+                let id = `sprite.action_${index}`;
+                while (
+                  (project.actions ?? []).some(
+                    (file) => file.definition.id === id,
+                  )
+                ) {
+                  index += 1;
+                  id = `sprite.action_${index}`;
+                }
+                setDialog({
+                  title: "新立绘动作 ID",
+                  value: id,
+                  kind: "action_add",
+                });
+              }}
+              icon={Plus}
+              label="新建立绘动作"
+              size="sm"
+              variant="ghost"
+            />
+          }
+          className="action-settings"
+          id="sprite-action"
+          onToggle={() => toggleSection("sprite-action")}
+          open={isSectionOpen("sprite-action")}
+          title="立绘动作库"
+        >
+          <div className="library-list">
+            {(project.actions ?? []).map(({ definition }) => (
+              <LibraryRow
+                actions={[
+                  {
+                    id: "rename",
+                    label: "重命名 ID…",
+                    icon: Pencil,
+                    onSelect: () =>
+                      setDialog({
+                        title: "新的动作 ID",
+                        value: definition.id,
+                        kind: "action_rename",
+                        previous: definition.id,
+                      }),
+                  },
+                  {
+                    id: "duplicate",
+                    label: "创建副本",
+                    icon: CopyPlus,
+                    onSelect: () => onDuplicateAction(definition.id),
+                  },
+                  { kind: "separator", id: "sep" },
+                  {
+                    id: "delete",
+                    label: "从项目移除",
+                    icon: Trash2,
+                    danger: true,
+                    onSelect: () => onDeleteAction(definition.id),
+                  },
+                ]}
+                editLabel={`编辑立绘动作 ${definition.id}`}
+                icon={PersonStanding}
+                key={definition.id}
+                meta={`${definition.id} · ${definition.duration_ms} ms`}
+                onOpen={() => onEditActionKeyframes(definition.id)}
+                title={definition.name || definition.id}
+              />
             ))}
-          </select>
-        </label>
-        <div className="ui-motion-list">
-          {project.ui_motions.map(({ definition, path }) => (
-            <article className="variable-card" key={definition.id}>
-              <header>
-                <span>
-                  <code>{definition.id}</code>
-                  <small>{definition.duration_ms} ms</small>
-                </span>
-                <div>
-                  <button
-                    onClick={() => onEditUiMotion(definition.id)}
-                    title="打开全屏关键帧编辑器"
-                    type="button"
-                  >
-                    编辑
-                  </button>
-                  <button
-                    className="danger-text"
-                    onClick={() => onDeleteUiMotion(definition.id)}
-                    type="button"
-                  >
-                    ×
-                  </button>
-                </div>
-              </header>
-              <small>{path}</small>
-            </article>
-          ))}
-          {project.ui_motions.length === 0 && (
-            <small>还没有预设。创建后可在 UI 节点中复用。</small>
-          )}
-        </div>
-      </CollapsibleSection>
-      <CollapsibleSection
-        actions={
-          <button onClick={onCreateButtonTemplate} type="button">
-            ＋
-          </button>
-        }
-        className="button-template-settings"
-        id="button-template"
-        onToggle={() => toggleSection("button-template")}
-        open={isSectionOpen("button-template")}
-        title="按钮模板"
-      >
-        <p className="field-note">
-          剧情节点可创建多个实例；模板被引用或贴图仍被使用时不能删除。
-        </p>
-        <div className="ui-motion-list">
-          {(project.buttons ?? []).map(({ definition, path }) => {
-            const references = findButtonTemplateReferences(
-              project,
-              definition.id,
-            );
+            {(project.actions ?? []).length === 0 && (
+              <p className="library-empty">
+                还没有立绘动作。动作以立绘当前姿态为基准，可在「立绘动作」节点中调用。
+              </p>
+            )}
+          </div>
+        </CollapsibleSection>
+      )}
+      {show("characters") && (
+        <CollapsibleSection
+          actions={
+            <IconButton
+              onClick={() => {
+                setDialog({
+                  title: "新角色 ID",
+                  value: "new_character",
+                  kind: "character_add",
+                });
+              }}
+              icon={Plus}
+              label="新建角色"
+              size="sm"
+              variant="ghost"
+            />
+          }
+          className="character-settings"
+          id="character"
+          onToggle={() => toggleSection("character")}
+          open={isSectionOpen("character")}
+          title="角色"
+        >
+          {Object.entries(manifest.characters).map(([id, definition]) => {
+            const itemKey = `character:${id}`;
+            const open = isSidebarItemOpen(itemKey);
+            const contentId = `sidebar-item-content-${encodeURIComponent(itemKey)}`;
             return (
-              <article className="variable-card" key={definition.id}>
+              <article className="variable-card character-card" key={id}>
                 <header>
-                  <span>
-                    <code>{definition.id}</code>
-                    <small>
-                      {definition.width} × {definition.height} ·{" "}
-                      {definition.asset_mode}
-                    </small>
-                  </span>
+                  <button
+                    aria-controls={contentId}
+                    aria-expanded={open}
+                    aria-label={`${open ? "收起" : "展开"}角色 ${id}`}
+                    className="sidebar-item-toggle"
+                    onClick={() => toggleSidebarItem(itemKey)}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="sidebar-item-caret">
+                      {open ? "▾" : "▸"}
+                    </span>
+                    <code>{id}</code>
+                  </button>
                   <div>
-                    <button
-                      onClick={() => onEditButtonTemplate(definition.id)}
-                      title="打开按钮模板工作区"
-                      type="button"
-                    >
-                      编辑
-                    </button>
-                    <button
-                      onClick={() => onDuplicateButtonTemplate(definition.id)}
-                      title="复制按钮模板"
-                      type="button"
-                    >
-                      复制
-                    </button>
-                    <button
-                      className="danger-text"
-                      onClick={() => onDeleteButtonTemplate(definition.id)}
-                      type="button"
-                    >
-                      ×
-                    </button>
+                    <IconButton
+                      onClick={() => {
+                        setDialog({
+                          title: "新的角色 ID",
+                          value: id,
+                          kind: "character_rename",
+                          previous: id,
+                        });
+                      }}
+                      icon={Pencil}
+                      label="重命名角色 ID"
+                      size="sm"
+                      variant="ghost"
+                    />
+                    <IconButton
+                      onClick={() => onDeleteCharacter(id)}
+                      icon={Trash2}
+                      label="删除角色"
+                      size="sm"
+                    />
                   </div>
                 </header>
-                <small>{path}</small>
-                <small>
-                  {references.length === 0
-                    ? "尚未被剧情引用"
-                    : `引用 ${references.length} 处：${references
-                        .slice(0, 3)
-                        .join("、")}${references.length > 3 ? "…" : ""}`}
-                </small>
-                <div className="button-template-slots">
-                  <span>正常：{definition.normal ?? "无"}</span>
-                  <span>悬停：{definition.hover ?? "沿用/无"}</span>
-                  <span>按下：{definition.pressed ?? "沿用/无"}</span>
+                <div
+                  className="sidebar-item-content"
+                  hidden={!open}
+                  id={contentId}
+                >
+                  <label>
+                    <span>显示名</span>
+                    <DeferredTextInput
+                      maxLength={64}
+                      value={definition.display_name}
+                      onCommit={(display_name) =>
+                        onChangeCharacter(id, { ...definition, display_name })
+                      }
+                    />
+                  </label>
+                  <CharacterColorInput
+                    label="姓名色"
+                    onChange={(name_color) =>
+                      onChangeCharacter(id, { ...definition, name_color })
+                    }
+                    value={definition.name_color}
+                  />
+                  <CharacterColorInput
+                    label="正文色"
+                    onChange={(text_color) =>
+                      onChangeCharacter(id, { ...definition, text_color })
+                    }
+                    value={definition.text_color}
+                  />
+                  <label>
+                    <span>默认表情</span>
+                    <select
+                      value={definition.default_expression ?? ""}
+                      onChange={(event) =>
+                        onChangeCharacter(id, {
+                          ...definition,
+                          default_expression: event.currentTarget.value || null,
+                        })
+                      }
+                    >
+                      <option value="">无（由节点指定素材）</option>
+                      {Object.keys(definition.expressions ?? {}).map(
+                        (expressionId) => (
+                          <option key={expressionId} value={expressionId}>
+                            {expressionId}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+                  <label>
+                    <span>默认缩放</span>
+                    <DeferredInput
+                      min={0.01}
+                      onCommit={(raw) => {
+                        const value = Number(raw);
+                        if (!Number.isFinite(value) || value <= 0) return false;
+                        onChangeCharacter(id, {
+                          ...definition,
+                          default_scale: value,
+                        });
+                      }}
+                      step={0.05}
+                      type="number"
+                      value={String(definition.default_scale ?? 1)}
+                    />
+                  </label>
+                  <div className="character-expression-list">
+                    <header>
+                      <span>表情图</span>
+                      <IconButton
+                        disabled={defaultExpressionSprite === null}
+                        onClick={() => {
+                          const expressions = {
+                            ...(definition.expressions ?? {}),
+                          };
+                          let index = Object.keys(expressions).length + 1;
+                          let expressionId = `expression_${index}`;
+                          while (expressions[expressionId] !== undefined) {
+                            index += 1;
+                            expressionId = `expression_${index}`;
+                          }
+                          const firstSprite = firstVisibleAssetId(
+                            project.assets,
+                            assetLayout,
+                            "sprite",
+                          );
+                          if (firstSprite === null) return;
+                          expressions[expressionId] = {
+                            asset: firstSprite,
+                            anchor_x: 0.5,
+                            anchor_y: 1,
+                            offset_x: 0,
+                            offset_y: 0,
+                            scale: 1,
+                          };
+                          onChangeCharacter(id, { ...definition, expressions });
+                        }}
+                        icon={Plus}
+                        label="添加表情"
+                        tooltip={
+                          defaultExpressionSprite === null
+                            ? "没有可用的立绘素材（或全部已隐藏）"
+                            : "添加表情"
+                        }
+                        size="sm"
+                        variant="ghost"
+                      />
+                    </header>
+                    {Object.entries(definition.expressions ?? {}).map(
+                      ([expressionId, expression]) => (
+                        <CharacterExpressionEditor
+                          assets={project.assets}
+                          expression={expression}
+                          expressionId={expressionId}
+                          key={expressionId}
+                          onChange={(next) =>
+                            onChangeCharacter(id, {
+                              ...definition,
+                              expressions: {
+                                ...(definition.expressions ?? {}),
+                                [expressionId]: next,
+                              },
+                            })
+                          }
+                          onDelete={() => {
+                            const expressions = withoutKey(
+                              definition.expressions ?? {},
+                              expressionId,
+                            );
+                            onChangeCharacter(id, {
+                              ...definition,
+                              expressions,
+                              default_expression:
+                                definition.default_expression === expressionId
+                                  ? null
+                                  : definition.default_expression,
+                            });
+                          }}
+                        />
+                      ),
+                    )}
+                    {Object.keys(definition.expressions ?? {}).length === 0 && (
+                      <small>添加 sprite 素材后，可为角色注册表情。</small>
+                    )}
+                  </div>
                 </div>
               </article>
             );
           })}
-          {(project.buttons ?? []).length === 0 && (
-            <small>还没有按钮模板。创建后可在按钮节点中复用。</small>
-          )}
-        </div>
-      </CollapsibleSection>
-      <CollapsibleSection
-        actions={
-          <button
-            onClick={() => {
-              let index = (project.actions ?? []).length + 1;
-              let id = `sprite.action_${index}`;
-              while (
-                (project.actions ?? []).some(
-                  (file) => file.definition.id === id,
-                )
-              ) {
-                index += 1;
-                id = `sprite.action_${index}`;
-              }
-              setDialog({
-                title: "新立绘动作 ID",
-                value: id,
-                kind: "action_add",
-              });
-            }}
-            type="button"
-          >
-            ＋
-          </button>
-        }
-        className="action-settings"
-        id="sprite-action"
-        onToggle={() => toggleSection("sprite-action")}
-        open={isSectionOpen("sprite-action")}
-        title="立绘动作库"
-      >
-        <p className="field-note">
-          动作以当前立绘姿态为基准，位置/旋转为偏移，缩放/透明度为倍率。
-        </p>
-        <div className="ui-motion-list">
-          {(project.actions ?? []).map(({ definition, path }) => (
-            <ActionDefinitionEditor
-              definition={definition}
-              key={definition.id}
-              onChange={(next) => onChangeAction(definition.id, next)}
-              onEditKeyframes={() => onEditActionKeyframes(definition.id)}
-              onRename={() =>
+        </CollapsibleSection>
+      )}
+      {show("variables") && (
+        <CollapsibleSection
+          actions={
+            <IconButton
+              onClick={() => {
                 setDialog({
-                  title: "新的动作 ID",
-                  value: definition.id,
-                  kind: "action_rename",
-                  previous: definition.id,
-                })
-              }
-              onDuplicate={() => onDuplicateAction(definition.id)}
-              onDelete={() => onDeleteAction(definition.id)}
-              path={path}
+                  title: "新变量 ID",
+                  value: "new_variable",
+                  kind: "variable_add",
+                });
+              }}
+              icon={Plus}
+              label="新建变量"
+              size="sm"
+              variant="ghost"
             />
-          ))}
-          {(project.actions ?? []).length === 0 && (
-            <small>还没有动作。创建后可在“立绘动作”节点中调用。</small>
-          )}
-        </div>
-      </CollapsibleSection>
-      <CollapsibleSection
-        actions={
-          <button
-            onClick={() => {
-              setDialog({
-                title: "新角色 ID",
-                value: "new_character",
-                kind: "character_add",
-              });
-            }}
-            type="button"
-          >
-            ＋
-          </button>
-        }
-        className="character-settings"
-        id="character"
-        onToggle={() => toggleSection("character")}
-        open={isSectionOpen("character")}
-        title="角色"
-      >
-        {Object.entries(manifest.characters).map(([id, definition]) => (
-          <article className="variable-card character-card" key={id}>
-            <header>
-              <code>{id}</code>
-              <div>
-                <button
-                  onClick={() => {
-                    setDialog({
-                      title: "新的角色 ID",
-                      value: id,
-                      kind: "character_rename",
-                      previous: id,
-                    });
-                  }}
-                  type="button"
+          }
+          id="variable"
+          onToggle={() => toggleSection("variable")}
+          open={isSectionOpen("variable")}
+          title="剧情变量"
+        >
+          {Object.entries(manifest.variables).map(([id, definition]) => {
+            const itemKey = `variable:${id}`;
+            const open = isSidebarItemOpen(itemKey);
+            const contentId = `sidebar-item-content-${encodeURIComponent(itemKey)}`;
+            return (
+              <article className="variable-card" key={id}>
+                <header>
+                  <button
+                    aria-controls={contentId}
+                    aria-expanded={open}
+                    aria-label={`${open ? "收起" : "展开"}变量 ${id}`}
+                    className="sidebar-item-toggle"
+                    onClick={() => toggleSidebarItem(itemKey)}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="sidebar-item-caret">
+                      {open ? "▾" : "▸"}
+                    </span>
+                    <code>{id}</code>
+                  </button>
+                  <div>
+                    <IconButton
+                      onClick={() => {
+                        setDialog({
+                          title: "新的变量 ID",
+                          value: id,
+                          kind: "variable_rename",
+                          previous: id,
+                        });
+                      }}
+                      icon={Pencil}
+                      label="重命名变量 ID"
+                      size="sm"
+                      variant="ghost"
+                    />
+                    <IconButton
+                      onClick={() => onDeleteVariable(id)}
+                      icon={Trash2}
+                      label="删除变量"
+                      size="sm"
+                    />
+                  </div>
+                </header>
+                <div
+                  className="sidebar-item-content"
+                  hidden={!open}
+                  id={contentId}
                 >
-                  ✎
-                </button>
-                <button
-                  className="danger-text"
-                  onClick={() => onDeleteCharacter(id)}
-                  type="button"
-                >
-                  ×
-                </button>
-              </div>
-            </header>
-            <label>
-              <span>显示名</span>
-              <DeferredTextInput
-                maxLength={64}
-                value={definition.display_name}
-                onCommit={(display_name) =>
-                  onChangeCharacter(id, { ...definition, display_name })
-                }
-              />
-            </label>
-            <CharacterColorInput
-              label="姓名色"
-              onChange={(name_color) =>
-                onChangeCharacter(id, { ...definition, name_color })
-              }
-              value={definition.name_color}
-            />
-            <CharacterColorInput
-              label="正文色"
-              onChange={(text_color) =>
-                onChangeCharacter(id, { ...definition, text_color })
-              }
-              value={definition.text_color}
-            />
-            <label>
-              <span>默认表情</span>
-              <select
-                value={definition.default_expression ?? ""}
-                onChange={(event) =>
-                  onChangeCharacter(id, {
-                    ...definition,
-                    default_expression: event.currentTarget.value || null,
-                  })
-                }
-              >
-                <option value="">无（由节点指定素材）</option>
-                {Object.keys(definition.expressions ?? {}).map(
-                  (expressionId) => (
-                    <option key={expressionId} value={expressionId}>
-                      {expressionId}
-                    </option>
-                  ),
-                )}
-              </select>
-            </label>
-            <label>
-              <span>默认缩放</span>
-              <input
-                min={0.01}
-                onChange={(event) => {
-                  const value = Number(event.currentTarget.value);
-                  if (Number.isFinite(value) && value > 0)
-                    onChangeCharacter(id, {
-                      ...definition,
-                      default_scale: value,
-                    });
-                }}
-                step={0.05}
-                type="number"
-                value={definition.default_scale ?? 1}
-              />
-            </label>
-            <div className="character-expression-list">
-              <header>
-                <span>表情图</span>
-                <button
-                  disabled={defaultExpressionSprite === null}
-                  onClick={() => {
-                    const expressions = { ...(definition.expressions ?? {}) };
-                    let index = Object.keys(expressions).length + 1;
-                    let expressionId = `expression_${index}`;
-                    while (expressions[expressionId] !== undefined) {
-                      index += 1;
-                      expressionId = `expression_${index}`;
-                    }
-                    const firstSprite = firstVisibleAssetId(
-                      project.assets,
-                      assetLayout,
-                      "sprite",
-                    );
-                    if (firstSprite === null) return;
-                    expressions[expressionId] = {
-                      asset: firstSprite,
-                      anchor_x: 0.5,
-                      anchor_y: 1,
-                      offset_x: 0,
-                      offset_y: 0,
-                      scale: 1,
-                    };
-                    onChangeCharacter(id, { ...definition, expressions });
-                  }}
-                  title={
-                    defaultExpressionSprite === null
-                      ? "没有可用的立绘素材（或全部已隐藏）"
-                      : undefined
-                  }
-                  type="button"
-                >
-                  ＋
-                </button>
-              </header>
-              {Object.entries(definition.expressions ?? {}).map(
-                ([expressionId, expression]) => (
-                  <CharacterExpressionEditor
-                    assets={project.assets}
-                    expression={expression}
-                    expressionId={expressionId}
-                    key={expressionId}
-                    onChange={(next) =>
-                      onChangeCharacter(id, {
-                        ...definition,
-                        expressions: {
-                          ...(definition.expressions ?? {}),
-                          [expressionId]: next,
-                        },
-                      })
-                    }
-                    onDelete={() => {
-                      const expressions = withoutKey(
-                        definition.expressions ?? {},
-                        expressionId,
-                      );
-                      onChangeCharacter(id, {
-                        ...definition,
-                        expressions,
-                        default_expression:
-                          definition.default_expression === expressionId
-                            ? null
-                            : definition.default_expression,
-                      });
-                    }}
-                  />
-                ),
-              )}
-              {Object.keys(definition.expressions ?? {}).length === 0 && (
-                <small>添加 sprite 素材后，可为角色注册表情。</small>
-              )}
+                  <label>
+                    <span>作用域</span>
+                    <select
+                      value={definition.scope}
+                      onChange={(event) =>
+                        onChangeVariable(id, {
+                          ...definition,
+                          scope: event.currentTarget
+                            .value as VariableDefinition["scope"],
+                        })
+                      }
+                    >
+                      <option value="save">{VARIABLE_SCOPE_LABELS.save}</option>
+                      <option value="profile">
+                        {VARIABLE_SCOPE_LABELS.profile}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>类型</span>
+                    <select
+                      value={definition.type}
+                      onChange={(event) => {
+                        const type = event.currentTarget.value as VariableType;
+                        onChangeVariable(id, {
+                          ...definition,
+                          type,
+                          default: defaultForVariableType(type),
+                        });
+                      }}
+                    >
+                      <option value="boolean">
+                        {VARIABLE_TYPE_LABELS.boolean}
+                      </option>
+                      <option value="integer">
+                        {VARIABLE_TYPE_LABELS.integer}
+                      </option>
+                      <option value="number">
+                        {VARIABLE_TYPE_LABELS.number}
+                      </option>
+                      <option value="string">
+                        {VARIABLE_TYPE_LABELS.string}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>默认值</span>
+                    <VariableDefaultInput
+                      definition={definition}
+                      onChange={(defaultValue) =>
+                        onChangeVariable(id, {
+                          ...definition,
+                          default: defaultValue,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              </article>
+            );
+          })}
+        </CollapsibleSection>
+      )}
+      {show("project") && (
+        <>
+          <dl className="project-facts">
+            <div>
+              <dt>Schema</dt>
+              <dd>{manifest.schema_version}</dd>
             </div>
-          </article>
-        ))}
-      </CollapsibleSection>
-      <CollapsibleSection
-        actions={
-          <button
-            onClick={() => {
-              setDialog({
-                title: "新变量 ID",
-                value: "new_variable",
-                kind: "variable_add",
-              });
-            }}
-            type="button"
-          >
-            ＋
-          </button>
-        }
-        id="variable"
-        onToggle={() => toggleSection("variable")}
-        open={isSectionOpen("variable")}
-        title="剧情变量"
-      >
-        {Object.entries(manifest.variables).map(([id, definition]) => (
-          <article className="variable-card" key={id}>
-            <header>
-              <code>{id}</code>
-              <div>
-                <button
-                  onClick={() => {
-                    setDialog({
-                      title: "新的变量 ID",
-                      value: id,
-                      kind: "variable_rename",
-                      previous: id,
-                    });
-                  }}
-                  type="button"
-                >
-                  ✎
-                </button>
-                <button
-                  className="danger-text"
-                  onClick={() => onDeleteVariable(id)}
-                  type="button"
-                >
-                  ×
-                </button>
-              </div>
-            </header>
-            <label>
-              <span>作用域</span>
-              <select
-                value={definition.scope}
-                onChange={(event) =>
-                  onChangeVariable(id, {
-                    ...definition,
-                    scope: event.currentTarget
-                      .value as VariableDefinition["scope"],
-                  })
-                }
-              >
-                <option value="save">save · 随存档</option>
-                <option value="profile">profile · 跨存档</option>
-              </select>
-            </label>
-            <label>
-              <span>类型</span>
-              <select
-                value={definition.type}
-                onChange={(event) => {
-                  const type = event.currentTarget.value as VariableType;
-                  onChangeVariable(id, {
-                    ...definition,
-                    type,
-                    default: defaultForVariableType(type),
-                  });
-                }}
-              >
-                <option value="boolean">boolean</option>
-                <option value="integer">integer</option>
-                <option value="number">number</option>
-                <option value="string">string</option>
-              </select>
-            </label>
-            <label>
-              <span>默认值</span>
-              <VariableDefaultInput
-                definition={definition}
-                onChange={(defaultValue) =>
-                  onChangeVariable(id, { ...definition, default: defaultValue })
-                }
-              />
-            </label>
-          </article>
-        ))}
-      </CollapsibleSection>
-      <dl className="project-facts">
-        <div>
-          <dt>Schema</dt>
-          <dd>{manifest.schema_version}</dd>
-        </div>
-        <div>
-          <dt>场景</dt>
-          <dd>{project.scenes.length}</dd>
-        </div>
-        <div>
-          <dt>素材</dt>
-          <dd>{Object.keys(manifest.assets).length}</dd>
-        </div>
-      </dl>
-      <code className="project-root">{project.root}</code>
+            <div>
+              <dt>场景</dt>
+              <dd>{project.scenes.length}</dd>
+            </div>
+            <div>
+              <dt>素材</dt>
+              <dd>{Object.keys(manifest.assets).length}</dd>
+            </div>
+          </dl>
+          <code className="project-root">{project.root}</code>
+        </>
+      )}
       {dialog !== null && (
         <TextEntryDialog
           initialValue={dialog.value}
@@ -3358,393 +3572,23 @@ function ProjectPanel({
             if (accepted) setDialog(null);
             return accepted;
           }}
+          hint={ID_RULE_HINT}
           title={dialog.title}
+          validate={(value) =>
+            idUnavailableReason(
+              dialog.kind.startsWith("character")
+                ? "character"
+                : dialog.kind.startsWith("variable")
+                  ? "variable"
+                  : "action",
+              value,
+              project,
+              { previous: dialog.previous },
+            )
+          }
         />
       )}
     </div>
-  );
-}
-
-const ACTION_CHANNELS: { id: string; label: string; defaultValue: number }[] = [
-  { id: "x", label: "X 偏移", defaultValue: 0 },
-  { id: "y", label: "Y 偏移", defaultValue: 0 },
-  { id: "rotation_deg", label: "旋转偏移", defaultValue: 0 },
-  { id: "scale", label: "整体缩放倍率", defaultValue: 1 },
-  { id: "scale_x", label: "横向缩放倍率", defaultValue: 1 },
-  { id: "scale_y", label: "纵向缩放倍率", defaultValue: 1 },
-  { id: "opacity", label: "透明度倍率", defaultValue: 1 },
-];
-
-function ActionDefinitionEditor({
-  definition,
-  onRename,
-  onDuplicate,
-  onChange,
-  onDelete,
-  onEditKeyframes,
-  path,
-}: {
-  definition: SpriteActionDefinition;
-  onRename(): void;
-  onDuplicate(): void;
-  onChange(definition: SpriteActionDefinition): void;
-  onDelete(): void;
-  onEditKeyframes(): void;
-  path: string;
-}): ReactElement {
-  const channels = definition.channels ?? {};
-  const parameters = definition.parameters ?? {};
-  const updateChannel = (
-    channel: string,
-    keyframes: SpriteActionKeyframe[],
-  ): void => {
-    const nextChannels = { ...channels };
-    if (keyframes.length === 0) {
-      onChange({
-        ...definition,
-        channels: withoutKey(channels, channel),
-      });
-      return;
-    } else {
-      nextChannels[channel] = [...keyframes].sort((a, b) => a.at_ms - b.at_ms);
-    }
-    onChange({ ...definition, channels: nextChannels });
-  };
-  return (
-    <article
-      className="variable-card action-card"
-      onDoubleClick={onEditKeyframes}
-      title="双击打开关键帧工作区"
-    >
-      <header>
-        <span>
-          <code>{definition.id}</code>
-          <small>{definition.duration_ms} ms</small>
-        </span>
-        <div>
-          <button
-            onClick={onEditKeyframes}
-            title="打开关键帧工作区"
-            type="button"
-          >
-            关键帧
-          </button>
-          <button onClick={onRename} title="重命名动作" type="button">
-            ✎
-          </button>
-          <button onClick={onDuplicate} title="复制动作" type="button">
-            复制
-          </button>
-          <button className="danger-text" onClick={onDelete} type="button">
-            ×
-          </button>
-        </div>
-      </header>
-      <small>{path}</small>
-      <label>
-        <span>动作名称</span>
-        <DeferredTextInput
-          maxLength={128}
-          onCommit={(name) => onChange({ ...definition, name })}
-          value={definition.name}
-        />
-      </label>
-      <div className="field-grid">
-        <label>
-          <span>默认时长 ms</span>
-          <ActionNumberInput
-            min={1}
-            onCommit={(duration_ms) => onChange({ ...definition, duration_ms })}
-            value={definition.duration_ms}
-          />
-        </label>
-        <label>
-          <span>结束姿态</span>
-          <select
-            onChange={(event) =>
-              onChange({
-                ...definition,
-                end: event.currentTarget.value as "hold" | "restore",
-              })
-            }
-            value={definition.end ?? "hold"}
-          >
-            <option value="hold">保持最后一帧</option>
-            <option value="restore">恢复动作前姿态</option>
-          </select>
-        </label>
-      </div>
-      <div className="action-channel-list">
-        <div className="action-channel-toolbar">
-          <strong>参数</strong>
-          <button
-            onClick={() => {
-              let index = Object.keys(parameters).length + 1;
-              let id = `amount_${index}`;
-              while (parameters[id] !== undefined) {
-                index += 1;
-                id = `amount_${index}`;
-              }
-              onChange({
-                ...definition,
-                parameters: {
-                  ...parameters,
-                  [id]: { default: 1, min: -10, max: 10 },
-                },
-              });
-            }}
-            type="button"
-          >
-            ＋ 添加参数
-          </button>
-        </div>
-        {Object.entries(parameters).map(([parameterId, parameter]) => (
-          <div className="action-keyframe action-parameter" key={parameterId}>
-            <code>{parameterId}</code>
-            <ActionNumberInput
-              ariaLabel={`${parameterId} 默认值`}
-              onCommit={(value) =>
-                onChange({
-                  ...definition,
-                  parameters: {
-                    ...parameters,
-                    [parameterId]: { ...parameter, default: value },
-                  },
-                })
-              }
-              value={parameter.default}
-            />
-            <ActionNumberInput
-              ariaLabel={`${parameterId} 最小值`}
-              onCommit={(value) =>
-                onChange({
-                  ...definition,
-                  parameters: {
-                    ...parameters,
-                    [parameterId]: { ...parameter, min: value },
-                  },
-                })
-              }
-              value={parameter.min ?? -10}
-            />
-            <ActionNumberInput
-              ariaLabel={`${parameterId} 最大值`}
-              onCommit={(value) =>
-                onChange({
-                  ...definition,
-                  parameters: {
-                    ...parameters,
-                    [parameterId]: { ...parameter, max: value },
-                  },
-                })
-              }
-              value={parameter.max ?? 10}
-            />
-            <button
-              className="danger-text"
-              onClick={() => {
-                const next = withoutKey(parameters, parameterId);
-                onChange({ ...definition, parameters: next });
-              }}
-              type="button"
-            >
-              ×
-            </button>
-          </div>
-        ))}
-        <div className="action-channel-toolbar">
-          <strong>变换通道</strong>
-          <select
-            aria-label="添加动作通道"
-            defaultValue=""
-            onChange={(event) => {
-              const channel = event.currentTarget.value;
-              event.currentTarget.value = "";
-              if (!channel || channels[channel] !== undefined) return;
-              const defaultValue =
-                ACTION_CHANNELS.find((candidate) => candidate.id === channel)
-                  ?.defaultValue ?? 0;
-              updateChannel(channel, [
-                { at_ms: 0, value: defaultValue, easing: "linear" },
-                {
-                  at_ms: definition.duration_ms,
-                  value: defaultValue,
-                  easing: "linear",
-                },
-              ]);
-            }}
-          >
-            <option value="">＋ 添加通道</option>
-            {ACTION_CHANNELS.filter(({ id }) => channels[id] === undefined).map(
-              ({ id, label }) => (
-                <option key={id} value={id}>
-                  {label}
-                </option>
-              ),
-            )}
-          </select>
-        </div>
-        {Object.entries(channels).map(([channel, keyframes]) => (
-          <section className="action-channel" key={channel}>
-            <header>
-              <strong>
-                {ACTION_CHANNELS.find((candidate) => candidate.id === channel)
-                  ?.label ?? channel}
-              </strong>
-              <button
-                className="danger-text"
-                onClick={() => updateChannel(channel, [])}
-                type="button"
-              >
-                删除通道
-              </button>
-            </header>
-            {keyframes.map((keyframe, index) => (
-              <div className="action-keyframe" key={`${channel}-${index}`}>
-                <ActionNumberInput
-                  ariaLabel="关键帧时间"
-                  min={0}
-                  max={definition.duration_ms}
-                  onCommit={(at_ms) => {
-                    const next = [...keyframes];
-                    next[index] = { ...keyframe, at_ms };
-                    updateChannel(channel, next);
-                  }}
-                  value={keyframe.at_ms}
-                />
-                <ActionNumberInput
-                  ariaLabel="关键帧数值"
-                  onCommit={(value) => {
-                    const next = [...keyframes];
-                    next[index] = { ...keyframe, value };
-                    updateChannel(channel, next);
-                  }}
-                  value={keyframe.value}
-                />
-                <select
-                  aria-label="关键帧缓动"
-                  onChange={(event) => {
-                    const next = [...keyframes];
-                    next[index] = {
-                      ...keyframe,
-                      easing: event.currentTarget.value as
-                        | "linear"
-                        | "ease_in"
-                        | "ease_out"
-                        | "ease_in_out"
-                        | "step",
-                    };
-                    updateChannel(channel, next);
-                  }}
-                  value={
-                    typeof keyframe.easing === "string"
-                      ? keyframe.easing
-                      : "linear"
-                  }
-                >
-                  <option value="linear">linear</option>
-                  <option value="ease_in">ease in</option>
-                  <option value="ease_out">ease out</option>
-                  <option value="ease_in_out">ease in/out</option>
-                  <option value="step">step</option>
-                </select>
-                <select
-                  aria-label="关键帧参数"
-                  onChange={(event) => {
-                    const next = [...keyframes];
-                    next[index] = {
-                      ...keyframe,
-                      parameter: event.currentTarget.value || undefined,
-                    };
-                    updateChannel(channel, next);
-                  }}
-                  value={keyframe.parameter ?? ""}
-                >
-                  <option value="">固定值</option>
-                  {Object.keys(parameters).map((parameterId) => (
-                    <option key={parameterId} value={parameterId}>
-                      参数：{parameterId}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  className="danger-text"
-                  disabled={keyframes.length <= 1}
-                  onClick={() =>
-                    updateChannel(
-                      channel,
-                      keyframes.filter((_, current) => current !== index),
-                    )
-                  }
-                  type="button"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-            <button
-              onClick={() =>
-                updateChannel(channel, [
-                  ...keyframes,
-                  {
-                    at_ms: definition.duration_ms,
-                    value: keyframes.at(-1)?.value ?? 0,
-                    easing: "linear",
-                  },
-                ])
-              }
-              type="button"
-            >
-              ＋ 关键帧
-            </button>
-          </section>
-        ))}
-      </div>
-    </article>
-  );
-}
-
-function ActionNumberInput({
-  ariaLabel,
-  max,
-  min,
-  onCommit,
-  value,
-}: {
-  ariaLabel?: string;
-  max?: number;
-  min?: number;
-  onCommit(value: number): void;
-  value: number;
-}): ReactElement {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const commit = (): void => {
-    const parsed = Number(inputRef.current?.value ?? value);
-    if (!Number.isFinite(parsed)) {
-      if (inputRef.current) inputRef.current.value = String(value);
-      return;
-    }
-    const bounded = Math.min(max ?? parsed, Math.max(min ?? parsed, parsed));
-    if (bounded !== value) onCommit(bounded);
-  };
-  return (
-    <input
-      aria-label={ariaLabel}
-      defaultValue={String(value)}
-      key={String(value)}
-      max={max}
-      min={min}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          commit();
-        }
-      }}
-      ref={inputRef}
-      step="any"
-      type="number"
-    />
   );
 }
 
@@ -3762,12 +3606,9 @@ function CharacterColorInput({
     <label className="character-color-field">
       <span>{label}</span>
       <span>
-        <input
-          aria-label={`${label}选择器`}
-          onChange={(event) =>
-            onChange(event.currentTarget.value.toUpperCase())
-          }
-          type="color"
+        <ColorSwatch
+          label={`${label}选择器`}
+          onCommit={onChange}
           value={
             /^#[0-9A-Fa-f]{6}$/.test(opaqueColor) ? opaqueColor : "#FFFFFF"
           }
@@ -3800,9 +3641,12 @@ function CharacterExpressionEditor({
     <article className="character-expression-card">
       <header>
         <code>{expressionId}</code>
-        <button className="danger-text" onClick={onDelete} type="button">
-          ×
-        </button>
+        <IconButton
+          onClick={onDelete}
+          icon={Trash2}
+          label="删除表情"
+          size="sm"
+        />
       </header>
       <label>
         <span>素材</span>
@@ -3871,16 +3715,17 @@ function NumberInput({
   return (
     <label>
       <span>{label}</span>
-      <input
+      <DeferredInput
         max={max}
         min={min}
-        onChange={(event) => {
-          const next = Number(event.currentTarget.value);
-          if (Number.isFinite(next)) onChange(next);
+        onCommit={(raw) => {
+          const next = Number(raw);
+          if (raw.trim() === "" || !Number.isFinite(next)) return false;
+          onChange(next);
         }}
         step={step ?? "any"}
         type="number"
-        value={value}
+        value={String(value)}
       />
     </label>
   );
@@ -3893,72 +3738,46 @@ function VariableDefaultInput({
   definition: VariableDefinition;
   onChange(value: ScalarValue): void;
 }): ReactElement {
-  const inputRef = useRef<HTMLInputElement>(null);
   if (definition.type === "boolean") {
     return (
       <select
         value={String(definition.default)}
         onChange={(event) => onChange(event.currentTarget.value === "true")}
       >
-        <option value="true">true</option>
-        <option value="false">false</option>
+        <option value="true">是</option>
+        <option value="false">否</option>
       </select>
     );
   }
-  const numeric = definition.type === "integer" || definition.type === "number";
   const defaultText = String(definition.default);
-  const commitInteger = (): void => {
-    const text = inputRef.current?.value ?? defaultText;
-    if (isCanonicalIntegerText(text)) onChange(BigInt(text));
-    else if (inputRef.current !== null) inputRef.current.value = defaultText;
-  };
   if (definition.type === "integer") {
     return (
-      <input
+      <DeferredInput
         aria-label="整数默认值"
         inputMode="numeric"
-        defaultValue={defaultText}
-        key={defaultText}
-        ref={inputRef}
-        type="text"
-        onBlur={commitInteger}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") commitInteger();
+        onCommit={(raw) => {
+          if (!isCanonicalIntegerText(raw)) return false;
+          onChange(BigInt(raw));
         }}
+        type="text"
+        value={defaultText}
       />
     );
   }
   return (
-    <input
+    <DeferredInput
+      onCommit={(raw) => {
+        if (definition.type !== "number") {
+          onChange(raw);
+          return;
+        }
+        const parsed = Number(raw);
+        if (raw.trim() === "" || !Number.isFinite(parsed)) return false;
+        if (parsed !== definition.default) onChange(parsed);
+      }}
       step="any"
-      type={numeric ? "number" : "text"}
-      defaultValue={defaultText}
-      key={defaultText}
-      ref={inputRef}
-      onBlur={() => {
-        const raw = inputRef.current?.value ?? defaultText;
-        if (definition.type === "number") {
-          const parsed = Number(raw);
-          if (Number.isFinite(parsed) && parsed !== definition.default)
-            onChange(parsed);
-          else if (!Number.isFinite(parsed) && inputRef.current !== null)
-            inputRef.current.value = defaultText;
-        } else if (raw !== defaultText) {
-          onChange(raw);
-        }
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        const raw = inputRef.current?.value ?? defaultText;
-        if (definition.type === "number") {
-          const parsed = Number(raw);
-          if (Number.isFinite(parsed) && parsed !== definition.default)
-            onChange(parsed);
-        } else if (raw !== defaultText) {
-          onChange(raw);
-        }
-      }}
+      type={definition.type === "number" ? "number" : "text"}
+      value={defaultText}
     />
   );
 }
@@ -3974,25 +3793,12 @@ function DeferredTextInput({
   placeholder?: string;
   value: string;
 }): ReactElement {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const commit = (): void => {
-    const draft = inputRef.current?.value ?? value;
-    if (draft !== value) onCommit(draft);
-  };
   return (
-    <input
-      defaultValue={value}
-      key={value}
+    <DeferredInput
       maxLength={maxLength}
-      ref={inputRef}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          commit();
-        }
-      }}
+      onCommit={(raw) => onCommit(raw)}
       placeholder={placeholder}
+      value={value}
     />
   );
 }

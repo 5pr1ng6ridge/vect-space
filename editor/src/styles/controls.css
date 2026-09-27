@@ -1,0 +1,265 @@
+/*
+ * Shared compound controls (asset chooser, list editors, condition builder,
+ * markup preview).  They live in the `elements` layer like the native
+ * control defaults, so a legacy workspace that still overrides them keeps
+ * working until it is migrated.
+ */
+@layer elements {
+  /* --------------------------------------------------------- Asset chooser */
+  .asset-chooser {
+    position: relative;
+    min-width: 0;
+  }
+
+  .asset-chooser-trigger {
+    display: flex;
+    width: 100%;
+    min-height: var(--control-height-md);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2-5, 10px);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-input);
+    text-align: left;
+  }
+
+  .asset-chooser-trigger:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: var(--surface-input);
+  }
+
+  .asset-chooser-value {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 1px;
+    font-size: var(--font-size-md);
+  }
+
+  .asset-chooser-sub {
+    overflow: hidden;
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .asset-chooser-caret {
+    flex: 0 0 auto;
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+  }
+
+  .asset-chooser-popover {
+    position: absolute;
+    z-index: var(--z-dropdown);
+    left: 0;
+    display: flex;
+    width: max(100%, 280px);
+    max-height: 360px;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+    padding: var(--space-1-5);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface-overlay);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .asset-chooser-filters {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .asset-chooser-filters select {
+    min-width: 0;
+    flex: 1 1 0;
+    height: var(--control-height-sm);
+    font-size: var(--font-size-sm);
+  }
+
+  .asset-chooser-list {
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .asset-chooser-option {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: var(--space-1-5) var(--space-2);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+  }
+
+  .asset-chooser-option.active,
+  .asset-chooser-option:hover {
+    background: var(--surface-active);
+  }
+
+  .asset-chooser-option.selected {
+    background: var(--accent-muted);
+  }
+
+  .asset-chooser-option-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    font-size: var(--font-size-md);
+  }
+
+  .asset-chooser-option-detail {
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+  }
+
+  .asset-kind-chip {
+    margin-left: auto;
+    padding: 1px var(--space-1-5);
+    border-radius: var(--radius-sm);
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+    font-size: var(--font-size-xs);
+  }
+
+  .asset-chooser-empty {
+    padding: var(--space-2);
+    font-size: var(--font-size-sm);
+  }
+
+  .asset-chooser-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  /* ------------------------------------------------ Repeated list editors */
+  .choice-editor-list,
+  .long-text-steps-editor {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+
+  .choice-editor,
+  .long-text-step-editor,
+  .condition-editor {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-raised);
+  }
+
+  .choice-editor > header,
+  .long-text-step-editor > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .choice-editor > header strong,
+  .long-text-step-editor > header strong {
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .choice-editor > header div,
+  .compact-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .compact-actions > button:not(.vs-icon-button) {
+    height: var(--control-height-sm);
+    padding: 0 var(--space-2);
+    font-size: var(--font-size-sm);
+  }
+
+  .long-text-step-editor label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1-5);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+  }
+
+  .long-text-step-editor label.long-text-break-toggle {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-primary);
+  }
+
+  /* ---------------------------------------------------- Condition builder */
+  .condition-editor .condition-editor {
+    background: var(--surface-panel);
+  }
+
+  .condition-operands,
+  .condition-children {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .condition-child {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1-5);
+  }
+
+  .condition-child-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 2px;
+  }
+
+  .operand-editor {
+    display: grid;
+    grid-template-columns: 96px minmax(0, 1fr);
+    gap: var(--space-1-5);
+  }
+
+  .optional-condition {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  /* ------------------------------------------------------- Markup preview */
+  .markup-preview {
+    min-height: var(--control-height-md);
+    padding: var(--space-2) var(--space-2-5, 10px);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-canvas);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+
+  .character-style-preview {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-canvas);
+  }
+}

@@ -23,6 +23,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { editorApi } from "../api";
 import type { AssetInspection, EditorLayout, EditorProject } from "../types";
 import { ProjectSidebar, type ImportDraft } from "./ProjectSidebar";
+import { withTauriGuard } from "../test/appHarness";
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
@@ -104,7 +105,6 @@ const SIDEBAR_CALLBACKS = {
   onAddCharacter: () => true,
   onAddScene: () => true,
   onAddVariable: () => true,
-  onChangeAction: () => undefined,
   onChangeCharacter: () => undefined,
   onChangeVariable: () => undefined,
   onCreateAction: () => true,
@@ -585,9 +585,9 @@ describe("same-ID / new-path replacement", () => {
     });
 
     fireEvent.click(assetRow("bg.room"));
-    fireEvent.click(screen.getByRole("button", { name: "替换二进制文件…" }));
+    fireEvent.click(screen.getByRole("button", { name: "替换文件…" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "替换素材二进制",
+      name: "替换素材文件",
     });
     // Logical id and kind are locked; only the file name can change.
     expect(
@@ -615,9 +615,9 @@ describe("same-ID / new-path replacement", () => {
     ]);
     renderAssets();
     fireEvent.click(assetRow("bg.room"));
-    fireEvent.click(screen.getByRole("button", { name: "替换二进制文件…" }));
+    fireEvent.click(screen.getByRole("button", { name: "替换文件…" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "替换素材二进制",
+      name: "替换素材文件",
     });
     expect(
       within(dialog).getByText(/新文件必须与旧文件格式一致/),
@@ -646,9 +646,9 @@ describe("same-ID / new-path replacement", () => {
     pick.mockResolvedValue(["C:/incoming/room_v2.png"]);
     inspect.mockResolvedValue([inspection({ source_name: "room_v2.png" })]);
     fireEvent.click(assetRow("bg.room"));
-    fireEvent.click(screen.getByRole("button", { name: "替换二进制文件…" }));
+    fireEvent.click(screen.getByRole("button", { name: "替换文件…" }));
     let dialog = await screen.findByRole("dialog", {
-      name: "替换素材二进制",
+      name: "替换素材文件",
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "导入清单" }));
     await waitFor(() => expect(imported).toHaveLength(1));
@@ -661,8 +661,8 @@ describe("same-ID / new-path replacement", () => {
     // and the picker prefills a free `_vN` suggestion instead.
     pick.mockResolvedValue(["C:/incoming/room.png"]);
     inspect.mockResolvedValue([inspection({ source_name: "room.png" })]);
-    fireEvent.click(screen.getByRole("button", { name: "替换二进制文件…" }));
-    dialog = await screen.findByRole("dialog", { name: "替换素材二进制" });
+    fireEvent.click(screen.getByRole("button", { name: "替换文件…" }));
+    dialog = await screen.findByRole("dialog", { name: "替换素材文件" });
     const fileName =
       within(dialog).getByLabelText<HTMLInputElement>("room_v3.png 文件名");
     expect(fileName).toHaveValue("room_v3.png");
@@ -695,8 +695,8 @@ describe("same-ID / new-path replacement", () => {
 
     // After staging room_v3.png, the current registration is room_v3.png and
     // the picker still avoids it (and every earlier reserved path).
-    fireEvent.click(screen.getByRole("button", { name: "替换二进制文件…" }));
-    dialog = await screen.findByRole("dialog", { name: "替换素材二进制" });
+    fireEvent.click(screen.getByRole("button", { name: "替换文件…" }));
+    dialog = await screen.findByRole("dialog", { name: "替换素材文件" });
     const finalName =
       within(dialog).getByLabelText<HTMLInputElement>("room_v4.png 文件名");
     expect(finalName).toHaveValue("room_v4.png");
@@ -709,9 +709,44 @@ describe("same-ID / new-path replacement", () => {
   it("refuses to replace a composite animated asset", () => {
     renderAssets();
     fireEvent.click(assetRow("anim.blink"));
-    expect(
-      screen.getByRole("button", { name: "替换二进制文件…" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "替换文件…" })).toBeDisabled();
     expect(screen.getByText(/合成动画素材不能直接替换/)).toBeInTheDocument();
+  });
+});
+
+describe("asset folder filter", () => {
+  it("narrows the tree to ungrouped assets or to one folder subtree", () => {
+    renderAssets();
+    const rowIds = (): string[] =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>("[data-explorer-asset-id]"),
+      ).map((row) => row.dataset.explorerAssetId ?? "");
+
+    expect(rowIds()).toEqual(
+      expect.arrayContaining(["bg.room", "anim.blink", "bg.old"]),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "未分组（根目录）" }));
+    expect(rowIds()).not.toContain("bg.old");
+    expect(rowIds()).toContain("bg.room");
+
+    fireEvent.click(screen.getByRole("button", { name: "归档" }));
+    expect(rowIds()).toEqual(["bg.old"]);
+  });
+});
+
+// Keep this suite last: the desktop guard installs process-wide listeners.
+describe("asset explorer under the desktop browser guard", () => {
+  it("still opens the asset and folder context menus", async () => {
+    const release = await withTauriGuard();
+    try {
+      renderAssets();
+      fireEvent.contextMenu(assetRow("bg.room"), { clientX: 20, clientY: 30 });
+      expect(
+        screen.getByRole("menu", { name: "素材操作" }),
+      ).toBeInTheDocument();
+    } finally {
+      release();
+    }
   });
 });

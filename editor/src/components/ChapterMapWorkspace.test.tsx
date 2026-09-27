@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { useRef, useState, type ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -17,6 +17,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { ChapterMapWorkspace } from "./ChapterMapWorkspace";
+import { ASSET_DRAG_TYPE } from "../assetDrag";
 
 const MAP: ChapterMapDefinition = {
   schema_version: 1,
@@ -296,5 +297,59 @@ describe("ChapterMapWorkspace pointer interactions", () => {
 
     const latest = onChange.mock.lastCall?.[0] as ChapterMapDefinition;
     expect(latest.hotspots[0].hover_text).toBe("新的 hover 说明");
+  });
+});
+
+describe("ChapterMapWorkspace drag and drop", () => {
+  it("accepts an asset dragged from the shared asset library", () => {
+    const onChange = vi.fn();
+    const { container } = renderWorkspace(EMPTY_MAP, onChange);
+    const stage = container.querySelector<HTMLElement>(".map-canvas-stage");
+    if (stage === null) throw new Error("missing map stage");
+    const data: Record<string, string> = { [ASSET_DRAG_TYPE]: "gui.new" };
+    fireEvent.drop(stage, {
+      clientX: 100,
+      clientY: 100,
+      dataTransfer: { getData: (type: string) => data[type] ?? "" },
+    });
+    const next = onChange.mock.calls.at(-1)?.[0] as
+      ChapterMapDefinition | undefined;
+    expect(next?.decorations.map((item) => item.asset)).toEqual(["gui.new"]);
+  });
+});
+
+describe("ChapterMapWorkspace keyboard and zoom", () => {
+  beforeEach(cleanup);
+
+  it("nudges the selected object with arrow keys and deletes it with Delete", () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <Harness initialMap={MAP} onChange={onChange} sceneIds={["scene-a"]} />,
+    );
+    const object = container.querySelector<HTMLElement>(".map-editor-object");
+    if (object === null) throw new Error("missing map object");
+    fireEvent.click(object);
+
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    const nudged = onChange.mock.calls.at(-1)?.[0] as ChapterMapDefinition;
+    expect(nudged.hotspots[0]?.x).toBe(260);
+
+    fireEvent.keyDown(document.body, { key: "ArrowDown", shiftKey: true });
+    const shifted = onChange.mock.calls.at(-1)?.[0] as ChapterMapDefinition;
+    expect(shifted.hotspots[0]?.y).toBe(460);
+
+    fireEvent.keyDown(document.body, { key: "Delete" });
+    const removed = onChange.mock.calls.at(-1)?.[0] as ChapterMapDefinition;
+    expect(removed.hotspots).toHaveLength(0);
+  });
+
+  it("zooms with the header buttons and resets to fit", () => {
+    const { getByRole, getByTitle } = renderWorkspace(MAP);
+    const readout = getByTitle("当前缩放");
+    const before = readout.textContent;
+    fireEvent.click(getByRole("button", { name: "放大" }));
+    expect(readout.textContent).not.toBe(before);
+    fireEvent.click(getByRole("button", { name: "适合画布" }));
+    expect(readout.textContent).toBe(before);
   });
 });

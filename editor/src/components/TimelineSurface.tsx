@@ -19,6 +19,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type ReactNode,
@@ -36,6 +37,10 @@ import type {
   TimelineEvent,
   TimelineKeyframe,
 } from "../types";
+import { ClipboardPaste, Copy, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { IconButton } from "../ui/Button";
+import { channelLabel } from "../labels";
+import { MAX_ZOOM, MIN_ZOOM, clampZoom, rulerTicks } from "./timelineRuler";
 
 export interface TimelineSurfaceTrack<TData = unknown> {
   /** Stable identity used for copy/paste addressing and React keys. */
@@ -160,6 +165,22 @@ export function TimelineSurface<TData>({
   const [clipboardStatus, setClipboardStatus] = useState<string | null>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
   const tracksRef = useRef<HTMLDivElement>(null);
+  // Horizontal zoom of the lanes: 1 fits the whole duration in the view.
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => {
+    const element = tracksRef.current;
+    if (element === null) return;
+    // Ctrl/⌘+wheel zooms the lanes (non-passive, so the page never zooms).
+    const handleWheel = (event: WheelEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.deltaY === 0) return;
+      event.preventDefault();
+      setZoom((current) =>
+        clampZoom(current * (event.deltaY < 0 ? 1.25 : 1 / 1.25)),
+      );
+    };
+    element.addEventListener("wheel", handleWheel, { passive: false });
+    return () => element.removeEventListener("wheel", handleWheel);
+  }, []);
   const clipboardStatusTimerRef = useRef<number | null>(null);
   const playheadRef = useRef(playhead);
 
@@ -323,6 +344,17 @@ export function TimelineSurface<TData>({
     onChange(next);
   }, [draft, onChange, selected]);
 
+  const deleteSelectedEvent = useCallback((): void => {
+    if (selectedEventId === null) return;
+    setSelectedEventId(null);
+    commit({
+      ...draft,
+      events: draft.events.filter(
+        (candidate) => candidate.id !== selectedEventId,
+      ),
+    });
+  }, [commit, draft, selectedEventId]);
+
   const showClipboardStatus = useCallback((message: string): void => {
     setClipboardStatus(message);
     if (clipboardStatusTimerRef.current !== null)
@@ -394,11 +426,18 @@ export function TimelineSurface<TData>({
 
   useEffect(() => {
     const handleClipboardKey = (event: KeyboardEvent): void => {
-      if (isEditableTarget(event.target)) return;
-      if (event.key === "Delete" && selected.size > 0) {
-        event.preventDefault();
-        deleteSelected();
-        return;
+      if (event.defaultPrevented || isEditableTarget(event.target)) return;
+      if (event.key === "Delete" || event.key === "Backspace") {
+        if (selected.size > 0) {
+          event.preventDefault();
+          deleteSelected();
+          return;
+        }
+        if (selectedEventId !== null) {
+          event.preventDefault();
+          deleteSelectedEvent();
+          return;
+        }
       }
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
       const key = event.key.toLowerCase();
@@ -412,7 +451,14 @@ export function TimelineSurface<TData>({
     };
     window.addEventListener("keydown", handleClipboardKey);
     return () => window.removeEventListener("keydown", handleClipboardKey);
-  }, [copySelected, deleteSelected, pasteCopied, selected.size]);
+  }, [
+    copySelected,
+    deleteSelected,
+    deleteSelectedEvent,
+    pasteCopied,
+    selected.size,
+    selectedEventId,
+  ]);
 
   const beginMarquee = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0 || tracksRef.current === null) return;
@@ -620,74 +666,100 @@ export function TimelineSurface<TData>({
             value={playhead}
           />
           {transportExtras}
-          <button
-            disabled={selected.size === 0}
-            onClick={deleteSelected}
-            type="button"
-          >
-            删除关键帧
-          </button>
         </div>
       )}
-      <div className="timeline-ruler-row">
-        <div className="timeline-clipboard-tools">
-          <button
-            disabled={selected.size === 0}
-            onClick={copySelected}
-            type="button"
-          >
-            复制
-          </button>
-          <button
-            disabled={surfaceClipboard === null}
-            onClick={pasteCopied}
-            type="button"
-          >
-            粘贴
-          </button>
-          <span>
-            {selected.size > 0 ? `${selected.size} 已选` : "拖框多选"}
-          </span>
-        </div>
-        <div
-          className="timeline-ruler"
-          ref={rulerRef}
-          onClick={(event) => {
-            if (event.target !== event.currentTarget) return;
-            const rect = event.currentTarget.getBoundingClientRect();
-            setPlayhead(
-              Math.round(
-                (((event.clientX - rect.left) / rect.width) *
-                  draft.duration_ms) /
-                  snap,
-              ) * snap,
-            );
-          }}
-        >
-          {Array.from({ length: 11 }, (_, index) => (
-            <span key={index} style={{ left: `${index * 10}%` }}>
-              {Math.round((draft.duration_ms * index) / 10)}
-            </span>
-          ))}
-          <i
-            className="timeline-playback-start"
-            style={{
-              left: `${(playbackStart / Math.max(1, draft.duration_ms)) * 100}%`,
-            }}
-          />
-          <i
-            className="timeline-playhead"
-            style={{
-              left: `${(playhead / Math.max(1, draft.duration_ms)) * 100}%`,
-            }}
-          />
-        </div>
-      </div>
       <div
         className="timeline-tracks"
         onPointerDown={beginMarquee}
         ref={tracksRef}
+        style={{ "--timeline-zoom": zoom } as CSSProperties}
       >
+        <div className="timeline-ruler-row">
+          <div className="timeline-clipboard-tools">
+            <IconButton
+              disabled={selected.size === 0}
+              icon={Copy}
+              label="复制"
+              onClick={copySelected}
+              shortcut="Ctrl+C"
+              size="sm"
+              tooltip="复制所选关键帧"
+            />
+            <IconButton
+              disabled={surfaceClipboard === null}
+              icon={ClipboardPaste}
+              label="粘贴"
+              onClick={pasteCopied}
+              shortcut="Ctrl+V"
+              size="sm"
+              tooltip="粘贴到播放头"
+            />
+            <IconButton
+              disabled={selected.size === 0}
+              icon={Trash2}
+              label="删除关键帧"
+              onClick={deleteSelected}
+              shortcut="Delete"
+              size="sm"
+            />
+            <span aria-hidden="true" className="timeline-tools-divider" />
+            <IconButton
+              disabled={zoom <= MIN_ZOOM}
+              icon={ZoomOut}
+              label="缩小时间轴"
+              onClick={() => setZoom((current) => clampZoom(current / 1.5))}
+              shortcut="Ctrl+滚轮"
+              size="sm"
+            />
+            <IconButton
+              disabled={zoom >= MAX_ZOOM}
+              icon={ZoomIn}
+              label="放大时间轴"
+              onClick={() => setZoom((current) => clampZoom(current * 1.5))}
+              shortcut="Ctrl+滚轮"
+              size="sm"
+            />
+            {selected.size > 0 && <span>已选 {selected.size}</span>}
+          </div>
+          <div
+            className="timeline-ruler"
+            ref={rulerRef}
+            onClick={(event) => {
+              if (event.target !== event.currentTarget) return;
+              const rect = event.currentTarget.getBoundingClientRect();
+              setPlayhead(
+                Math.round(
+                  (((event.clientX - rect.left) / rect.width) *
+                    draft.duration_ms) /
+                    snap,
+                ) * snap,
+              );
+            }}
+          >
+            {rulerTicks(draft.duration_ms, zoom).map((tick) => (
+              <span
+                key={tick.at}
+                style={{
+                  left: `${(tick.at / Math.max(1, draft.duration_ms)) * 100}%`,
+                }}
+              >
+                {tick.label}
+              </span>
+            ))}
+            <i
+              className="timeline-playback-start"
+              style={{
+                left: `${(playbackStart / Math.max(1, draft.duration_ms)) * 100}%`,
+              }}
+            />
+            <i
+              className="timeline-playhead"
+              style={{
+                left: `${(playhead / Math.max(1, draft.duration_ms)) * 100}%`,
+              }}
+            />
+          </div>
+        </div>
         {draft.tracks.map((track, trackIndex) => {
           const api = trackApis[trackIndex];
           if (api === undefined) return null;
@@ -704,7 +776,9 @@ export function TimelineSurface<TData>({
                   }
                 >
                   {track.allowedChannels.map((channel) => (
-                    <option key={channel}>{channel}</option>
+                    <option key={channel} value={channel}>
+                      {channelLabel(channel)}
+                    </option>
                   ))}
                 </select>
                 <button
@@ -720,64 +794,71 @@ export function TimelineSurface<TData>({
                   ＋关键帧
                 </button>
                 {allowRemoveTrack && (
-                  <button
-                    aria-label={`删除轨道 ${track.label}`}
+                  <IconButton
+                    icon={Trash2}
+                    label={`删除轨道 ${track.label}`}
                     onClick={() => api.removeTrack()}
-                    type="button"
-                  >
-                    ×
-                  </button>
+                    size="sm"
+                  />
                 )}
               </div>
               {renderTrackConfig?.(track, api)}
-              {track.allowedChannels.map((channel) => {
-                const frames = track.channels[channel] ?? [];
-                return (
-                  <div className="timeline-channel" key={channel}>
-                    <label title="双击轨道空白处可快速添加关键帧">
-                      {channel}
-                    </label>
-                    <div
-                      onDoubleClick={(event) => {
-                        if (event.target instanceof HTMLButtonElement) return;
-                        const rect =
-                          event.currentTarget.getBoundingClientRect();
-                        const atMs =
-                          ((event.clientX - rect.left) / rect.width) *
-                          draft.duration_ms;
-                        const snapped = Math.max(
-                          0,
-                          Math.min(
-                            draft.duration_ms,
-                            snapTimelineTime(atMs, snap, playbackStart),
-                          ),
-                        );
-                        setPlayhead(snapped);
-                        addKeyframe(trackIndex, channel, snapped);
-                      }}
-                      title="双击空白处添加关键帧"
-                    >
-                      {frames.map((frame, frameIndex) => {
-                        const key = `${trackIndex}:${channel}:${frameIndex}`;
-                        return (
-                          <button
-                            aria-label={`${channel} ${frame.at_ms}ms`}
-                            className={`${selected.has(key) ? "selected" : ""}${frame.value === "inherit" ? " inherited" : ""}`}
-                            data-keyframe-key={key}
-                            key={key}
-                            onPointerDown={(event) => beginDrag(event, key)}
-                            style={{
-                              left: `${(frame.at_ms / Math.max(1, draft.duration_ms)) * 100}%`,
-                            }}
-                            title={`${frame.at_ms} ms · ${frame.value === "inherit" ? "继承入口值" : frame.value}`}
-                            type="button"
-                          />
-                        );
-                      })}
+              {track.allowedChannels
+                .filter(
+                  // Only channels with keyframes (plus the one picked in the
+                  // channel menu) get a row, so tracks stay compact.
+                  (channel) =>
+                    (track.channels[channel]?.length ?? 0) > 0 ||
+                    channel === trackChannel(track, channelName),
+                )
+                .map((channel) => {
+                  const frames = track.channels[channel] ?? [];
+                  return (
+                    <div className="timeline-channel" key={channel}>
+                      <label title={`${channel} · 双击右侧空白处添加关键帧`}>
+                        {channelLabel(channel)}
+                      </label>
+                      <div
+                        onDoubleClick={(event) => {
+                          if (event.target instanceof HTMLButtonElement) return;
+                          const rect =
+                            event.currentTarget.getBoundingClientRect();
+                          const atMs =
+                            ((event.clientX - rect.left) / rect.width) *
+                            draft.duration_ms;
+                          const snapped = Math.max(
+                            0,
+                            Math.min(
+                              draft.duration_ms,
+                              snapTimelineTime(atMs, snap, playbackStart),
+                            ),
+                          );
+                          setPlayhead(snapped);
+                          addKeyframe(trackIndex, channel, snapped);
+                        }}
+                        title="双击空白处添加关键帧"
+                      >
+                        {frames.map((frame, frameIndex) => {
+                          const key = `${trackIndex}:${channel}:${frameIndex}`;
+                          return (
+                            <button
+                              aria-label={`${channel} ${frame.at_ms}ms`}
+                              className={`${selected.has(key) ? "selected" : ""}${frame.value === "inherit" ? " inherited" : ""}`}
+                              data-keyframe-key={key}
+                              key={key}
+                              onPointerDown={(event) => beginDrag(event, key)}
+                              style={{
+                                left: `${(frame.at_ms / Math.max(1, draft.duration_ms)) * 100}%`,
+                              }}
+                              title={`${frame.at_ms} ms · ${frame.value === "inherit" ? "继承入口值" : frame.value}`}
+                              type="button"
+                            />
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
             </div>
           );
         })}
@@ -787,8 +868,8 @@ export function TimelineSurface<TData>({
         {showEvents && (
           <div className="timeline-track timeline-event-track">
             <div className="timeline-track-head">
-              <strong>events</strong>
-              <small>单击定位；双击删除</small>
+              <strong>事件</strong>
+              <small>单击选中并定位 · Delete 删除</small>
             </div>
             <div className="timeline-channel">
               <label>瞬时事件</label>
@@ -796,20 +877,11 @@ export function TimelineSurface<TData>({
                 {draft.events.map((event) => (
                   <button
                     aria-label={`${event.id} ${event.at_ms}ms`}
-                    className={`timeline-event-marker event-${event.type}`}
+                    className={`timeline-event-marker event-${event.type}${selectedEventId === event.id ? " selected" : ""}`}
                     key={event.id}
                     onClick={() => {
                       setSelectedEventId(event.id);
                       setPlayhead(event.at_ms);
-                    }}
-                    onDoubleClick={() => {
-                      setSelectedEventId(null);
-                      commit({
-                        ...draft,
-                        events: draft.events.filter(
-                          (candidate) => candidate.id !== event.id,
-                        ),
-                      });
                     }}
                     style={{
                       left: `${(event.at_ms / Math.max(1, draft.duration_ms)) * 100}%`,

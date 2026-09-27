@@ -7,8 +7,11 @@ import {
 } from "react";
 
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import { PersonStanding } from "lucide-react";
+import { WorkspaceHeader } from "../shell/WorkspaceHeader";
 
 import { TimelineEditor } from "./TimelineEditor";
+import { DeferredInput } from "./Fields";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import { firstVisibleAssetId } from "../assetLibrary";
 import { ActionPreview, type ActionPreviewHandle } from "./ActionPreview";
@@ -61,6 +64,8 @@ export function ActionWorkspace({
   onValidate,
   onUndo,
   onRedo,
+  undoAvailable = true,
+  redoAvailable = true,
   previewEnvironment,
 }: {
   definition: SpriteActionDefinition;
@@ -74,6 +79,8 @@ export function ActionWorkspace({
   onValidate(): void;
   onUndo(): void;
   onRedo(): void;
+  undoAvailable?: boolean;
+  redoAvailable?: boolean;
   previewEnvironment?: EditorPreviewEnvironment;
 }): ReactElement {
   // The preview pose is author-facing state: relative channels are only
@@ -168,58 +175,45 @@ export function ActionWorkspace({
 
   return (
     <main className="action-workspace">
-      <header className="ui-motion-toolbar">
-        <button onClick={onBack} type="button">
-          ← 返回项目
-        </button>
-        <strong>立绘动作 · {definition.id}</strong>
-        <small>{path}</small>
-        <button onClick={onValidate} type="button">
-          校验
-        </button>
-        <button onClick={onUndo} type="button">
-          撤销
-        </button>
-        <button onClick={onRedo} type="button">
-          重做
-        </button>
-        <button
-          className="primary-button"
-          disabled={!dirty}
-          onClick={onSave}
-          type="button"
-        >
-          保存
-        </button>
-      </header>
+      <WorkspaceHeader
+        dirty={dirty}
+        icon={PersonStanding}
+        kind="立绘动作"
+        onBack={onBack}
+        onRedo={onRedo}
+        onSave={onSave}
+        onUndo={onUndo}
+        onValidate={onValidate}
+        redoAvailable={redoAvailable}
+        title={<span title={path}>{definition.name || definition.id}</span>}
+        undoAvailable={undoAvailable}
+      />
       <section className="action-workspace-body">
         <aside className="action-side-panel">
           <h3>动作属性</h3>
           <label>
             名称
-            <input
+            <DeferredInput
               maxLength={128}
-              onBlur={(event) =>
-                onChange({ ...definition, name: event.currentTarget.value })
-              }
-              defaultValue={definition.name}
+              onCommit={(name) => onChange({ ...definition, name })}
+              value={definition.name}
             />
           </label>
           <label>
             默认时长 ms
-            <input
+            <DeferredInput
               min={1}
-              onBlur={(event) => {
-                const value = Number(event.currentTarget.value);
+              onCommit={(raw) => {
+                const value = Number(raw);
                 if (!Number.isInteger(value) || value < 1) {
                   setError("动作时长必须是大于 0 的整数毫秒");
-                  return;
+                  return false;
                 }
                 setError(null);
                 onChange({ ...definition, duration_ms: value });
               }}
               type="number"
-              defaultValue={definition.duration_ms}
+              value={String(definition.duration_ms)}
             />
           </label>
           <label>

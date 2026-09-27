@@ -898,6 +898,65 @@ describe("TimelineWorkspace preview context", () => {
 });
 
 describe("TimelineWorkspace gestures and history", () => {
+  it("focuses on entry and Space toggles playback from buttons but not editable fields", async () => {
+    const { view, handle } = await renderWorkspace();
+    const workspace = view.container.querySelector(".timeline-workspace");
+    expect(workspace).not.toBeNull();
+    expect(document.activeElement).toBe(workspace);
+
+    const addFlash = screen.getByRole("button", { name: "＋闪光" });
+    fireEvent.click(addFlash);
+    expect(currentNode(handle).events).toHaveLength(1);
+    addFlash.focus();
+    fireEvent.keyDown(addFlash, { key: " " });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "＋闪光" })).toBe(addFlash);
+
+    fireEvent.keyDown(addFlash, { key: " " });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument(),
+    );
+    const durationInput = screen.getByLabelText("时间线时长");
+    durationInput.focus();
+    fireEvent.keyDown(durationInput, { key: " " });
+    expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument();
+  });
+
+  it("commits outward uniform sprite scaling from all four corner handles and cancels cleanly", async () => {
+    const { view, handle, onChangeSpy } = await renderWorkspace();
+    selectFirstObject(view.container);
+    const initialScale = Number(inspectorField(view.container, "Scale").value);
+    const cases = [
+      ["左上角缩放素材", -96, -96],
+      ["右上角缩放素材", 96, -96],
+      ["左下角缩放素材", -96, 96],
+      ["右下角缩放素材", 96, 96],
+    ] as const;
+    let commits = 0;
+    for (const [label, dx, dy] of cases) {
+      const corner = screen.getByRole("button", { name: label });
+      fireEvent.pointerDown(corner, { button: 0, clientX: 0, clientY: 0 });
+      fireEvent.pointerMove(corner, { clientX: dx, clientY: dy });
+      fireEvent.pointerUp(corner, { clientX: dx, clientY: dy });
+      commits += 1;
+      expect(onChangeSpy).toHaveBeenCalledTimes(commits);
+      expect(
+        currentNode(handle).tracks[0]?.channels.scale?.[0]?.value,
+      ).toBeCloseTo(initialScale + (commits * 96) / 450);
+    }
+
+    const before = currentNode(handle).tracks[0]?.channels.scale;
+    const corner = screen.getByRole("button", { name: "左上角缩放素材" });
+    fireEvent.pointerDown(corner, { button: 0, clientX: 0, clientY: 0 });
+    fireEvent.pointerMove(corner, { clientX: -200, clientY: -200 });
+    fireEvent.pointerCancel(corner);
+    fireEvent.pointerUp(corner, { clientX: -200, clientY: -200 });
+    expect(currentNode(handle).tracks[0]?.channels.scale).toEqual(before);
+    expect(onChangeSpy).toHaveBeenCalledTimes(4);
+  });
+
   it("commits one history entry per drag, snapping to the playhead, and one undo reverts it", async () => {
     const { view, handle, onChangeSpy } = await renderWorkspace();
     expect(view.container.querySelector(".timeline-gizmo.selected")).toBeNull();
@@ -968,7 +1027,7 @@ describe("TimelineWorkspace gestures and history", () => {
 
     // The exit dialog's "write and return" is the same single commit.
     dragGizmo(selectedGizmo(view.container), 96);
-    fireEvent.click(screen.getByRole("button", { name: "← 返回剧情图" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回剧情图" }));
     fireEvent.click(screen.getByRole("button", { name: "写入并返回" }));
     expect(handle.backCalls).toBe(1);
     expect(handle.state?.past).toHaveLength(2);
@@ -982,7 +1041,7 @@ describe("TimelineWorkspace gestures and history", () => {
 
     dragGizmo(selectedGizmo(view.container), 96);
     expect(gizmoLeft(view.container)).not.toBe(leftBefore);
-    fireEvent.click(screen.getByRole("button", { name: "← 返回剧情图" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回剧情图" }));
     fireEvent.click(screen.getByRole("button", { name: "丢弃并返回" }));
     expect(handle.backCalls).toBe(1);
     expect(onChangeSpy).not.toHaveBeenCalled();
@@ -1207,13 +1266,13 @@ describe("TimelineWorkspace playback context replacement", () => {
 
   async function startPlayback(pump: FramePump): Promise<void> {
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "▶" }));
+      fireEvent.click(screen.getByRole("button", { name: "播放" }));
       await settle();
       await settle();
     });
     await stepPlayback(pump, 100, 3);
     expect(playheadLabel()).toBe("播放 300 · 起点 0 ms");
-    expect(screen.getByRole("button", { name: "❚❚" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
   }
 
   function videoProject(node: TimelineNode): EditorProject {
@@ -1255,10 +1314,10 @@ describe("TimelineWorkspace playback context replacement", () => {
     );
     await settle();
     await stepPlayback(playback.pump, 100, 12);
-    expect(screen.getByRole("button", { name: "❚❚" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
     await stepPlayback(playback.pump, 100, 20);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "▶" })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument(),
     );
     expect(playheadLabel()).toBe("播放 3000 · 起点 0 ms");
   });
@@ -1294,7 +1353,7 @@ describe("TimelineWorkspace playback context replacement", () => {
     await settle();
     await stepPlayback(playback.pump, 100, 8);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "▶" })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument(),
     );
     expect(playheadLabel()).toBe("播放 1000 · 起点 0 ms");
   });
@@ -1325,7 +1384,7 @@ describe("TimelineWorkspace playback context replacement", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "▶" })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument(),
     );
     await waitFor(() => expect(playheadLabel()).toBe("播放 300 · 起点 0 ms"));
     expect(playback.dom.videos).toHaveLength(1);
@@ -1334,7 +1393,7 @@ describe("TimelineWorkspace playback context replacement", () => {
     // completes a phantom pass against the replaced cue.
     await stepPlayback(playback.pump, 100, 10);
     expect(playheadLabel()).toBe("播放 300 · 起点 0 ms");
-    expect(screen.getByRole("button", { name: "▶" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument();
   });
 
   it("ends a running pass when undo removes the video track", async () => {
@@ -1367,7 +1426,7 @@ describe("TimelineWorkspace playback context replacement", () => {
     // end the run rather than run on the removed track's clock.
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "▶" })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument(),
     );
     await waitFor(() => expect(playheadLabel()).toBe("播放 300 · 起点 0 ms"));
     await stepPlayback(playback.pump, 100, 10);
@@ -1398,14 +1457,14 @@ describe("TimelineWorkspace playback context replacement", () => {
     );
     await waitForReady();
     // A preview starts silent; unmute so a crossed SFX reaches the audio port.
-    fireEvent.click(screen.getByRole("button", { name: "静音" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消静音" }));
     await settle();
     await startPlayback(playback.pump);
     expect(playSfx).toHaveBeenCalledTimes(1);
 
     // Pause exactly on the event cursor, then make an ordinary keyframe edit.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "❚❚" }));
+      fireEvent.click(screen.getByRole("button", { name: "暂停" }));
       await settle();
     });
     const edited = timelineNode({
@@ -1440,7 +1499,7 @@ describe("TimelineWorkspace playback context replacement", () => {
 
     // Resuming across the cursor must not re-fire the consumed event.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "▶" }));
+      fireEvent.click(screen.getByRole("button", { name: "播放" }));
       await settle();
       await settle();
     });
@@ -1474,7 +1533,7 @@ describe("TimelineWorkspace playback context replacement", () => {
       />,
     );
     await waitForReady();
-    fireEvent.click(screen.getByRole("button", { name: "静音" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消静音" }));
     await settle();
     await startPlayback(playback.pump);
     expect(playSfx).toHaveBeenCalledTimes(1);
@@ -1510,7 +1569,7 @@ describe("TimelineWorkspace playback context replacement", () => {
       />,
     );
     await settle();
-    expect(screen.getByRole("button", { name: "❚❚" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
     await stepPlayback(playback.pump, 100, 1);
     expect(playSfx).toHaveBeenCalledTimes(1);
     await stepPlayback(playback.pump, 100, 5);

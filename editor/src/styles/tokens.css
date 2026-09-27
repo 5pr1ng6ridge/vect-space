@@ -1,0 +1,176 @@
+/*
+ * Design tokens — the only place raw colour values may appear.
+ *
+ * One dark, neutral cool-grey ramp with a single mint accent.  Surfaces go
+ * from the canvas (darkest) up to overlays (lightest); text has four levels;
+ * semantic colours are shared by badges, toasts and validation.
+ */
+@layer tokens {
+  :root {
+    color-scheme: dark;
+
+    /* Neutral ramp */
+    --gray-0: #0d0f13;
+    --gray-1: #121419;
+    --gray-2: #171a20;
+    --gray-3: #1c2027;
+    --gray-4: #22272f;
+    --gray-5: #2a3039;
+    --gray-6: #353c47;
+    --gray-7: #465061;
+    --gray-8: #6b7585;
+    --gray-9: #9aa3b2;
+    --gray-10: #c3c9d4;
+    --gray-11: #e7eaf0;
+
+    /* Surfaces */
+    --surface-canvas: var(--gray-0);
+    --surface-app: var(--gray-1);
+    --surface-panel: var(--gray-2);
+    --surface-raised: var(--gray-3);
+    --surface-hover: var(--gray-4);
+    --surface-active: var(--gray-5);
+    --surface-input: #0f1116;
+    --surface-overlay: #1f232b;
+    --surface-scrim: rgb(5 6 9 / 64%);
+
+    /* Borders */
+    --border-subtle: #1f232a;
+    --border-default: #2a2f38;
+    --border-strong: #3a414d;
+
+    /* Text */
+    --text-primary: var(--gray-11);
+    --text-secondary: var(--gray-9);
+    --text-tertiary: var(--gray-8);
+    --text-disabled: #4d5563;
+    --text-on-accent: #07231c;
+
+    /* Accent (brand mint) */
+    --accent: #68d7bb;
+    --accent-hover: #86e3cc;
+    --accent-strong: #3fbf9e;
+    --accent-muted: rgb(104 215 187 / 14%);
+    --accent-muted-hover: rgb(104 215 187 / 22%);
+    --accent-text: #9fecd8;
+
+    /* Semantic */
+    --danger: #f07983;
+    --danger-muted: rgb(240 121 131 / 14%);
+    --danger-text: #ffb3b9;
+    --warning: #f2bb68;
+    --warning-muted: rgb(242 187 104 / 14%);
+    --warning-text: #ffd9a3;
+    --info: #7ea6ff;
+    --info-muted: rgb(126 166 255 / 14%);
+    --info-text: #b9ceff;
+    --success: #6fd39a;
+
+    /* Story node categories */
+    --node-narrative: #68d7bb;
+    --node-logic: #f2bb68;
+    --node-visual: #7ea6ff;
+    --node-audio: #c79af5;
+    --node-interaction: #f59cc4;
+    --node-flow: #9aa3b2;
+    --node-end: #f07983;
+
+    /* Timeline / keyframes */
+    --keyframe: #ffd97a;
+    --keyframe-selected: #fff3c4;
+    --playhead: #ff6b6b;
+
+    /* Typography */
+    --font-ui:
+      "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC",
+      "Noto Sans CJK SC", system-ui, sans-serif;
+    --font-mono:
+      "Cascadia Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --font-size-xs: 11px; /* tabular numbers and mono ids only */
+    --font-size-sm: 12px;
+    --font-size-md: 13px;
+    --font-size-lg: 14px;
+    --font-size-xl: 16px;
+    --font-size-2xl: 20px;
+    --font-size-3xl: 28px;
+    --line-height-tight: 1.25;
+    --line-height-normal: 1.5;
+    --font-weight-regular: 400;
+    --font-weight-medium: 500;
+    --font-weight-semibold: 600;
+
+    /* Spacing (4px grid) */
+    --space-0-5: 2px;
+    --space-1: 4px;
+    --space-1-5: 6px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+
+    /* Shape */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+    --radius-full: 999px;
+
+    /* Elevation */
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+    --shadow-md: 0 6px 16px rgb(0 0 0 / 35%);
+    --shadow-lg: 0 16px 40px rgb(0 0 0 / 45%);
+    --focus-ring: 0 0 0 2px var(--surface-app), 0 0 0 4px var(--accent);
+
+    /* Controls */
+    --control-height-sm: 28px;
+    --control-height-md: 32px;
+    --control-height-lg: 40px;
+
+    /* Layers */
+    --z-base: 0;
+    --z-sticky: 10;
+    --z-dropdown: 50;
+    --z-overlay: 100;
+    --z-modal: 200;
+    --z-toast: 300;
+    --z-tooltip: 400;
+
+    /* Motion */
+    --duration-fast: 100ms;
+    --duration-normal: 160ms;
+    --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+    /* Legacy aliases — the pre-token stylesheet reads these names. */
+    --panel: var(--surface-panel);
+    --panel-2: var(--surface-raised);
+    --panel-3: var(--surface-hover);
+    --line: var(--border-default);
+    --line-soft: var(--border-subtle);
+    --border: var(--border-default);
+    --muted: var(--text-secondary);
+    --text: var(--text-primary);
+    --blue: var(--info);
+    --shadow: var(--shadow-lg);
+
+    /* React Flow */
+    --xy-background-color: var(--surface-canvas);
+    --xy-node-border-radius: var(--radius-lg);
+    --xy-edge-stroke: var(--gray-7);
+    --xy-edge-stroke-selected: var(--accent);
+    --xy-connectionline-stroke: var(--accent);
+    --xy-attribution-background-color: transparent;
+    --xy-minimap-background-color: var(--surface-panel);
+    --xy-minimap-mask-background-color: rgb(8 9 12 / 72%);
+    --xy-minimap-node-background-color: var(--gray-7);
+    --xy-controls-button-background-color: var(--surface-raised);
+    --xy-controls-button-background-color-hover: var(--surface-hover);
+    --xy-controls-button-color: var(--text-secondary);
+    --xy-controls-button-color-hover: var(--text-primary);
+    --xy-controls-button-border-color: var(--border-default);
+    --xy-selection-background-color: var(--accent-muted);
+    --xy-selection-border: 1px dashed var(--accent);
+  }
+}

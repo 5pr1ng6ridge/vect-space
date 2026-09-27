@@ -1,0 +1,517 @@
+/* Story graph canvas, node cards and the workspace header. */
+@layer workspace {
+  /* ------------------------------------------------- Workspace header */
+  .workspace-header {
+    display: flex;
+    flex: 0 0 40px;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 0 var(--space-3);
+    border-bottom: 1px solid var(--border-default);
+    background: var(--surface-panel);
+  }
+
+  .workspace-header-hint {
+    overflow: hidden;
+    margin-left: auto;
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .segmented {
+    display: inline-flex;
+    flex: 0 0 auto;
+    padding: 2px;
+    border-radius: var(--radius-md);
+    background: var(--surface-input);
+  }
+
+  .segmented button {
+    height: 24px;
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    cursor: pointer;
+  }
+
+  .segmented button:hover {
+    color: var(--text-primary);
+  }
+
+  .segmented button.is-active {
+    background: var(--surface-active);
+    box-shadow: var(--shadow-sm);
+    color: var(--text-primary);
+  }
+
+  /* -------------------------------------------------------- Canvas */
+  .workspace > .graph-shell {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    outline: none;
+  }
+
+  .graph-shell .react-flow {
+    background: var(--surface-canvas);
+  }
+
+  /*
+   * Group frames live in React Flow's viewport portal, which paints above the
+   * node cards.  A negative z-index puts the frame behind the cards (and
+   * behind its own child frames), and only the border/header re-enable pointer
+   * events so the card bodies, handles and insert buttons stay reachable.
+   */
+  .story-group-frame {
+    position: absolute;
+    z-index: -1;
+    pointer-events: none;
+  }
+
+  .story-group-border {
+    position: absolute;
+    border: 2px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .story-group-frame.is-selected .story-group-border {
+    border-style: solid;
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  .story-group-header {
+    position: absolute;
+    top: -1px;
+    left: -1px;
+    display: flex;
+    height: 22px;
+    max-width: calc(100% + 2px);
+    align-items: center;
+    padding: 0 var(--space-2);
+    border-radius: 14px 14px 0 0;
+    background: color-mix(in srgb, var(--accent) 22%, var(--surface-panel));
+    color: var(--text-secondary);
+    cursor: grab;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    pointer-events: auto;
+    touch-action: none;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  .story-group-frame.is-selected .story-group-header {
+    background: color-mix(in srgb, var(--accent) 40%, var(--surface-panel));
+    color: var(--text-primary);
+  }
+
+  .story-group-header:active {
+    cursor: grabbing;
+  }
+
+  .story-group-edge {
+    position: absolute;
+    pointer-events: auto;
+    touch-action: none;
+  }
+
+  .story-group-edge-top,
+  .story-group-edge-bottom {
+    right: 0;
+    left: 0;
+    height: 6px;
+    cursor: grab;
+  }
+
+  .story-group-edge-top {
+    top: -3px;
+  }
+
+  .story-group-edge-bottom {
+    bottom: -3px;
+  }
+
+  .story-group-edge-left,
+  .story-group-edge-right {
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: grab;
+  }
+
+  .story-group-edge-left {
+    left: -3px;
+  }
+
+  .story-group-edge-right {
+    right: -3px;
+  }
+
+  .graph-shell .react-flow__background {
+    color: var(--gray-5);
+  }
+
+  .graph-toolbar {
+    position: absolute;
+    z-index: var(--z-sticky);
+    top: var(--space-3);
+    left: var(--space-3);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-panel);
+    box-shadow: var(--shadow-md);
+  }
+
+  .graph-toolbar .vs-button svg:last-child:not(.vs-button-icon) {
+    width: 14px;
+    height: 14px;
+    color: var(--text-tertiary);
+  }
+
+  .graph-shell .react-flow__controls {
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+  }
+
+  .graph-shell .react-flow__controls-button {
+    width: 28px;
+    height: 28px;
+    border-bottom: 1px solid var(--border-default);
+  }
+
+  .graph-shell .react-flow__controls-button:last-child {
+    border-bottom: 0;
+  }
+
+  .graph-shell .react-flow__minimap {
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+  }
+
+  .graph-shell .minimap-node {
+    fill: var(--gray-7);
+  }
+
+  .graph-shell .minimap-entry {
+    fill: var(--accent);
+  }
+
+  /* --------------------------------------------------------- Edges */
+  .graph-shell .story-edge .react-flow__edge-path {
+    stroke: var(--gray-7);
+    stroke-width: 1.5;
+  }
+
+  .graph-shell .story-edge-branch .react-flow__edge-path {
+    stroke: rgb(242 187 104 / 70%);
+  }
+
+  .graph-shell .react-flow__edge.selected .react-flow__edge-path,
+  .graph-shell .react-flow__edge:hover .react-flow__edge-path {
+    stroke: var(--accent);
+  }
+
+  .graph-shell .react-flow__edge-textbg {
+    fill: var(--surface-raised);
+    stroke: var(--border-default);
+  }
+
+  .graph-shell .react-flow__edge-text {
+    fill: var(--warning-text);
+    font-size: var(--font-size-sm);
+  }
+
+  .graph-shell .react-flow__arrowhead polyline {
+    stroke: var(--gray-7);
+    fill: var(--gray-7);
+  }
+
+  /* ---------------------------------------------------------- Nodes */
+  .graph-shell .react-flow__node-story {
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-lg);
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .story-node {
+    --node-color: var(--node-flow);
+    position: relative;
+    width: 248px;
+    overflow: visible;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    transition:
+      border-color var(--duration-fast) ease,
+      box-shadow var(--duration-fast) ease;
+  }
+
+  .story-cat-narrative {
+    --node-color: var(--node-narrative);
+  }
+
+  .story-cat-logic {
+    --node-color: var(--node-logic);
+  }
+
+  .story-cat-visual {
+    --node-color: var(--node-visual);
+  }
+
+  .story-cat-audio {
+    --node-color: var(--node-audio);
+  }
+
+  .story-cat-interaction {
+    --node-color: var(--node-interaction);
+  }
+
+  .story-cat-end {
+    --node-color: var(--node-end);
+  }
+
+  .story-node:hover {
+    border-color: var(--gray-7);
+  }
+
+  .story-node.is-selected {
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 3px var(--accent-muted),
+      var(--shadow-lg);
+  }
+
+  .story-node-header {
+    display: flex;
+    min-width: 0;
+    height: 34px;
+    align-items: center;
+    gap: var(--space-1-5);
+    padding: 0 var(--space-2) 0 var(--space-2);
+    border-bottom: 1px solid var(--border-default);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--node-color) 16%, transparent),
+      transparent 70%
+    );
+    cursor: grab;
+  }
+
+  .story-node-header:active {
+    cursor: grabbing;
+  }
+
+  .story-node-icon {
+    display: grid;
+    width: 22px;
+    height: 22px;
+    flex: 0 0 22px;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--node-color) 22%, transparent);
+    color: var(--node-color);
+    place-items: center;
+  }
+
+  .story-node-icon svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+  }
+
+  .story-node-type {
+    flex: 0 0 auto;
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .story-node-id {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .story-node-flag {
+    display: inline-flex;
+    flex: 0 0 auto;
+    color: var(--text-tertiary);
+  }
+
+  .story-node-flag svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .story-node-flag.is-entry {
+    color: var(--accent);
+  }
+
+  .story-node-issues {
+    min-width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    padding: 0 5px;
+    border-radius: var(--radius-full);
+    background: var(--danger);
+    color: var(--text-on-accent);
+    font-size: 11px;
+    font-weight: var(--font-weight-semibold);
+    line-height: 18px;
+    text-align: center;
+  }
+
+  .story-node-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3) var(--space-2-5, 10px);
+  }
+
+  .story-node-title {
+    overflow: hidden;
+    color: var(--node-color);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .story-node-summary {
+    display: -webkit-box;
+    margin: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  .story-node-ports {
+    margin: 0;
+    padding: var(--space-1) 0;
+    border-top: 1px solid var(--border-default);
+    list-style: none;
+  }
+
+  .story-port {
+    position: relative;
+    display: flex;
+    height: 26px;
+    align-items: center;
+    padding: 0 var(--space-4) 0 var(--space-3);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+  }
+
+  .story-port span {
+    overflow: hidden;
+    margin-left: auto;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Handles: small, legible connection points on the card edge. */
+  .graph-shell .story-handle {
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--surface-canvas);
+    background: var(--gray-8);
+  }
+
+  .graph-shell .story-handle-out {
+    right: -6px;
+    background: var(--node-color);
+  }
+
+  .graph-shell .story-handle-in {
+    left: -6px;
+  }
+
+  .graph-shell .story-handle:hover,
+  .graph-shell .react-flow__handle.connectingfrom,
+  .graph-shell .react-flow__handle.connectingto {
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-muted);
+  }
+
+  /* Hover affordances for inserting a node before/after this one. */
+  .story-insert {
+    position: absolute;
+    z-index: 2;
+    top: 50%;
+    display: grid;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-full);
+    background: var(--surface-overlay);
+    color: var(--text-secondary);
+    cursor: pointer;
+    opacity: 0;
+    place-items: center;
+    transform: translateY(-50%);
+    transition: opacity var(--duration-fast) ease;
+  }
+
+  .story-insert svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .story-insert-left {
+    left: -36px;
+  }
+
+  .story-insert-right {
+    right: -36px;
+  }
+
+  .story-node:hover .story-insert,
+  .story-node.is-selected .story-insert,
+  .story-insert:focus-visible,
+  .story-insert[data-state="open"] {
+    opacity: 1;
+  }
+
+  .story-insert:hover,
+  .story-insert[data-state="open"] {
+    border-color: var(--accent);
+    background: var(--accent-muted);
+    color: var(--accent-text);
+  }
+}

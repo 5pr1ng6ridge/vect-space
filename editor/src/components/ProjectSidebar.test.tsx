@@ -45,10 +45,16 @@ function createProject(): EditorProject {
       default_locale: "zh-CN",
       variables: {
         affection: { scope: "save", type: "integer", default: 0 },
+        courage: { scope: "save", type: "integer", default: 1 },
       },
       characters: {
         lumi: {
           display_name: "露米",
+          name_color: "#ffffff",
+          text_color: "#ffffff",
+        },
+        sora: {
+          display_name: "空",
           name_color: "#ffffff",
           text_color: "#ffffff",
         },
@@ -117,7 +123,6 @@ const SIDEBAR_CALLBACKS = {
   onAddCharacter: () => true,
   onAddScene: () => true,
   onAddVariable: () => true,
-  onChangeAction: () => undefined,
   onChangeCharacter: () => undefined,
   onChangeVariable: () => undefined,
   onCreateAction: () => true,
@@ -156,6 +161,7 @@ function ProjectHarness({
   overrides?: Partial<ComponentProps<typeof ProjectSidebar>>;
 }): ReactElement {
   const [sections, setSections] = useState(createProjectSectionState);
+  const [itemsOpen, setItemsOpen] = useState<Record<string, boolean>>({});
   return (
     <ProjectSidebar
       {...SIDEBAR_CALLBACKS}
@@ -168,7 +174,14 @@ function ProjectHarness({
           [sectionId]: !current[sectionId],
         }))
       }
+      onToggleSidebarItem={(key) =>
+        setItemsOpen((current) => ({
+          ...current,
+          [key]: !(current[key] ?? true),
+        }))
+      }
       project={project}
+      sidebarItemOpen={itemsOpen}
       sectionOpen={sections}
       {...overrides}
     />
@@ -194,6 +207,7 @@ function RoundTripHarness({
   overrides?: Partial<ComponentProps<typeof ProjectSidebar>>;
 }): ReactElement {
   const [sections, setSections] = useState(createProjectSectionState);
+  const [itemsOpen, setItemsOpen] = useState<Record<string, boolean>>({});
   const [tab, setTab] = useState<SidebarTab>("scenes");
   const [visible, setVisible] = useState(true);
   return (
@@ -215,8 +229,15 @@ function RoundTripHarness({
               [sectionId]: !current[sectionId],
             }))
           }
+          onToggleSidebarItem={(key) =>
+            setItemsOpen((current) => ({
+              ...current,
+              [key]: !(current[key] ?? true),
+            }))
+          }
           project={project}
           scrollStore={store}
+          sidebarItemOpen={itemsOpen}
           sectionOpen={sections}
           {...overrides}
         />
@@ -246,6 +267,36 @@ function scrollTo(tab: SidebarTab, offset: number): void {
 }
 
 describe("project panel sections", () => {
+  it("collapses characters and variables independently", () => {
+    render(<ProjectHarness project={createProject()} />);
+
+    const lumi = screen.getByRole("button", { name: "收起角色 lumi" });
+    const sora = screen.getByRole("button", { name: "收起角色 sora" });
+    const affection = screen.getByRole("button", {
+      name: "收起变量 affection",
+    });
+    const courage = screen.getByRole("button", { name: "收起变量 courage" });
+    const regionFor = (button: HTMLElement): HTMLElement => {
+      const region = document.getElementById(
+        button.getAttribute("aria-controls") ?? "",
+      );
+      if (region === null) throw new Error("missing item content region");
+      return region;
+    };
+
+    fireEvent.click(lumi);
+    expect(lumi).toHaveAttribute("aria-expanded", "false");
+    expect(regionFor(lumi)).toHaveAttribute("hidden");
+    expect(sora).toHaveAttribute("aria-expanded", "true");
+    expect(regionFor(sora)).not.toHaveAttribute("hidden");
+
+    fireEvent.click(affection);
+    expect(affection).toHaveAttribute("aria-expanded", "false");
+    expect(regionFor(affection)).toHaveAttribute("hidden");
+    expect(courage).toHaveAttribute("aria-expanded", "true");
+    expect(regionFor(courage)).not.toHaveAttribute("hidden");
+  });
+
   it("starts all five sections expanded and toggles each one independently", () => {
     render(<ProjectHarness project={createProject()} />);
 
@@ -312,15 +363,44 @@ describe("project panel sections", () => {
 
     const section = toggle.closest("section");
     if (section === null) throw new Error("missing section element");
-    fireEvent.click(within(section).getByRole("button", { name: "＋" }));
+    fireEvent.click(
+      within(section).getByRole("button", { name: "新建 UI 动效" }),
+    );
     expect(onCreateUiMotion).toHaveBeenCalledTimes(1);
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(sectionRegion("UI 动效")).toHaveAttribute("hidden");
     // The ＋ action is a sibling of the toggle, so it still works collapsed.
-    fireEvent.click(within(section).getByRole("button", { name: "＋" }));
+    fireEvent.click(
+      within(section).getByRole("button", { name: "新建 UI 动效" }),
+    );
     expect(onCreateUiMotion).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps individual item collapse state across sidebar unmounts", () => {
+    render(
+      <RoundTripHarness
+        diagnostics={[]}
+        project={createProject()}
+        store={{ current: {} }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "项目" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起角色 lumi" }));
+    fireEvent.click(screen.getByRole("button", { name: "场景" }));
+    fireEvent.click(screen.getByRole("button", { name: "项目" }));
+    expect(
+      screen.getByRole("button", { name: "展开角色 lumi" }),
+    ).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: "切换侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "项目" }));
+    expect(
+      screen.getByRole("button", { name: "展开角色 lumi" }),
+    ).toHaveAttribute("aria-expanded", "false");
   });
 
   it("keeps host-owned collapse state across a sidebar unmount/remount round trip", () => {

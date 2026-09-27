@@ -1,16 +1,10 @@
 /* Editor chrome: keep authoring layout separate from preview/content styles. */
 .editor-shell {
-  --line: #2b303a;
-  --line-soft: #222730;
-  --panel: #15181e;
-  --panel-2: #1b1f27;
-  --muted: #9aa4b5;
   --chrome-height: 64px;
   --status-height: 30px;
   grid-template-columns:
-    calc(
-      min(var(--left-sidebar-width), 24vw) + var(--asset-detail-width)
-    ) minmax(0, 1fr)
+    calc(min(var(--left-sidebar-width), 24vw) + var(--asset-detail-width))
+    minmax(0, 1fr)
     min(var(--right-sidebar-width), 30vw);
   grid-template-rows: var(--chrome-height) minmax(0, 1fr) var(--status-height);
   background: #101217;
@@ -90,125 +84,11 @@
   font-size: 11px;
   height: 34px;
 }
-.sidebar-body {
-  padding: 12px 14px;
-}
-.scene-row {
-  margin-bottom: 5px;
-}
-.scene-row.active {
-  background: #20332e;
-  border-color: #35554b;
-  box-shadow: inset 3px 0 #68d7bb;
-}
-.scene-main {
-  min-height: 60px;
-}
-.scene-main strong {
-  white-space: nowrap;
-}
-.scene-row:focus-within .scene-row-actions {
-  display: flex;
-}
 
 .workspace {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-.workspace-toolbar {
-  position: relative;
-  top: auto;
-  left: auto;
-  flex: 0 0 52px;
-  width: 100%;
-  height: auto;
-  padding: 8px 12px;
-  gap: 8px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: #15181e;
-  box-shadow: none;
-  overflow-x: auto;
-}
-.workspace-toolbar select,
-.workspace-toolbar > button {
-  flex-shrink: 0;
-  height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #1d222b;
-}
-.workspace-toolbar select {
-  width: 138px;
-  margin-left: auto;
-}
-.workspace-toolbar > button {
-  white-space: nowrap;
-}
-.view-switch {
-  flex-shrink: 0;
-  height: 32px;
-  padding: 3px;
-  border: 0;
-  background: #0e1116;
-}
-.view-switch button {
-  border: 0;
-  border-radius: 4px;
-  color: var(--muted);
-}
-.view-switch button + button {
-  border-left: 0;
-}
-.view-switch button.active {
-  background: #2a3935;
-  color: #a3ebd8;
-}
-.workspace > .graph-shell {
-  position: relative;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
-}
-.workspace > .script-view {
-  flex: 1;
-  height: auto;
-  overflow: hidden;
-}
-.graph-toolbar {
-  padding: 5px;
-  height: auto;
-  max-width: calc(100% - 24px);
-  flex-wrap: wrap;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #171b23;
-}
-.graph-toolbar button {
-  border-color: transparent;
-}
-.story-node {
-  box-shadow: 0 5px 18px rgb(0 0 0 / 18%);
-}
-.inspector-header {
-  min-height: 74px;
-  background: #191d24;
-}
-.inspector-header h2 {
-  font-size: 16px;
-}
-.inspector-section {
-  padding: 18px;
-}
-.field {
-  gap: 7px;
-  margin-bottom: 16px;
-}
-.field-label {
-  font-size: 11px;
-  color: #b8c1d0;
 }
 .editor-shell input,
 .editor-shell textarea,
@@ -278,7 +158,6 @@
   grid-template-columns: 0 minmax(0, 1fr) 0;
 }
 .panels-hidden > .left-panels,
-.panels-hidden > .inspector,
 .panels-hidden > .resize-handle {
   display: none;
 }
@@ -297,12 +176,6 @@
   .toolbar-actions button {
     padding: 0 8px;
   }
-  .sidebar-body {
-    padding: 10px;
-  }
-  .inspector-section {
-    padding: 14px;
-  }
   .status-help {
     display: none;
   }
@@ -311,9 +184,9 @@
 @media (max-width: 760px) {
   .editor-shell {
     --chrome-height: 98px;
-    grid-template-columns: calc(
-        min(var(--left-sidebar-width), 32vw) + var(--asset-detail-width)
-      ) minmax(0, 1fr) 0;
+    grid-template-columns:
+      calc(min(var(--left-sidebar-width), 32vw) + var(--asset-detail-width))
+      minmax(0, 1fr) 0;
     grid-template-rows:
       var(--chrome-height) minmax(0, 1fr) minmax(120px, 30%)
       var(--status-height);
@@ -336,12 +209,6 @@
   .editor-shell:not(.panels-hidden):has(.asset-detail-column:not(:empty)) {
     --asset-detail-width: min(220px, 32vw);
   }
-  .editor-shell > .inspector {
-    grid-column: 1 / -1;
-    grid-row: 3;
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
   .editor-statusbar {
     grid-row: 4;
   }
@@ -363,9 +230,5 @@
   .sidebar-tabs {
     padding: 6px 3px;
     gap: 0;
-  }
-  .workspace-toolbar {
-    gap: 4px;
-    padding: 8px;
   }
 }

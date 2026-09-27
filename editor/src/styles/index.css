@@ -1,0 +1,34 @@
+/*
+ * Editor stylesheet entry point (the only CSS main.tsx imports).
+ *
+ * Cascade layers make precedence explicit instead of depending on selector
+ * specificity or import order:
+ *   vendor     third-party CSS (React Flow, KaTeX)
+ *   elements   native control defaults (below legacy, so old areas keep
+ *              their overrides until migrated)
+ *   legacy     the pre-redesign stylesheets, shrinking as areas migrate
+ *   tokens     design tokens (tokens.css)
+ *   base       document defaults (base.css)
+ *   components ui/ primitives
+ *   workspace  area-specific styles written against the tokens
+ *
+ * Stage CSS from the shared presentation packages is imported from JS and
+ * stays unlayered on purpose: the game's own stage styles always win.
+ */
+@layer vendor, elements, legacy, tokens, base, components, workspace;
+
+@import "@xyflow/react/dist/style.css" layer(vendor);
+@import "katex/dist/katex.min.css" layer(vendor);
+@import "./tokens.css";
+@import "./elements.css";
+@import "./controls.css";
+@import "./base.css";
+@import "./components.css";
+@import "./shell.css";
+@import "./graph.css";
+@import "./inspector.css";
+@import "./panels.css";
+@import "./script.css";
+@import "./workspaces.css";
+@import "../styles.css" layer(legacy);
+@import "../editor-layout.css" layer(legacy);

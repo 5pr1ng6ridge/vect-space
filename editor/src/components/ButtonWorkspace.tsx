@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import { MousePointerClick } from "lucide-react";
+import { WorkspaceHeader } from "../shell/WorkspaceHeader";
 import type {
   AssetUrlMap,
   ButtonSnapshot,
@@ -10,6 +12,7 @@ import { TemplateButton } from "@vectspace/presentation-react/button";
 import "@vectspace/presentation-react/gameplay.css";
 import { assetUrl } from "../api";
 import { AssetChooser } from "./AssetChooser";
+import { escapeTextEntry, isComposing } from "../ui/keyboard";
 import { evaluateChannel } from "../timeline";
 import {
   KeyframeInspector,
@@ -74,6 +77,8 @@ export function ButtonWorkspace({
   onSave,
   onUndo,
   onRedo,
+  undoAvailable = true,
+  redoAvailable = true,
 }: {
   file: ButtonFile;
   assets: EditorAsset[];
@@ -84,6 +89,8 @@ export function ButtonWorkspace({
   onSave(): void;
   onUndo(): void;
   onRedo(): void;
+  undoAvailable?: boolean;
+  redoAvailable?: boolean;
 }): ReactElement {
   const [state, setState] = useState<ButtonState>("normal");
   const [playhead, setPlayhead] = useState(0);
@@ -132,7 +139,10 @@ export function ButtonWorkspace({
   }, []);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") onBack();
+      if (event.key !== "Escape") return;
+      if (event.defaultPrevented || isComposing(event)) return;
+      if (escapeTextEntry(event)) return;
+      onBack();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -274,21 +284,18 @@ export function ButtonWorkspace({
 
   return (
     <main className="button-workspace">
-      <header className="ui-motion-toolbar">
-        <button onClick={onBack} type="button">
-          ← 返回项目
-        </button>
-        <strong>按钮模板 · {draft.id}</strong>
-        <button onClick={onUndo} type="button">
-          撤销
-        </button>
-        <button onClick={onRedo} type="button">
-          重做
-        </button>
-        <button disabled={!dirty} onClick={onSave} type="button">
-          保存
-        </button>
-      </header>
+      <WorkspaceHeader
+        dirty={dirty}
+        icon={MousePointerClick}
+        kind="按钮模板"
+        onBack={onBack}
+        onRedo={onRedo}
+        onSave={onSave}
+        onUndo={onUndo}
+        redoAvailable={redoAvailable}
+        title={draft.id}
+        undoAvailable={undoAvailable}
+      />
       <section className="button-workspace-main">
         <div className="button-preview" ref={previewRef}>
           <div

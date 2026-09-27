@@ -1,0 +1,178 @@
+/* Right-hand node inspector. */
+@layer workspace {
+  .inspector {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .inspector.empty-inspector {
+    justify-content: center;
+  }
+
+  .inspector-header {
+    --node-color: var(--node-flow);
+    position: sticky;
+    z-index: var(--z-sticky);
+    top: 0;
+    display: flex;
+    min-height: 60px;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border-default);
+    background: var(--surface-panel);
+  }
+
+  .inspector-header.story-cat-narrative {
+    --node-color: var(--node-narrative);
+  }
+
+  .inspector-header.story-cat-logic {
+    --node-color: var(--node-logic);
+  }
+
+  .inspector-header.story-cat-visual {
+    --node-color: var(--node-visual);
+  }
+
+  .inspector-header.story-cat-audio {
+    --node-color: var(--node-audio);
+  }
+
+  .inspector-header.story-cat-interaction {
+    --node-color: var(--node-interaction);
+  }
+
+  .inspector-header.story-cat-end {
+    --node-color: var(--node-end);
+  }
+
+  .inspector-type-icon {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--node-color) 20%, transparent);
+    color: var(--node-color);
+    place-items: center;
+  }
+
+  .inspector-type-icon svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .inspector-heading {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .inspector-heading h2 {
+    margin: 0;
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-semibold);
+    line-height: var(--line-height-tight);
+  }
+
+  .inspector-id {
+    display: inline-flex;
+    max-width: 100%;
+    align-self: flex-start;
+    align-items: center;
+    gap: var(--space-1);
+    height: 20px;
+    padding: 0 var(--space-1);
+    margin-left: calc(var(--space-1) * -1);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: text;
+  }
+
+  .inspector-id code {
+    overflow: hidden;
+    font-size: var(--font-size-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .inspector-id svg {
+    width: 12px;
+    height: 12px;
+    opacity: 0;
+  }
+
+  .inspector-id:hover {
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+  }
+
+  .inspector-id:hover svg {
+    opacity: 1;
+  }
+
+  .inspector-id-input {
+    height: 24px;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+  }
+
+  .inspector-section {
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .inspector-section:last-child {
+    border-bottom: 0;
+  }
+
+  /* ------------------------------------------------- Direct stage editing */
+  /* The inspector previews show the real design stage; a `sprite` node can be
+     dragged there and a `background` node accepts a library asset dropped on
+     it.  Both layers live inside `.cue-preview-stage`, above its canvas. */
+  .cue-preview-stage.is-draggable .timeline-stage {
+    cursor: grab;
+  }
+
+  .cue-preview-stage.is-dragging .timeline-stage {
+    cursor: grabbing;
+  }
+
+  .stage-drop-target {
+    position: absolute;
+    z-index: 2;
+    display: grid;
+    border: 1px dashed transparent;
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    inset: 0;
+    place-items: center;
+  }
+
+  .stage-drop-target.is-active {
+    border-color: var(--accent);
+    background: var(--accent-muted);
+    color: var(--accent-text);
+  }
+
+  .inspector-preview-note {
+    display: flex;
+    align-items: center;
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    gap: var(--space-2);
+  }
+
+  .inspector-preview-note button {
+    margin-left: auto;
+  }
+}

@@ -13,10 +13,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMemoryKit,
   createMemoryTextureLoader,
+  MemoryNode,
+  MemorySprite,
+  type MemoryKit,
 } from "@vectspace/presentation-core/scene-test-kit";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 
 import { CuePreview } from "./CuePreview";
-import { buildBackgroundPreviewRequest } from "../presentationPreview";
+import {
+  buildBackgroundPreviewRequest,
+  buildWorldPreviewRequest,
+} from "../presentationPreview";
 import type { BackgroundNode, EditorAsset } from "../types";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -40,6 +47,60 @@ const ASSETS: EditorAsset[] = [
     absolute_path: "C:/b.png",
   },
 ];
+
+const LOOP_URLS = ["C:/loop/0.png", "C:/loop/1.png"] as const;
+
+/** A two-frame loop on the logical asset the static world shows. */
+const ANIMATIONS: AnimationMap = {
+  "sprite.loop": {
+    id: "loop",
+    width: 128,
+    height: 128,
+    total_duration_ms: 20,
+    frames: [
+      { asset: "sprite.loop", url: LOOP_URLS[0], duration_ms: 10 },
+      { asset: "sprite.loop", url: LOOP_URLS[1], duration_ms: 10 },
+    ],
+  },
+};
+
+/** The runtime world a `sprite` node resolves to, with no cue on top. */
+function staticWorldRequest() {
+  return buildWorldPreviewRequest({
+    background: "bg.a",
+    sprites: {
+      lumi: {
+        asset: "sprite.loop",
+        x: 960,
+        y: 1080,
+        scale: 1,
+        scale_x: 1,
+        scale_y: 1,
+        rotation_deg: 0,
+        flip_x: false,
+        anchor_x: 0.5,
+        anchor_y: 1,
+        opacity: 1,
+        z: 0,
+      },
+    },
+    camera: { x: 0, y: 0, zoom: 1, rotation_deg: 0 },
+    curtain: { covered: false, fill: null },
+  });
+}
+
+/** How many distinct frame textures the stage's sprite has displayed. */
+function spriteFrameTextures(kit: MemoryKit): number {
+  let frames = 0;
+  const walk = (node: MemoryNode): void => {
+    if (node instanceof MemorySprite)
+      frames = Math.max(frames, node.textures.length);
+    for (const child of node.children) walk(child);
+  };
+  const application = kit.applications[0];
+  if (application !== undefined) walk(application.stage);
+  return frames;
+}
 
 function backgroundRequest(durationMs = 40) {
   const node: BackgroundNode = {
@@ -87,6 +148,37 @@ describe("CuePreview", () => {
     // application instead of creating and destroying a second one.
     expect(kit.applications).toHaveLength(1);
     expect(kit.applications[0]?.destroyed).toBe(false);
+  });
+
+  it("keeps a static world's animated sprite looping without a transport", async () => {
+    const kit = createMemoryKit();
+    const loader = createMemoryTextureLoader({
+      "C:/a.png": { width: 1920, height: 1080 },
+      "C:/b.png": { width: 1920, height: 1080 },
+      [LOOP_URLS[0]]: { width: 128, height: 128 },
+      [LOOP_URLS[1]]: { width: 128, height: 128 },
+    });
+    render(
+      <CuePreview
+        animations={ANIMATIONS}
+        assets={ASSETS}
+        environment={{ kit: kit.kit, textureLoader: loader.load }}
+        label="立绘预览"
+        request={staticWorldRequest()}
+      />,
+    );
+
+    await screen.findByLabelText("立绘预览");
+    // A static world preview has no cue, so it has no transport at all.
+    expect(screen.queryByRole("button", { name: /播放/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "转场后" })).toBeNull();
+
+    // The decoration loop is driven by the shared clock, so the sprite moves
+    // past its first frame even though no timeline is involved; a paused clock
+    // would leave it with exactly one texture forever.
+    await waitFor(() => expect(spriteFrameTextures(kit)).toBeGreaterThan(1), {
+      timeout: 3000,
+    });
   });
 
   it("rebuilds deterministically when the authored request changes", async () => {

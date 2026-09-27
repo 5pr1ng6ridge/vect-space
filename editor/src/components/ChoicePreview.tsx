@@ -246,7 +246,7 @@ export function ChoicePreview({
                 <span>
                   {choice.template.kind === "button"
                     ? `模板 ${choice.template.button.template}`
-                    : "内置 CSS 按钮"}
+                    : "默认选项按钮"}
                 </span>
                 <span>
                   {choice.icon == null ? "无图标" : `图标 ${choice.icon}`}

@@ -273,7 +273,7 @@ describe("ChoicePreview", () => {
     const summary = screen.getByText(/锚点 960, 540/);
     expect(summary).toBeInTheDocument();
     expect(screen.getByText("模板 choice.primary")).toBeInTheDocument();
-    expect(screen.getAllByText("内置 CSS 按钮")).toHaveLength(2);
+    expect(screen.getAllByText("默认选项按钮")).toHaveLength(2);
     expect(screen.getByText("图标 gui.icon")).toBeInTheDocument();
     expect(screen.getAllByText("可选")).toHaveLength(2);
     expect(screen.getByText("禁用")).toBeInTheDocument();

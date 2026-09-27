@@ -113,7 +113,6 @@ function renderSidebar(
       onAddCharacter={() => true}
       onAddScene={() => true}
       onAddVariable={() => true}
-      onChangeAction={() => undefined}
       onChangeCharacter={() => undefined}
       onChangeVariable={() => undefined}
       onCreateAction={() => true}
@@ -195,17 +194,19 @@ describe("ambience editor interactions", () => {
     });
   });
 
-  it("shows the ambience reference and leaves deletion to the host guard", () => {
+  it("shows the ambience reference and blocks removal before asking", () => {
     const remove = vi.fn(() => false);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderSidebar(projectWith("ambience"), undefined, remove);
 
     fireEvent.click(screen.getByRole("button", { name: /ambience\.forest/ }));
     expect(screen.getByText(/该素材仍被引用/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "从清单移除" }));
+    const removeButton = screen.getByRole("button", { name: "从清单移除" });
+    expect(removeButton).toBeDisabled();
+    fireEvent.click(removeButton);
 
-    expect(confirm).toHaveBeenCalled();
-    expect(remove).toHaveBeenCalledWith("ambience.forest");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
     expect(screen.getAllByText("ambience.forest").length).toBeGreaterThan(0);
   });
 });

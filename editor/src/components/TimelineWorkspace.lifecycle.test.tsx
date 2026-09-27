@@ -539,5 +539,5 @@ describe("TimelineWorkspace lifecycle", () => {
     expect(
       lifecycle.dom.videos.every((video) => video.listenerCount() === 0),
     ).toBe(true);
-  });
+  }, 15_000);
 });

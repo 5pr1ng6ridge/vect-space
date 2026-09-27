@@ -9,6 +9,16 @@ import {
 } from "react";
 
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
+import {
+  ArrowLeft,
+  Play,
+  RotateCcw,
+  SkipBack,
+  Square,
+  StepForward,
+} from "lucide-react";
+import { Button } from "../ui/Button";
+import { shouldIgnoreShortcut } from "../ui/keyboard";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import type {
   AssetUrlMap,
@@ -117,6 +127,8 @@ interface GameplayPreviewProps {
    */
   autoStart?: "scene" | "node" | "reset_node";
   onError(message: string): void;
+  /** Leave the preview (renders the back button in the toolbar). */
+  onBack?(): void;
 }
 
 type Status = "idle" | "starting" | "playing" | "stopped";
@@ -146,6 +158,7 @@ export function GameplayPreview({
   nodeId,
   autoStart,
   onError,
+  onBack,
 }: GameplayPreviewProps): ReactElement {
   const [status, setStatus] = useState<Status>("idle");
   const [notice, setNotice] = useState<string | null>(null);
@@ -472,6 +485,21 @@ export function GameplayPreview({
     advanceWith("manual");
   }, [advanceWith, update]);
 
+  // Space / Enter advance like in the game (never while typing or when a
+  // focused button would activate itself).
+  useEffect(() => {
+    if (status !== "playing") return;
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== " " && event.key !== "Enter") return;
+      if (shouldIgnoreShortcut(event) || busy) return;
+      if (event.target instanceof HTMLButtonElement) return;
+      event.preventDefault();
+      advance();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [advance, busy, status]);
+
   const choose = useCallback(
     (choiceId: string): void => {
       const snapshot = update?.snapshot;
@@ -657,38 +685,71 @@ export function GameplayPreview({
 
   return (
     <section className="gameplay-preview">
-      <header className="gameplay-preview-toolbar">
-        <button disabled={busy} onClick={startScene} type="button">
-          从场景入口开始
-        </button>
-        <button
-          disabled={busy || nodeId === null}
-          onClick={startNode}
-          type="button"
-        >
-          从所选节点开始
-        </button>
-        <button
-          disabled={busy || nodeId === null}
-          onClick={resetAtNode}
-          title="不执行前置节点，使用场景默认值直接从此节点开始"
-          type="button"
-        >
-          重置并从此节点开始
-        </button>
-        <button
-          disabled={busy || status !== "playing"}
-          onClick={advance}
-          type="button"
-        >
-          {update?.requires_ack === true ? "跳过表现" : "推进 / 完成打字"}
-        </button>
-        <button disabled={!stopEnabled} onClick={stopSession} type="button">
-          停止
-        </button>
+      <header className="gameplay-preview-toolbar workspace-header-bar">
+        {onBack !== undefined && (
+          <>
+            <Button icon={ArrowLeft} onClick={onBack} size="sm" variant="ghost">
+              返回编辑器
+            </Button>
+            <span aria-hidden="true" className="shell-divider" />
+          </>
+        )}
+        <div className="workspace-header-title">
+          <Play aria-hidden="true" />
+          <span>游戏预览</span>
+        </div>
+        <div className="workspace-header-tools">
+          <Button
+            disabled={busy}
+            icon={SkipBack}
+            onClick={startScene}
+            size="sm"
+            variant="ghost"
+          >
+            从场景入口开始
+          </Button>
+          <Button
+            disabled={busy || nodeId === null}
+            icon={Play}
+            onClick={startNode}
+            size="sm"
+            variant="ghost"
+          >
+            从所选节点开始
+          </Button>
+          <Button
+            disabled={busy || nodeId === null}
+            icon={RotateCcw}
+            onClick={resetAtNode}
+            size="sm"
+            title="不执行前置节点，使用场景默认值直接从此节点开始"
+            variant="ghost"
+          >
+            重置并从此节点开始
+          </Button>
+          <span aria-hidden="true" className="shell-divider" />
+          <Button
+            disabled={busy || status !== "playing"}
+            icon={StepForward}
+            onClick={advance}
+            size="sm"
+            title="也可以按空格或 Enter"
+          >
+            {update?.requires_ack === true ? "跳过表现" : "推进 / 完成打字"}
+          </Button>
+          <Button
+            disabled={!stopEnabled}
+            icon={Square}
+            onClick={stopSession}
+            size="sm"
+            variant="ghost"
+          >
+            停止
+          </Button>
+        </div>
         <span className="gameplay-preview-status">
           {status === "playing"
-            ? `运行中 · ${snapshot?.location.scene_id ?? ""}/${snapshot?.location.node_id ?? ""}${forcedAuto ? " · 强制自动" : ""}`
+            ? `运行中 · ${snapshot?.location.scene_id ?? ""} / ${snapshot?.location.node_id ?? ""}${forcedAuto ? " · 强制自动" : ""}`
             : status === "starting"
               ? "启动中…"
               : status === "stopped"

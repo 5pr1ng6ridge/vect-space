@@ -54,6 +54,20 @@ import {
 import { buildAnimationMap } from "../imageAnimationMap";
 import { ScreenEffectFields } from "./SpecFields";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import { DeferredInput } from "./Fields";
+import {
+  Clapperboard,
+  KeyRound,
+  Pause,
+  Play,
+  RefreshCw,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
+import { WorkspaceHeader } from "../shell/WorkspaceHeader";
+import { Button, IconButton } from "../ui/Button";
+import { escapeTextEntry, isComposing } from "../ui/keyboard";
+import { isEditableTarget } from "./nodeDeleteShortcut";
 import { firstVisibleAssetId } from "../assetLibrary";
 
 interface TimelineWorkspaceProps {
@@ -64,6 +78,8 @@ interface TimelineWorkspaceProps {
   assets: EditorAsset[];
   dirty: boolean;
   futureAvailable: boolean;
+  /** Whether the project history has an entry to undo. */
+  pastAvailable?: boolean;
   previewSettings: TimelinePreviewSettings | undefined;
   onBack(): void;
   onChange(node: TimelineNode): void;
@@ -82,7 +98,16 @@ interface TimelineWorkspaceProps {
 }
 
 type Tool = "select" | "camera";
-type TransformHandle = "move" | "scale" | "scale_x" | "scale_y" | "rotate";
+type TransformHandle =
+  | "move"
+  | "scale"
+  | "scale_tl"
+  | "scale_tr"
+  | "scale_bl"
+  | "scale_br"
+  | "scale_x"
+  | "scale_y"
+  | "rotate";
 type CameraHandle = "move" | "zoom" | "rotate";
 
 const DEFAULT_PREVIEW_SETTINGS: TimelinePreviewSettings = {
@@ -104,6 +129,7 @@ export function TimelineWorkspace({
   assets,
   dirty,
   futureAvailable,
+  pastAvailable = true,
   previewSettings,
   onBack,
   onChange,
@@ -157,7 +183,7 @@ export function TimelineWorkspace({
     },
     [],
   );
-  const [contextStatus, setContextStatus] = useState("尚未建立真实上下文");
+  const [contextStatus, setContextStatus] = useState("尚未生成预览");
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
   const [pendingChoice, setPendingChoice] = useState<Extract<
@@ -176,6 +202,7 @@ export function TimelineWorkspace({
   const [exitPrompt, setExitPrompt] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(320);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
   const surfaceRef = useRef<SceneSurface | null>(null);
   const sessionRef = useRef<TimelineSession | null>(null);
   const surfaceReadyRef = useRef<Promise<void>>(Promise.resolve());
@@ -234,6 +261,9 @@ export function TimelineWorkspace({
   useEffect(() => {
     projectRef.current = project;
   }, [project]);
+  useEffect(() => {
+    workspaceRef.current?.focus({ preventScroll: true });
+  }, []);
   useEffect(() => {
     nodeRef.current = localNode;
   }, [localNode]);
@@ -716,6 +746,16 @@ export function TimelineWorkspace({
       const dx = ((moveEvent.clientX - startX) / rect.width) * DESIGN_WIDTH;
       const dy = ((moveEvent.clientY - startY) / rect.height) * DESIGN_HEIGHT;
       moved = moved || Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5;
+      const corner =
+        handle === "scale_tl" ||
+        handle === "scale_tr" ||
+        handle === "scale_bl" ||
+        handle === "scale_br";
+      const outwardDelta = corner
+        ? (dx * (handle.endsWith("l") ? -1 : 1) +
+            dy * (handle.startsWith("scale_t") ? -1 : 1)) /
+          2
+        : dy;
       const transform: Partial<SceneObjectFrame> =
         handle === "move"
           ? { x: initial.x + dx, y: initial.y + dy }
@@ -739,7 +779,12 @@ export function TimelineWorkspace({
                         scale_x: Math.max(0.05, initial.scale_x + dy / 450),
                         scale_y: Math.max(0.05, initial.scale_y + dy / 450),
                       }
-                    : { scale: Math.max(0.05, initial.scale + dy / 450) };
+                    : {
+                        scale: Math.max(
+                          0.05,
+                          initial.scale + outwardDelta / 450,
+                        ),
+                      };
       surfaceRef.current?.setObjectOverride(object.id, transform);
       setFrame((current) =>
         current === null
@@ -1177,13 +1222,13 @@ export function TimelineWorkspace({
     void buildContext(nextSettings);
   };
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
-    if (
-      event.target instanceof HTMLInputElement ||
-      event.target instanceof HTMLTextAreaElement
-    )
-      return;
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>): void => {
+    if (event.defaultPrevented || isComposing(event)) return;
+    if (escapeTextEntry(event)) return;
+    if (isEditableTarget(event.target)) return;
     if (event.key === " ") {
+      // Space is the workspace playback shortcut even when a button has focus;
+      // prevent native button activation (which can add duplicate events).
       event.preventDefault();
       togglePlayback();
     } else if (event.key === "ArrowLeft") {
@@ -1295,74 +1340,97 @@ export function TimelineWorkspace({
   return (
     <main
       className="timeline-workspace"
+      ref={workspaceRef}
       onKeyDown={handleKeyDown}
       style={{ "--timeline-height": `${timelineHeight}px` } as CSSProperties}
       tabIndex={0}
     >
-      <header className="timeline-workspace-toolbar">
-        <button onClick={requestBack} type="button">
-          ← 返回剧情图
-        </button>
-        <strong>
-          关键帧 · {sceneId}/{nodeId}
-        </strong>
-        <span className="timeline-context-status">{contextStatus}</span>
-        <button
-          disabled={contextBusy}
-          onClick={() => void buildContext()}
-          type="button"
-        >
-          {contextBusy ? "建立中…" : "重建上下文"}
-        </button>
-        <button
-          disabled={preview === null}
-          onClick={togglePlayback}
-          type="button"
-        >
-          {playing ? "❚❚" : "▶"}
-        </button>
-        <code>
-          播放 {Math.round(playhead)} · 起点 {Math.round(playbackStart)} ms
-        </code>
-        <label className="timeline-toolbar-select">
+      <WorkspaceHeader
+        dirty={dirty}
+        icon={Clapperboard}
+        kind="关键帧时间线"
+        onBack={requestBack}
+        onRedo={onRedo}
+        onSave={onSave}
+        onUndo={onUndo}
+        redoAvailable={futureAvailable}
+        title={`${sceneId} / ${nodeId}`}
+        undoAvailable={pastAvailable}
+      >
+        <div className="workspace-transport">
+          <IconButton
+            disabled={preview === null}
+            icon={playing ? Pause : Play}
+            label={playing ? "暂停" : "播放"}
+            onClick={togglePlayback}
+            shortcut="Space"
+            variant="secondary"
+          />
+          <code className="workspace-transport-readout">
+            播放 {Math.round(playhead)} · 起点 {Math.round(playbackStart)} ms
+          </code>
+        </div>
+        <label className="workspace-header-field">
+          时长
+          <DeferredInput
+            aria-label="时间线时长"
+            max={1_800_000}
+            min={1}
+            onCommit={(raw) => {
+              const duration = Number(raw);
+              if (!Number.isInteger(duration) || duration < 1) return false;
+              commitNode({ ...localNode, duration_ms: duration });
+            }}
+            type="number"
+            value={String(localNode.duration_ms)}
+          />
+          <span>ms</span>
+        </label>
+        <label className="workspace-header-field">
           吸附
           <select
             aria-label="关键帧吸附"
             onChange={(event) => setSnap(Number(event.currentTarget.value))}
             value={snap}
           >
-            <option value={10}>10ms</option>
-            <option value={50}>50ms</option>
-            <option value={100}>100ms</option>
+            <option value={10}>10 ms</option>
+            <option value={50}>50 ms</option>
+            <option value={100}>100 ms</option>
           </select>
         </label>
-        <button
-          className={autoKey ? "active" : ""}
+        <Button
+          aria-pressed={autoKey}
+          className={autoKey ? "is-active" : ""}
+          icon={KeyRound}
           onClick={toggleAutoKey}
-          type="button"
+          size="sm"
+          title="修改选中对象时自动在播放头写入关键帧"
+          variant="ghost"
         >
           自动关键帧
-        </button>
-        <button
+        </Button>
+        <IconButton
+          icon={muted ? VolumeX : Volume2}
+          label={muted ? "取消静音" : "静音"}
           onClick={() => {
             const next = !muted;
             setMuted(next);
             sessionRef.current?.setMuted(next);
           }}
-          type="button"
-        >
-          {muted ? "静音" : "声音"}
-        </button>
-        <button disabled={!futureAvailable} onClick={onRedo} type="button">
-          重做
-        </button>
-        <button onClick={onUndo} type="button">
-          撤销
-        </button>
-        <button disabled={!dirty} onClick={onSave} type="button">
-          保存
-        </button>
-      </header>
+          size="sm"
+        />
+        <span className="workspace-context-status" title={contextStatus}>
+          {contextStatus}
+        </span>
+        <IconButton
+          disabled={contextBusy}
+          icon={RefreshCw}
+          label={contextBusy ? "建立中…" : "重建上下文"}
+          onClick={() => void buildContext()}
+          size="sm"
+          tooltip="重新用运行时计算进入这个节点时的画面状态"
+        />
+      </WorkspaceHeader>
       <div className="timeline-workspace-main">
         <section className="timeline-stage-pane">
           <div className="timeline-stage-wrap">
@@ -1408,14 +1476,51 @@ export function TimelineWorkspace({
                   <span>{object.id}</span>
                   {selectedId === object.id && (
                     <>
-                      <button
-                        aria-label="缩放素材"
-                        className="timeline-gizmo-scale"
-                        onPointerDown={(event) =>
-                          beginObjectDrag(event, object, "scale")
-                        }
-                        type="button"
-                      />
+                      {object.kind === "sprite" ? (
+                        <>
+                          <button
+                            aria-label="左上角缩放素材"
+                            className="timeline-gizmo-scale timeline-gizmo-scale-tl"
+                            onPointerDown={(event) =>
+                              beginObjectDrag(event, object, "scale_tl")
+                            }
+                            type="button"
+                          />
+                          <button
+                            aria-label="右上角缩放素材"
+                            className="timeline-gizmo-scale timeline-gizmo-scale-tr"
+                            onPointerDown={(event) =>
+                              beginObjectDrag(event, object, "scale_tr")
+                            }
+                            type="button"
+                          />
+                          <button
+                            aria-label="左下角缩放素材"
+                            className="timeline-gizmo-scale timeline-gizmo-scale-bl"
+                            onPointerDown={(event) =>
+                              beginObjectDrag(event, object, "scale_bl")
+                            }
+                            type="button"
+                          />
+                          <button
+                            aria-label="右下角缩放素材"
+                            className="timeline-gizmo-scale timeline-gizmo-scale-br"
+                            onPointerDown={(event) =>
+                              beginObjectDrag(event, object, "scale_br")
+                            }
+                            type="button"
+                          />
+                        </>
+                      ) : (
+                        <button
+                          aria-label="缩放素材"
+                          className="timeline-gizmo-scale"
+                          onPointerDown={(event) =>
+                            beginObjectDrag(event, object, "scale")
+                          }
+                          type="button"
+                        />
+                      )}
                       <button
                         aria-label="水平缩放素材"
                         className="timeline-gizmo-scale-x"

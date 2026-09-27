@@ -1,10 +1,12 @@
 import {
   Background,
+  BackgroundVariant,
   Controls,
   MarkerType,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  ViewportPortal,
   applyEdgeChanges,
   applyNodeChanges,
   useReactFlow,
@@ -16,27 +18,61 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import {
+  ChevronDown,
+  ClipboardPaste,
+  Copy,
+  CopyPlus,
+  Flag,
+  Group,
+  Maximize,
+  PanelRightOpen,
+  Play,
+  Plus,
+  Trash2,
+  Ungroup,
+  Workflow,
+} from "lucide-react";
+import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from "react";
-import { NODE_TYPES, nodeLabel, outputPorts, type InsertSide } from "../story";
+
+import { describeNode } from "../nodeSummary";
+import {
+  canonicalizeGroupSelection,
+  createParentGroup,
+  dissolveGroup,
+  groupNodeIds,
+  moveGroupChildUpOneLevel,
+  nestedGroupBounds,
+  nestedGroupedLayout,
+  normalizeSceneGroups,
+} from "./graphGroups";
+import { outputPorts, type InsertSide } from "../story";
+import { nodeTypeEntries } from "./nodeTypeMenu";
+import type {
+  ContentManifest,
+  EditorDiagnostic,
+  GroupChildRef,
+  NodePosition,
+  NodeType,
+  SceneDefinition,
+  SceneGroup,
+  SceneLayout,
+} from "../types";
+import { Button, IconButton } from "../ui/Button";
+import { ContextMenuArea, DropdownMenu, type MenuItemSpec } from "../ui/Menu";
 import {
   imeState,
   isInteractiveTarget,
   shouldIgnoreNodeDeletion,
 } from "./nodeDeleteShortcut";
-import type {
-  EditorDiagnostic,
-  NodePosition,
-  NodeType,
-  SceneDefinition,
-  SceneLayout,
-} from "../types";
 import { StoryNodeCard, type StoryGraphNode } from "./StoryNode";
 
 const nodeTypes = { story: StoryNodeCard };
@@ -45,31 +81,38 @@ export interface StoryGraphProps {
   scene: SceneDefinition;
   layout: SceneLayout | undefined;
   diagnostics: EditorDiagnostic[];
+  /** Used to show character display names in node summaries. */
+  manifest?: ContentManifest;
   selectedNodeId: string | null;
   onSelect(nodeId: string | null): void;
+  /** Open the dedicated workspace of a timeline / long-text node. */
   onOpen(nodeId: string): void;
   /** Open the live gameplay preview starting from this node. */
   onPreview(nodeId: string): void;
+  /** Double-click on an ordinary node: move focus to its inspector. */
+  onEditNode?(nodeId: string): void;
   onConnect(sourceId: string, handle: string, targetId: string): void;
   onCopy(nodeId: string): void;
   /** Delete the selected node through the App confirmation/undo pipeline. */
   onDelete(nodeId: string): void;
+  onDuplicate?(nodeId: string): void;
+  onSetEntry?(nodeId: string): void;
   /** True while an App-level dialog or entry overlay owns the interaction. */
   deleteDisabled?: boolean;
   onMoveNode(nodeId: string, position: NodePosition): void;
+  /**
+   * Commit a batch of node positions.  The map is **partial**: it may only
+   * name the nodes a gesture moved (a group drag sends its descendants), so
+   * the App merges it into the scene layout and never replaces the whole
+   * `SceneLayout.nodes` map.
+   */
   onMoveMany(positions: Record<string, NodePosition>): void;
+  onSetGroups(groups: SceneGroup[]): void;
   onPaste(position: NodePosition): void;
   onViewport(viewport: Viewport): void;
   onQuickInsert(nodeId: string, side: InsertSide, type: NodeType): void;
-}
-
-interface QuickInsertMenu {
-  nodeId: string;
-  side: InsertSide;
-  x: number;
-  y: number;
-  clientX: number;
-  clientY: number;
+  /** Create an unconnected node at a flow position. */
+  onAddNode?(type: NodeType, position: NodePosition): void;
 }
 
 export function StoryGraph(props: StoryGraphProps): ReactElement {
@@ -80,33 +123,176 @@ export function StoryGraph(props: StoryGraphProps): ReactElement {
   );
 }
 
+interface MenuTarget {
+  nodeId: string | null;
+  groupId: string | null;
+  position: NodePosition;
+}
+
+/** One selected canvas entity: a node card or a group frame. */
+type EntityRef = GroupChildRef;
+
+function refKey(ref: EntityRef): string {
+  return "node" in ref ? `node:${ref.node}` : `group:${ref.group}`;
+}
+
+function groupMenuEntry(
+  canWrap: boolean,
+  canUngroup: boolean,
+  disabled: boolean,
+  onSelect: () => void,
+): MenuItemSpec {
+  return {
+    id: "group-selection",
+    label: canUngroup ? "解散此组" : "将所选项组成父组",
+    icon: canUngroup ? Ungroup : Group,
+    shortcut: "Ctrl+Shift+L",
+    disabled: disabled || (!canWrap && !canUngroup),
+    hint: "请先多选至少两个节点或组",
+    onSelect,
+  };
+}
+
+interface GroupDrag {
+  groupId: string;
+  pointerId: number;
+  origin: NodePosition;
+  /** Positions of every descendant node when the drag started. */
+  base: Record<string, NodePosition>;
+}
+
+/** Snap a group drag delta to the 16px card grid. */
+function snapGroupDelta(
+  origin: NodePosition,
+  pointer: NodePosition,
+): NodePosition {
+  return {
+    x: Math.round((pointer.x - origin.x) / 16) * 16,
+    y: Math.round((pointer.y - origin.y) / 16) * 16,
+  };
+}
+
+/** Absolute positions of the dragged descendants at a given snapped delta. */
+function groupDragPositions(
+  drag: GroupDrag,
+  delta: NodePosition,
+): Map<string, NodePosition> {
+  const moved = new Map<string, NodePosition>();
+  for (const [id, position] of Object.entries(drag.base))
+    moved.set(id, { x: position.x + delta.x, y: position.y + delta.y });
+  return moved;
+}
+
+/** Apply a partial position map to the locally rendered React Flow nodes. */
+function applyPositions(
+  nodes: StoryGraphNode[],
+  moved: Map<string, NodePosition>,
+): StoryGraphNode[] {
+  return nodes.map((node) => {
+    const position = moved.get(node.id);
+    return position === undefined ? node : { ...node, position };
+  });
+}
+
+/**
+ * ELK layout runs are guarded by a monotonic token.  The helpers keep the
+ * token access out of render-reachable code (only event handlers and effects
+ * touch the ref), so a stale async result can never move nodes after the scene
+ * changed or after a newer run started.
+ */
+function beginLayoutRun(ref: { current: number }): number {
+  ref.current += 1;
+  return ref.current;
+}
+
+function layoutRunIsCurrent(ref: { current: number }, token: number): boolean {
+  return ref.current === token;
+}
+
 function StoryGraphInner({
   scene,
   layout,
   diagnostics,
+  manifest,
   selectedNodeId,
   onSelect,
   onOpen,
   onPreview,
+  onEditNode,
   onConnect,
   onCopy,
   onDelete,
+  onDuplicate,
+  onSetEntry,
   deleteDisabled = false,
   onMoveNode,
   onMoveMany,
+  onSetGroups,
   onPaste,
   onViewport,
   onQuickInsert,
+  onAddNode,
 }: StoryGraphProps): ReactElement {
-  const { fitView, screenToFlowPosition, setViewport } =
+  const { fitView, getNodes, screenToFlowPosition, setViewport } =
     useReactFlow<StoryGraphNode>();
   const graphShellRef = useRef<HTMLDivElement>(null);
+  // Kept in state as well so render-time menu builders never read a ref.
+  const [shellElement, setShellElement] = useState<HTMLDivElement | null>(null);
   const lastPointerRef = useRef({
     x: window.innerWidth / 2,
     y: window.innerHeight / 2,
   });
-  const [quickInsertMenu, setQuickInsertMenu] =
-    useState<QuickInsertMenu | null>(null);
+  const [menuTarget, setMenuTarget] = useState<MenuTarget>({
+    nodeId: null,
+    groupId: null,
+    position: { x: 0, y: 0 },
+  });
+  const [layoutBusy, setLayoutBusy] = useState(false);
+  const [selection, setSelectionState] = useState<EntityRef[]>(() =>
+    selectedNodeId === null ? [] : [{ node: selectedNodeId }],
+  );
+  const selectionRef = useRef<EntityRef[]>(selection);
+  const setSelection = useCallback((next: EntityRef[]): void => {
+    selectionRef.current = next;
+    setSelectionState(next);
+  }, []);
+  useEffect(() => {
+    selectionRef.current = selection;
+  }, [selection]);
+  const selectedNodeIdRef = useRef(selectedNodeId);
+  // Synced in an effect (not during render) and declared before the scene
+  // reset below, so a scene switch reads the freshly committed focus.
+  useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+  // A scene switch resets the canvas selection.  The App's inspector focus is
+  // intentionally *not* a dependency: an additive Ctrl/Shift selection (and a
+  // group selection, which reports `null` back to the App) must survive it.
+  useEffect(() => {
+    const focused = selectedNodeIdRef.current;
+    setSelection(focused === null ? [] : [{ node: focused }]);
+  }, [scene.id, setSelection]);
+  // When the App focuses a node on its own (duplicate, paste, insert), mirror
+  // it so Delete keeps targeting the node the author is looking at.
+  useEffect(() => {
+    if (selectedNodeId === null) return;
+    const current = selectionRef.current;
+    if (
+      current.length === 1 &&
+      "node" in current[0] &&
+      current[0].node === selectedNodeId
+    )
+      return;
+    setSelection([{ node: selectedNodeId }]);
+  }, [scene.id, selectedNodeId, setSelection]);
+  // Drop selection entries whose node no longer exists (e.g. after a delete).
+  useEffect(() => {
+    const current = selectionRef.current;
+    const pruned = current.filter(
+      (ref) => "group" in ref || scene.nodes[ref.node] !== undefined,
+    );
+    if (pruned.length !== current.length) setSelection(pruned);
+  }, [scene, setSelection]);
   const issuesByNode = useMemo(() => {
     const result = new Map<string, number>();
     for (const issue of diagnostics) {
@@ -117,29 +303,32 @@ function StoryGraphInner({
     return result;
   }, [diagnostics, scene.id]);
 
-  const openQuickInsertMenu = useCallback(
-    (
-      nodeId: string,
-      side: InsertSide,
-      clientX: number,
-      clientY: number,
-    ): void => {
-      const bounds = graphShellRef.current?.getBoundingClientRect();
-      const rawX = clientX - (bounds?.left ?? 0);
-      const rawY = clientY - (bounds?.top ?? 0);
-      const menuWidth = 264;
-      const menuHeight = 500;
-      const x = bounds
-        ? Math.max(8, Math.min(rawX, bounds.width - menuWidth - 8))
-        : rawX;
-      const y = bounds
-        ? Math.max(8, Math.min(rawY, bounds.height - menuHeight - 8))
-        : rawY;
-      lastPointerRef.current = { x: clientX, y: clientY };
-      setQuickInsertMenu({ nodeId, side, x, y, clientX, clientY });
-      onSelect(nodeId);
+  const nodeIdSet = useMemo(
+    () => new Set(Object.keys(scene.nodes)),
+    [scene.nodes],
+  );
+  const groups = useMemo(
+    () => normalizeSceneGroups(layout?.groups, nodeIdSet),
+    [layout?.groups, nodeIdSet],
+  );
+  const selectionKeys = useMemo(
+    () => new Set(selection.map((ref) => refKey(ref))),
+    [selection],
+  );
+
+  const activate = useCallback(
+    (nodeId: string): void => {
+      const type = scene.nodes[nodeId]?.type;
+      if (type === "timeline" || type === "long_text") onOpen(nodeId);
+      else onEditNode?.(nodeId);
     },
-    [onSelect],
+    [onEditNode, onOpen, scene.nodes],
+  );
+
+  const insertEntries = useCallback(
+    (nodeId: string, side: InsertSide): MenuItemSpec[] =>
+      nodeTypeEntries((type) => onQuickInsert(nodeId, side, type)),
+    [onQuickInsert],
   );
 
   const buildNodes = useCallback(
@@ -151,28 +340,28 @@ function StoryGraphInner({
           x: (index % 4) * 320,
           y: Math.floor(index / 4) * 220,
         },
-        selected: nodeId === selectedNodeId,
+        selected: selectionKeys.has(`node:${nodeId}`),
         dragHandle: ".node-drag-handle",
         data: {
           nodeId,
           node,
+          description: describeNode(node, { manifest }),
           entry: scene.entry === nodeId,
           issueCount: issuesByNode.get(nodeId) ?? 0,
-          onOpen,
-          onPreview,
+          onActivate: activate,
           onSelect,
-          onQuickInsert: openQuickInsertMenu,
+          insertEntries,
         },
       })),
     [
+      activate,
+      insertEntries,
       issuesByNode,
       layout?.nodes,
+      manifest,
       onSelect,
-      onOpen,
-      onPreview,
-      openQuickInsertMenu,
       scene,
-      selectedNodeId,
+      selectionKeys,
     ],
   );
 
@@ -183,18 +372,17 @@ function StoryGraphInner({
         if (port.targetScene !== null && port.targetScene !== scene.id)
           continue;
         if (scene.nodes[port.target] === undefined) continue;
+        const branch = port.id !== "next";
         edges.push({
           id: `${sourceId}:${port.id}`,
           source: sourceId,
           sourceHandle: port.id,
           target: port.target,
-          label: port.label,
+          label: branch ? port.label : undefined,
           type: "smoothstep",
-          markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-          className: `story-edge story-edge-${node.type}`,
-          labelStyle: { fill: "#aeb6cb", fontSize: 11 },
-          labelBgStyle: { fill: "#151923", fillOpacity: 0.88 },
-          labelBgPadding: [5, 3],
+          markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+          className: `story-edge${branch ? " story-edge-branch" : ""}`,
+          labelBgPadding: [6, 3],
           labelBgBorderRadius: 4,
         });
       }
@@ -204,6 +392,49 @@ function StoryGraphInner({
 
   const [nodes, setNodes] = useState<StoryGraphNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const nodesRef = useRef<StoryGraphNode[]>(nodes);
+  // Click selection is owned by this pane; only a Shift marquee may import
+  // React Flow's `select` changes into that same selection model.
+  const marqueeActiveRef = useRef(false);
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  // Frame geometry is measured from the live card rects, so the empty first
+  // render simply produces no frames.
+  const graphItems = useMemo(
+    () =>
+      nodes.map((node) => ({
+        id: node.id,
+        position: node.position,
+        width: node.measured?.width ?? 248,
+        height: node.measured?.height ?? 120,
+      })),
+    [nodes],
+  );
+  const frames = useMemo(
+    () => nestedGroupBounds(graphItems, groups),
+    [graphItems, groups],
+  );
+  // Parents first so a child frame's border/header wins the pointer above it.
+  const orderedGroups = useMemo(() => {
+    const parentOf = new Map<string, string>();
+    for (const group of groups) {
+      for (const ref of group.children) {
+        if ("group" in ref) parentOf.set(ref.group, group.id);
+      }
+    }
+    const depth = new Map<string, number>();
+    const depthOf = (id: string): number => {
+      const cached = depth.get(id);
+      if (cached !== undefined) return cached;
+      const parent = parentOf.get(id);
+      const value = parent === undefined ? 0 : depthOf(parent) + 1;
+      depth.set(id, value);
+      return value;
+    };
+    return [...groups].sort((a, b) => depthOf(a.id) - depthOf(b.id));
+  }, [groups]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => setNodes(buildNodes()));
@@ -220,13 +451,31 @@ function StoryGraphInner({
       void setViewport(viewport, { duration: 0 });
     } else {
       requestAnimationFrame(
-        () => void fitView({ padding: 0.2, duration: 250 }),
+        () => void fitView({ padding: 0.2, duration: 250, maxZoom: 1 }),
       );
     }
   }, [fitView, layout?.viewport, nodes.length, scene.id, setViewport]);
 
   const handleNodesChange = (changes: NodeChange<StoryGraphNode>[]): void => {
-    setNodes((current) => applyNodeChanges(changes, current));
+    // Keep click and frame selection under our control.  During a Shift
+    // marquee, adopt React Flow's selection changes so Ctrl+L/context menus
+    // see the same nodes that the rectangle highlighted.
+    const accepted = marqueeActiveRef.current
+      ? changes
+      : changes.filter((change) => change.type !== "select");
+    if (
+      marqueeActiveRef.current &&
+      accepted.some((change) => change.type === "select")
+    ) {
+      const updated = applyNodeChanges(accepted, nodesRef.current);
+      nodesRef.current = updated;
+      const selected = updated
+        .filter((node) => node.selected)
+        .map((node) => ({ node: node.id }));
+      setSelection(selected);
+      onSelect(selected.length === 1 ? selected[0].node : null);
+    }
+    setNodes((current) => applyNodeChanges(accepted, current));
   };
   const handleEdgesChange = (changes: EdgeChange<Edge>[]): void => {
     setEdges((current) => applyEdgeChanges(changes, current));
@@ -240,33 +489,219 @@ function StoryGraphInner({
       onConnect(connection.source, connection.sourceHandle, connection.target);
     }
   };
-  const handleNodeClick: NodeMouseHandler<StoryGraphNode> = (_event, node) => {
-    setQuickInsertMenu(null);
-    onSelect(node.id);
-    // Delete is handled by this pane's own key listener, so keyboard focus has
-    // to stay inside it.  React Flow already focuses the node itself; this is
-    // the fallback for a click that did not move focus (canvas chrome, or a
-    // browser that does not focus a tabbable ancestor on click).
-    const shell = graphShellRef.current;
-    if (shell !== null && !shell.contains(document.activeElement))
-      shell.focus();
+
+  /** The node the inspector should follow, or `null` for group/multi selects. */
+  const focusedNodeOf = (entities: EntityRef[]): string | null =>
+    entities.length === 1 && "node" in entities[0] ? entities[0].node : null;
+
+  const focusShell = useCallback((): void => {
+    // A toolbar button remains inside the pane but is an interactive target;
+    // it must relinquish focus after a node/group is selected so shortcuts work.
+    graphShellRef.current?.focus();
+  }, []);
+
+  /** Toggle `ref` in the canvas selection, replacing it when not additive. */
+  const selectEntity = useCallback(
+    (ref: EntityRef, additive: boolean): EntityRef[] => {
+      const key = refKey(ref);
+      const current = selectionRef.current;
+      const next = additive
+        ? current.some((entry) => refKey(entry) === key)
+          ? current.filter((entry) => refKey(entry) !== key)
+          : [...current, ref]
+        : [ref];
+      setSelection(next);
+      return next;
+    },
+    [setSelection],
+  );
+
+  const handleNodeClick: NodeMouseHandler<StoryGraphNode> = (event, node) => {
+    const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+    const next = selectEntity({ node: node.id }, additive);
+    onSelect(focusedNodeOf(next));
+    focusShell();
+  };
+
+  /** Every scene node under a group frame, recursively. */
+  const groupNodeSelection = (groupId: string): string[] =>
+    groupNodeIds(groups, groupId).filter((id) => scene.nodes[id] !== undefined);
+
+  const dragRef = useRef<GroupDrag | null>(null);
+
+  const selectGroup = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    groupId: string,
+    additive: boolean,
+  ): EntityRef[] => {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = selectEntity({ group: groupId }, additive);
+    onSelect(focusedNodeOf(next));
+    focusShell();
+    return next;
+  };
+
+  const handleGroupHeaderPointerDown = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    groupId: string,
+  ): void => {
+    if (event.button !== 0) return;
+    const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+    selectGroup(event, groupId, additive);
+    if (additive) return;
+    // Arm one rigid drag: all descendant nodes move by the same snapped delta.
+    const origin = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    const base: Record<string, NodePosition> = {};
+    for (const id of groupNodeSelection(groupId)) {
+      const node = nodesRef.current.find((candidate) => candidate.id === id);
+      if (node !== undefined) base[id] = { ...node.position };
+    }
+    dragRef.current = {
+      groupId,
+      pointerId: event.pointerId,
+      origin,
+      base,
+    };
+    const element = event.currentTarget;
+    if (typeof element.setPointerCapture === "function")
+      element.setPointerCapture(event.pointerId);
+  };
+
+  /** Release pointer capture if the environment implements it (jsdom does not). */
+  const releaseGroupPointer = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ): void => {
+    const element = event.currentTarget;
+    if (
+      typeof element.hasPointerCapture === "function" &&
+      element.hasPointerCapture(event.pointerId) &&
+      typeof element.releasePointerCapture === "function"
+    ) {
+      element.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handleGroupPointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ): void => {
+    const drag = dragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    // Always derive from the drag baseline, including a zero delta: dragging
+    // out and back to the origin must restore the original positions rather
+    // than leave the nodes at the last non-zero offset.
+    const delta = snapGroupDelta(
+      drag.origin,
+      screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+    );
+    const moved = groupDragPositions(drag, delta);
+    setNodes((current) => applyPositions(current, moved));
+  };
+
+  /** Pointer-up: commit the final snapped delta once (or restore on a no-op). */
+  const endGroupDrag = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    releaseGroupPointer(event);
+    // Read the final delta from this event, not from a possibly batched
+    // pointermove or from the rendered node state.
+    const delta = snapGroupDelta(
+      drag.origin,
+      screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+    );
+    const moved = groupDragPositions(drag, delta);
+    if (delta.x === 0 && delta.y === 0) {
+      // Out-and-back (or a plain header click): ensure the baseline is shown
+      // and commit nothing.
+      setNodes((current) => applyPositions(current, moved));
+      return;
+    }
+    setNodes((current) => applyPositions(current, moved));
+    // Partial batch: only the dragged descendants.  App merges it into the
+    // scene layout, so unrelated node/group positions are preserved.
+    onMoveMany(Object.fromEntries(moved));
+  };
+
+  /** Cancelled gesture: restore the baseline and never commit. */
+  const cancelGroupDrag = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    releaseGroupPointer(event);
+    setNodes((current) =>
+      applyPositions(current, groupDragPositions(drag, { x: 0, y: 0 })),
+    );
+  };
+
+  const selectedForGrouping = (entities: EntityRef[]): EntityRef[] =>
+    canonicalizeGroupSelection(
+      groups,
+      entities.filter((ref) =>
+        "node" in ref
+          ? scene.nodes[ref.node] !== undefined
+          : groups.some((group) => group.id === ref.group),
+      ),
+    );
+
+  /** Shared by keyboard and context menu; returns false for an ineligible selection. */
+  const applyGrouping = (canonical: EntityRef[]): boolean => {
+    if (deleteDisabled) return false;
+    if (canonical.length >= 2) {
+      const previousIds = new Set(groups.map((group) => group.id));
+      const next = createParentGroup(groups, canonical, nodeIdSet);
+      const parent = next.find((group) => !previousIds.has(group.id));
+      setSelectionState(parent === undefined ? [] : [{ group: parent.id }]);
+      onSetGroups(next);
+      return true;
+    }
+    const single = canonical[0];
+    if (canonical.length === 1 && single !== undefined && "group" in single) {
+      const target = groups.find((group) => group.id === single.group);
+      const next = dissolveGroup(groups, single.group, nodeIdSet);
+      setSelectionState(target === undefined ? [] : [...target.children]);
+      onSetGroups(next);
+      return true;
+    }
+    return false;
   };
 
   /**
-   * Scoped node deletion.  Only `Delete` is a graph shortcut (Backspace never
-   * deletes a node here), the handler is bound to the graph pane rather than the
-   * window, and the selection change/deletion/undo work stays in
-   * `App.deleteNode`.  An open quick-insert menu or App dialog disables it, and
-   * editable, composing, auto-repeat and interactive focus is ignored, so a key
-   * press can never delete twice or from another workspace.
+   * Graph-wide shortcuts, scoped to the pane.
+   *
+   * `Ctrl+L` (or `Ctrl+Shift+L` when WebView reserves Ctrl+L) wraps
+   * two or more canonical entities in a parent group, or
+   * dissolves the single selected group.  `Delete` is consumed as a no-op
+   * whenever the canvas selection contains a group, so it can never fall
+   * through to the inspector's (possibly stale) node.  A pure node selection
+   * deletes exactly that node through the App's confirmation/undo pipeline.
    */
   const handleGraphKeyDown = (
     event: ReactKeyboardEvent<HTMLDivElement>,
   ): void => {
-    if (event.key !== "Delete") return;
-    if (deleteDisabled || quickInsertMenu !== null) return;
-    if (selectedNodeId === null || scene.nodes[selectedNodeId] === undefined)
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "l") {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        deleteDisabled ||
+        event.repeat ||
+        shouldIgnoreNodeDeletion({
+          target: event.target,
+          repeat: event.repeat,
+          ...imeState(event),
+        }) ||
+        isInteractiveTarget(event.target)
+      )
+        return;
+      if (applyGrouping(selectedForGrouping(selectionRef.current))) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       return;
+    }
+    if (event.key !== "Delete" || event.defaultPrevented) return;
+    if (deleteDisabled) return;
     if (
       shouldIgnoreNodeDeletion({
         target: event.target,
@@ -277,23 +712,29 @@ function StoryGraphInner({
     ) {
       return;
     }
+    const selectedGroups = selectionRef.current.filter(
+      (ref): ref is { group: string } =>
+        "group" in ref && groups.some((group) => group.id === ref.group),
+    );
+    if (selectedGroups.length > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const selectedNodes = selectionRef.current.filter(
+      (ref): ref is { node: string } =>
+        "node" in ref && scene.nodes[ref.node] !== undefined,
+    );
+    if (selectedNodes.length !== 1) return;
     event.preventDefault();
     event.stopPropagation();
-    onDelete(selectedNodeId);
+    onDelete(selectedNodes[0].node);
   };
-
-  useEffect(() => {
-    if (quickInsertMenu === null) return;
-    const closeOnEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setQuickInsertMenu(null);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [quickInsertMenu]);
 
   useEffect(() => {
     const handleClipboardShortcut = (event: KeyboardEvent): void => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (event.defaultPrevented) return;
       const target = event.target;
       if (
         target instanceof HTMLInputElement ||
@@ -304,180 +745,453 @@ function StoryGraphInner({
         return;
       }
       const key = event.key.toLowerCase();
-      if (key === "c" && selectedNodeId !== null) {
+      if (key === "enter" && selectedNodeId !== null) {
+        event.preventDefault();
+        onPreview(selectedNodeId);
+      } else if (key === "c" && selectedNodeId !== null) {
         event.preventDefault();
         onCopy(selectedNodeId);
       } else if (key === "v") {
         event.preventDefault();
         onPaste(screenToFlowPosition(lastPointerRef.current));
-        setQuickInsertMenu(null);
       }
     };
     window.addEventListener("keydown", handleClipboardShortcut);
     return () => window.removeEventListener("keydown", handleClipboardShortcut);
-  }, [onCopy, onPaste, screenToFlowPosition, selectedNodeId]);
+  }, [onCopy, onPaste, onPreview, screenToFlowPosition, selectedNodeId]);
 
-  const autoLayout = async (): Promise<void> => {
-    const { default: ELK } = await import("elkjs/lib/elk.bundled.js");
-    const elk = new ELK();
-    const result = await elk.layout({
-      id: "root",
-      layoutOptions: {
-        "elk.algorithm": "layered",
-        "elk.direction": "RIGHT",
-        "elk.spacing.nodeNode": "72",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "120",
-        "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
-        "elk.edgeRouting": "ORTHOGONAL",
-      },
-      children: nodes.map((node) => ({ id: node.id, width: 260, height: 150 })),
-      edges: edges.map((edge) => ({
-        id: edge.id,
-        sources: [edge.source],
-        targets: [edge.target],
-      })),
-    });
-    const positions: Record<string, NodePosition> = {};
-    for (const child of result.children ?? []) {
-      positions[child.id] = { x: child.x ?? 0, y: child.y ?? 0 };
+  // A stale ELK callback must never move nodes after the scene changed or a
+  // newer layout run started: bump the token on every run and on scene change.
+  // The counter lives in a stable state object (an ordinary instance field)
+  // rather than a ref, so render-reachable menu code never touches a ref.
+  const [layoutRunStore] = useState(() => ({ current: 0 }));
+  useEffect(
+    () => () => {
+      layoutRunStore.current += 1;
+    },
+    [layoutRunStore, scene.id],
+  );
+
+  const autoLayout = useCallback(async (): Promise<void> => {
+    const token = beginLayoutRun(layoutRunStore);
+    setLayoutBusy(true);
+    try {
+      const { default: ELK } = await import("elkjs/lib/elk.bundled.js");
+      if (!layoutRunIsCurrent(layoutRunStore, token)) return;
+      const elk = new ELK();
+      const graph = nestedGroupedLayout(
+        nodes.map((node) => ({
+          id: node.id,
+          position: node.position,
+          width: node.measured?.width ?? 248,
+          height: node.measured?.height ?? 120,
+        })),
+        edges.map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+        })),
+        groups,
+      );
+      const result = await elk.layout({
+        id: "root",
+        layoutOptions: {
+          "elk.algorithm": "layered",
+          "elk.direction": "RIGHT",
+          "elk.spacing.nodeNode": "56",
+          "elk.layered.spacing.nodeNodeBetweenLayers": "96",
+          "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+          "elk.edgeRouting": "ORTHOGONAL",
+        },
+        children: graph.children,
+        edges: graph.edges,
+      });
+      if (!layoutRunIsCurrent(layoutRunStore, token)) return;
+      const positions: Record<string, NodePosition> = {};
+      for (const child of result.children ?? []) {
+        positions[child.id] = { x: child.x ?? 0, y: child.y ?? 0 };
+      }
+      onMoveMany(graph.expand(positions));
+      requestAnimationFrame(
+        () => void fitView({ padding: 0.18, duration: 350, maxZoom: 1 }),
+      );
+    } finally {
+      if (layoutRunIsCurrent(layoutRunStore, token)) setLayoutBusy(false);
     }
-    onMoveMany(positions);
-    requestAnimationFrame(() => void fitView({ padding: 0.18, duration: 350 }));
+  }, [edges, fitView, groups, layoutRunStore, nodes, onMoveMany]);
+
+  /** Flow position at the centre of the visible canvas. */
+  const viewportCentre = (): NodePosition => {
+    const bounds = shellElement?.getBoundingClientRect();
+    const centre =
+      bounds === undefined
+        ? { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+        : {
+            x: bounds.left + bounds.width / 2,
+            y: bounds.top + bounds.height / 2,
+          };
+    const position = screenToFlowPosition(centre);
+    // Offset by half a card so the new node lands centred.
+    return { x: position.x - 124, y: position.y - 48 };
+  };
+
+  const canonicalForMenu = selectedForGrouping(selection);
+  const canWrap = canonicalForMenu.length >= 2;
+  const canUngroup =
+    canonicalForMenu.length === 1 && "group" in canonicalForMenu[0];
+  const groupingEntry = groupMenuEntry(
+    canWrap,
+    canUngroup,
+    deleteDisabled,
+    () => {
+      applyGrouping(canonicalForMenu);
+    },
+  );
+  const menuEntity: EntityRef | null =
+    menuTarget.nodeId !== null
+      ? { node: menuTarget.nodeId }
+      : menuTarget.groupId !== null
+        ? { group: menuTarget.groupId }
+        : null;
+  const directOwner =
+    menuEntity === null
+      ? undefined
+      : groups.find((group) =>
+          group.children.some((ref) => refKey(ref) === refKey(menuEntity)),
+        );
+  const detachEntry: MenuItemSpec | null =
+    menuEntity !== null &&
+    directOwner !== undefined &&
+    canonicalForMenu.length === 1 &&
+    refKey(canonicalForMenu[0]) === refKey(menuEntity)
+      ? {
+          id: "move-up-one-level",
+          label: "移出此组（上移一级）",
+          icon: Ungroup,
+          disabled: deleteDisabled,
+          onSelect: () => {
+            if (deleteDisabled) return;
+            onSetGroups(
+              moveGroupChildUpOneLevel(groups, menuEntity, nodeIdSet),
+            );
+          },
+        }
+      : null;
+
+  const menuEntries = (): MenuItemSpec[] => {
+    const { nodeId, position } = menuTarget;
+    const node = nodeId === null ? undefined : scene.nodes[nodeId];
+    if (nodeId === null || node === undefined) {
+      const entries: MenuItemSpec[] = [];
+      if (onAddNode !== undefined)
+        entries.push({
+          kind: "submenu",
+          id: "add",
+          label: "在此处添加节点",
+          icon: Plus,
+          entries: nodeTypeEntries((type) => onAddNode(type, position)),
+        });
+      entries.push(
+        groupingEntry,
+        ...(detachEntry === null ? [] : [detachEntry]),
+        { kind: "separator", id: "sep-group" },
+        {
+          id: "paste",
+          label: "粘贴到此处",
+          icon: ClipboardPaste,
+          shortcut: "Ctrl+V",
+          onSelect: () => onPaste(position),
+        },
+        { kind: "separator", id: "sep" },
+        {
+          id: "layout",
+          label: "自动布局",
+          icon: Workflow,
+          onSelect: () => void autoLayout(),
+        },
+        {
+          id: "fit",
+          label: "适合画布",
+          icon: Maximize,
+          onSelect: () => void fitView({ padding: 0.2, duration: 250 }),
+        },
+      );
+      return entries;
+    }
+    const entries: MenuItemSpec[] = [
+      groupingEntry,
+      ...(detachEntry === null ? [] : [detachEntry]),
+      { kind: "separator", id: "sep-group" },
+      {
+        id: "preview",
+        label: "从此处预览",
+        icon: Play,
+        shortcut: "Ctrl+Enter",
+        onSelect: () => onPreview(nodeId),
+      },
+    ];
+    if (node.type === "timeline" || node.type === "long_text")
+      entries.push({
+        id: "open",
+        label:
+          node.type === "timeline" ? "打开时间线工作区" : "打开长文本工作区",
+        icon: PanelRightOpen,
+        onSelect: () => onOpen(nodeId),
+      });
+    if (onSetEntry !== undefined)
+      entries.push({
+        id: "entry",
+        label: "设为场景入口",
+        icon: Flag,
+        disabled: scene.entry === nodeId,
+        hint: "已经是场景入口",
+        onSelect: () => onSetEntry(nodeId),
+      });
+    entries.push(
+      { kind: "separator", id: "sep-insert" },
+      {
+        kind: "submenu",
+        id: "insert-before",
+        label: "在前面插入",
+        entries: insertEntries(nodeId, "left"),
+      },
+      {
+        kind: "submenu",
+        id: "insert-after",
+        label: "在后面插入",
+        entries: insertEntries(nodeId, "right"),
+      },
+      { kind: "separator", id: "sep-clipboard" },
+      {
+        id: "copy",
+        label: "复制",
+        icon: Copy,
+        shortcut: "Ctrl+C",
+        onSelect: () => onCopy(nodeId),
+      },
+    );
+    if (onDuplicate !== undefined)
+      entries.push({
+        id: "duplicate",
+        label: "创建副本",
+        icon: CopyPlus,
+        onSelect: () => onDuplicate(nodeId),
+      });
+    entries.push(
+      { kind: "separator", id: "sep-delete" },
+      {
+        id: "delete",
+        label: "删除",
+        icon: Trash2,
+        shortcut: "Delete",
+        danger: true,
+        disabled: deleteDisabled,
+        onSelect: () => onDelete(nodeId),
+      },
+    );
+    return entries;
   };
 
   return (
-    <div
-      className="graph-shell"
-      onKeyDown={handleGraphKeyDown}
-      onPointerMove={(event) => {
-        lastPointerRef.current = { x: event.clientX, y: event.clientY };
+    <ContextMenuArea
+      entries={menuEntries()}
+      label={
+        menuTarget.groupId !== null
+          ? "布局组操作"
+          : menuTarget.nodeId === null
+            ? "画布操作"
+            : "节点操作"
+      }
+      onOpen={(event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const nodeId =
+          element?.closest<HTMLElement>(".react-flow__node")?.dataset.id ??
+          null;
+        const candidateGroupId =
+          element?.closest<HTMLElement>(".story-group-frame")?.dataset
+            .groupId ?? null;
+        const groupId =
+          candidateGroupId !== null &&
+          groups.some((group) => group.id === candidateGroupId)
+            ? candidateGroupId
+            : null;
+        const target =
+          nodeId !== null
+            ? { node: nodeId }
+            : groupId !== null
+              ? { group: groupId }
+              : null;
+        if (
+          target !== null &&
+          !selectionRef.current.some((ref) => refKey(ref) === refKey(target))
+        ) {
+          setSelection([target]);
+          onSelect(nodeId);
+        }
+        // Right-clicking a selected member keeps the full multi-selection.
+        setMenuTarget({
+          nodeId,
+          groupId,
+          position: screenToFlowPosition({
+            x: event.clientX,
+            y: event.clientY,
+          }),
+        });
       }}
-      ref={graphShellRef}
-      tabIndex={-1}
     >
-      <div className="graph-toolbar">
-        <strong>{scene.id}</strong>
-        <span>{Object.keys(scene.nodes).length} nodes</span>
-        <button onClick={() => void autoLayout()} type="button">
-          自动布局
-        </button>
-        <button
-          onClick={() => void fitView({ padding: 0.2, duration: 250 })}
-          type="button"
-        >
-          适合画布
-        </button>
-      </div>
-      <ReactFlow<StoryGraphNode>
-        deleteKeyCode={null}
-        edges={edges}
-        fitViewOptions={{ padding: 0.2 }}
-        maxZoom={1.8}
-        minZoom={0.15}
-        nodeTypes={nodeTypes}
-        nodes={nodes}
-        onConnect={handleConnect}
-        onEdgesChange={handleEdgesChange}
-        onMoveEnd={(event, viewport) => {
-          if (event !== null) onViewport(viewport);
+      <div
+        className="graph-shell"
+        onKeyDown={handleGraphKeyDown}
+        onPointerMove={(event) => {
+          lastPointerRef.current = { x: event.clientX, y: event.clientY };
         }}
-        onNodeClick={handleNodeClick}
-        onNodeDragStop={(_event, node) => onMoveNode(node.id, node.position)}
-        onNodesChange={handleNodesChange}
-        onPaneClick={() => {
-          setQuickInsertMenu(null);
-          onSelect(null);
+        ref={(element) => {
+          graphShellRef.current = element;
+          setShellElement(element);
         }}
-        snapGrid={[16, 16]}
-        snapToGrid
+        tabIndex={-1}
       >
-        <Background color="#262b38" gap={24} size={1} />
-        <MiniMap
-          maskColor="rgba(8, 10, 15, 0.72)"
-          nodeColor={(node) =>
-            node.id === scene.entry ? "#68d7bb" : "#727d99"
-          }
-          pannable
-          zoomable
-        />
-        <Controls position="bottom-right" showInteractive={false} />
-      </ReactFlow>
-      {quickInsertMenu !== null && (
-        <div
-          className="quick-insert-menu"
-          onContextMenu={(event) => event.preventDefault()}
-          onPointerDown={(event) => event.stopPropagation()}
-          role="menu"
-          style={{ left: quickInsertMenu.x, top: quickInsertMenu.y }}
-        >
-          <header className="quick-insert-menu-header">
-            <div>
-              <strong>
-                {quickInsertMenu.side === "left" ? "左侧" : "右侧"}插入节点
-              </strong>
-              <small>
-                {nodeLabel(scene.nodes[quickInsertMenu.nodeId]?.type ?? "say")}{" "}
-                · {quickInsertMenu.nodeId}
-              </small>
-            </div>
-            <button
-              aria-label="关闭插入菜单"
-              onClick={() => setQuickInsertMenu(null)}
-              type="button"
-            >
-              ×
-            </button>
-          </header>
-          <div className="quick-insert-clipboard">
-            <button
-              onClick={() => {
-                onCopy(quickInsertMenu.nodeId);
-                setQuickInsertMenu(null);
-              }}
-              role="menuitem"
-              type="button"
-            >
-              复制节点 <kbd>Ctrl+C</kbd>
-            </button>
-            <button
-              onClick={() => {
-                onPaste(
-                  screenToFlowPosition({
-                    x: quickInsertMenu.clientX,
-                    y: quickInsertMenu.clientY,
-                  }),
-                );
-                setQuickInsertMenu(null);
-              }}
-              role="menuitem"
-              type="button"
-            >
-              粘贴到此处 <kbd>Ctrl+V</kbd>
-            </button>
-          </div>
-          <div className="quick-insert-options">
-            {NODE_TYPES.map((candidate) => (
-              <button
-                key={candidate.type}
-                onClick={() => {
-                  setQuickInsertMenu(null);
-                  onQuickInsert(
-                    quickInsertMenu.nodeId,
-                    quickInsertMenu.side,
-                    candidate.type,
-                  );
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <span>{candidate.label}</span>
-                <small>{candidate.group}</small>
-              </button>
-            ))}
-          </div>
-          <p>选择类型后会自动接管原有连线。</p>
+        <div aria-label="剧情图工具" className="graph-toolbar" role="toolbar">
+          {onAddNode !== undefined && (
+            <DropdownMenu
+              entries={nodeTypeEntries((type) =>
+                onAddNode(type, viewportCentre()),
+              )}
+              label="添加节点"
+              trigger={
+                <Button
+                  icon={Plus}
+                  size="sm"
+                  trailing={<ChevronDown aria-hidden="true" />}
+                >
+                  添加节点
+                </Button>
+              }
+            />
+          )}
+          <IconButton
+            disabled={layoutBusy}
+            icon={Workflow}
+            label="自动布局"
+            onClick={() => void autoLayout()}
+            size="sm"
+          />
+          <IconButton
+            icon={Maximize}
+            label="适合画布"
+            onClick={() => void fitView({ padding: 0.2, duration: 250 })}
+            size="sm"
+          />
         </div>
-      )}
-    </div>
+        <ReactFlow<StoryGraphNode>
+          colorMode="dark"
+          deleteKeyCode={null}
+          edges={edges}
+          fitViewOptions={{ padding: 0.2 }}
+          maxZoom={1.8}
+          minZoom={0.15}
+          nodeTypes={nodeTypes}
+          nodes={nodes}
+          onConnect={handleConnect}
+          onEdgesChange={handleEdgesChange}
+          onMoveEnd={(event, viewport) => {
+            if (event !== null) onViewport(viewport);
+          }}
+          onNodeClick={handleNodeClick}
+          onNodeDragStop={(_event, node) => {
+            const selectedNodes = selectionRef.current.filter(
+              (ref): ref is { node: string } => "node" in ref,
+            );
+            if (selectedNodes.length < 2) {
+              onMoveNode(node.id, node.position);
+              return;
+            }
+            onMoveMany(
+              Object.fromEntries(
+                getNodes().map((current) => [
+                  current.id,
+                  current.id === node.id ? node.position : current.position,
+                ]),
+              ),
+            );
+          }}
+          onNodesChange={handleNodesChange}
+          onSelectionStart={() => {
+            marqueeActiveRef.current = true;
+            setSelection([]);
+            onSelect(null);
+          }}
+          onSelectionEnd={() => {
+            marqueeActiveRef.current = false;
+            focusShell();
+          }}
+          onPaneClick={() => {
+            setSelection([]);
+            onSelect(null);
+          }}
+          proOptions={{ hideAttribution: true }}
+          snapGrid={[16, 16]}
+          snapToGrid
+        >
+          <ViewportPortal>
+            {orderedGroups.map((group) => {
+              const bounds = frames.get(group.id);
+              if (bounds === undefined) return null;
+              const selected = selectionKeys.has(`group:${group.id}`);
+              return (
+                <div
+                  className={`story-group-frame${selected ? " is-selected" : ""}`}
+                  data-group-id={group.id}
+                  key={group.id}
+                  style={{
+                    transform: `translate(${bounds.x}px, ${bounds.y}px)`,
+                    width: bounds.width,
+                    height: bounds.height,
+                  }}
+                >
+                  <div aria-hidden="true" className="story-group-border" />
+                  <div
+                    className="story-group-header nopan"
+                    onPointerCancel={cancelGroupDrag}
+                    onPointerDown={(event) =>
+                      handleGroupHeaderPointerDown(event, group.id)
+                    }
+                    onPointerMove={handleGroupPointerMove}
+                    onPointerUp={endGroupDrag}
+                  >
+                    {group.id}
+                  </div>
+                  {(["top", "right", "bottom", "left"] as const).map((side) => (
+                    <div
+                      aria-hidden="true"
+                      className={`story-group-edge story-group-edge-${side} nopan`}
+                      key={side}
+                      onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        selectGroup(
+                          event,
+                          group.id,
+                          event.ctrlKey || event.metaKey || event.shiftKey,
+                        );
+                      }}
+                    />
+                  ))}
+                </div>
+              );
+            })}
+          </ViewportPortal>
+          <Background gap={24} size={1.2} variant={BackgroundVariant.Dots} />
+          <MiniMap
+            nodeBorderRadius={4}
+            nodeClassName={(node) =>
+              node.id === scene.entry ? "minimap-entry" : "minimap-node"
+            }
+            pannable
+            zoomable
+          />
+          <Controls position="bottom-left" showInteractive={false} />
+        </ReactFlow>
+      </div>
+    </ContextMenuArea>
   );
 }

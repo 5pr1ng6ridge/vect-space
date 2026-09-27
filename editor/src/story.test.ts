@@ -16,6 +16,7 @@ import {
   setPortTarget,
   splitLongTextAt,
   splitDialogueAt,
+  sceneSpriteIds,
   summarizeNode,
 } from "./story";
 import { findAssetReferences } from "./components/assetReferences";
@@ -1376,5 +1377,31 @@ describe("canonical presentation authoring", () => {
         ].includes(diagnostic.code),
       ),
     ).toEqual([]);
+  });
+});
+
+describe("sceneSpriteIds", () => {
+  it("lists sprite instance ids, not the ids of the nodes that create them", () => {
+    const ids = sceneSpriteIds({
+      schema_version: 2,
+      id: "s",
+      entry: "show_hero",
+      nodes: {
+        show_hero: {
+          type: "sprite",
+          sprite_id: "hero",
+          action: "show",
+          next: "move",
+        } as SceneNode,
+        move: {
+          type: "timeline",
+          duration_ms: 100,
+          tracks: [{ type: "sprite", sprite_id: "rival" }],
+          next: "done",
+        } as unknown as SceneNode,
+        done: { type: "end" },
+      },
+    });
+    expect(ids).toEqual(["hero", "rival"]);
   });
 });

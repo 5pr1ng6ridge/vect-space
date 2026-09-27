@@ -36,6 +36,13 @@ function Harness(): ReactElement {
   );
 }
 
+/** Track headers of the ambience tracks, in display order. */
+function ambienceTrackTitles(): string[] {
+  return Array.from(document.querySelectorAll(".timeline-track-head strong"))
+    .map((title) => title.textContent ?? "")
+    .filter((title) => title.startsWith("环境声"));
+}
+
 describe("ambience timeline authoring", () => {
   it("assigns unused fixed slots, exposes volume automation, and caps at four tracks", () => {
     render(<Harness />);
@@ -47,11 +54,12 @@ describe("ambience timeline authoring", () => {
       fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
     }
 
-    expect(screen.getAllByText(/ambience slot_/)).toHaveLength(4);
-    expect(screen.getByText("ambience slot_1")).toBeInTheDocument();
-    expect(screen.getByText("ambience slot_2")).toBeInTheDocument();
-    expect(screen.getByText("ambience slot_3")).toBeInTheDocument();
-    expect(screen.getByText("ambience slot_4")).toBeInTheDocument();
+    expect(ambienceTrackTitles()).toEqual([
+      "环境声 2",
+      "环境声 1",
+      "环境声 3",
+      "环境声 4",
+    ]);
 
     // The shared toolbar channel switches to the only ambience channel.
     const comboboxes = screen.getAllByRole<HTMLSelectElement>("combobox");
@@ -69,6 +77,6 @@ describe("ambience timeline authoring", () => {
     // The fifth add is ignored rather than creating a duplicate slot or an
     // unaddressable fifth ambience lane.
     fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
-    expect(screen.getAllByText(/ambience slot_/)).toHaveLength(4);
+    expect(ambienceTrackTitles()).toHaveLength(4);
   });
 });

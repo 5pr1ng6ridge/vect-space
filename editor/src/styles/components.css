@@ -1,0 +1,547 @@
+/* ui/ primitives.  Every value comes from tokens.css. */
+@layer components {
+  /* ------------------------------------------------------------ Buttons */
+  .vs-button,
+  .vs-icon-button {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1-5);
+    margin: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-medium);
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background var(--duration-fast) ease,
+      border-color var(--duration-fast) ease,
+      color var(--duration-fast) ease;
+  }
+
+  .vs-button-md {
+    height: var(--control-height-md);
+    padding: 0 var(--space-3);
+  }
+
+  .vs-button-sm {
+    height: var(--control-height-sm);
+    padding: 0 var(--space-2);
+    font-size: var(--font-size-sm);
+  }
+
+  .vs-button svg,
+  .vs-icon-button svg {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    stroke-width: 1.75;
+  }
+
+  .vs-button-sm svg,
+  .vs-icon-button-sm svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .vs-button-secondary {
+    border-color: var(--border-default);
+    background: var(--surface-raised);
+  }
+
+  .vs-button-secondary:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: var(--surface-hover);
+  }
+
+  .vs-button-primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--text-on-accent);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .vs-button-primary:hover:not(:disabled) {
+    border-color: var(--accent-hover);
+    background: var(--accent-hover);
+  }
+
+  .vs-button-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+  }
+
+  .vs-button-ghost:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .vs-button-danger {
+    border-color: rgb(240 121 131 / 40%);
+    background: var(--danger-muted);
+    color: var(--danger-text);
+  }
+
+  .vs-button-danger:hover:not(:disabled) {
+    border-color: var(--danger);
+    background: rgb(240 121 131 / 22%);
+  }
+
+  .vs-button:disabled,
+  .vs-icon-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .vs-button:focus-visible,
+  .vs-icon-button:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+
+  .vs-icon-button {
+    padding: 0;
+  }
+
+  .vs-icon-button-md {
+    width: var(--control-height-md);
+    height: var(--control-height-md);
+  }
+
+  .vs-icon-button-sm {
+    width: var(--control-height-sm);
+    height: var(--control-height-sm);
+  }
+
+  .vs-icon-button.is-active {
+    background: var(--accent-muted);
+    color: var(--accent-text);
+  }
+
+  .vs-icon-button.is-active:hover:not(:disabled) {
+    background: var(--accent-muted-hover);
+    color: var(--accent-text);
+  }
+
+  /* ------------------------------------------------------ Tooltip & kbd */
+  .vs-tooltip {
+    z-index: var(--z-tooltip);
+    display: flex;
+    max-width: 320px;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1-5) var(--space-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-overlay);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-tight);
+  }
+
+  .vs-kbd {
+    display: inline-flex;
+    min-width: 20px;
+    height: 20px;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--space-1-5);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--surface-input);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    line-height: 1;
+  }
+
+  /* --------------------------------------------------------------- Badge */
+  .vs-badge {
+    display: inline-flex;
+    height: 20px;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-1-5);
+    border-radius: var(--radius-sm);
+    background: var(--surface-hover);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .vs-badge svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  .vs-badge-accent {
+    background: var(--accent-muted);
+    color: var(--accent-text);
+  }
+
+  .vs-badge-info {
+    background: var(--info-muted);
+    color: var(--info-text);
+  }
+
+  .vs-badge-warning {
+    background: var(--warning-muted);
+    color: var(--warning-text);
+  }
+
+  .vs-badge-danger {
+    background: var(--danger-muted);
+    color: var(--danger-text);
+  }
+
+  /* --------------------------------------------------------- Empty state */
+  .vs-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-10) var(--space-6);
+    color: var(--text-secondary);
+    text-align: center;
+  }
+
+  .vs-empty-compact {
+    padding: var(--space-6) var(--space-4);
+  }
+
+  .vs-empty-icon {
+    width: 28px;
+    height: 28px;
+    color: var(--text-tertiary);
+    stroke-width: 1.5;
+  }
+
+  .vs-empty-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-medium);
+  }
+
+  .vs-empty-body {
+    max-width: 280px;
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-normal);
+  }
+
+  /* ------------------------------------------------------------- Spinner */
+  .vs-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
+    border-radius: var(--radius-full);
+    animation: vs-spin 700ms linear infinite;
+  }
+
+  @keyframes vs-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* ---------------------------------------------------------------- Menu */
+  .vs-menu {
+    z-index: var(--z-dropdown);
+    min-width: 200px;
+    max-height: min(
+      520px,
+      var(--radix-dropdown-menu-content-available-height, 520px)
+    );
+    overflow-y: auto;
+    padding: var(--space-1);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface-overlay);
+    box-shadow: var(--shadow-lg);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+  }
+
+  .vs-menu-item {
+    display: flex;
+    height: 30px;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    outline: none;
+    cursor: default;
+    user-select: none;
+  }
+
+  .vs-menu-item[data-highlighted],
+  .vs-menu-item[data-state="open"] {
+    background: var(--surface-active);
+  }
+
+  .vs-menu-item[data-disabled] {
+    color: var(--text-disabled);
+  }
+
+  .vs-menu-item.is-danger {
+    color: var(--danger-text);
+  }
+
+  .vs-menu-item.is-danger[data-highlighted] {
+    background: var(--danger-muted);
+  }
+
+  .vs-menu-item-icon {
+    display: inline-flex;
+    width: 16px;
+    flex: 0 0 16px;
+    color: var(--text-secondary);
+  }
+
+  .vs-menu-item-icon svg,
+  .vs-menu-chevron {
+    width: 16px;
+    height: 16px;
+    stroke-width: 1.75;
+  }
+
+  .vs-menu-item.is-danger .vs-menu-item-icon {
+    color: inherit;
+  }
+
+  .vs-menu-item-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .vs-menu-chevron {
+    color: var(--text-tertiary);
+  }
+
+  .vs-menu-separator {
+    height: 1px;
+    margin: var(--space-1) calc(var(--space-1) * -1);
+    background: var(--border-default);
+  }
+
+  .vs-menu-label {
+    padding: var(--space-1-5) var(--space-2) var(--space-1);
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+  }
+
+  /* -------------------------------------------------------------- Dialog */
+  .vs-dialog-overlay {
+    position: fixed;
+    z-index: var(--z-modal);
+    inset: 0;
+    background: var(--surface-scrim);
+  }
+
+  .vs-dialog {
+    position: fixed;
+    z-index: var(--z-modal);
+    top: 50%;
+    left: 50%;
+    display: flex;
+    width: min(var(--dialog-width), calc(100vw - var(--space-8)));
+    max-height: calc(100vh - var(--space-10));
+    flex-direction: column;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-xl);
+    background: var(--surface-panel);
+    box-shadow: var(--shadow-lg);
+    color: var(--text-primary);
+    transform: translate(-50%, -50%);
+  }
+
+  .vs-dialog:focus {
+    outline: none;
+  }
+
+  .vs-dialog-sm {
+    --dialog-width: 420px;
+  }
+
+  .vs-dialog-md {
+    --dialog-width: 560px;
+  }
+
+  .vs-dialog-lg {
+    --dialog-width: 760px;
+  }
+
+  .vs-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-4) var(--space-2) var(--space-5);
+  }
+
+  .vs-dialog-title {
+    margin: 0;
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .vs-dialog-close {
+    display: inline-flex;
+    width: var(--control-height-sm);
+    height: var(--control-height-sm);
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .vs-dialog-close:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .vs-dialog-close svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .vs-dialog-description {
+    margin: 0;
+    padding: 0 var(--space-5) var(--space-2);
+    color: var(--text-secondary);
+    font-size: var(--font-size-md);
+    line-height: var(--line-height-normal);
+  }
+
+  .vs-dialog-body {
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--space-2) var(--space-5) var(--space-4);
+  }
+
+  .vs-dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-5) var(--space-4);
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  /* --------------------------------------------------------------- Toast */
+  .vs-toast-viewport {
+    position: fixed;
+    z-index: var(--z-toast);
+    right: var(--space-4);
+    bottom: calc(var(--status-height, 0px) + var(--space-4));
+    display: flex;
+    width: min(420px, calc(100vw - var(--space-8)));
+    flex-direction: column;
+    gap: var(--space-2);
+    pointer-events: none;
+  }
+
+  .vs-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--toast-color);
+    border-radius: var(--radius-lg);
+    background: var(--surface-overlay);
+    box-shadow: var(--shadow-lg);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    line-height: var(--line-height-normal);
+    pointer-events: auto;
+    user-select: text;
+  }
+
+  .vs-toast-success {
+    --toast-color: var(--accent);
+  }
+
+  .vs-toast-info {
+    --toast-color: var(--info);
+  }
+
+  .vs-toast-warning {
+    --toast-color: var(--warning);
+  }
+
+  .vs-toast-error {
+    --toast-color: var(--danger);
+  }
+
+  .vs-toast-icon {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    margin-top: 1px;
+    color: var(--toast-color);
+  }
+
+  .vs-toast-message {
+    flex: 1;
+    min-width: 0;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
+
+  .vs-toast-action {
+    flex: 0 0 auto;
+    padding: 2px var(--space-2);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--accent-text);
+    font: inherit;
+    font-weight: var(--font-weight-semibold);
+    cursor: pointer;
+  }
+
+  .vs-toast-action:hover {
+    background: var(--accent-muted);
+  }
+
+  .vs-toast-close {
+    display: inline-flex;
+    flex: 0 0 auto;
+    padding: 2px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer;
+  }
+
+  .vs-toast-close:hover {
+    color: var(--text-primary);
+  }
+
+  .vs-toast-close svg {
+    width: 14px;
+    height: 14px;
+  }
+}

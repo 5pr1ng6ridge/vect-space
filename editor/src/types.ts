@@ -672,9 +672,39 @@ export interface EditorViewport {
   zoom: number;
 }
 
+/**
+ * One persisted group member: a scene node or a nested child group.  Explicitly
+ * tagged so a nested forest can be stored without relying on member order.
+ */
+export type GroupChildRef = { node: string } | { group: string };
+
+/**
+ * One editor-only rigid group.  `id` is a stable identity independent of node
+ * names, so renaming a node never reassigns a group and nesting never has to
+ * re-create a parent.  Ownership lives in `children` only.
+ */
+export interface SceneGroup {
+  id: string;
+  children: GroupChildRef[];
+}
+
+/**
+ * Legacy flat membership persisted before groups had stable identities.  Every
+ * inner list was a loose, first-come set of node ids.
+ */
+export type LegacySceneGroups = string[][];
+
+/**
+ * Persisted group membership.  New layouts store the canonical nested forest;
+ * older layouts keep loading their flat `string[][]` lists.
+ */
+export type SceneGroups = SceneGroup[] | LegacySceneGroups;
+
 export interface SceneLayout {
   nodes: Record<string, NodePosition>;
   viewport: EditorViewport | null;
+  /** Rigid node clusters used only by the editor's automatic graph layout. */
+  groups?: SceneGroups;
 }
 
 export interface EditorLayout {

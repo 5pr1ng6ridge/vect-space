@@ -5,35 +5,27 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import {
-  memo,
-  useEffect,
-  type MouseEvent as ReactMouseEvent,
-  type ReactElement,
-} from "react";
-import {
-  nodeLabel,
-  outputPorts,
-  summarizeNode,
-  type InsertSide,
-} from "../story";
+import { Flag, Hourglass, Plus } from "lucide-react";
+import { memo, useEffect, type ReactElement } from "react";
+
+import { NODE_CATEGORY } from "../labels";
+import type { NodeDescription } from "../nodeSummary";
+import { nodeLabel, outputPorts, type InsertSide } from "../story";
 import type { SceneNode } from "../types";
+import { DropdownMenu, type MenuItemSpec } from "../ui/Menu";
+import { NODE_ICONS, UNKNOWN_NODE_ICON } from "../ui/nodeIcons";
 
 export interface StoryNodeData extends Record<string, unknown> {
   nodeId: string;
   node: SceneNode;
+  description: NodeDescription;
   entry: boolean;
   issueCount: number;
-  onOpen(nodeId: string): void;
-  /** Start the live gameplay preview from this node (plain double-click). */
-  onPreview(nodeId: string): void;
+  /** Double-click: open the node's workspace or edit it in the inspector. */
+  onActivate(nodeId: string): void;
   onSelect(nodeId: string): void;
-  onQuickInsert(
-    nodeId: string,
-    side: InsertSide,
-    clientX: number,
-    clientY: number,
-  ): void;
+  /** Menu entries for inserting a node before/after this one. */
+  insertEntries(nodeId: string, side: InsertSide): MenuItemSpec[];
 }
 
 export type StoryGraphNode = Node<StoryNodeData, "story">;
@@ -45,125 +37,130 @@ export const StoryNodeCard = memo(function StoryNodeCard({
 }: NodeProps<StoryGraphNode>): ReactElement {
   const updateNodeInternals = useUpdateNodeInternals();
   const ports = outputPorts(data.node);
-  const hasNextPort = ports.some((port) => port.id === "next");
-  const insertSides: InsertSide[] = hasNextPort ? ["left"] : ["left", "right"];
-  const openNextInsert = (event: ReactMouseEvent<HTMLDivElement>): void => {
-    event.preventDefault();
-    event.stopPropagation();
-    data.onQuickInsert(data.nodeId, "right", event.clientX, event.clientY);
-  };
   useEffect(
     () => updateNodeInternals(id),
     [id, ports.length, updateNodeInternals],
   );
-
+  const Icon = NODE_ICONS[data.node.type] ?? UNKNOWN_NODE_ICON;
+  const category = NODE_CATEGORY[data.node.type] ?? "flow";
   const awaited = "await" in data.node && data.node.await;
-  return (
-    <article
-      className={`story-node nopan story-node-${data.node.type}${selected ? " is-selected" : ""}`}
-      data-allow-context-menu="true"
-      onClick={() => data.onSelect(data.nodeId)}
-      onPointerDown={() => data.onSelect(data.nodeId)}
-      onDoubleClick={() => {
-        // timeline / long_text keep their specialized full-screen workspaces;
-        // every other node opens the live gameplay preview from itself.
-        if (data.node.type === "timeline" || data.node.type === "long_text") {
-          data.onOpen(data.nodeId);
-          return;
-        }
-        data.onPreview(data.nodeId);
-      }}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        data.onQuickInsert(data.nodeId, "right", event.clientX, event.clientY);
-      }}
-    >
-      {insertSides.map((side) => (
+  // A lone "next" port is drawn on the card edge; branches get labelled rows.
+  const singleNext = ports.length === 1 && ports[0].id === "next";
+
+  const insertButton = (side: InsertSide): ReactElement => (
+    <DropdownMenu
+      align="start"
+      entries={data.insertEntries(data.nodeId, side)}
+      label={side === "left" ? "在前面插入节点" : "在后面插入节点"}
+      side={side === "left" ? "left" : "right"}
+      trigger={
         <button
-          aria-label={`在${side === "left" ? "左" : "右"}侧插入节点`}
-          className={`insert-point insert-point-${side}`}
-          data-allow-context-menu="true"
-          key={side}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            data.onQuickInsert(data.nodeId, side, event.clientX, event.clientY);
-          }}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            data.onQuickInsert(data.nodeId, side, event.clientX, event.clientY);
-          }}
+          aria-label={`在${side === "left" ? "前面" : "后面"}插入节点`}
+          className={`story-insert story-insert-${side} nodrag`}
           onPointerDown={(event) => event.stopPropagation()}
           type="button"
         >
-          <span aria-hidden="true">＋</span>
+          <Plus aria-hidden="true" />
         </button>
-      ))}
+      }
+    />
+  );
+
+  return (
+    <article
+      className={`story-node story-cat-${category}${selected ? " is-selected" : ""}`}
+      data-node-id={data.nodeId}
+      onClick={(event) => {
+        if (
+          event.button === 0 &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey
+        )
+          data.onSelect(data.nodeId);
+      }}
+      onDoubleClick={() => data.onActivate(data.nodeId)}
+      onPointerDown={(event) => {
+        // Right-click must not discard a multi-selection before its menu opens.
+        if (
+          event.button === 0 &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey
+        )
+          data.onSelect(data.nodeId);
+      }}
+    >
+      {insertButton("left")}
+      {(singleNext || ports.length === 0) && insertButton("right")}
       <Handle
-        className="story-handle input-handle"
+        className="story-handle story-handle-in"
         position={Position.Left}
         type="target"
       />
       <header className="story-node-header node-drag-handle">
+        <span className="story-node-icon">
+          <Icon aria-hidden="true" />
+        </span>
         <span className="story-node-type">{nodeLabel(data.node.type)}</span>
-        <span className="story-node-id">{data.nodeId}</span>
-      </header>
-      <div className="story-node-summary">{summarizeNode(data.node)}</div>
-      <div className="story-node-badges">
-        {data.entry && <span className="node-badge entry-badge">ENTRY</span>}
-        {awaited && <span className="node-badge await-badge">AWAIT</span>}
-        {data.node.type === "say" && (
-          <span className="node-badge boundary-badge">PLAYER</span>
-        )}
-        {data.issueCount > 0 && (
-          <span className="node-badge issue-badge">
-            {data.issueCount} ISSUE
+        <span className="story-node-id" title={data.nodeId}>
+          {data.nodeId}
+        </span>
+        {awaited && (
+          <span className="story-node-flag" title="等待演出完成后再继续">
+            <Hourglass aria-label="等待完成" />
           </span>
         )}
+        {data.entry && (
+          <span className="story-node-flag is-entry" title="场景入口">
+            <Flag aria-label="场景入口" />
+          </span>
+        )}
+        {data.issueCount > 0 && (
+          <span
+            className="story-node-issues"
+            title={`${data.issueCount} 个问题`}
+          >
+            {data.issueCount}
+          </span>
+        )}
+      </header>
+      <div className="story-node-body">
+        {data.description.title !== null && (
+          <strong className="story-node-title">{data.description.title}</strong>
+        )}
+        <p className="story-node-summary">{data.description.summary}</p>
       </div>
-      {ports.length > 0 && (
-        <div className="story-node-ports">
-          {ports.map((port, index) => {
-            const top = `${((index + 1) / (ports.length + 1)) * 100}%`;
-            return (
-              <div className="story-port-row" key={port.id} title={port.target}>
-                <span>{port.label}</span>
-                <small>{port.target}</small>
-                <Handle
-                  aria-label={
-                    port.id === "next"
-                      ? "拖动连接，或点击在右侧插入节点"
-                      : undefined
-                  }
-                  className={`story-handle output-handle${
-                    port.id === "next" ? " next-output-handle" : ""
-                  }`}
-                  data-allow-context-menu={
-                    port.id === "next" ? "true" : undefined
-                  }
-                  id={port.id}
-                  {...(port.id === "next"
-                    ? {
-                        onClick: openNextInsert,
-                        onContextMenu: openNextInsert,
-                      }
-                    : {})}
-                  position={Position.Right}
-                  style={{ top }}
-                  type="source"
-                >
-                  {port.id === "next" && (
-                    <span aria-hidden="true" className="next-output-glyph">
-                      ＋
-                    </span>
-                  )}
-                </Handle>
-              </div>
-            );
-          })}
-        </div>
+      {singleNext && (
+        <Handle
+          className="story-handle story-handle-out"
+          id="next"
+          position={Position.Right}
+          type="source"
+        />
+      )}
+      {!singleNext && ports.length > 0 && (
+        <ul className="story-node-ports">
+          {ports.map((port) => (
+            <li
+              className="story-port"
+              key={port.id}
+              title={
+                port.targetScene === null
+                  ? `→ ${port.target}`
+                  : `→ ${port.targetScene} / ${port.target}`
+              }
+            >
+              <span>{port.label}</span>
+              <Handle
+                className="story-handle story-handle-out"
+                id={port.id}
+                position={Position.Right}
+                type="source"
+              />
+            </li>
+          ))}
+        </ul>
       )}
     </article>
   );

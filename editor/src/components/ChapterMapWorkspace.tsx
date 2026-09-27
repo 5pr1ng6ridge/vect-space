@@ -20,6 +20,23 @@ import type { AnimationMap } from "@vectspace/presentation-core/image-animation"
 import { editorImageSource } from "../imageAnimationMap";
 import { AnimatedImage } from "./AnimatedImage";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import {
+  Frame,
+  Grid3x3,
+  Map as MapIcon,
+  Maximize,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
+import { WorkspaceHeader } from "../shell/WorkspaceHeader";
+import { IconButton } from "../ui/Button";
+import {
+  escapeTextEntry,
+  isComposing,
+  shouldIgnoreShortcut,
+} from "../ui/keyboard";
+import { isEditableTarget } from "./nodeDeleteShortcut";
+import { ASSET_DRAG_TYPE, draggedAssetId } from "../assetDrag";
 import { assetChoiceOptions, firstVisibleAssetId } from "../assetLibrary";
 import {
   clampMapCenter,
@@ -202,7 +219,10 @@ export function ChapterMapWorkspace({
     return null;
   }, [activeSelectionId, map.decorations, map.hotspots]);
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
-  const [scale, setScale] = useState(1);
+  // `fitScale` fits the whole room into the canvas; `zoom` multiplies it.
+  const [fitScale, setFitScale] = useState(1);
+  const [zoom, setZoom] = useState(1);
+  const scale = fitScale * zoom;
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [showGrid, setShowGrid] = useState(true);
   const [showViewFrame, setShowViewFrame] = useState(true);
@@ -291,7 +311,7 @@ export function ChapterMapWorkspace({
     const update = (): void => {
       const width = Math.max(320, element.clientWidth - 32);
       const height = Math.max(240, element.clientHeight - 32);
-      setScale(Math.min(width / map.width, height / map.height, 1));
+      setFitScale(Math.min(width / map.width, height / map.height, 1));
     };
     update();
     const observer = new ResizeObserver(update);
@@ -924,8 +944,18 @@ export function ChapterMapWorkspace({
 
   const dropOnStage = (event: DragEvent<HTMLDivElement>): void => {
     event.preventDefault();
-    const kind = event.dataTransfer.getData("application/x-vectspace-kind");
-    const id = event.dataTransfer.getData("application/x-vectspace-id");
+    // Scenes come from this workspace's list; assets use the shared editor
+    // asset drag type, so the asset library and this list are interchangeable.
+    const libraryAsset = draggedAssetId(event.dataTransfer, assets, [
+      "gui",
+      "sprite",
+    ]);
+    const kind =
+      libraryAsset !== null
+        ? "asset"
+        : event.dataTransfer.getData("application/x-vectspace-kind");
+    const id =
+      libraryAsset ?? event.dataTransfer.getData("application/x-vectspace-id");
     if (!id) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const x = snap((event.clientX - bounds.left) / Math.max(scale, 0.001));
@@ -967,6 +997,55 @@ export function ChapterMapWorkspace({
     });
   };
 
+  const MIN_ZOOM = 0.25;
+  const MAX_ZOOM = 4;
+  /** Zoom by `factor`, keeping the room point under `anchor` still. */
+  const zoomBy = (factor: number, anchor?: { x: number; y: number }): void => {
+    const wrap = canvasRef.current;
+    const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * factor));
+    if (nextZoom === zoom) return;
+    if (wrap === null || anchor === undefined) {
+      setPan((current) => ({
+        x: current.x * (nextZoom / zoom),
+        y: current.y * (nextZoom / zoom),
+      }));
+      setZoom(nextZoom);
+      return;
+    }
+    const rect = wrap.getBoundingClientRect();
+    const centreX = rect.left + rect.width / 2;
+    const centreY = rect.top + rect.height / 2;
+    const current = fitScale * zoom;
+    const next = fitScale * nextZoom;
+    // World point under the cursor, with the stage centred in the canvas.
+    const worldX =
+      (anchor.x - (centreX - (map.width * current) / 2 + pan.x)) / current;
+    const worldY =
+      (anchor.y - (centreY - (map.height * current) / 2 + pan.y)) / current;
+    setPan({
+      x: anchor.x - centreX + (map.width * next) / 2 - worldX * next,
+      y: anchor.y - centreY + (map.height * next) / 2 - worldY * next,
+    });
+    setZoom(nextZoom);
+  };
+  const resetView = (): void => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  /** Move the selected object by a grid-aligned offset (arrow keys). */
+  const nudgeSelected = (dx: number, dy: number): void => {
+    if (selection === null) return;
+    updateMap((next) => {
+      const items =
+        selection.kind === "hotspot" ? next.hotspots : next.decorations;
+      const item = items.find((candidate) => candidate.id === selection.id);
+      if (item === undefined) return;
+      item.x = Math.max(0, Math.min(next.width - item.width, item.x + dx));
+      item.y = Math.max(0, Math.min(next.height - item.height, item.y + dy));
+    });
+  };
+
   const removeSelected = (): void => {
     if (selection === null) return;
     updateMap((next) => {
@@ -982,6 +1061,33 @@ export function ChapterMapWorkspace({
     });
     select(null);
   };
+
+  // Delete removes the selected object; arrow keys nudge it by one grid
+  // cell (Shift: five cells).  Typing in the inspector is never affected.
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent): void => {
+      if (shouldIgnoreShortcut(event) || isEditableTarget(event.target)) return;
+      if (selection === null) return;
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        removeSelected();
+        return;
+      }
+      const step = GRID * (event.shiftKey ? 5 : 1);
+      const offsets: Record<string, [number, number]> = {
+        ArrowLeft: [-step, 0],
+        ArrowRight: [step, 0],
+        ArrowUp: [0, -step],
+        ArrowDown: [0, step],
+      };
+      const offset = offsets[event.key];
+      if (offset === undefined) return;
+      event.preventDefault();
+      nudgeSelected(offset[0], offset[1]);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  });
 
   const displayedObject = (
     kind: "hotspot" | "decoration",
@@ -1035,6 +1141,7 @@ export function ChapterMapWorkspace({
   useEffect(() => {
     const handleEscape = (event: globalThis.KeyboardEvent): void => {
       if (event.key !== "Escape") return;
+      if (event.defaultPrevented || isComposing(event)) return;
       event.preventDefault();
 
       const draftKey = activeInspectorKeyRef.current;
@@ -1062,6 +1169,7 @@ export function ChapterMapWorkspace({
         cancelPointerOperation();
         return;
       }
+      if (escapeTextEntry(event)) return;
       onClose();
     };
     window.addEventListener("keydown", handleEscape);
@@ -1079,53 +1187,64 @@ export function ChapterMapWorkspace({
 
   return (
     <main className="map-workspace" ref={workspaceRef}>
-      <header className="workspace-toolbar map-workspace-toolbar">
-        <button onClick={onClose} type="button">
-          返回剧情图
-        </button>
-        <strong>章节地图</strong>
-        {dirty && <span className="dirty-label">未保存</span>}
-        <span className="toolbar-spacer" />
-        <button disabled={!undoAvailable} onClick={onUndo} type="button">
-          撤销
-        </button>
-        <button disabled={!redoAvailable} onClick={onRedo} type="button">
-          重做
-        </button>
-        <button onClick={onValidate} type="button">
-          校验
-        </button>
-        <button
-          aria-pressed={showGrid}
+      <WorkspaceHeader
+        backLabel="返回剧情图"
+        dirty={dirty}
+        icon={MapIcon}
+        kind="章节地图"
+        onBack={onClose}
+        onRedo={onRedo}
+        onSave={onSave}
+        onUndo={onUndo}
+        onValidate={onValidate}
+        redoAvailable={redoAvailable}
+        title="世界地图"
+        undoAvailable={undoAvailable}
+      >
+        <IconButton
+          active={showGrid}
+          icon={Grid3x3}
+          label="网格"
           onClick={() => setShowGrid((value) => !value)}
-          type="button"
-        >
-          网格
-        </button>
-        <button
-          aria-pressed={showViewFrame}
+          size="sm"
+          tooltip="显示 20px 吸附网格"
+        />
+        <IconButton
+          active={showViewFrame}
+          icon={Frame}
+          label="初始视图框"
           onClick={() => setShowViewFrame((value) => !value)}
-          type="button"
-        >
-          初始视图框
-        </button>
-        <button onClick={() => setPan({ x: 0, y: 0 })} type="button">
-          适合画布
-        </button>
-        <button
-          className="primary-button"
-          disabled={!dirty}
-          onClick={onSave}
-          type="button"
-        >
-          保存
-        </button>
-      </header>
+          size="sm"
+          tooltip="显示玩家进入地图时的初始视图"
+        />
+        <span aria-hidden="true" className="shell-divider" />
+        <IconButton
+          icon={ZoomOut}
+          label="缩小"
+          onClick={() => zoomBy(1 / 1.25)}
+          size="sm"
+        />
+        <span className="workspace-transport-readout" title="当前缩放">
+          {Math.round(scale * 100)}%
+        </span>
+        <IconButton
+          icon={ZoomIn}
+          label="放大"
+          onClick={() => zoomBy(1.25)}
+          size="sm"
+        />
+        <IconButton
+          icon={Maximize}
+          label="适合画布"
+          onClick={resetView}
+          size="sm"
+        />
+      </WorkspaceHeader>
       <section className="map-workspace-body">
         <aside className="map-side-panel">
-          <h3>未放置 Scene</h3>
+          <h3>未放置的场景</h3>
           {unplacedScenes.length === 0 && (
-            <p className="muted">所有 Scene 已放置</p>
+            <p className="muted">所有场景都已放置</p>
           )}
           {unplacedScenes.map((sceneId) => (
             <button
@@ -1163,14 +1282,7 @@ export function ChapterMapWorkspace({
               draggable
               key={option.id}
               onDragStart={(event) => {
-                event.dataTransfer.setData(
-                  "application/x-vectspace-kind",
-                  "asset",
-                );
-                event.dataTransfer.setData(
-                  "application/x-vectspace-id",
-                  option.id,
-                );
+                event.dataTransfer.setData(ASSET_DRAG_TYPE, option.id);
               }}
               onClick={() => addDecoration(option.id)}
               type="button"
@@ -1222,7 +1334,18 @@ export function ChapterMapWorkspace({
             </div>
           ))}
         </aside>
-        <div className="map-canvas-wrap" ref={canvasRef}>
+        <div
+          className="map-canvas-wrap"
+          onWheel={(event) => {
+            // The wheel zooms around the pointer, like other map editors.
+            if (event.deltaY === 0) return;
+            zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1, {
+              x: event.clientX,
+              y: event.clientY,
+            });
+          }}
+          ref={canvasRef}
+        >
           <div
             className="map-canvas-stage"
             onDragOver={(event) => event.preventDefault()}
@@ -1895,7 +2018,7 @@ export function ChapterMapWorkspace({
               }
             </p>
           )}
-          <p className="muted">项目：{manifest.content_version}</p>
+          <p className="muted">内容版本：{manifest.content_version}</p>
         </aside>
       </section>
     </main>

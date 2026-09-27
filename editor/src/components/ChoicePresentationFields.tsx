@@ -60,11 +60,10 @@ export function ChoicePresentationFields({
             }
             type="checkbox"
           />
-          启用 presentation（按钮模板 / 设计像素锚点）
+          使用自定义选项布局（按钮模板 / 设计像素锚点）
         </span>
         <small>
-          关闭时保持旧版 CSS 面板位置与内置按钮皮肤；未取得 Rust
-          预览时，首次启用使用纵向旧版面板中心作为后备。
+          关闭时使用默认的选项面板位置与按钮样式；开启后可指定按钮模板、排列方向和锚点。
         </small>
       </label>
 
@@ -79,7 +78,7 @@ export function ChoicePresentationFields({
               }
               value={presentation.template ?? ""}
             >
-              <option value="">内置 CSS 按钮</option>
+              <option value="">默认选项按钮</option>
               {buttons.map((file) => (
                 <option key={file.definition.id} value={file.definition.id}>
                   {file.definition.id}（{file.definition.width}×

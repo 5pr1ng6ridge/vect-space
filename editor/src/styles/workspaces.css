@@ -1,0 +1,426 @@
+/*
+ * Full-screen workspaces: one header, one palette.
+ *
+ * The workspaces' internal layouts still come from the legacy stylesheet;
+ * this layer replaces their navy/cyan palette and tiny type with the design
+ * tokens so every workspace reads as part of the same editor.
+ */
+@layer workspace {
+  /* -------------------------------------------------- Shared header bar */
+  .workspace-header-bar {
+    display: flex;
+    min-width: 0;
+    min-height: 48px;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1-5) var(--space-3);
+    border-bottom: 1px solid var(--border-default);
+    background: var(--surface-panel);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+  }
+
+  .workspace-header-title {
+    display: flex;
+    min-width: 0;
+    flex: 0 1 auto;
+    align-items: center;
+    gap: var(--space-1-5);
+    white-space: nowrap;
+  }
+
+  .workspace-header-title svg {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: var(--accent);
+  }
+
+  .workspace-header-title span {
+    color: var(--text-secondary);
+  }
+
+  .workspace-header-title strong {
+    overflow: hidden;
+    font-weight: var(--font-weight-semibold);
+    text-overflow: ellipsis;
+  }
+
+  .workspace-header-tools {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+  }
+
+  .workspace-header-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .workspace-header-field {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+  }
+
+  .workspace-header-field input,
+  .workspace-header-field select {
+    width: 96px;
+    height: var(--control-height-sm);
+  }
+
+  .workspace-transport {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+  }
+
+  .workspace-transport-readout {
+    min-width: 0;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface-input);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .workspace-context-status {
+    max-width: 220px;
+    overflow: hidden;
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace-header-bar .vs-button.is-active {
+    background: var(--accent-muted);
+    color: var(--accent-text);
+  }
+
+  /* ------------------------------------------------------ Palette reset */
+  :is(
+    .timeline-workspace,
+    .long-text-workspace,
+    .map-workspace,
+    .button-workspace,
+    .ui-motion-workspace,
+    .action-workspace,
+    .gameplay-preview
+  ) {
+    background: var(--surface-canvas);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+  }
+
+  :is(
+    .timeline-workspace-inspector,
+    .long-text-workspace-inspector,
+    .map-side-panel,
+    .map-inspector,
+    .button-inspector,
+    .ui-motion-inspector,
+    .action-side-panel
+  ) {
+    border-color: var(--border-default);
+    background: var(--surface-panel);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+  }
+
+  :is(
+      .timeline-workspace-inspector,
+      .long-text-workspace-inspector,
+      .map-side-panel,
+      .map-inspector,
+      .button-inspector,
+      .ui-motion-inspector,
+      .action-side-panel
+    )
+    h3 {
+    margin: var(--space-3) 0 var(--space-2);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  :is(
+      .timeline-workspace-inspector,
+      .long-text-workspace-inspector,
+      .map-side-panel,
+      .map-inspector,
+      .button-inspector,
+      .ui-motion-inspector,
+      .action-side-panel
+    )
+    :is(label, p, small) {
+    font-size: var(--font-size-sm);
+  }
+
+  .map-list-button {
+    border-color: var(--border-default);
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+  }
+
+  /* --------------------------------------------------- Timeline surface */
+  .timeline-surface,
+  .timeline-workspace-tracks,
+  .timeline-editor {
+    background: var(--surface-app);
+    color: var(--text-primary);
+  }
+
+  .timeline-transport,
+  .timeline-clipboard-tools,
+  .timeline-track-head,
+  .timeline-track-config {
+    border-color: var(--border-default);
+    background: var(--surface-panel);
+    font-size: var(--font-size-sm);
+  }
+
+  .timeline-clipboard-tools button,
+  .timeline-track-head button,
+  .timeline-transport button {
+    height: var(--control-height-sm);
+    padding: 0 var(--space-2);
+    font-size: var(--font-size-sm);
+  }
+
+  .timeline-clipboard-tools span {
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+  }
+
+  .timeline-ruler {
+    border-bottom-color: var(--border-strong);
+    background: repeating-linear-gradient(
+      90deg,
+      transparent 0,
+      transparent calc(10% - 1px),
+      var(--border-default) 10%
+    );
+  }
+
+  .timeline-ruler span {
+    color: var(--text-tertiary);
+    font: var(--font-size-xs) / 1 var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timeline-track {
+    border-bottom-color: var(--border-subtle);
+  }
+
+  .timeline-track-head strong {
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .timeline-channel > label {
+    border-right-color: var(--border-default);
+    color: var(--text-secondary);
+    font: var(--font-size-sm) / 1.3 var(--font-ui);
+  }
+
+  .timeline-channel > div {
+    background: repeating-linear-gradient(
+      90deg,
+      transparent 0,
+      transparent calc(10% - 1px),
+      var(--border-subtle) 10%
+    );
+  }
+
+  /* Keyframes: a 14px diamond with a generous invisible hit area. */
+  .timeline-channel button {
+    top: 5px;
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--surface-canvas);
+    background: var(--keyframe);
+    box-shadow: 0 0 0 6px transparent;
+  }
+
+  .timeline-channel button:hover {
+    box-shadow: 0 0 0 3px rgb(255 217 122 / 30%);
+  }
+
+  .timeline-channel button.selected {
+    outline: 2px solid var(--accent);
+    background: var(--keyframe-selected);
+  }
+
+  .timeline-channel button.inherited {
+    border: 2px solid var(--keyframe);
+    background: transparent;
+  }
+
+  .timeline-playhead {
+    background: var(--playhead);
+  }
+
+  .timeline-playback-start {
+    background: var(--accent);
+  }
+
+  .timeline-selection-marquee {
+    border-color: var(--accent);
+    background: var(--accent-muted);
+  }
+
+  .timeline-clipboard-status {
+    border-color: var(--border-strong);
+    background: var(--surface-overlay);
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+  }
+
+  .timeline-surface-empty,
+  .timeline-selection-hint {
+    color: var(--text-tertiary);
+    font-size: var(--font-size-sm);
+  }
+
+  /* --------------------------------------------------- Game preview bar */
+  .gameplay-preview-toolbar {
+    position: sticky;
+    z-index: var(--z-sticky);
+    top: 0;
+    flex-wrap: wrap;
+  }
+
+  .gameplay-preview-status {
+    margin-left: auto;
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+  }
+
+  .gameplay-preview-notice,
+  .gameplay-preview-gate {
+    border-color: var(--border-default);
+    background: var(--surface-panel);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+  }
+
+  .timeline-workspace-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--border-default);
+    background: var(--surface-panel);
+  }
+
+  .timeline-workspace-controls > button,
+  .timeline-workspace-controls > select {
+    flex: 0 0 auto;
+    width: auto;
+    height: var(--control-height-sm);
+    padding: 0 var(--space-2-5, 10px);
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+  }
+
+  .timeline-workspace-controls > button.active {
+    border-color: var(--accent);
+    background: var(--accent-muted);
+    color: var(--accent-text);
+  }
+
+  .timeline-clipboard-tools {
+    gap: 2px;
+    padding: 0 var(--space-1-5);
+  }
+
+  .timeline-track-head {
+    min-height: 36px;
+    gap: var(--space-1-5);
+  }
+
+  .timeline-track-head select {
+    width: auto;
+    height: var(--control-height-sm);
+    font-size: var(--font-size-sm);
+  }
+
+  .timeline-event-marker.selected {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ----------------------------------------------- Zoomable lanes */
+  .timeline-surface {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .timeline-surface-with-transport {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .timeline-tracks {
+    overflow: auto;
+    container-type: inline-size;
+  }
+
+  /* Reserve room INSIDE the rows for the centered marker at duration_ms.
+     Putting the gutter outside the row would leave the marker at the new
+     scroll edge, still clipped; at zoom 1 the rows fit without scrolling. */
+  .timeline-tracks > .timeline-ruler-row,
+  .timeline-tracks > .timeline-track {
+    box-sizing: border-box;
+    width: calc(184px + (100cqw - 184px) * var(--timeline-zoom, 1));
+    min-width: 100%;
+  }
+
+  .timeline-tracks > .timeline-ruler-row,
+  .timeline-tracks .timeline-channel {
+    padding-right: 8px;
+  }
+
+  .timeline-tracks > .timeline-ruler-row {
+    position: sticky;
+    z-index: 15;
+    top: 0;
+    min-height: 32px;
+    background: var(--surface-panel);
+  }
+
+  .timeline-clipboard-tools,
+  .timeline-channel > label {
+    position: sticky;
+    z-index: 6;
+    left: 0;
+    background: var(--surface-panel);
+  }
+
+  .timeline-track-head,
+  .timeline-track-config {
+    position: sticky;
+    z-index: 5;
+    left: 0;
+    width: 100cqw;
+  }
+
+  .timeline-tools-divider {
+    width: 1px;
+    height: 16px;
+    margin: 0 2px;
+    background: var(--border-default);
+  }
+}

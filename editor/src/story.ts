@@ -32,6 +32,7 @@ import {
   removeUnknownTemplateVariables,
   renameTemplateVariable,
 } from "./textTemplate";
+import { renameNodeInGroups } from "./components/graphGroups";
 
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
@@ -145,6 +146,24 @@ export function setPortTarget(
     };
   }
   return node;
+}
+
+/**
+ * Sprite instance ids a scene can refer to: every `sprite` node's `sprite_id`
+ * and every timeline sprite track, de-duplicated and sorted.
+ */
+export function sceneSpriteIds(scene: SceneDefinition): string[] {
+  const ids = new Set<string>();
+  for (const node of Object.values(scene.nodes)) {
+    if (node.type === "sprite") ids.add(node.sprite_id);
+    if (node.type === "timeline") {
+      for (const track of node.tracks) {
+        if (track.type === "sprite") ids.add(track.sprite_id);
+      }
+    }
+  }
+  ids.delete("");
+  return [...ids].sort();
 }
 
 export function summarizeNode(node: SceneNode): string {
@@ -1566,6 +1585,13 @@ export function renameNode(
     sceneLayout.nodes[nextId] = sceneLayout.nodes[previousId];
     Reflect.deleteProperty(sceneLayout.nodes, previousId);
   }
+  if (sceneLayout?.groups !== undefined)
+    sceneLayout.groups = renameNodeInGroups(
+      sceneLayout.groups,
+      previousId,
+      nextId,
+      new Set(Object.keys(targetScene.definition.nodes)),
+    );
   const previews = updated.layout.timeline_previews;
   if (previews !== undefined) {
     const oldKey = `${sceneId}/${previousId}`;

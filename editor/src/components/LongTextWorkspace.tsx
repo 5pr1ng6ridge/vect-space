@@ -9,6 +9,16 @@ import {
   type ReactElement,
 } from "react";
 import { assetUrl, editorApi } from "../api";
+import {
+  BookOpenText,
+  ChevronsRight,
+  Pause,
+  Play,
+  RotateCcw,
+  StepForward,
+} from "lucide-react";
+import { WorkspaceHeader } from "../shell/WorkspaceHeader";
+import { Button } from "../ui/Button";
 import { projectRequest } from "../story";
 import {
   selectGameplayFont,
@@ -40,6 +50,8 @@ import type { AnimationMap } from "@vectspace/presentation-core/image-animation"
 import { editorImageSource } from "../imageAnimationMap";
 import { AnimatedImage } from "./AnimatedImage";
 import { AssetChooser } from "./AssetChooser";
+import { ColorSwatch, DeferredInput, DeferredTextArea } from "./Fields";
+import { escapeTextEntry, isComposing } from "../ui/keyboard";
 
 /**
  * The editor renders the shared panel but plays no typing sfx: the signal is
@@ -158,7 +170,7 @@ export function LongTextWorkspace({
     null,
   );
   const [previewContextStatus, setPreviewContextStatus] =
-    useState("尚未建立真实上下文");
+    useState("尚未生成预览");
   const [previewContextBusy, setPreviewContextBusy] = useState(false);
   // The first frame must wait for Rust's deterministic context; rendering raw
   // YAML here would make a continuation look valid before its retained page
@@ -753,6 +765,8 @@ export function LongTextWorkspace({
   const handleKeyDown = useCallback(
     (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
+      if (event.defaultPrevented || isComposing(event)) return;
+      if (escapeTextEntry(event)) return;
       event.preventDefault();
       const gesture = gestureRef.current;
       if (gesture !== null) {
@@ -783,71 +797,66 @@ export function LongTextWorkspace({
 
   return (
     <main className="long-text-workspace">
-      <header className="long-text-workspace-toolbar">
-        <button onClick={onBack} type="button">
-          ← 返回剧情图
-        </button>
-        <strong>长文本背景预览</strong>
-        <code>
-          {sceneId}/{nodeId}
-        </code>
-        <div className="long-text-workspace-preview-controls">
-          <button
+      <WorkspaceHeader
+        dirty={dirty}
+        icon={BookOpenText}
+        kind="长文本"
+        onBack={onBack}
+        onRedo={onRedo}
+        onSave={onSave}
+        onUndo={onUndo}
+        redoAvailable={redoAvailable}
+        title={nodeId}
+        undoAvailable={undoAvailable}
+      >
+        <div className="workspace-transport">
+          <Button
             disabled={previewUnavailable}
+            icon={previewPlaying ? Pause : Play}
             onClick={togglePreviewPlayback}
-            type="button"
+            size="sm"
           >
             {previewPlaying ? "暂停预览" : "播放预览"}
-          </button>
-          <button
+          </Button>
+          <Button
             disabled={previewUnavailable || previewComplete}
+            icon={ChevronsRight}
             onClick={completePreviewStep}
-            type="button"
+            size="sm"
+            title="立即显示本段全部文字"
+            variant="ghost"
           >
             补全
-          </button>
-          <button
+          </Button>
+          <Button
             disabled={
               previewUnavailable ||
               (previewComplete &&
                 safePreviewStepIndex >= previewSteps.length - 1)
             }
+            icon={StepForward}
             onClick={advancePreviewStep}
-            type="button"
+            size="sm"
+            variant="ghost"
           >
             下一分段
-          </button>
-          <button
+          </Button>
+          <Button
             disabled={previewUnavailable}
+            icon={RotateCcw}
             onClick={replayPreview}
-            type="button"
+            size="sm"
+            variant="ghost"
           >
             从头重播
-          </button>
-          <span>
+          </Button>
+          <span className="workspace-transport-readout">
             {previewUnavailable
-              ? "等待真实上下文"
-              : `${safePreviewStepIndex + 1} / ${previewSteps.length}`}
+              ? "正在准备预览…"
+              : `第 ${safePreviewStepIndex + 1} / ${previewSteps.length} 段`}
           </span>
         </div>
-        <span className="long-text-workspace-status">
-          {dirty ? "有未保存修改" : "已保存"}
-        </span>
-        <button disabled={!undoAvailable} onClick={onUndo} type="button">
-          撤销
-        </button>
-        <button disabled={!redoAvailable} onClick={onRedo} type="button">
-          重做
-        </button>
-        <button
-          className="primary-button"
-          disabled={!dirty}
-          onClick={onSave}
-          type="button"
-        >
-          保存
-        </button>
-      </header>
+      </WorkspaceHeader>
 
       <section className="long-text-workspace-main">
         <div className="long-text-workspace-stage-pane">
@@ -906,7 +915,7 @@ export function LongTextWorkspace({
               )}
               {previewUnavailable && (
                 <div className="long-text-workspace-preview-unavailable">
-                  等待 Rust 真实路径后显示累计文稿
+                  正在准备预览，稍后显示之前各步骤的文稿
                 </div>
               )}
               <div className="long-text-workspace-grid" />
@@ -988,7 +997,7 @@ export function LongTextWorkspace({
             />
           </label>
           <p className="long-text-workspace-note">
-            背景选择不会写入 YAML；它只用于确认文本块在真实场景中的可读性。
+            预览背景只影响编辑器，不会保存到剧情中；用它检查文字在实际场景里是否清晰可读。
           </p>
           <p className="long-text-workspace-note">
             预览渲染游戏本体的长文本组件（分页、打字机与滚动一致）；pause、speed
@@ -1010,7 +1019,7 @@ export function LongTextWorkspace({
             ))}
           </ul>
           <div className="long-text-workspace-context-status">
-            {previewContextBusy ? "正在构建真实路径…" : previewContextStatus}
+            {previewContextBusy ? "正在准备预览…" : previewContextStatus}
           </div>
           {pendingChoice !== null && (
             <div className="long-text-workspace-choice-wizard">
@@ -1109,12 +1118,12 @@ export function LongTextWorkspace({
             ))}
           </div>
           <p className="long-text-workspace-note">
-            右侧数值修改会立即写入项目历史；拖动操作在松开鼠标时作为一次撤销记录提交。
+            右侧数值在失焦或按 Enter
+            时写入一次撤销记录；拖动操作在松开鼠标时提交。
           </p>
           <h3>当前节点步骤</h3>
           <p className="long-text-workspace-note">
-            前序步骤来自 Rust
-            真实上下文并保持只读；这里的文本在失去焦点时写回当前节点。
+            前面步骤的文稿只读显示；这里的文字在输入框失去焦点时保存到当前节点。
           </p>
           <div className="long-text-workspace-step-editor-list">
             {draft.steps.map((step, index) => (
@@ -1122,10 +1131,9 @@ export function LongTextWorkspace({
                 <span>
                   第 {index + 1} 段 · <code>{step.id}</code>
                 </span>
-                <textarea
-                  defaultValue={step.text}
-                  onBlur={(event) => {
-                    const text = event.currentTarget.value;
+                <DeferredTextArea
+                  rows={4}
+                  onCommit={(text) => {
                     const nextSteps = draftRef.current.steps.map((candidate) =>
                       candidate.id === step.id
                         ? { ...candidate, text }
@@ -1133,7 +1141,7 @@ export function LongTextWorkspace({
                     );
                     updateField("steps", nextSteps);
                   }}
-                  rows={4}
+                  value={step.text}
                 />
                 {index > 0 && (
                   <button onClick={() => onSplitLongText(index)} type="button">
@@ -1172,17 +1180,18 @@ function NumericField({
   return (
     <label className="long-text-workspace-number">
       <span>{label}</span>
-      <input
+      <DeferredInput
         disabled={disabled}
         max={max}
         min={min}
-        onChange={(event) => {
-          const value = Number(event.currentTarget.value);
-          if (Number.isFinite(value)) onChange(value);
+        onCommit={(raw) => {
+          const next = Number(raw);
+          if (raw.trim() === "" || !Number.isFinite(next)) return false;
+          onChange(next);
         }}
         step="any"
         type="number"
-        value={value}
+        value={String(value)}
       />
     </label>
   );
@@ -1202,14 +1211,24 @@ function TextColorField({
   return (
     <label className="long-text-workspace-number">
       <span>{label}</span>
-      <input
-        disabled={disabled}
-        maxLength={9}
-        onChange={(event) => onChange(event.currentTarget.value)}
-        pattern="#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
-        type="text"
-        value={value}
-      />
+      <span className="inline-field">
+        <ColorSwatch
+          label={`${label}选择器`}
+          onCommit={onChange}
+          value={value}
+        />
+        <DeferredInput
+          aria-label={label}
+          disabled={disabled}
+          maxLength={9}
+          onCommit={(raw) => {
+            if (!/^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(raw)) return false;
+            onChange(raw);
+          }}
+          type="text"
+          value={value}
+        />
+      </span>
     </label>
   );
 }

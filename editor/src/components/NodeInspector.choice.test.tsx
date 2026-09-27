@@ -105,7 +105,7 @@ describe("choice inspector presentation fields", () => {
   it("seeds the legacy panel centre when presentation is first enabled", () => {
     const onChange = vi.fn();
     renderChoice(choiceNode(), onChange);
-    const toggle = screen.getByLabelText(/启用 presentation/);
+    const toggle = screen.getByLabelText(/使用自定义选项布局/);
     expect(toggle).not.toBeChecked();
     expect(screen.queryByLabelText("锚点 X（0–1920）")).toBeNull();
 
@@ -155,7 +155,7 @@ describe("choice inspector presentation fields", () => {
         previewPrompt={prompt}
       />,
     );
-    fireEvent.click(screen.getByLabelText(/启用 presentation/));
+    fireEvent.click(screen.getByLabelText(/使用自定义选项布局/));
     expect(onChange.mock.calls[0]?.[0].presentation).toMatchObject({
       anchor_x: 814,
       anchor_y: 404,

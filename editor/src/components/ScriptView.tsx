@@ -6,7 +6,12 @@ import {
   type KeyboardEvent,
   type ReactElement,
 } from "react";
+import { Plus, Trash2 } from "lucide-react";
+
+import { describeNode } from "../nodeSummary";
 import { nodeLabel, outputPorts } from "../story";
+import { IconButton } from "../ui/Button";
+import { NODE_ICONS } from "../ui/nodeIcons";
 import { buildScriptChainOptions } from "./scriptChains";
 import {
   imeState,
@@ -238,7 +243,12 @@ export function ScriptView({
   const visibleRows = rows.filter((row) => {
     const needle = query.trim().toLowerCase();
     if (needle.length === 0) return true;
-    const text = row.node.type === "say" ? row.node.text : summarize(row.node);
+    const text =
+      row.node.type === "say"
+        ? row.node.text
+        : row.node.type === "long_text"
+          ? `${describeNode(row.node).summary} ${row.node.steps.map((step) => step.text).join(" ")}`
+          : describeNode(row.node).summary;
     return `${row.id} ${text}`.toLowerCase().includes(needle);
   });
 
@@ -385,9 +395,8 @@ export function ScriptView({
       tabIndex={0}
     >
       <div className="script-toolbar">
-        <strong>脚本视图</strong>
-        <label>
-          链段起点
+        <label className="script-chain">
+          链段
           <select
             aria-label="选择脚本链段"
             onChange={(event) => {
@@ -437,10 +446,9 @@ export function ScriptView({
         <input
           aria-label="搜索脚本"
           onChange={(event) => setQuery(event.currentTarget.value)}
-          placeholder="搜索节点或正文…"
+          placeholder="筛选本链段…"
           value={query}
         />
-        <small>Enter 插入下一句 · Shift+Enter 换行 · Ctrl/⌘ 点击多选</small>
       </div>
       <div className="script-list">
         {visibleRows.map((row) => {
@@ -615,6 +623,7 @@ function ScriptRowView({
     errors: Record<string, string>;
   } | null;
 }): ReactElement {
+  const TypeIcon = NODE_ICONS[node.type];
   // Other controls in the same row must carry the current central text draft
   // forward; otherwise a role/mode change dispatched in the next event can be
   // based on the previous render and silently put older text back into the
@@ -690,141 +699,166 @@ function ScriptRowView({
   };
   return (
     <article
-      className={`script-row${selected ? " selected" : ""}`}
+      className={`script-row script-row-${node.type === "say" ? "say" : "other"}${selected ? " selected" : ""}`}
       onClick={(event) =>
         onSelect(event.ctrlKey || event.metaKey, event.shiftKey)
       }
     >
-      <div className="script-row-gutter">
+      <div
+        className="script-row-gutter"
+        title={`${nodeLabel(node.type)} · ${nodeId}`}
+      >
+        <TypeIcon aria-hidden="true" />
         <code>{nodeId}</code>
-        <span>{node.type === "say" ? "对话" : nodeLabel(node.type)}</span>
       </div>
       <div className="script-row-content">
         {node.type === "say" ? (
           <>
-            <select
-              aria-label={`${nodeId} 角色`}
-              onChange={(event) =>
-                updateDiscreteField(
-                  "speaker",
-                  changeRowValue({
-                    ...node,
-                    speaker: event.currentTarget.value || null,
-                  }),
-                  "修改角色",
-                )
-              }
-              value={node.speaker ?? ""}
-            >
-              <option value="">旁白</option>
-              {Object.entries(characters).map(([id, character]) => (
-                <option key={id} value={id}>
-                  {character.display_name} · {id}
-                </option>
-              ))}
-              {node.speaker !== null &&
-                characters[node.speaker] === undefined && (
-                  <option value={node.speaker}>临时：{node.speaker}</option>
-                )}
-            </select>
-            {((node.speaker !== null &&
-              characters[node.speaker] === undefined) ||
-              activeEdit?.id === fieldId("speaker")) && (
-              <input
-                aria-label={`${nodeId} 临时角色名`}
-                onBlur={() => commitField("speaker")}
-                onChange={(event) => {
-                  const raw = event.currentTarget.value;
-                  updateField(
+            <div className="script-row-head">
+              <select
+                aria-label={`${nodeId} 角色`}
+                className={`script-speaker${node.speaker === null ? " is-narrator" : ""}`}
+                style={
+                  node.speaker !== null &&
+                  characters[node.speaker]?.name_color != null
+                    ? {
+                        color:
+                          characters[node.speaker]?.name_color ?? undefined,
+                      }
+                    : undefined
+                }
+                onChange={(event) =>
+                  updateDiscreteField(
                     "speaker",
                     changeRowValue({
                       ...node,
-                      speaker: raw || null,
+                      speaker: event.currentTarget.value || null,
                     }),
-                    raw,
-                  );
-                }}
-                onFocus={() => onBeginEdit?.("speaker", "编辑临时角色")}
-                placeholder="临时角色名"
-                value={fieldValue("speaker", node.speaker ?? "")}
-              />
-            )}
-            {fieldError("speaker") !== null && (
-              <small className="inline-error">{fieldError("speaker")}</small>
-            )}
-            <select
-              aria-label={`${nodeId} 显示模式`}
-              onChange={(event) =>
-                updateDiscreteField(
-                  "mode",
-                  changeRowValue({
-                    ...node,
-                    mode: event.currentTarget.value as "start" | "append",
-                    page_id:
-                      event.currentTarget.value === "append"
-                        ? (node.page_id ?? `${nodeId}_page`)
-                        : node.page_id,
-                  }),
-                  "修改显示模式",
-                )
-              }
-              value={node.mode ?? "start"}
-            >
-              <option value="start">新对话段</option>
-              <option value="append">接续对话段</option>
-            </select>
-            <select
-              aria-label={`${nodeId} 揭示动画`}
-              onChange={(event) =>
-                updateDiscreteField(
-                  "reveal_animation",
-                  changeRowValue({
-                    ...node,
-                    reveal_animation:
-                      event.currentTarget.value === "default"
-                        ? null
-                        : (event.currentTarget.value as
-                            "line_sweep" | "typewriter" | "drop_fade"),
-                  }),
-                  "修改揭示动画",
-                )
-              }
-              value={node.reveal_animation ?? "default"}
-            >
-              <option value="default">默认揭示</option>
-              <option value="typewriter">打字机</option>
-              <option value="line_sweep">逐行扫入</option>
-              <option value="drop_fade">下落淡入</option>
-            </select>
-            <input
-              aria-label={`${nodeId} 速度`}
-              min="1"
-              onBlur={() => commitField("speed_cps")}
-              onChange={(event) => {
-                const raw = event.currentTarget.value;
-                const speed = raw.trim() === "" ? null : Number(raw);
-                updateField(
-                  "speed_cps",
-                  { ...node, speed_cps: speed },
-                  raw,
-                  speed !== null && (!Number.isFinite(speed) || speed <= 0),
-                );
-              }}
-              onFocus={() => onBeginEdit?.("speed_cps", "编辑打字速度")}
-              placeholder="速度 cps"
-              step="1"
-              inputMode="decimal"
-              type="text"
-              value={fieldValue(
-                "speed_cps",
-                node.speed_cps === null || node.speed_cps === undefined
-                  ? ""
-                  : String(node.speed_cps),
+                    "修改角色",
+                  )
+                }
+                value={node.speaker ?? ""}
+              >
+                <option value="">旁白</option>
+                {Object.entries(characters).map(([id, character]) => (
+                  <option key={id} value={id}>
+                    {character.display_name}
+                  </option>
+                ))}
+                {node.speaker !== null &&
+                  characters[node.speaker] === undefined && (
+                    <option value={node.speaker}>临时：{node.speaker}</option>
+                  )}
+              </select>
+              {((node.speaker !== null &&
+                characters[node.speaker] === undefined) ||
+                activeEdit?.id === fieldId("speaker")) && (
+                <input
+                  aria-label={`${nodeId} 临时角色名`}
+                  onBlur={() => commitField("speaker")}
+                  onChange={(event) => {
+                    const raw = event.currentTarget.value;
+                    updateField(
+                      "speaker",
+                      changeRowValue({
+                        ...node,
+                        speaker: raw || null,
+                      }),
+                      raw,
+                    );
+                  }}
+                  onFocus={() => onBeginEdit?.("speaker", "编辑临时角色")}
+                  placeholder="临时角色名"
+                  value={fieldValue("speaker", node.speaker ?? "")}
+                />
               )}
-            />
-            {fieldError("speed_cps") !== null && (
-              <small className="inline-error">{fieldError("speed_cps")}</small>
-            )}
+              {fieldError("speaker") !== null && (
+                <small className="inline-error">{fieldError("speaker")}</small>
+              )}
+              {node.mode === "append" && (
+                <span className="script-row-chip">接续上一段</span>
+              )}
+              {selected && (
+                <div className="script-row-advanced">
+                  <select
+                    aria-label={`${nodeId} 显示模式`}
+                    onChange={(event) =>
+                      updateDiscreteField(
+                        "mode",
+                        changeRowValue({
+                          ...node,
+                          mode: event.currentTarget.value as "start" | "append",
+                          page_id:
+                            event.currentTarget.value === "append"
+                              ? (node.page_id ?? `${nodeId}_page`)
+                              : node.page_id,
+                        }),
+                        "修改显示模式",
+                      )
+                    }
+                    value={node.mode ?? "start"}
+                  >
+                    <option value="start">新对话段</option>
+                    <option value="append">接续对话段</option>
+                  </select>
+                  <select
+                    aria-label={`${nodeId} 揭示动画`}
+                    onChange={(event) =>
+                      updateDiscreteField(
+                        "reveal_animation",
+                        changeRowValue({
+                          ...node,
+                          reveal_animation:
+                            event.currentTarget.value === "default"
+                              ? null
+                              : (event.currentTarget.value as
+                                  "line_sweep" | "typewriter" | "drop_fade"),
+                        }),
+                        "修改揭示动画",
+                      )
+                    }
+                    value={node.reveal_animation ?? "default"}
+                  >
+                    <option value="default">默认揭示</option>
+                    <option value="typewriter">打字机</option>
+                    <option value="line_sweep">逐行扫入</option>
+                    <option value="drop_fade">下落淡入</option>
+                  </select>
+                  <input
+                    aria-label={`${nodeId} 速度`}
+                    min="1"
+                    onBlur={() => commitField("speed_cps")}
+                    onChange={(event) => {
+                      const raw = event.currentTarget.value;
+                      const speed = raw.trim() === "" ? null : Number(raw);
+                      updateField(
+                        "speed_cps",
+                        { ...node, speed_cps: speed },
+                        raw,
+                        speed !== null &&
+                          (!Number.isFinite(speed) || speed <= 0),
+                      );
+                    }}
+                    onFocus={() => onBeginEdit?.("speed_cps", "编辑打字速度")}
+                    placeholder="速度 cps"
+                    step="1"
+                    inputMode="decimal"
+                    type="text"
+                    value={fieldValue(
+                      "speed_cps",
+                      node.speed_cps === null || node.speed_cps === undefined
+                        ? ""
+                        : String(node.speed_cps),
+                    )}
+                  />
+                  {fieldError("speed_cps") !== null && (
+                    <small className="inline-error">
+                      {fieldError("speed_cps")}
+                    </small>
+                  )}
+                </div>
+              )}
+            </div>
             <textarea
               aria-label={`${nodeId} 正文`}
               onBlur={onCommitText}
@@ -834,38 +868,65 @@ function ScriptRowView({
               rows={2}
               value={draftText}
             />
-            <small className="script-row-hint">
-              {node.mode === "append" ? "接续" : "新段"}
-              {node.speaker !== null && characters[node.speaker] === undefined
-                ? " · 临时名字"
-                : ""}
-            </small>
           </>
+        ) : node.type === "long_text" ? (
+          <div className="script-long-text-readonly">
+            <div className="script-long-text-heading">
+              <span>
+                {describeNode(node, { manifest: { characters } }).summary}
+              </span>
+              <button
+                className="script-long-text-open"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect(false, false);
+                  onOpenGraph();
+                }}
+                type="button"
+              >
+                在剧情图中打开以进入长文本编辑器
+              </button>
+            </div>
+            <ol className="script-long-text-steps">
+              {node.steps.map((step, index) => (
+                <li key={`${step.id}-${index}`}>
+                  {step.page_break_before && (
+                    <span className="script-long-text-page-break">分页符</span>
+                  )}
+                  <div className="script-long-text-step-text">{step.text}</div>
+                </li>
+              ))}
+            </ol>
+          </div>
         ) : (
           <button
             className="script-summary"
             onClick={onOpenGraph}
             type="button"
           >
-            {summarize(node)}
+            {describeNode(node, { manifest: { characters } }).summary}
           </button>
         )}
       </div>
       <div className="script-row-actions">
-        <button
-          aria-label={`在 ${nodeId} 后插入对话`}
+        <IconButton
+          icon={Plus}
+          label={`在 ${nodeId} 后插入对话`}
           onClick={(event) => {
             event.stopPropagation();
             if (ports.length > 1) setInsertMenuOpen((open) => !open);
             else onInsertAfter(ports[0]?.id);
           }}
-          type="button"
-        >
-          ＋
-        </button>
-        <button aria-label={`删除 ${nodeId}`} onClick={onDelete} type="button">
-          ×
-        </button>
+          size="sm"
+          tooltip="在后面插入一句对话"
+        />
+        <IconButton
+          icon={Trash2}
+          label={`删除 ${nodeId}`}
+          onClick={onDelete}
+          size="sm"
+          tooltip="删除"
+        />
         {insertMenuOpen && ports.length > 1 && (
           <div aria-label={`${nodeId} 插入出口`} className="script-insert-menu">
             <span>选择插入出口</span>
@@ -924,43 +985,4 @@ function ScriptRowView({
       )}
     </article>
   );
-}
-
-function summarize(node: SceneNode): string {
-  switch (node.type) {
-    case "choice":
-      return node.presentation == null
-        ? `${node.choices.length} 个选项`
-        : `${node.choices.length} 个选项 · ${node.presentation.template ?? "默认皮肤"} · ${node.presentation.direction === "horizontal" ? "横向" : "纵向"}`;
-    case "condition":
-      return "条件分支";
-    case "jump":
-      return `${node.scene ?? "本场景"} / ${node.target}`;
-    case "open_window":
-      return `副窗口 · ${node.scene}`;
-    case "end":
-      return "剧情终点";
-    case "background":
-      return `背景 · ${node.background ?? "清除"}`;
-    case "curtain":
-      return `幕布 · ${node.action === "cover" ? "落下" : "收起"}`;
-    case "screen_effect":
-      return node.effect.type === "flash" ? "闪光" : "震动";
-    case "sprite":
-      return `立绘 · ${node.action} ${node.sprite_id}`;
-    case "long_text":
-      return `长文本 · ${node.steps.length} 段`;
-    case "timeline":
-      return `时间线 · ${node.duration_ms} ms`;
-    case "bgm":
-      return `BGM · ${node.action}`;
-    case "ambience":
-      return `环境声 ${node.slot} · ${node.action}`;
-    case "sfx":
-      return `音效 · ${node.asset}`;
-    case "wait":
-      return `等待 · ${node.duration_ms} ms`;
-    default:
-      return node.type;
-  }
 }

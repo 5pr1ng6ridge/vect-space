@@ -71,9 +71,23 @@ function isBrowserShortcut(event: KeyboardEvent): boolean {
   return browserCtrlKeys.has(key);
 }
 
+export interface BrowserGuardOptions {
+  /** Let right-clicks inside `[data-allow-context-menu]` reach the app. */
+  allowContextMenu?: boolean;
+  /**
+   * Browser-reserved shortcuts the app handles itself.  The browser default
+   * is still prevented, but the event keeps propagating to app handlers.
+   */
+  passThrough?(event: KeyboardEvent): boolean;
+}
+
 /** Disable browser chrome behavior while leaving app shortcuts such as Ctrl+S/Z/Y intact. */
-export function installBrowserGuards(allowContextMenu = false): void {
+export function installBrowserGuards(
+  options: boolean | BrowserGuardOptions = false,
+): void {
   if (!isTauriRuntime()) return;
+  const { allowContextMenu = false, passThrough } =
+    typeof options === "boolean" ? { allowContextMenu: options } : options;
 
   const preventContextMenu = (event: MouseEvent): void => {
     if (
@@ -89,6 +103,7 @@ export function installBrowserGuards(allowContextMenu = false): void {
   const preventBrowserShortcut = (event: KeyboardEvent): void => {
     if (!isBrowserShortcut(event)) return;
     event.preventDefault();
+    if (passThrough?.(event) === true) return;
     event.stopPropagation();
   };
 

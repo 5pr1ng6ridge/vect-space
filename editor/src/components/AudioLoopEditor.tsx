@@ -44,6 +44,8 @@ import {
 } from "../audioWaveform";
 import type { EditorAsset } from "../types";
 import { Field } from "./Fields";
+import { isComposing } from "../ui/keyboard";
+import { usePendingCommit } from "../ui/pendingCommits";
 
 /**
  * How early the seam audition rewinds *before* `loop_end_ms`.
@@ -876,6 +878,7 @@ function MsField({
     if (inputRef.current !== null)
       inputRef.current.value = String(resolved ?? value);
   };
+  const pendingCommit = usePendingCommit(commit);
   return (
     <Field label={label}>
       <input
@@ -883,9 +886,9 @@ function MsField({
         inputMode="numeric"
         key={String(value)}
         min={0}
-        onBlur={commit}
+        {...pendingCommit}
         onKeyDown={(event) => {
-          if (event.key === "Enter") {
+          if (event.key === "Enter" && !isComposing(event)) {
             event.preventDefault();
             commit();
           }

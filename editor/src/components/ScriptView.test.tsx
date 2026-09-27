@@ -49,6 +49,64 @@ const scene: SceneDefinition = {
   },
 };
 
+describe("ScriptView long-text rows", () => {
+  it("shows ordered step bodies and page breaks, searches their text, and links to graph editing", () => {
+    const longTextScene: SceneDefinition = {
+      schema_version: 2,
+      id: "main",
+      entry: "document",
+      nodes: {
+        document: {
+          type: "long_text",
+          steps: [
+            {
+              id: "opening",
+              text: "第一行\n仍是第一段",
+              page_break_before: false,
+            },
+            { id: "second", text: "全文独特词语", page_break_before: true },
+          ],
+          speed_cps: null,
+          next: "finish",
+        },
+        finish: { type: "end" },
+      },
+    };
+    const onOpenGraph = vi.fn();
+    render(
+      <ScriptView
+        manifest={manifest}
+        onChange={() => undefined}
+        onDelete={() => undefined}
+        onInsertAfter={() => undefined}
+        onInsertBatch={() => undefined}
+        onOpenGraph={onOpenGraph}
+        onSelect={() => undefined}
+        scene={longTextScene}
+        selectedNodeId={null}
+      />,
+    );
+
+    const list = screen.getByRole("list");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    const firstStep = within(list).getByText(/第一行/);
+    expect(firstStep.textContent).toBe("第一行\n仍是第一段");
+    expect(within(list).getByText("全文独特词语")).toBeTruthy();
+    expect(within(list).getByText("分页符")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "document 正文" })).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "在剧情图中打开以进入长文本编辑器" }),
+    );
+    expect(onOpenGraph).toHaveBeenCalledWith("document");
+
+    fireEvent.change(screen.getByLabelText("搜索脚本"), {
+      target: { value: "全文独特词语" },
+    });
+    expect(within(list).getByText("全文独特词语")).toBeTruthy();
+    expect(document.querySelectorAll(".script-row")).toHaveLength(1);
+  });
+});
+
 describe("ScriptView branch insertion", () => {
   it("offers branch outlets and inserts into the selected outlet", () => {
     const onInsertAfter = vi.fn();
@@ -81,7 +139,7 @@ describe("ScriptView branch insertion", () => {
 });
 
 describe("ScriptView choice summary", () => {
-  it("shows the legacy option count and the template presentation when set", () => {
+  it("summarises a choice by its option labels", () => {
     const legacy: SceneDefinition = {
       ...scene,
       nodes: {
@@ -105,7 +163,7 @@ describe("ScriptView choice summary", () => {
         selectedNodeId={null}
       />,
     );
-    expect(screen.getByText("1 个选项")).toBeTruthy();
+    expect(screen.getByText("左分支")).toBeTruthy();
     first.unmount();
 
     const presented: SceneDefinition = {
@@ -143,7 +201,7 @@ describe("ScriptView choice summary", () => {
         selectedNodeId={null}
       />,
     );
-    expect(screen.getByText("2 个选项 · choice.primary · 横向")).toBeTruthy();
+    expect(screen.getAllByText("左分支 / 右分支").length).toBeGreaterThan(0);
   });
 });
 

@@ -586,9 +586,10 @@ describe("LongTextWorkspace shared panel", () => {
   it("keeps inspector edits and the layout gizmo driving the panel geometry", async () => {
     const { view, onChange } = await renderWorkspace();
 
-    fireEvent.change(screen.getByLabelText("字号"), {
-      target: { value: "48" },
-    });
+    const fontSize = screen.getByLabelText("字号");
+    fireEvent.change(fontSize, { target: { value: "48" } });
+    // Numeric fields commit one history entry on blur/Enter.
+    fireEvent.blur(fontSize);
     await waitFor(() => {
       expect(panelVar("--long-text-font-size")).toBe("48px");
     });
@@ -726,7 +727,7 @@ describe("LongTextWorkspace preview controls", () => {
     // 下一分段 moves the playhead and keeps the authored pause semantics.
     fireEvent.click(screen.getByRole("button", { name: "下一分段" }));
     await waitFor(() => {
-      expect(screen.getByText("2 / 2")).toBeInTheDocument();
+      expect(screen.getByText("第 2 / 2 段")).toBeInTheDocument();
     });
     expect(latestPanelProps().page.active_step_index).toBe(1);
     expect(latestPanelProps().prompt?.step_id).toBe(OWN_STEP_ID);
@@ -734,12 +735,12 @@ describe("LongTextWorkspace preview controls", () => {
     // The last step cannot advance further: the button completes the current
     // reveal, it never overflows the document.
     fireEvent.click(screen.getByRole("button", { name: "下一分段" }));
-    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    expect(screen.getByText("第 2 / 2 段")).toBeInTheDocument();
 
     // 从头重播 returns to the first step with a fresh reveal instance.
     fireEvent.click(screen.getByRole("button", { name: "从头重播" }));
     await waitFor(() => {
-      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(screen.getByText("第 1 / 2 段")).toBeInTheDocument();
     });
     expect(latestPanelProps().page.active_step_index).toBe(0);
     expect(latestPanelProps().sessionKey).not.toBe(firstSessionKey);

@@ -7,6 +7,11 @@
  * React component stays a thin adapter.
  */
 
+import {
+  evaluateSceneFrame,
+  type SceneFrame,
+  type SceneSpriteGeometry,
+} from "@vectspace/presentation-core/scene-frame";
 import type {
   SceneVisualCue,
   SceneWorldSnapshot,
@@ -31,7 +36,12 @@ export interface StoryVisualState {
 /** One deterministic preview run: a before-world plus the cue to apply. */
 export interface CuePreviewRequest {
   world: SceneWorldSnapshot;
-  cue: SceneVisualCue;
+  /**
+   * The cue to play, or `null` for a static world preview: the world is shown
+   * as it is and the transport is not offered, which is what the sprite stage
+   * editor needs.
+   */
+  cue: SceneVisualCue | null;
   /** Authored cue duration, used by the seek slider. */
   duration_ms: number;
 }
@@ -154,6 +164,43 @@ export function buildCurtainPreviewRequest(
     },
     duration_ms: node.duration_ms,
   };
+}
+
+/**
+ * A one-shot world preview of a runtime snapshot the editor already resolved.
+ *
+ * Ordinary sprite nodes are previewed from the real `build_node_preview`
+ * result (never from a graph walk), so the world is passed in verbatim and the
+ * request only states that no cue runs on top of it.
+ */
+export function buildWorldPreviewRequest(
+  world: SceneWorldSnapshot,
+): CuePreviewRequest {
+  return { world, cue: null, duration_ms: 0 };
+}
+
+/**
+ * The frame a static world shows, with the same sprite boxes as the renderer.
+ *
+ * A surface that only applies a world (no timeline) still has to expose the
+ * evaluated frame for hit testing; evaluating the world's own sprites with no
+ * tracks yields exactly the snapshot's pose with the renderer's sprite boxes.
+ */
+export function sceneFrameFromWorld(
+  world: SceneWorldSnapshot,
+  geometry: SceneSpriteGeometry,
+): SceneFrame {
+  return evaluateSceneFrame(
+    {
+      duration_ms: 0,
+      tracks: [],
+      sprites: world.sprites,
+      camera: world.camera,
+      bgm_volume: 1,
+    },
+    0,
+    geometry,
+  );
 }
 
 /** The world a screen effect shakes/flashes over. */

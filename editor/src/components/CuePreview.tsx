@@ -25,7 +25,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type ReactElement,
+  type ReactNode,
 } from "react";
 
 import {
@@ -37,13 +39,22 @@ import {
   type SceneKit,
 } from "@vectspace/presentation-core/scene-surface";
 import type { SceneTextureLike } from "@vectspace/presentation-core/scene-textures";
+import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
 
 import { PreviewFrameClock } from "./previewFrameClock";
 
 import { assetUrl } from "../api";
+import {
+  sceneFrameFromWorld,
+  type CuePreviewRequest,
+} from "../presentationPreview";
+import {
+  dragWorldPosition,
+  movedEnough,
+  stagePointFromClientPoint,
+} from "../stageEdit";
 import type { EditorAsset } from "../types";
-import type { CuePreviewRequest } from "../presentationPreview";
 
 export interface CuePreviewEnvironment {
   kit?: SceneKit;
@@ -66,6 +77,26 @@ interface CuePreviewProps {
   label: string;
   onError?(message: string): void;
   environment?: CuePreviewEnvironment;
+  /**
+   * Resolved animation map for animated assets.
+   *
+   * Cue previews only map logical ids to a static url, which shows the first
+   * frame of an animated asset; passing the project's map lets the shared
+   * surface play the loop instead.
+   */
+  animations?: AnimationMap;
+  /**
+   * Sprite instance the author may drag on a static world preview.
+   *
+   * The gesture only starts when the pointer actually hits this object, and it
+   * writes nothing itself: the world position of the finished drag is handed
+   * back through `onDragCommit` so the host can commit one authored change.
+   */
+  dragTargetId?: string;
+  /** Called once per completed drag with the world-space target position. */
+  onDragCommit?(position: { x: number; y: number }): void;
+  /** Extra layer rendered inside the 16:9 stage, above the canvas. */
+  overlay?: ReactNode;
 }
 
 export function CuePreview({
@@ -74,6 +105,10 @@ export function CuePreview({
   label,
   onError,
   environment,
+  animations,
+  dragTargetId,
+  onDragCommit,
+  overlay,
 }: CuePreviewProps): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lifecycleRef = useRef<DeferredSession<PreviewSession> | null>(null);
@@ -85,8 +120,12 @@ export function CuePreview({
   const abortRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const rateRef = useRef(1);
+  const dragTargetRef = useRef(dragTargetId);
+  const dragCommitRef = useRef(onDragCommit);
+  const gestureCleanupRef = useRef<(() => void) | null>(null);
   const [status, setStatus] = useState<PreviewStatus>("loading");
   const [progressMs, setProgressMs] = useState(0);
+  const [dragging, setDragging] = useState(false);
 
   const assetsSignature = useMemo(
     () =>
@@ -126,6 +165,23 @@ export function CuePreview({
     urlsRef.current = urls;
   }, [urls]);
 
+  // Gesture state is read from refs: a commit must use the current callback
+  // even when the host re-rendered while the pointer was down.
+  useEffect(() => {
+    dragTargetRef.current = dragTargetId;
+  }, [dragTargetId]);
+
+  useEffect(() => {
+    dragCommitRef.current = onDragCommit;
+  }, [onDragCommit]);
+
+  useEffect(
+    () => () => {
+      gestureCleanupRef.current?.();
+    },
+    [],
+  );
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (canvas === null) return;
@@ -158,7 +214,13 @@ export function CuePreview({
     const lifecycle = lifecycleRef.current;
     const handle = lifecycle.acquire();
     const session = handle.session;
-    session.clock.onStep = () => setProgressMs(session.clock.now);
+    session.clock.onStep = () => {
+      // A static world preview has no transport readout, and its clock runs
+      // continuously for the decoration loops: writing state on every frame
+      // would re-render the inspector without anything to show.
+      if (requestRef.current.cue === null) return;
+      setProgressMs(session.clock.now);
+    };
     sessionRef.current = session;
     readyRef.current = handle.initialized.then(() => undefined);
     let active = true;
@@ -176,6 +238,12 @@ export function CuePreview({
       lifecycle.release();
     };
   }, [environment, report]);
+
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (session === null || animations === undefined) return;
+    session.surface.setAnimations(animations);
+  }, [animations]);
 
   /**
    * Rebuilds the before-state from scratch and returns the session.
@@ -210,6 +278,20 @@ export function CuePreview({
     }
     if (prepared === null || !session.surface.applyWorld(prepared)) {
       throw new Error("预览世界准备失败");
+    }
+    if (requestRef.current.cue === null) {
+      // A static world preview has no timeline: the world's own pose is the
+      // evaluated frame, which is what makes it hit-testable and draggable.
+      session.surface.applyFrame(
+        sceneFrameFromWorld(requestRef.current.world, session.surface.geometry),
+      );
+      // The clock stays paused for a cue (its transport resumes it explicitly),
+      // but a static world has no transport at all: it has to keep running so
+      // the shared render loop ticks the decorative frame loops.  A paused
+      // clock would freeze an animated sprite on its first frame forever.
+      session.clock.step(0);
+      session.clock.resume();
+      return session;
     }
     session.clock.step(0);
     return session;
@@ -288,6 +370,10 @@ export function CuePreview({
   );
 
   const play = useCallback(async (): Promise<void> => {
+    const cue = requestRef.current.cue;
+    // A static world preview has no cue and therefore no transport; the guard
+    // keeps that invariant local instead of relying on the hidden controls.
+    if (cue === null) return;
     const session = await rebuildSession();
     if (session === null) return;
     const generation = generationRef.current;
@@ -296,7 +382,7 @@ export function CuePreview({
     rateRef.current = 1;
     setStatus("playing");
     let settled = false;
-    const run = session.surface.runCue(requestRef.current.cue, {
+    const run = session.surface.runCue(cue, {
       assets: urlsRef.current,
       signal: controller.signal,
       getRate: () => rateRef.current,
@@ -347,6 +433,8 @@ export function CuePreview({
    */
   const seek = useCallback(
     async (ms: number): Promise<void> => {
+      const cue = requestRef.current.cue;
+      if (cue === null) return;
       const session = await rebuildSession();
       if (session === null) return;
       const generation = generationRef.current;
@@ -356,7 +444,7 @@ export function CuePreview({
       const target = Math.max(0, Math.min(ms, duration));
       rateRef.current = 1;
       let settled = false;
-      const run = session.surface.runCue(requestRef.current.cue, {
+      const run = session.surface.runCue(cue, {
         assets: urlsRef.current,
         signal: controller.signal,
         getRate: () => rateRef.current,
@@ -393,64 +481,177 @@ export function CuePreview({
     [rebuildSession, report, waitForAnimation],
   );
 
+  /**
+   * Starts a drag on the static world preview.
+   *
+   * Nothing is authored while the pointer moves: the shared surface gets a
+   * temporary object override, so the document, the preview request and the
+   * history stay untouched until the gesture finishes.  A click without
+   * movement, `Escape`, a pointer cancel or the window losing focus restores
+   * the exact evaluated pose and writes nothing at all.
+   */
+  const beginStageDrag = (
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ): void => {
+    if (event.button !== 0) return;
+    const session = sessionRef.current;
+    const request = requestRef.current;
+    const targetId = dragTargetRef.current;
+    if (session === null || targetId === undefined || request.cue !== null)
+      return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const down = stagePointFromClientPoint(rect, event.clientX, event.clientY);
+    const object = session.surface.hitTest(down.x, down.y);
+    if (object === null || object.id !== targetId || object.kind !== "sprite")
+      return;
+    event.preventDefault();
+    const camera = session.surface.camera;
+    const origin = { x: object.x, y: object.y };
+    let position = origin;
+    let moved = false;
+    setDragging(true);
+    const move = (moveEvent: PointerEvent): void => {
+      const pointer = stagePointFromClientPoint(
+        rect,
+        moveEvent.clientX,
+        moveEvent.clientY,
+      );
+      position = dragWorldPosition({
+        origin,
+        pointerDown: down,
+        pointerNow: pointer,
+        camera,
+      });
+      moved = moved || movedEnough(down, pointer);
+      session.surface.setObjectOverride(object.id, position);
+    };
+    let finished = false;
+    const cleanup = (): void => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", cancel);
+      if (gestureCleanupRef.current === cancel) {
+        gestureCleanupRef.current = null;
+      }
+      setDragging(false);
+    };
+    const onKeyDown = (keyEvent: KeyboardEvent): void => {
+      if (keyEvent.key === "Escape") cancel();
+    };
+    const cancel = (): void => {
+      cleanup();
+      // Overrides never touched the world, so clearing them restores exactly
+      // the evaluated pose without a rebuild or an authored change.
+      session.surface.clearOverrides();
+    };
+    const up = (): void => {
+      cleanup();
+      const commit = dragCommitRef.current;
+      if (!moved || commit === undefined) {
+        // A click, or a stage without a commit owner, never leaves a temporary
+        // pose behind.
+        session.surface.clearOverrides();
+        return;
+      }
+      // The temporary pose stays on the surface until the host commits the
+      // authored value and the rebuilt world replaces it, so the sprite never
+      // jumps back to its old position in between.
+      commit(position);
+    };
+    gestureCleanupRef.current = cancel;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+    window.addEventListener("pointercancel", cancel, { once: true });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", cancel);
+  };
+
   const duration = request.duration_ms;
+  const staticWorld = request.cue === null;
   const busy = status === "loading";
+  const grabbable = staticWorld && dragTargetId !== undefined;
 
   return (
-    <section className="cue-preview">
-      <div className="cue-preview-stage">
+    <section
+      className={`cue-preview${staticWorld ? " cue-preview-static" : ""}`}
+    >
+      <div
+        className={`cue-preview-stage${grabbable ? " is-draggable" : ""}${
+          dragging ? " is-dragging" : ""
+        }`}
+      >
         <canvas
           aria-label={label}
           className="timeline-stage"
           height={DESIGN_HEIGHT}
+          onPointerDown={grabbable ? beginStageDrag : undefined}
           ref={canvasRef}
           width={DESIGN_WIDTH}
         />
+        {overlay}
       </div>
-      <div className="cue-preview-transport">
-        <button disabled={busy} onClick={() => void play()} type="button">
-          ▶ 播放
-        </button>
-        {status === "error" && (
-          <button onClick={retry} type="button">
-            重试
+      {staticWorld ? (
+        status === "error" ? (
+          <div className="cue-preview-transport">
+            <button onClick={retry} type="button">
+              重试
+            </button>
+          </div>
+        ) : null
+      ) : (
+        <div className="cue-preview-transport">
+          <button disabled={busy} onClick={() => void play()} type="button">
+            ▶ 播放
           </button>
-        )}
-        {status === "playing" ? (
-          <button onClick={pause} type="button">
-            ❚❚ 暂停
+          {status === "error" && (
+            <button onClick={retry} type="button">
+              重试
+            </button>
+          )}
+          {status === "playing" ? (
+            <button onClick={pause} type="button">
+              ❚❚ 暂停
+            </button>
+          ) : (
+            <button
+              disabled={status !== "paused"}
+              onClick={resume}
+              type="button"
+            >
+              ▶ 继续
+            </button>
+          )}
+          <button disabled={busy} onClick={() => void seek(0)} type="button">
+            转场前
           </button>
-        ) : (
-          <button disabled={status !== "paused"} onClick={resume} type="button">
-            ▶ 继续
-          </button>
-        )}
-        <button disabled={busy} onClick={() => void seek(0)} type="button">
-          转场前
-        </button>
-        <button
-          disabled={busy}
-          onClick={() => void seek(duration)}
-          type="button"
-        >
-          转场后
-        </button>
-        {duration > 0 && (
-          <input
-            aria-label={`${label}进度`}
+          <button
             disabled={busy}
-            max={duration}
-            min={0}
-            onChange={(event) => void seek(Number(event.currentTarget.value))}
-            step={1}
-            type="range"
-            value={progressMs}
-          />
-        )}
-        <code>
-          {Math.round(progressMs)} / {duration} ms
-        </code>
-      </div>
+            onClick={() => void seek(duration)}
+            type="button"
+          >
+            转场后
+          </button>
+          {duration > 0 && (
+            <input
+              aria-label={`${label}进度`}
+              disabled={busy}
+              max={duration}
+              min={0}
+              onChange={(event) => void seek(Number(event.currentTarget.value))}
+              step={1}
+              type="range"
+              value={progressMs}
+            />
+          )}
+          <code>
+            {Math.round(progressMs)} / {duration} ms
+          </code>
+        </div>
+      )}
     </section>
   );
 }

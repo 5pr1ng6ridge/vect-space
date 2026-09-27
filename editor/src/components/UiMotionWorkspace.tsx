@@ -8,6 +8,8 @@ import {
   type ReactElement,
 } from "react";
 import { assetUrl } from "../api";
+import { Sparkles } from "lucide-react";
+import { WorkspaceHeader } from "../shell/WorkspaceHeader";
 import {
   resolveImageAsset,
   type AnimationMap,
@@ -24,6 +26,8 @@ import {
   useGameplayFont,
 } from "@vectspace/presentation-react/gameplay";
 import { evaluateChannel } from "../timeline";
+import { escapeTextEntry, isComposing } from "../ui/keyboard";
+import { isEditableTarget } from "./nodeDeleteShortcut";
 import {
   KeyframeInspector,
   TimelineSurface,
@@ -172,6 +176,8 @@ export function UiMotionWorkspace({
   onSave,
   onUndo,
   onRedo,
+  undoAvailable = true,
+  redoAvailable = true,
 }: {
   file: UiMotionFile;
   assets: EditorAsset[];
@@ -191,6 +197,8 @@ export function UiMotionWorkspace({
   onSave(): void;
   onUndo(): void;
   onRedo(): void;
+  undoAvailable?: boolean;
+  redoAvailable?: boolean;
 }): ReactElement {
   const [domainGesture, setDomainGesture] = useState<UiMotionPreset | null>(
     null,
@@ -332,11 +340,13 @@ export function UiMotionWorkspace({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || isComposing(event)) return;
       if (event.key === "Escape") {
+        if (escapeTextEntry(event)) return;
         onBack();
       } else if (
         (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
-        !(event.target instanceof HTMLInputElement)
+        !isEditableTarget(event.target)
       ) {
         event.preventDefault();
         const direction = event.key === "ArrowLeft" ? -1 : 1;
@@ -512,21 +522,18 @@ export function UiMotionWorkspace({
 
   return (
     <main className="ui-motion-workspace">
-      <header className="ui-motion-toolbar">
-        <button onClick={onBack} type="button">
-          ← 返回剧情图
-        </button>
-        <strong>UI 动效 · {draft.id}</strong>
-        <button onClick={onUndo} type="button">
-          撤销
-        </button>
-        <button onClick={onRedo} type="button">
-          重做
-        </button>
-        <button disabled={!dirty} onClick={onSave} type="button">
-          保存
-        </button>
-      </header>
+      <WorkspaceHeader
+        dirty={dirty}
+        icon={Sparkles}
+        kind="UI 动效"
+        onBack={onBack}
+        onRedo={onRedo}
+        onSave={onSave}
+        onUndo={onUndo}
+        redoAvailable={redoAvailable}
+        title={draft.id}
+        undoAvailable={undoAvailable}
+      />
       <section className="ui-motion-main">
         <div className="ui-motion-preview" ref={previewRef}>
           <div

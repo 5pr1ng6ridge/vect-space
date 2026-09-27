@@ -1,4 +1,8 @@
 import {
+  createContext,
+  useContext,
+  useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -6,19 +10,22 @@ import {
   type ReactNode,
 } from "react";
 import {
-  NODE_TYPES,
   canConvertToTimeline,
   defaultCondition,
   defaultNode,
   nodeLabel,
+  projectRequest,
   resolveSpriteAsset,
+  sceneSpriteIds,
 } from "../story";
 import { interpolateTemplate } from "../textTemplate";
 import { isCanonicalIntegerText, scalarType } from "../scalars";
-import { assetUrl } from "../api";
+import { assetUrl, editorApi } from "../api";
 import { defaultCurtainFill } from "../presentationDefaults";
 import { animationSourceId } from "../imageAnimation";
-import { AssetChooser } from "./AssetChooser";
+import { isAssetDrag, resolveBackgroundDrop } from "../assetDrag";
+import { authoredSpritePosition, spriteDragTarget } from "../stageEdit";
+import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import { FrameSequencePreview } from "./FrameSequencePreview";
 import type {
   AnimationFile,
@@ -48,10 +55,42 @@ import type {
 } from "../types";
 import { MeasuredMarkup } from "@vectspace/text-react";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
-import type { ChoicePrompt } from "@vectspace/presentation-core/types";
+import type { SceneWorldSnapshot } from "@vectspace/presentation-core/scene-surface";
+import type {
+  ChoicePrompt,
+  StoryLocation,
+} from "@vectspace/presentation-core/types";
 import { CuePreview } from "./CuePreview";
 import type { CuePreviewEnvironment } from "./CuePreview";
-import { Field, NumberField } from "./Fields";
+import { DeferredInput, DeferredTextArea, Field, NumberField } from "./Fields";
+import { usePendingCommit } from "../ui/pendingCommits";
+import {
+  ArrowDown,
+  ArrowUp,
+  Clapperboard,
+  CopyPlus,
+  Flag,
+  MoreHorizontal,
+  MousePointerClick,
+  Pencil,
+  Replace,
+  Trash2,
+} from "lucide-react";
+import { NODE_CATEGORY } from "../labels";
+import { Badge, EmptyState } from "../ui/Display";
+import { IconButton } from "../ui/Button";
+import { DropdownMenu, type MenuItemSpec } from "../ui/Menu";
+import { NODE_ICONS } from "../ui/nodeIcons";
+import { useConfirm } from "../ui/feedbackContext";
+import { nodeTypeEntries } from "./nodeTypeMenu";
+import { describeNode } from "../nodeSummary";
+import { Crosshair } from "lucide-react";
+
+import {
+  MUTATION_LABELS,
+  VARIABLE_SCOPE_LABELS,
+  VARIABLE_TYPE_LABELS,
+} from "../labels";
 import { AudioLoopEditor } from "./AudioLoopEditor";
 import { ChoicePresentationFields } from "./ChoicePresentationFields";
 import { ChoicePreview } from "./ChoicePreview";
@@ -65,11 +104,12 @@ import {
   buildBackgroundPreviewRequest,
   buildCurtainPreviewRequest,
   buildScreenEffectPreviewRequest,
+  buildWorldPreviewRequest,
   storyVisualStateAtNode,
 } from "../presentationPreview";
 
-/** Preview inputs threaded to the Rust-backed Choice inspector preview. */
-interface ChoicePreviewContext {
+/** Preview inputs threaded to the Rust-backed inspector previews. */
+interface NodePreviewContext {
   project: EditorProject;
   animationMap: AnimationMap;
   importTokens: string[];
@@ -121,6 +161,8 @@ interface NodeInspectorProps {
   previewImportTokens?: string[];
   previewVariableOverrides?: Record<string, ScalarValue>;
   previewChoices?: PreviewChoiceDecision[];
+  /** Select a node in the story graph (the target locator). */
+  onLocateNode?(nodeId: string): void;
 }
 
 export function NodeInspector({
@@ -150,9 +192,9 @@ export function NodeInspector({
   previewImportTokens,
   previewVariableOverrides,
   previewChoices,
+  onLocateNode,
 }: NodeInspectorProps): ReactElement {
   const node = nodeId === null ? undefined : scene.nodes[nodeId];
-  const [idDraft, setIdDraft] = useState(nodeId ?? "");
   const [choicePreviewResolution, setChoicePreviewResolution] = useState<{
     project: EditorProject;
     sceneId: string;
@@ -170,10 +212,9 @@ export function NodeInspector({
   if (nodeId === null || node === undefined) {
     return (
       <aside className="inspector empty-inspector">
-        <div className="empty-state compact">
-          <span className="empty-glyph">⌁</span>
-          <p>选择一个节点以编辑属性</p>
-        </div>
+        <EmptyState icon={MousePointerClick} title="未选择节点">
+          在剧情图或脚本视图中选择一个节点，这里会显示它的全部属性。
+        </EmptyState>
       </aside>
     );
   }
@@ -183,144 +224,245 @@ export function NodeInspector({
     Object.keys(scene.nodes).find((id) => id !== nodeId) ?? nodeId;
 
   return (
-    <aside className="inspector">
-      <header className="inspector-header">
-        <div>
-          <span className="eyebrow">NODE INSPECTOR</span>
-          <h2>{nodeLabel(node.type)}</h2>
-        </div>
-        {scene.entry === nodeId && <span className="entry-chip">ENTRY</span>}
-      </header>
+    <InspectorSceneContext.Provider
+      value={{ scene, manifest, onLocate: onLocateNode }}
+    >
+      <aside className="inspector">
+        <InspectorHeader
+          isEntry={scene.entry === nodeId}
+          node={node}
+          nodeId={nodeId}
+          onChangeType={(type) => update(defaultNode(type, fallback))}
+          onConvertActionToTimeline={
+            node.type === "action" &&
+            onConvertActionToTimeline !== undefined &&
+            actions.some((file) => file.definition.id === node.action)
+              ? () => void onConvertActionToTimeline(nodeId)
+              : undefined
+          }
+          onConvertToTimeline={
+            canConvertToTimeline(node)
+              ? () => onConvertToTimeline(nodeId)
+              : undefined
+          }
+          onDelete={() => onDelete(nodeId)}
+          onDuplicate={() => onDuplicate(nodeId)}
+          onRename={(next) => onRename(nodeId, next)}
+          onSetEntry={() => onSetEntry(nodeId)}
+        />
 
-      <section className="inspector-section">
-        <Field label="节点 ID" hint="存档会引用此 ID">
-          <div className="inline-field">
-            <input
-              value={idDraft}
-              onChange={(event) => setIdDraft(event.currentTarget.value)}
-            />
-            <button
-              disabled={idDraft === nodeId || idDraft.trim() === ""}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "重命名节点会破坏使用旧 ID 的既有存档。确定要更新全部剧情引用吗？",
-                  )
-                ) {
-                  onRename(nodeId, idDraft.trim());
-                }
-              }}
-              type="button"
-            >
-              重命名
-            </button>
-          </div>
-        </Field>
-        <Field label="节点类型">
-          <select
-            value={node.type}
-            onChange={(event) => {
-              const nextType = event.currentTarget.value as SceneNode["type"];
-              if (window.confirm("切换节点类型会重置该节点的专有字段。")) {
-                update(defaultNode(nextType, fallback));
-              }
-            }}
-          >
-            {NODE_TYPES.map((candidate) => (
-              <option key={candidate.type} value={candidate.type}>
-                {candidate.group} · {candidate.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </section>
-
-      <section className="inspector-section node-fields">
-        {renderFields(
-          node,
-          nodeId,
-          update,
-          scene,
-          manifest,
-          uiMotions,
-          buttons,
-          assets,
-          animations,
-          actions,
-          scenes,
-          onError,
-          previewEnvironment,
-          (offset, text) => onSplitDialogue(nodeId, offset, text),
-          (stepIndex) => onSplitLongText(nodeId, stepIndex),
-          () => onOpenLongTextWorkspace(nodeId),
-          previewProject === undefined
-            ? undefined
-            : {
-                project: previewProject,
-                animationMap: previewAnimationMap,
-                importTokens: previewImportTokens ?? [],
-                variableOverrides: previewVariableOverrides ?? {},
-                choices: previewChoices ?? [],
-                onResolvedPrompt: (prompt) =>
-                  setChoicePreviewResolution({
-                    project: previewProject,
-                    sceneId: scene.id,
-                    nodeId,
-                    prompt,
-                  }),
-              },
-          choicePreviewPrompt,
-        )}
-      </section>
-
-      <section className="inspector-section inspector-actions">
-        {node.type === "action" &&
-          onConvertActionToTimeline !== undefined &&
-          actions.some((file) => file.definition.id === node.action) && (
-            <button
-              className="convert-timeline-button"
-              onClick={() => {
-                void onConvertActionToTimeline(nodeId);
-              }}
-              type="button"
-            >
-              解除引用为关键帧时间线
-            </button>
+        <section className="inspector-section node-fields">
+          {renderFields(
+            node,
+            nodeId,
+            update,
+            scene,
+            manifest,
+            uiMotions,
+            buttons,
+            assets,
+            animations,
+            actions,
+            scenes,
+            onError,
+            previewEnvironment,
+            (offset, text) => onSplitDialogue(nodeId, offset, text),
+            (stepIndex) => onSplitLongText(nodeId, stepIndex),
+            () => onOpenLongTextWorkspace(nodeId),
+            previewProject === undefined
+              ? undefined
+              : {
+                  project: previewProject,
+                  animationMap: previewAnimationMap,
+                  importTokens: previewImportTokens ?? [],
+                  variableOverrides: previewVariableOverrides ?? {},
+                  choices: previewChoices ?? [],
+                  onResolvedPrompt: (prompt) =>
+                    setChoicePreviewResolution({
+                      project: previewProject,
+                      sceneId: scene.id,
+                      nodeId,
+                      prompt,
+                    }),
+                },
+            choicePreviewPrompt,
           )}
-        {canConvertToTimeline(node) && (
-          <>
-            <button
-              className="convert-timeline-button"
-              onClick={() => onConvertToTimeline(nodeId)}
-              type="button"
-            >
-              转为关键帧时间线
-            </button>
-            <p className="field-note">
-              保留下一节点、时长与等待策略；0 ms
-              使用“继承入口值”，无需先选择预览路径。
-            </p>
-          </>
+        </section>
+      </aside>
+    </InspectorSceneContext.Provider>
+  );
+}
+
+/**
+ * Inspector title: what the node is, its stable id (renamable in place) and
+ * every node-level action in one menu, instead of a column of buttons.
+ */
+/** Scene data shared with deeply nested field editors. */
+const InspectorSceneContext = createContext<{
+  scene: SceneDefinition;
+  manifest: ContentManifest;
+  onLocate?(nodeId: string): void;
+} | null>(null);
+
+function InspectorHeader({
+  node,
+  nodeId,
+  isEntry,
+  onRename,
+  onChangeType,
+  onSetEntry,
+  onDuplicate,
+  onDelete,
+  onConvertToTimeline,
+  onConvertActionToTimeline,
+}: {
+  node: SceneNode;
+  nodeId: string;
+  isEntry: boolean;
+  onRename(next: string): void;
+  onChangeType(type: SceneNode["type"]): void;
+  onSetEntry(): void;
+  onDuplicate(): void;
+  onDelete(): void;
+  onConvertToTimeline?(): void;
+  onConvertActionToTimeline?(): void;
+}): ReactElement {
+  const confirm = useConfirm();
+  const [renaming, setRenaming] = useState(false);
+  const Icon = NODE_ICONS[node.type];
+  const category = NODE_CATEGORY[node.type];
+  const requestRename = (raw: string): boolean => {
+    const next = raw.trim();
+    if (next === "" || next === nodeId) {
+      setRenaming(false);
+      return true;
+    }
+    void confirm({
+      title: `把节点 ${nodeId} 重命名为 ${next}？`,
+      description:
+        "本项目中指向它的连线、跳转与预览设置会一并更新；但玩家已有存档中记录的旧 ID 将无法恢复到这个节点。",
+      confirmLabel: "重命名并更新引用",
+    }).then((accepted) => {
+      if (accepted) onRename(next);
+      setRenaming(false);
+    });
+    return true;
+  };
+  const entries: MenuItemSpec[] = [
+    {
+      id: "entry",
+      label: "设为场景入口",
+      icon: Flag,
+      disabled: isEntry,
+      hint: "已经是场景入口",
+      onSelect: onSetEntry,
+    },
+    {
+      id: "rename",
+      label: "重命名 ID…",
+      icon: Pencil,
+      onSelect: () => setRenaming(true),
+    },
+    {
+      id: "duplicate",
+      label: "创建副本",
+      icon: CopyPlus,
+      onSelect: onDuplicate,
+    },
+  ];
+  if (
+    onConvertToTimeline !== undefined ||
+    onConvertActionToTimeline !== undefined
+  )
+    entries.push({ kind: "separator", id: "sep-convert" });
+  if (onConvertToTimeline !== undefined)
+    entries.push({
+      id: "convert",
+      label: "转为关键帧时间线",
+      icon: Clapperboard,
+      onSelect: onConvertToTimeline,
+    });
+  if (onConvertActionToTimeline !== undefined)
+    entries.push({
+      id: "convert-action",
+      label: "展开为关键帧时间线",
+      icon: Clapperboard,
+      onSelect: onConvertActionToTimeline,
+    });
+  entries.push(
+    { kind: "separator", id: "sep-type" },
+    {
+      kind: "submenu",
+      id: "type",
+      label: "更改类型",
+      icon: Replace,
+      entries: nodeTypeEntries((type) => {
+        if (type === node.type) return;
+        void confirm({
+          title: `把这个节点改为「${nodeLabel(type)}」？`,
+          description:
+            "切换类型会清空该节点的专有设置，只保留节点 ID 与位置。可以撤销。",
+          confirmLabel: "更改类型",
+          danger: true,
+        }).then((accepted) => {
+          if (accepted) onChangeType(type);
+        });
+      }),
+    },
+    { kind: "separator", id: "sep-delete" },
+    {
+      id: "delete",
+      label: "删除节点",
+      icon: Trash2,
+      danger: true,
+      shortcut: "Delete",
+      onSelect: onDelete,
+    },
+  );
+  return (
+    <header className={`inspector-header story-cat-${category}`}>
+      <span className="inspector-type-icon">
+        <Icon aria-hidden="true" />
+      </span>
+      <div className="inspector-heading">
+        <h2>{nodeLabel(node.type)}</h2>
+        {renaming ? (
+          <DeferredInput
+            aria-label="节点 ID"
+            autoFocus
+            className="inspector-id-input"
+            onCommit={requestRename}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setRenaming(false);
+            }}
+            spellCheck={false}
+            value={nodeId}
+          />
+        ) : (
+          <button
+            aria-label={`节点 ID ${nodeId}，点击重命名`}
+            className="inspector-id"
+            onClick={() => setRenaming(true)}
+            title="点击重命名（存档会引用此 ID）"
+            type="button"
+          >
+            <code>{nodeId}</code>
+            <Pencil aria-hidden="true" />
+          </button>
         )}
-        <button
-          disabled={scene.entry === nodeId}
-          onClick={() => onSetEntry(nodeId)}
-          type="button"
-        >
-          设为场景入口
-        </button>
-        <button onClick={() => onDuplicate(nodeId)} type="button">
-          复制节点
-        </button>
-        <button
-          className="danger-button"
-          onClick={() => onDelete(nodeId)}
-          type="button"
-        >
-          删除节点
-        </button>
-      </section>
-    </aside>
+      </div>
+      {isEntry && (
+        <Badge icon={Flag} tone="accent">
+          入口
+        </Badge>
+      )}
+      <DropdownMenu
+        align="end"
+        entries={entries}
+        label="节点操作"
+        trigger={<IconButton icon={MoreHorizontal} label="节点操作" />}
+      />
+    </header>
   );
 }
 
@@ -341,7 +483,7 @@ function renderFields(
   splitDialogue: (offset: number, text?: string) => void,
   splitLongText: (stepIndex: number) => void,
   openLongTextWorkspace: () => void,
-  preview: ChoicePreviewContext | undefined,
+  preview: NodePreviewContext | undefined,
   choicePreviewPrompt: ChoicePrompt | null,
 ): ReactNode {
   const targets = Object.keys(scene.nodes);
@@ -375,6 +517,7 @@ function renderFields(
             environment={previewEnvironment}
             node={node}
             nodeId={nodeId}
+            onChange={update}
             onError={onError}
             scene={scene}
           />
@@ -436,6 +579,7 @@ function renderFields(
           <TextField
             label="立绘实例 ID"
             onChange={(sprite_id) => update({ ...node, sprite_id })}
+            suggestions={sceneSpriteIds(scene)}
             value={node.sprite_id}
           />
           <Field label="动作">
@@ -601,6 +745,17 @@ function renderFields(
             onChange={(next) => update({ ...node, next })}
             targets={targets}
             value={node.next}
+          />
+          <SpriteStagePreview
+            assets={assets}
+            environment={previewEnvironment}
+            manifest={manifest}
+            node={node}
+            nodeId={nodeId}
+            onChange={update}
+            onError={onError}
+            preview={preview}
+            sceneId={scene.id}
           />
         </>
       );
@@ -1008,7 +1163,7 @@ function renderFields(
                 <header>
                   <strong>选项 {index + 1}</strong>
                   <div>
-                    <button
+                    <IconButton
                       disabled={index === 0}
                       onClick={() => {
                         const choices = [...node.choices];
@@ -1018,11 +1173,12 @@ function renderFields(
                         ];
                         update({ ...node, choices });
                       }}
-                      type="button"
-                    >
-                      ↑
-                    </button>
-                    <button
+                      icon={ArrowUp}
+                      label="上移"
+                      size="sm"
+                      variant="ghost"
+                    />
+                    <IconButton
                       disabled={index === node.choices.length - 1}
                       onClick={() => {
                         const choices = [...node.choices];
@@ -1032,12 +1188,12 @@ function renderFields(
                         ];
                         update({ ...node, choices });
                       }}
-                      type="button"
-                    >
-                      ↓
-                    </button>
-                    <button
-                      className="danger-text"
+                      icon={ArrowDown}
+                      label="下移"
+                      size="sm"
+                      variant="ghost"
+                    />
+                    <IconButton
                       onClick={() =>
                         update({
                           ...node,
@@ -1047,10 +1203,10 @@ function renderFields(
                           ),
                         })
                       }
-                      type="button"
-                    >
-                      删除
-                    </button>
+                      icon={Trash2}
+                      label="删除"
+                      size="sm"
+                    />
                   </div>
                 </header>
                 <TextField
@@ -1114,7 +1270,7 @@ function renderFields(
                     }
                     value={choice.template ?? ""}
                   >
-                    <option value="">继承节点模板 / 内置 CSS 按钮</option>
+                    <option value="">继承节点模板 / 默认选项按钮</option>
                     {choice.template != null &&
                       choice.template !== "" &&
                       !buttons.some(
@@ -1269,7 +1425,7 @@ function renderFields(
               )}
               {Object.entries(manifest.variables).map(([id, definition]) => (
                 <option key={id} value={id}>
-                  {id} · {definition.type}
+                  {id}（{VARIABLE_TYPE_LABELS[definition.type]}）
                 </option>
               ))}
             </select>
@@ -1388,9 +1544,7 @@ function renderFields(
       const definition = actions.find(
         (file) => file.definition.id === node.action,
       )?.definition;
-      const spriteIds = Object.entries(scene.nodes)
-        .filter(([, candidate]) => candidate.type === "sprite")
-        .map(([id]) => id);
+      const spriteIds = sceneSpriteIds(scene);
       return (
         <>
           <Field label="目标立绘实例">
@@ -2227,7 +2381,7 @@ function ButtonActionEditor({
               )}
               {Object.entries(manifest.variables).map(([id, definition]) => (
                 <option key={id} value={id}>
-                  {id} · {definition.type}
+                  {id}（{VARIABLE_TYPE_LABELS[definition.type]}）
                 </option>
               ))}
             </select>
@@ -2262,8 +2416,9 @@ function ButtonActionEditor({
                 value={set.value}
               />
             )}
-            <button
-              className="danger-text"
+            <IconButton
+              icon={Trash2}
+              label="移除这条变量修改"
               onClick={() =>
                 onChange({
                   ...action,
@@ -2272,10 +2427,8 @@ function ButtonActionEditor({
                   ),
                 })
               }
-              type="button"
-            >
-              ×
-            </button>
+              size="sm"
+            />
           </article>
         );
       })}
@@ -2406,7 +2559,7 @@ function ButtonMutationValueEditor({
           }
         }}
       >
-        <option value="literal">字面量</option>
+        <option value="literal">固定值</option>
         <option disabled={eligibleVariables.length === 0} value="variable">
           变量
         </option>
@@ -2431,7 +2584,7 @@ function ButtonMutationValueEditor({
           )}
           {eligibleVariables.map(([id, definition]) => (
             <option key={id} value={id}>
-              {id} · {definition.type}
+              {id}（{VARIABLE_TYPE_LABELS[definition.type]}）
             </option>
           ))}
         </select>
@@ -2521,13 +2674,19 @@ function OptionalDurationField({
         使用节点时长
       </label>
       {value !== null && (
-        <input
+        <DeferredInput
+          aria-label="时长覆盖 ms"
           max={60_000}
           min={0}
-          onChange={(event) => onChange(Number(event.currentTarget.value))}
+          onCommit={(raw) => {
+            const duration = Number(raw);
+            if (raw.trim() === "" || !Number.isFinite(duration) || duration < 0)
+              return false;
+            onChange(duration);
+          }}
           step={10}
           type="number"
-          value={value}
+          value={String(value)}
         />
       )}
       <small>关闭时使用预设自身时长</small>
@@ -2644,15 +2803,9 @@ function AssetSelect({
   );
 }
 
-const SET_OPERATIONS: { value: VariableOperation; label: string }[] = [
-  { value: "assign", label: "assign · 赋值" },
-  { value: "add", label: "add · 加" },
-  { value: "sub", label: "sub · 减" },
-  { value: "mul", label: "mul · 乘" },
-  { value: "mod", label: "mod · 取模" },
-  { value: "append", label: "append · 追加文本" },
-  { value: "toggle", label: "toggle · 布尔翻转" },
-];
+const SET_OPERATIONS: { value: VariableOperation; label: string }[] = (
+  ["assign", "add", "sub", "mul", "mod", "append", "toggle"] as const
+).map((value) => ({ value, label: MUTATION_LABELS[value] }));
 
 function operationSupportsTarget(
   operation: VariableOperation,
@@ -2697,7 +2850,7 @@ function MutationValueEditor({
             )
           }
         >
-          <option value="literal">字面量</option>
+          <option value="literal">固定值</option>
           <option value="variable">变量</option>
         </select>
         {variableValue === null ? (
@@ -2720,7 +2873,7 @@ function MutationValueEditor({
             )}
             {eligibleVariables.map(([id, definition]) => (
               <option key={id} value={id}>
-                {id} · {definition.type}
+                {id}（{VARIABLE_TYPE_LABELS[definition.type]}）
               </option>
             ))}
           </select>
@@ -2839,14 +2992,14 @@ export function ConditionEditor({
             )
           }
         >
-          <option value="eq">Eq · 等于</option>
-          <option value="ne">Ne · 不等于</option>
-          <option value="lt">Lt · 小于</option>
-          <option value="le">Le · 小于等于</option>
-          <option value="gt">Gt · 大于</option>
-          <option value="ge">Ge · 大于等于</option>
+          <option value="eq">等于</option>
+          <option value="ne">不等于</option>
+          <option value="lt">小于</option>
+          <option value="le">小于等于</option>
+          <option value="gt">大于</option>
+          <option value="ge">大于等于</option>
           <option value="and">And · 全部成立</option>
-          <option value="or">Or · 任一成立</option>
+          <option value="or">任一满足（或）</option>
           <option value="not">Not · 取反</option>
         </select>
       </Field>
@@ -2873,7 +3026,7 @@ export function ConditionEditor({
           {value.conditions.map((child, index) => (
             <div className="condition-child" key={index}>
               <div className="condition-child-actions">
-                <button
+                <IconButton
                   disabled={index === 0}
                   onClick={() => {
                     const conditions = [...value.conditions];
@@ -2883,11 +3036,12 @@ export function ConditionEditor({
                     ];
                     onChange({ ...value, conditions });
                   }}
-                  type="button"
-                >
-                  ↑
-                </button>
-                <button
+                  icon={ArrowUp}
+                  label="上移"
+                  size="sm"
+                  variant="ghost"
+                />
+                <IconButton
                   disabled={index === value.conditions.length - 1}
                   onClick={() => {
                     const conditions = [...value.conditions];
@@ -2897,12 +3051,12 @@ export function ConditionEditor({
                     ];
                     onChange({ ...value, conditions });
                   }}
-                  type="button"
-                >
-                  ↓
-                </button>
-                <button
-                  className="danger-text"
+                  icon={ArrowDown}
+                  label="下移"
+                  size="sm"
+                  variant="ghost"
+                />
+                <IconButton
                   onClick={() =>
                     onChange({
                       ...value,
@@ -2912,10 +3066,10 @@ export function ConditionEditor({
                       ),
                     })
                   }
-                  type="button"
-                >
-                  删除
-                </button>
+                  icon={Trash2}
+                  label="删除"
+                  size="sm"
+                />
               </div>
               <ConditionEditor
                 manifest={manifest}
@@ -2991,7 +3145,7 @@ function OperandEditor({
           }}
         >
           <option value="variable">变量</option>
-          <option value="value">字面量</option>
+          <option value="value">固定值</option>
         </select>
         {"variable" in value ? (
           <select
@@ -3007,8 +3161,8 @@ function OperandEditor({
             )}
             {variableIds.map((id) => (
               <option key={id} value={id}>
-                {id} · {manifest.variables[id].scope}/
-                {manifest.variables[id].type}
+                {id}（{VARIABLE_SCOPE_LABELS[manifest.variables[id].scope]} ·{" "}
+                {VARIABLE_TYPE_LABELS[manifest.variables[id].type]}）
               </option>
             ))}
           </select>
@@ -3034,52 +3188,45 @@ function LiteralEditor({
   value: ScalarValue;
 }): ReactElement {
   const valueType = expectedType ?? scalarVariableType(value);
-  const integerInputRef = useRef<HTMLInputElement>(null);
   if (valueType === "boolean") {
     return (
       <select
         value={String(value)}
         onChange={(event) => onChange(event.currentTarget.value === "true")}
       >
-        <option value="true">true</option>
-        <option value="false">false</option>
+        <option value="true">是</option>
+        <option value="false">否</option>
       </select>
     );
   }
   if (valueType === "integer") {
     return (
-      <input
+      <DeferredInput
         aria-label="整数值"
         inputMode="numeric"
-        key={String(value)}
-        ref={integerInputRef}
+        onCommit={(raw) => {
+          if (!isCanonicalIntegerText(raw)) return false;
+          onChange(BigInt(raw));
+        }}
         type="text"
-        defaultValue={String(value)}
-        onBlur={() => {
-          const raw = integerInputRef.current?.value ?? String(value);
-          if (isCanonicalIntegerText(raw)) onChange(BigInt(raw));
-        }}
-        onKeyDown={(event) => {
-          const raw = integerInputRef.current?.value ?? String(value);
-          if (event.key === "Enter" && isCanonicalIntegerText(raw)) {
-            onChange(BigInt(raw));
-          }
-        }}
+        value={String(value)}
       />
     );
   }
   return (
-    <input
+    <DeferredInput
+      onCommit={(raw) => {
+        if (valueType !== "number") {
+          onChange(raw);
+          return;
+        }
+        const parsed = Number(raw);
+        if (raw.trim() === "" || !Number.isFinite(parsed)) return false;
+        onChange(parsed);
+      }}
       step="any"
       type={valueType === "number" ? "number" : "text"}
       value={String(value)}
-      onChange={(event) =>
-        onChange(
-          valueType === "number"
-            ? Number(event.currentTarget.value)
-            : event.currentTarget.value,
-        )
-      }
     />
   );
 }
@@ -3171,11 +3318,11 @@ function LongTextStepsEditor({
     <div className="long-text-steps-editor">
       <div className="field-label">推进段落</div>
       {steps.map((step, index) => (
-        <article className="long-text-step-editor" key={`${step.id}-${index}`}>
+        <article className="long-text-step-editor" key={index}>
           <header>
             <strong>第 {index + 1} 段</strong>
             <div className="compact-actions">
-              <button
+              <IconButton
                 disabled={index === 0}
                 onClick={() => {
                   const next = [...steps];
@@ -3185,11 +3332,12 @@ function LongTextStepsEditor({
                   ];
                   onChange(next);
                 }}
-                type="button"
-              >
-                ↑
-              </button>
-              <button
+                icon={ArrowUp}
+                label="上移"
+                size="sm"
+                variant="ghost"
+              />
+              <IconButton
                 disabled={index === steps.length - 1}
                 onClick={() => {
                   const next = [...steps];
@@ -3199,20 +3347,20 @@ function LongTextStepsEditor({
                   ];
                   onChange(next);
                 }}
-                type="button"
-              >
-                ↓
-              </button>
-              <button
-                className="danger-text"
+                icon={ArrowDown}
+                label="下移"
+                size="sm"
+                variant="ghost"
+              />
+              <IconButton
                 disabled={steps.length === 1}
                 onClick={() =>
                   onChange(steps.filter((_, current) => current !== index))
                 }
-                type="button"
-              >
-                删除
-              </button>
+                icon={Trash2}
+                label="删除"
+                size="sm"
+              />
               <button
                 disabled={index === 0}
                 onClick={() => onSplit(index)}
@@ -3224,10 +3372,11 @@ function LongTextStepsEditor({
           </header>
           <label>
             <span>步骤 ID</span>
-            <input
-              onChange={(event) =>
-                replace(index, { id: event.currentTarget.value })
-              }
+            <DeferredInput
+              onCommit={(id) => {
+                if (id.trim() === "") return false;
+                replace(index, { id });
+              }}
               value={step.id}
             />
           </label>
@@ -3244,14 +3393,11 @@ function LongTextStepsEditor({
             />
             <span>从新纸张开始</span>
           </label>
-          <textarea
-            onChange={(event) =>
-              replace(index, { text: event.currentTarget.value })
-            }
-            rows={6}
+          <LongTextStepText
+            manifest={manifest}
+            onCommit={(text) => replace(index, { text })}
             value={step.text}
           />
-          <MeasuredMarkup source={interpolatePreview(step.text, manifest)} />
         </article>
       ))}
       <button
@@ -3290,6 +3436,7 @@ function DialogueTextEditor({
     const draft = inputRef.current?.value ?? value;
     if (draft !== value) onChange(draft);
   };
+  const pendingCommit = usePendingCommit(commit);
   return (
     <Field label="对话文本" hint="支持 KaTeX、pause、speed 和 fx 标记">
       <textarea
@@ -3298,7 +3445,7 @@ function DialogueTextEditor({
         defaultValue={value}
         key={value}
         onChange={(event) => setTextLength(event.currentTarget.value.length)}
-        onBlur={commit}
+        {...pendingCommit}
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
             event.preventDefault();
@@ -3374,6 +3521,9 @@ function LongTextLayoutEditor({
       }
     | undefined
   >(undefined);
+  // The drag previews locally and commits one history entry on release.
+  const [dragLayout, setDragLayout] = useState<LongTextLayout | null>(null);
+  const shown = dragLayout ?? layout;
   const change = (field: keyof LongTextLayout, value: number): void =>
     onChange({ ...layout, [field]: value });
   const snapped = (value: number): number => Math.round(value / 10) * 10;
@@ -3396,7 +3546,7 @@ function LongTextLayoutEditor({
     const dy = (event.clientY - drag.y) * scaleY;
     const snap = event.shiftKey ? (value: number) => value : snapped;
     if (drag.mode === "move") {
-      onChange({
+      setDragLayout({
         ...drag.layout,
         x: snap(
           Math.max(0, Math.min(1920 - drag.layout.width, drag.layout.x + dx)),
@@ -3406,7 +3556,7 @@ function LongTextLayoutEditor({
         ),
       });
     } else {
-      onChange({
+      setDragLayout({
         ...drag.layout,
         width: snap(
           Math.max(160, Math.min(1920 - drag.layout.x, drag.layout.width + dx)),
@@ -3428,9 +3578,12 @@ function LongTextLayoutEditor({
           onPointerMove={move}
           onPointerUp={() => {
             dragRef.current = undefined;
+            if (dragLayout !== null) onChange(dragLayout);
+            setDragLayout(null);
           }}
           onPointerCancel={() => {
             dragRef.current = undefined;
+            setDragLayout(null);
           }}
           ref={canvasRef}
         >
@@ -3439,10 +3592,10 @@ function LongTextLayoutEditor({
             className="long-text-layout-rect"
             onPointerDown={(event) => begin(event, "move")}
             style={{
-              left: `${(layout.x / 1920) * 100}%`,
-              top: `${(layout.y / 1080) * 100}%`,
-              width: `${(layout.width / 1920) * 100}%`,
-              height: `${(layout.height / 1080) * 100}%`,
+              left: `${(shown.x / 1920) * 100}%`,
+              top: `${(shown.y / 1080) * 100}%`,
+              width: `${(shown.width / 1920) * 100}%`,
+              height: `${(shown.height / 1080) * 100}%`,
             }}
             type="button"
           >
@@ -3497,35 +3650,35 @@ function TextField({
   disabled = false,
   label,
   onChange,
+  suggestions,
   value,
 }: {
   allowEmpty?: boolean;
   disabled?: boolean;
   label: string;
   onChange(value: string): void;
+  /** Offer existing values (e.g. sprite ids) while still allowing new ones. */
+  suggestions?: readonly string[];
   value: string;
 }): ReactElement {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const commit = (): void => {
-    const draft = inputRef.current?.value ?? value;
-    if (draft !== value) onChange(draft);
-  };
+  const listId = useId();
   return (
     <Field label={label}>
-      <input
+      <DeferredInput
         disabled={disabled}
+        list={suggestions === undefined ? undefined : listId}
+        onCommit={(raw) => onChange(raw)}
         required={!allowEmpty}
-        defaultValue={value}
-        key={value}
-        ref={inputRef}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            commit();
-          }
-        }}
+        spellCheck={false}
+        value={value}
       />
+      {suggestions !== undefined && (
+        <datalist id={listId}>
+          {suggestions.map((suggestion) => (
+            <option key={suggestion} value={suggestion} />
+          ))}
+        </datalist>
+      )}
     </Field>
   );
 }
@@ -3545,40 +3698,24 @@ function OptionalNumber({
   step?: number;
   value: number | null;
 }): ReactElement {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const commit = (): void => {
-    const raw =
-      inputRef.current?.value ?? (value === null ? "" : String(value));
-    if (raw.trim() === "") {
-      if (value !== null) onChange(null);
-      return;
-    }
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed)) {
-      if (parsed !== value) onChange(parsed);
-    } else {
-      if (inputRef.current !== null)
-        inputRef.current.value = value === null ? "" : String(value);
-    }
-  };
   return (
     <Field label={label}>
-      <input
+      <DeferredInput
         max={max}
         min={min}
+        onCommit={(raw) => {
+          if (raw.trim() === "") {
+            if (value !== null) onChange(null);
+            return;
+          }
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed)) return false;
+          if (parsed !== value) onChange(parsed);
+        }}
         placeholder="保持不变"
         step={step}
         type="number"
-        defaultValue={value === null ? "" : String(value)}
-        key={value === null ? "null" : String(value)}
-        ref={inputRef}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            commit();
-          }
-        }}
+        value={value === null ? "" : String(value)}
       />
     </Field>
   );
@@ -3616,21 +3753,44 @@ function TargetSelect({
   targets: string[];
   value: string;
 }): ReactElement {
+  const context = useContext(InspectorSceneContext);
+  const optionLabel = (id: string): string => {
+    const target = context?.scene.nodes[id];
+    if (target === undefined) return id;
+    const { title, summary } = describeNode(target, {
+      manifest: context?.manifest,
+    });
+    const text = `${title === null ? "" : `${title}：`}${summary}`;
+    return `${id} · ${nodeLabel(target.type)} · ${
+      text.length > 24 ? `${text.slice(0, 24)}…` : text
+    }`;
+  };
   return (
     <Field label={label}>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
-      >
-        {!targets.includes(value) && (
-          <option value={value}>{value || "— 缺少目标 —"}</option>
+      <div className="inline-field">
+        <select
+          value={value}
+          onChange={(event) => onChange(event.currentTarget.value)}
+        >
+          {!targets.includes(value) && (
+            <option value={value}>{value || "— 缺少目标 —"}</option>
+          )}
+          {targets.map((target) => (
+            <option key={target} value={target}>
+              {optionLabel(target)}
+            </option>
+          ))}
+        </select>
+        {context?.onLocate !== undefined && targets.includes(value) && (
+          <IconButton
+            icon={Crosshair}
+            label={`在剧情图中定位 ${value}`}
+            onClick={() => context.onLocate?.(value)}
+            size="sm"
+            tooltip="在剧情图中定位"
+          />
         )}
-        {targets.map((target) => (
-          <option key={target} value={target}>
-            {target}
-          </option>
-        ))}
-      </select>
+      </div>
     </Field>
   );
 }
@@ -3640,6 +3800,7 @@ function BackgroundPreview({
   environment,
   node,
   nodeId,
+  onChange,
   onError,
   scene,
 }: {
@@ -3647,6 +3808,7 @@ function BackgroundPreview({
   environment: CuePreviewEnvironment | undefined;
   node: Extract<SceneNode, { type: "background" }>;
   nodeId: string;
+  onChange(node: SceneNode): void;
   onError: ((message: string) => void) | undefined;
   scene: SceneDefinition;
 }): ReactElement {
@@ -3658,15 +3820,252 @@ function BackgroundPreview({
       ),
     [node, nodeId, scene],
   );
+  const layout = useAssetLayout();
+  const [dragOver, setDragOver] = useState(false);
   return (
     <CuePreview
       assets={assets}
       environment={environment}
       label="背景转场预览"
       onError={onError}
+      overlay={
+        <div
+          className={`stage-drop-target${dragOver ? " is-active" : ""}`}
+          onDragLeave={() => setDragOver(false)}
+          onDragOver={(event) => {
+            // Every drag over the stage canvas is consumed, including one the
+            // canvas refuses: an uncancelled drag leaves the WebView free to
+            // open a dropped OS file (or the file's target) and throw away
+            // unsaved authoring.  Only an internal single-asset drag offers
+            // the drop affordance; a refused payload is consumed silently.
+            event.preventDefault();
+            const internal = isAssetDrag(event.dataTransfer);
+            event.dataTransfer.dropEffect = internal ? "copy" : "none";
+            setDragOver(internal);
+          }}
+          onDrop={(event) => {
+            // Consumed unconditionally: dropping on the canvas is never a file
+            // import (that is the asset library's own drop zone) and a refused
+            // drop must not bubble into another target either.
+            event.preventDefault();
+            event.stopPropagation();
+            setDragOver(false);
+            if (!isAssetDrag(event.dataTransfer)) return;
+            const id = resolveBackgroundDrop(
+              event.dataTransfer,
+              assets,
+              layout,
+            );
+            // Re-dropping the background the node already shows is a no-op:
+            // an unchanged value must never create an undo entry.
+            if (id === null || id === node.background) return;
+            onChange({ ...node, background: id });
+          }}
+        >
+          {dragOver && <span>松开以更换背景</span>}
+        </div>
+      }
       request={request}
     />
   );
+}
+
+/**
+ * Where the sprite stage editor stands while its real entering state is being
+ * resolved by the Rust runtime.
+ *
+ * `loading` keeps the previously resolved world (if any) on screen, so a
+ * refetch never blanks the canvas or drops the just-committed pose.
+ */
+type SpriteStageState =
+  | { status: "loading"; world: SceneWorldSnapshot | null }
+  | { status: "ready"; world: SceneWorldSnapshot }
+  | { status: "needs_choice"; location: StoryLocation }
+  | { status: "unreachable"; message: string }
+  | { status: "error"; message: string };
+
+/** Debounce for the runtime preview request; typing must not fire per key. */
+const STAGE_PREVIEW_SETTLE_MS = 200;
+
+function stageWorld(state: SpriteStageState): SceneWorldSnapshot | null {
+  return state.status === "loading" || state.status === "ready"
+    ? state.world
+    : null;
+}
+
+/**
+ * The editable stage of one ordinary `sprite` node.
+ *
+ * The world is always the real one the runtime produces: the node's own
+ * `build_node_preview` result, resolved from the *current* draft and preview
+ * decisions, never a graph-walk guess.  `show` and `move` therefore show the
+ * exact pose the game will end up at, and dragging the visible sprite writes
+ * the authored `x`/`y` once, on release:
+ *
+ * - the gesture temporarily overrides pixels on the shared surface only,
+ * - `hide` removes the sprite, so it has no target and stays read-only,
+ * - the authored value is derived from the world position by removing the
+ *   resolved expression offset (see `stageEdit.ts`).
+ */
+function SpriteStagePreview({
+  assets,
+  environment,
+  manifest,
+  node,
+  nodeId,
+  onChange,
+  onError,
+  preview,
+  sceneId,
+}: {
+  assets: readonly EditorAsset[];
+  environment: CuePreviewEnvironment | undefined;
+  manifest: ContentManifest;
+  node: Extract<SceneNode, { type: "sprite" }>;
+  nodeId: string;
+  onChange(node: SceneNode): void;
+  onError: ((message: string) => void) | undefined;
+  preview: NodePreviewContext | undefined;
+  sceneId: string;
+}): ReactElement {
+  const project = preview?.project;
+  const choices = preview?.choices;
+  const importTokens = preview?.importTokens;
+  const variableOverrides = preview?.variableOverrides;
+  const [state, setState] = useState<SpriteStageState>({
+    status: "loading",
+    world: null,
+  });
+  const [attempt, setAttempt] = useState(0);
+  const generationRef = useRef(0);
+  const sceneChoices = useMemo(
+    () => (choices ?? []).filter((choice) => choice.scene_id === sceneId),
+    [choices, sceneId],
+  );
+  // The parent rebuilds the preview inputs on every commit, so the effect keys
+  // on signatures instead of object identities: an unrelated re-render may not
+  // re-fire a host request (and therefore can never reorder two worlds).
+  const importTokensKey = (importTokens ?? []).join("\u0000");
+  const overridesKey = JSON.stringify(variableOverrides ?? {});
+  const choicesKey = JSON.stringify(sceneChoices);
+
+  useEffect(() => {
+    if (project === undefined) return undefined;
+    const generation = ++generationRef.current;
+    let active = true;
+    // Keeping the last world while the replacement is resolved is an
+    // intentional external-system synchronization, exactly like the cue
+    // preview's own loading state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setState((current) => ({ status: "loading", world: stageWorld(current) }));
+    // A short settle window keeps typing in the inspector from firing one
+    // host round trip per keystroke; a superseded request never starts.
+    const timer = window.setTimeout(() => {
+      void editorApi
+        .buildNodePreview({
+          project: projectRequest(project, importTokens ?? []),
+          target: { scene_id: sceneId, node_id: nodeId },
+          variable_overrides: variableOverrides ?? {},
+          choices: sceneChoices,
+        })
+        .then((result) => {
+          if (!active || generation !== generationRef.current) return;
+          if (result.status === "needs_choice") {
+            setState({ status: "needs_choice", location: result.location });
+            return;
+          }
+          if (result.status === "unreachable") {
+            setState({ status: "unreachable", message: result.message });
+            return;
+          }
+          setState({ status: "ready", world: result.update.snapshot.world });
+        })
+        .catch((reason: unknown) => {
+          if (!active || generation !== generationRef.current) return;
+          setState({ status: "error", message: stagePreviewError(reason) });
+        });
+    }, STAGE_PREVIEW_SETTLE_MS);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      generationRef.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the signatures stand in for the derived decision objects; project identity changes on every commit.
+  }, [
+    project,
+    sceneId,
+    nodeId,
+    importTokensKey,
+    overridesKey,
+    choicesKey,
+    attempt,
+  ]);
+
+  const world = stageWorld(state);
+  const request = useMemo(
+    () => (world === null ? null : buildWorldPreviewRequest(world)),
+    [world],
+  );
+  if (project === undefined) return <></>;
+  if (request === null) {
+    return (
+      <p className="inspector-preview-note">
+        {state.status === "needs_choice"
+          ? `预览需要先补充路径选择：${state.location.scene_id}/${state.location.node_id}`
+          : state.status === "unreachable"
+            ? `无法从场景入口到达该节点：${state.message}`
+            : state.status === "error"
+              ? `预览失败：${state.message}`
+              : "正在通过运行时解析预览…"}
+        {state.status === "error" && (
+          <button
+            onClick={() => setAttempt((current) => current + 1)}
+            type="button"
+          >
+            重试
+          </button>
+        )}
+      </p>
+    );
+  }
+  const spriteId = spriteDragTarget(node);
+  return (
+    <>
+      <CuePreview
+        animations={preview?.animationMap}
+        assets={assets}
+        dragTargetId={
+          state.status === "ready" && spriteId !== null ? spriteId : undefined
+        }
+        environment={environment}
+        label="立绘预览"
+        onDragCommit={(position) => {
+          const authored = authoredSpritePosition(node, manifest, position);
+          if (
+            authored.x === (node.x ?? null) &&
+            authored.y === (node.y ?? null)
+          )
+            return;
+          onChange({ ...node, x: authored.x, y: authored.y });
+        }}
+        onError={onError}
+        request={request}
+      />
+      {spriteId === null ? (
+        <p className="inspector-preview-note">
+          隐藏节点没有可拖动的目标；画面是执行后的真实结果。
+        </p>
+      ) : (
+        <p className="inspector-preview-note">
+          拖动画面中的立绘即可修改 X / Y。
+        </p>
+      )}
+    </>
+  );
+}
+
+function stagePreviewError(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }
 
 function CurtainPreview({
@@ -3731,5 +4130,31 @@ function ScreenEffectPreview({
       onError={onError}
       request={request}
     />
+  );
+}
+
+/** A long-text step body: live markup preview, one history entry per edit. */
+function LongTextStepText({
+  manifest,
+  onCommit,
+  value,
+}: {
+  manifest: ContentManifest;
+  onCommit(text: string): void;
+  value: string;
+}): ReactElement {
+  const [draft, setDraft] = useState({ source: value, text: value });
+  // Re-seed the preview when the committed value changes (undo, redo).
+  const previewText = draft.source === value ? draft.text : value;
+  return (
+    <>
+      <DeferredTextArea
+        onCommit={(text) => onCommit(text)}
+        onDraftChange={(text) => setDraft({ source: value, text })}
+        rows={6}
+        value={value}
+      />
+      <MeasuredMarkup source={interpolatePreview(previewText, manifest)} />
+    </>
   );
 }

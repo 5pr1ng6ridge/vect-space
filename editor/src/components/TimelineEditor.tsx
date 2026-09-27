@@ -9,6 +9,8 @@ import {
 import { assetUrl } from "../api";
 import { firstVisibleAssetId } from "../assetLibrary";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import { DeferredInput } from "./Fields";
+import { AMBIENCE_SLOT_LABELS, FIT_LABELS } from "../labels";
 import { defaultFlashEffect } from "../presentationDefaults";
 import { evaluateVideoClip } from "@vectspace/presentation-core/video-clip";
 import { evaluateChannel, timelineTrackIdentity } from "../timeline";
@@ -328,17 +330,16 @@ export function TimelineEditor({
             <strong>时间线属性</strong>
             <label>
               时长{" "}
-              <input
-                min={1}
+              <DeferredInput
                 max={1_800_000}
+                min={1}
+                onCommit={(raw) => {
+                  const duration = Number(raw);
+                  if (!Number.isInteger(duration) || duration < 1) return false;
+                  onChange({ ...node, duration_ms: duration });
+                }}
                 type="number"
-                value={node.duration_ms}
-                onChange={(event) =>
-                  onChange({
-                    ...node,
-                    duration_ms: Number(event.currentTarget.value),
-                  })
-                }
+                value={String(node.duration_ms)}
               />
             </label>
             <label>
@@ -466,7 +467,7 @@ export function TimelineEditor({
             return (
               <div className="timeline-track-config">
                 <label>
-                  Sprite ID
+                  立绘实例 ID
                   <input
                     value={data.sprite_id}
                     onChange={(event) =>
@@ -523,7 +524,7 @@ export function TimelineEditor({
                         key={slot}
                         value={slot}
                       >
-                        {slot}
+                        {AMBIENCE_SLOT_LABELS[slot]}
                       </option>
                     ))}
                   </select>
@@ -577,9 +578,9 @@ export function TimelineEditor({
                       })
                     }
                   >
-                    <option value="contain">contain</option>
-                    <option value="cover">cover</option>
-                    <option value="stretch">stretch</option>
+                    <option value="contain">{FIT_LABELS.contain}</option>
+                    <option value="cover">{FIT_LABELS.cover}</option>
+                    <option value="stretch">{FIT_LABELS.stretch}</option>
                   </select>
                 </label>
                 <label>
@@ -672,11 +673,20 @@ function surfaceDocumentToNode(
   };
 }
 
+const TRACK_TYPE_LABELS: Record<TimelineTrack["type"], string> = {
+  sprite: "立绘",
+  button: "按钮",
+  camera: "镜头",
+  video: "视频",
+  bgm: "背景音乐",
+  ambience: "环境声",
+};
+
 function trackLabel(track: TimelineTrack): string {
-  if (track.type === "sprite") return `sprite ${track.sprite_id}`;
-  if (track.type === "button") return `button ${track.instance_id}`;
-  if (track.type === "ambience") return `ambience ${track.slot}`;
-  return track.type;
+  if (track.type === "sprite") return `立绘 ${track.sprite_id}`;
+  if (track.type === "button") return `按钮 ${track.instance_id}`;
+  if (track.type === "ambience") return AMBIENCE_SLOT_LABELS[track.slot];
+  return TRACK_TYPE_LABELS[track.type];
 }
 
 function firstItem<T>(values: readonly T[]): T | undefined {
