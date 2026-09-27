@@ -70,6 +70,7 @@ import {
 import type {
   ContentManifest,
   EditorProject,
+  GroupChildRef,
   NodePosition,
   NodeType,
   SceneNode,
@@ -89,6 +90,11 @@ import { useConfirm, useToast } from "./ui/feedbackContext";
 import { ProjectSearch } from "./shell/ProjectSearch";
 import { DeleteNodesDialog, IdEntryDialog } from "./app/dialogs";
 import { idFormatError, idUnavailableReason } from "./app/ids";
+import {
+  captureGraphSelection,
+  placeGraphSelection,
+  type GraphSelectionClipboard,
+} from "./app/graphSelectionClipboard";
 import {
   addButtonTemplate,
   addSpriteAction,
@@ -191,11 +197,14 @@ interface ResizeState {
   initial: number;
 }
 
-interface NodeClipboard {
-  node: SceneNode;
-  sourceNodeId: string;
-  sourceCharacterId: string | null;
-}
+type NodeClipboard =
+  | {
+      kind: "node";
+      node: SceneNode;
+      sourceNodeId: string;
+      sourceCharacterId: string | null;
+    }
+  | { kind: "selection"; graph: GraphSelectionClipboard };
 
 const DEFAULT_PANEL_SIZES: PanelSizes = {
   left: 280,
@@ -1446,6 +1455,58 @@ function EditorApp(): ReactElement {
     setSelectedNodeId(id);
   };
 
+  const duplicateGraphSelection = (
+    selection: readonly GroupChildRef[],
+  ): GroupChildRef[] => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const scene = findScene(currentProject, activeSceneId)?.definition;
+    if (scene === undefined) return [];
+    const layout = currentProject.layout.scenes[activeSceneId];
+    const snapshot = captureGraphSelection(
+      scene,
+      layout,
+      selection,
+      currentProject.manifest,
+    );
+    if (snapshot === null) return [];
+    const placed = placeGraphSelection(
+      snapshot,
+      scene,
+      layout,
+      { x: 0, y: 0 },
+      "duplicate",
+      currentProject.manifest,
+      currentProject.buttons ?? [],
+    );
+    commit((draft) => {
+      const file = findScene(draft, activeSceneId);
+      if (file === undefined) return;
+      Object.assign(file.definition.nodes, placed.nodes);
+      const sceneLayout = ensureSceneLayout(draft.layout, activeSceneId);
+      Object.assign(sceneLayout.nodes, placed.positions);
+      if (placed.copiedGroupCount > 0) sceneLayout.groups = placed.groups;
+    });
+    setSelectedNodeId(null);
+    return placed.roots;
+  };
+
+  const copyGraphSelection = (selection: readonly GroupChildRef[]): void => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const scene = findScene(currentProject, activeSceneId)?.definition;
+    if (scene === undefined) return;
+    const graph = captureGraphSelection(
+      scene,
+      currentProject.layout.scenes[activeSceneId],
+      selection,
+      currentProject.manifest,
+    );
+    if (graph === null) return;
+    nodeClipboardRef.current = { kind: "selection", graph };
+    setNotice(
+      `已复制 ${Object.keys(graph.nodes).length} 个节点，可切换场景后粘贴。`,
+    );
+  };
+
   const copyNode = (nodeId: string): void => {
     const currentProject = editorStateRef.current.project ?? project;
     const node = findScene(currentProject, activeSceneId)?.definition.nodes[
@@ -1459,6 +1520,7 @@ function EditorApp(): ReactElement {
         ? node.speaker
         : null;
     nodeClipboardRef.current = {
+      kind: "node",
       node: structuredClone(node),
       sourceNodeId: nodeId,
       sourceCharacterId,
@@ -1474,11 +1536,36 @@ function EditorApp(): ReactElement {
       setNotice("还没有复制节点。");
       return;
     }
-    const id = uniqueNodeId(currentScene, `${clipboard.sourceNodeId}_copy`);
     const snapped = {
       x: Math.round(position.x / 16) * 16,
       y: Math.round(position.y / 16) * 16,
     };
+    if (clipboard.kind === "selection") {
+      const layout = currentProject.layout.scenes[activeSceneId];
+      const placed = placeGraphSelection(
+        clipboard.graph,
+        currentScene,
+        layout,
+        snapped,
+        "paste",
+        currentProject.manifest,
+        currentProject.buttons ?? [],
+      );
+      commit((draft) => {
+        const file = findScene(draft, activeSceneId);
+        if (file === undefined) return;
+        Object.assign(file.definition.nodes, placed.nodes);
+        const sceneLayout = ensureSceneLayout(draft.layout, activeSceneId);
+        Object.assign(sceneLayout.nodes, placed.positions);
+        if (placed.copiedGroupCount > 0) sceneLayout.groups = placed.groups;
+      });
+      setSelectedNodeId(null);
+      setNotice(
+        `已粘贴 ${Object.keys(placed.nodes).length} 个节点；外部流程连接已清空。`,
+      );
+      return;
+    }
+    const id = uniqueNodeId(currentScene, `${clipboard.sourceNodeId}_copy`);
     commit((draft) => {
       const file = findScene(draft, activeSceneId);
       if (file === undefined) return;
@@ -2597,7 +2684,7 @@ function EditorApp(): ReactElement {
               </div>
               <span className="workspace-header-hint">
                 {sceneViewMode === "graph"
-                  ? "Ctrl/⌘ 或 Shift 点击多选 · 右键组合/解散布局组（Ctrl+L 或 Ctrl+Shift+L）· Ctrl+Enter 预览"
+                  ? "Ctrl/⌘ 或 Shift 点击多选 · Ctrl+C/V 批量复制粘贴 · Ctrl+L 组合/解散（也可点工具栏或右键）· Ctrl+Enter 预览"
                   : "Enter 插入下一句 · Shift+Enter 换行 · Ctrl/⌘ 点击多选"}
               </span>
             </div>
@@ -2613,6 +2700,8 @@ function EditorApp(): ReactElement {
                 manifest={project.manifest}
                 onAddNode={addNode}
                 onDuplicate={duplicateNode}
+                onDuplicateSelection={duplicateGraphSelection}
+                onCopySelection={copyGraphSelection}
                 onEditNode={(nodeId) => {
                   setSelectedNodeId(nodeId);
                   setRightPanelVisible(true);

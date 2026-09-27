@@ -9,8 +9,9 @@ installBrowserGuards({
   // Editor-owned shortcuts that WebView2 would otherwise claim.
   passThrough: (event) =>
     (event.ctrlKey || event.metaKey) &&
-    !event.shiftKey &&
-    event.key.toLowerCase() === "f",
+    ((!event.shiftKey && event.key.toLowerCase() === "f") ||
+      (event.key.toLowerCase() === "l" &&
+        document.querySelector(".graph-shell") !== null)),
 });
 
 const root = document.getElementById("root");

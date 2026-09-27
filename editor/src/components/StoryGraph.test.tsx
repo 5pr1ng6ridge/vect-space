@@ -455,6 +455,90 @@ describe("StoryGraph nested groups", () => {
     expect(onSetGroups).toHaveBeenCalledTimes(1);
   });
 
+  it("captures Ctrl+L after the WebView browser guard and a Flow descendant", async () => {
+    const browserGuard = (event: KeyboardEvent): void => {
+      if (!event.ctrlKey || event.key.toLowerCase() !== "l") return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    window.addEventListener("keydown", browserGuard, true);
+    try {
+      const { view, props } = renderGraph();
+      fireEvent.click(await nodeCard("a"));
+      fireEvent.click(await nodeCard("b"), { ctrlKey: true });
+      const target = await nodeCard("b");
+      target.addEventListener("keydown", (event) => event.stopPropagation());
+      expect(fireEvent.keyDown(target, { key: "l", ctrlKey: true })).toBe(
+        false,
+      );
+      expect(props.onSetGroups).toHaveBeenCalledTimes(1);
+      const updated = (props.onSetGroups as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as SceneGroup[];
+      expect(updated[0].children).toEqual([{ node: "a" }, { node: "b" }]);
+      expect(pane(view)).toBeInTheDocument();
+    } finally {
+      window.removeEventListener("keydown", browserGuard, true);
+    }
+  });
+
+  it("copies and duplicates the full selection from keyboard and the selected node menu", async () => {
+    const onCopySelection = vi.fn();
+    const onDuplicateSelection = vi.fn(() => [
+      { node: "a_copy" },
+      { node: "b_copy" },
+    ]);
+    renderGraph({
+      onCopySelection,
+      onDuplicateSelection,
+      onDuplicate: vi.fn(),
+    });
+    fireEvent.click(await nodeCard("a"));
+    fireEvent.click(await nodeCard("b"), { ctrlKey: true });
+    expect(
+      fireEvent.keyDown(await nodeCard("b"), { key: "c", ctrlKey: true }),
+    ).toBe(false);
+    expect(onCopySelection).toHaveBeenCalledWith([
+      { node: "a" },
+      { node: "b" },
+    ]);
+
+    fireEvent.contextMenu(await nodeCard("b"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "为所选项创建副本" }),
+    );
+    expect(onDuplicateSelection).toHaveBeenCalledWith([
+      { node: "a" },
+      { node: "b" },
+    ]);
+  });
+
+  it("copies a selected group as a whole from its context menu", async () => {
+    const onCopySelection = vi.fn();
+    const layout: SceneLayout = {
+      nodes: {
+        a: { x: 100, y: 30 },
+        b: { x: 230, y: 60 },
+        c: { x: 400, y: 30 },
+      },
+      viewport: null,
+      groups: [
+        { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+        { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
+      ],
+    };
+    const { view } = renderGraph({
+      layout,
+      onCopySelection,
+      selectedNodeId: null,
+    });
+    const frame = await groupFrame(view.container, "g0");
+    fireEvent.contextMenu(groupHeader(frame), { clientX: 30, clientY: 40 });
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: /复制所选项/ }),
+    );
+    expect(onCopySelection).toHaveBeenCalledWith([{ group: "g0" }]);
+  });
+
   it("Ctrl-click selects multiple nodes and Ctrl+L wraps them in a parent group", async () => {
     const onSetGroups = vi.fn();
     const { view } = renderGraph({ onSetGroups });

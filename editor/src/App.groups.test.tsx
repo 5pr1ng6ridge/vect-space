@@ -113,6 +113,83 @@ describe("App nested layout groups", () => {
     ).toHaveLength(2);
   });
 
+  it("copies and pastes a multi-node selection as one undoable edit with internal links", async () => {
+    await renderOpenedApp(<App />);
+    fireEvent.click(
+      await screen.findByText("你好", { selector: ".story-node-summary" }),
+    );
+    fireEvent.click(
+      await screen.findByText("第二句", { selector: ".story-node-summary" }),
+      {
+        ctrlKey: true,
+      },
+    );
+    const endCard = document.querySelector<HTMLElement>(
+      '[data-id="finish"] .story-node',
+    );
+    if (endCard === null) throw new Error("missing end node");
+    fireEvent.click(endCard, { ctrlKey: true });
+    fireEvent.keyDown(graphPane(), { key: "c", ctrlKey: true });
+    fireEvent.keyDown(graphPane(), { key: "v", ctrlKey: true });
+    await waitFor(() =>
+      expect(document.querySelector('[data-id="second_copy"]')).not.toBeNull(),
+    );
+    fireEvent.keyDown(document.body, { key: "s", ctrlKey: true });
+    await waitFor(() => expect(api.saveProject).toHaveBeenCalledTimes(1));
+    const scene = api.saveProject.mock.calls[0][0].scenes[0].definition;
+    expect(scene.nodes.start_copy).toMatchObject({ next: "second_copy" });
+    expect(scene.nodes.second_copy).toMatchObject({ next: "finish_copy" });
+    fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    await waitFor(() =>
+      expect(document.querySelector('[data-id="start_copy"]')).toBeNull(),
+    );
+  });
+
+  it("duplicates a selected nested group with its hierarchy and connections", async () => {
+    api.openProject.mockImplementation(() => {
+      const project = structuredClone(fixtureProject());
+      project.layout.scenes.main.groups = [
+        { id: "inner", children: [{ node: "start" }, { node: "second" }] },
+        { id: "outer", children: [{ group: "inner" }, { node: "finish" }] },
+      ];
+      return Promise.resolve(project);
+    });
+    await renderOpenedApp(<App />);
+    const outer = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(
+        '.story-group-frame[data-group-id="outer"] .story-group-header',
+      );
+      if (element === null) throw new Error("missing outer group");
+      return element;
+    });
+    fireEvent.pointerDown(outer, { button: 0, pointerId: 1 });
+    fireEvent.contextMenu(outer);
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "为所选项创建副本" }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector('[data-id="start_copy"]')).not.toBeNull(),
+    );
+    fireEvent.keyDown(document.body, { key: "s", ctrlKey: true });
+    await waitFor(() => expect(api.saveProject).toHaveBeenCalledTimes(1));
+    const request = api.saveProject.mock.calls[0][0];
+    expect(request.scenes[0].definition.nodes.start_copy).toMatchObject({
+      next: "second_copy",
+    });
+    expect(request.layout.scenes.main.groups).toEqual([
+      { id: "inner", children: [{ node: "start" }, { node: "second" }] },
+      { id: "outer", children: [{ group: "inner" }, { node: "finish" }] },
+      {
+        id: "group-0",
+        children: [{ node: "start_copy" }, { node: "second_copy" }],
+      },
+      {
+        id: "group-1",
+        children: [{ group: "group-0" }, { node: "finish_copy" }],
+      },
+    ]);
+  });
+
   it("creates a nested group with Ctrl+L, persists it, and survives undo/redo", async () => {
     await renderOpenedApp(<App />);
     fireEvent.click(

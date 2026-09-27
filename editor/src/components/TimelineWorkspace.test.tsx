@@ -922,6 +922,23 @@ describe("TimelineWorkspace gestures and history", () => {
     durationInput.focus();
     fireEvent.keyDown(durationInput, { key: " " });
     expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument();
+
+    const slider = screen.getByRole("slider", { name: "时间线播放头" });
+    slider.focus();
+    expect(fireEvent.keyDown(slider, { key: " ", code: "Space" })).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument(),
+    );
+    const tracks =
+      view.container.querySelector<HTMLElement>(".timeline-tracks");
+    if (tracks === null) throw new Error("missing scrolling tracks");
+    tracks.tabIndex = 0;
+    tracks.focus();
+    tracks.addEventListener("keydown", (event) => event.stopPropagation());
+    expect(fireEvent.keyDown(tracks, { key: " ", code: "Space" })).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument(),
+    );
   });
 
   it("commits outward uniform sprite scaling from all four corner handles and cancels cleanly", async () => {

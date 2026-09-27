@@ -93,9 +93,13 @@ export interface StoryGraphProps {
   onEditNode?(nodeId: string): void;
   onConnect(sourceId: string, handle: string, targetId: string): void;
   onCopy(nodeId: string): void;
+  /** Copy a multi-selection or an entire nested group into the graph clipboard. */
+  onCopySelection?(selection: readonly GroupChildRef[]): void;
   /** Delete the selected node through the App confirmation/undo pipeline. */
   onDelete(nodeId: string): void;
   onDuplicate?(nodeId: string): void;
+  /** Return newly cloned roots so the canvas can select the batch. */
+  onDuplicateSelection?(selection: readonly GroupChildRef[]): GroupChildRef[];
   onSetEntry?(nodeId: string): void;
   /** True while an App-level dialog or entry overlay owns the interaction. */
   deleteDisabled?: boolean;
@@ -221,8 +225,10 @@ function StoryGraphInner({
   onEditNode,
   onConnect,
   onCopy,
+  onCopySelection,
   onDelete,
   onDuplicate,
+  onDuplicateSelection,
   onSetEntry,
   deleteDisabled = false,
   onMoveNode,
@@ -668,38 +674,13 @@ function StoryGraphInner({
   };
 
   /**
-   * Graph-wide shortcuts, scoped to the pane.
-   *
-   * `Ctrl+L` (or `Ctrl+Shift+L` when WebView reserves Ctrl+L) wraps
-   * two or more canonical entities in a parent group, or
-   * dissolves the single selected group.  `Delete` is consumed as a no-op
-   * whenever the canvas selection contains a group, so it can never fall
-   * through to the inspector's (possibly stale) node.  A pure node selection
-   * deletes exactly that node through the App's confirmation/undo pipeline.
+   * Delete remains pane-scoped. Grouping is registered at window capture phase
+   * below, because React Flow can own the focused inner node or marquee and
+   * stop its bubbled key event before it reaches this shell.
    */
   const handleGraphKeyDown = (
     event: ReactKeyboardEvent<HTMLDivElement>,
   ): void => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "l") {
-      if (
-        event.defaultPrevented ||
-        event.altKey ||
-        deleteDisabled ||
-        event.repeat ||
-        shouldIgnoreNodeDeletion({
-          target: event.target,
-          repeat: event.repeat,
-          ...imeState(event),
-        }) ||
-        isInteractiveTarget(event.target)
-      )
-        return;
-      if (applyGrouping(selectedForGrouping(selectionRef.current))) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-      return;
-    }
     if (event.key !== "Delete" || event.defaultPrevented) return;
     if (deleteDisabled) return;
     if (
@@ -733,9 +714,44 @@ function StoryGraphInner({
 
   useEffect(() => {
     const handleClipboardShortcut = (event: KeyboardEvent): void => {
+      const shell = graphShellRef.current;
+      const target = event.target;
+      if (
+        shell === null ||
+        (!(target instanceof Node && shell.contains(target)) &&
+          !(
+            target === document.body && document.activeElement === document.body
+          ))
+      )
+        return;
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        event.key.toLowerCase() === "l"
+      ) {
+        if (
+          // The Tauri browser guard prevents the native Ctrl+L address-bar
+          // action before this window listener runs. It deliberately keeps
+          // propagation alive for the graph, so defaultPrevented is expected.
+          deleteDisabled ||
+          event.repeat ||
+          shouldIgnoreNodeDeletion({
+            target,
+            repeat: event.repeat,
+            isComposing: event.isComposing,
+            keyCode: imeState({ nativeEvent: event }).keyCode,
+          }) ||
+          isInteractiveTarget(target)
+        )
+          return;
+        if (applyGrouping(selectedForGrouping(selectionRef.current))) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
       if (event.defaultPrevented) return;
-      const target = event.target;
       if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
@@ -748,17 +764,24 @@ function StoryGraphInner({
       if (key === "enter" && selectedNodeId !== null) {
         event.preventDefault();
         onPreview(selectedNodeId);
-      } else if (key === "c" && selectedNodeId !== null) {
-        event.preventDefault();
-        onCopy(selectedNodeId);
+      } else if (key === "c") {
+        const selected = selectedForGrouping(selectionRef.current);
+        if (selected.length === 1 && "node" in selected[0]) {
+          event.preventDefault();
+          onCopy(selected[0].node);
+        } else if (selected.length > 0 && onCopySelection !== undefined) {
+          event.preventDefault();
+          onCopySelection(selected);
+        }
       } else if (key === "v") {
         event.preventDefault();
         onPaste(screenToFlowPosition(lastPointerRef.current));
       }
     };
-    window.addEventListener("keydown", handleClipboardShortcut);
-    return () => window.removeEventListener("keydown", handleClipboardShortcut);
-  }, [onCopy, onPaste, onPreview, screenToFlowPosition, selectedNodeId]);
+    window.addEventListener("keydown", handleClipboardShortcut, true);
+    return () =>
+      window.removeEventListener("keydown", handleClipboardShortcut, true);
+  });
 
   // A stale ELK callback must never move nodes after the scene changed or a
   // newer layout run started: bump the token on every run and on scene change.
@@ -836,6 +859,22 @@ function StoryGraphInner({
   };
 
   const canonicalForMenu = selectedForGrouping(selection);
+  const copyEntities = (entities: EntityRef[]): void => {
+    if (entities.length === 1 && "node" in entities[0])
+      onCopy(entities[0].node);
+    else if (entities.length > 0) onCopySelection?.(entities);
+  };
+  const duplicateEntities = (entities: EntityRef[]): void => {
+    if (entities.length === 1 && "node" in entities[0]) {
+      onDuplicate?.(entities[0].node);
+    } else if (entities.length > 0 && onDuplicateSelection !== undefined) {
+      const copiedRoots = onDuplicateSelection(entities);
+      if (copiedRoots.length > 0) {
+        setSelectionState(copiedRoots);
+        onSelect(null);
+      }
+    }
+  };
   const canWrap = canonicalForMenu.length >= 2;
   const canUngroup =
     canonicalForMenu.length === 1 && "group" in canonicalForMenu[0];
@@ -895,6 +934,27 @@ function StoryGraphInner({
         groupingEntry,
         ...(detachEntry === null ? [] : [detachEntry]),
         { kind: "separator", id: "sep-group" },
+        ...(canonicalForMenu.length > 0 && onCopySelection !== undefined
+          ? [
+              {
+                id: "copy-selection",
+                label: "复制所选项",
+                icon: Copy,
+                shortcut: "Ctrl+C",
+                onSelect: () => copyEntities(canonicalForMenu),
+              } satisfies MenuItemSpec,
+            ]
+          : []),
+        ...(canonicalForMenu.length > 0 && onDuplicateSelection !== undefined
+          ? [
+              {
+                id: "duplicate-selection",
+                label: "为所选项创建副本",
+                icon: CopyPlus,
+                onSelect: () => duplicateEntities(canonicalForMenu),
+              } satisfies MenuItemSpec,
+            ]
+          : []),
         {
           id: "paste",
           label: "粘贴到此处",
@@ -967,15 +1027,15 @@ function StoryGraphInner({
         label: "复制",
         icon: Copy,
         shortcut: "Ctrl+C",
-        onSelect: () => onCopy(nodeId),
+        onSelect: () => copyEntities(canonicalForMenu),
       },
     );
-    if (onDuplicate !== undefined)
+    if (onDuplicate !== undefined || onDuplicateSelection !== undefined)
       entries.push({
         id: "duplicate",
-        label: "创建副本",
+        label: canonicalForMenu.length > 1 ? "为所选项创建副本" : "创建副本",
         icon: CopyPlus,
-        onSelect: () => onDuplicate(nodeId),
+        onSelect: () => duplicateEntities(canonicalForMenu),
       });
     entries.push(
       { kind: "separator", id: "sep-delete" },
@@ -1069,6 +1129,16 @@ function StoryGraphInner({
               }
             />
           )}
+          <IconButton
+            disabled={deleteDisabled || (!canWrap && !canUngroup)}
+            icon={canUngroup ? Ungroup : Group}
+            label={canUngroup ? "解散此组" : "组合所选项"}
+            onClick={() => {
+              applyGrouping(selectedForGrouping(selectionRef.current));
+              focusShell();
+            }}
+            size="sm"
+          />
           <IconButton
             disabled={layoutBusy}
             icon={Workflow}

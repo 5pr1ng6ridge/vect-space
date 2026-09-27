@@ -66,7 +66,11 @@ import {
 } from "lucide-react";
 import { WorkspaceHeader } from "../shell/WorkspaceHeader";
 import { Button, IconButton } from "../ui/Button";
-import { escapeTextEntry, isComposing } from "../ui/keyboard";
+import {
+  escapeTextEntry,
+  isComposing,
+  isTextEntryTarget,
+} from "../ui/keyboard";
 import { isEditableTarget } from "./nodeDeleteShortcut";
 import { firstVisibleAssetId } from "../assetLibrary";
 
@@ -1222,16 +1226,42 @@ export function TimelineWorkspace({
     void buildContext(nextSettings);
   };
 
+  // The track scroller and range control can consume Space before a bubbled
+  // React handler sees it. Capture it while this workspace owns focus, so its
+  // native page/track scroll (or a focused button's click) never runs.
+  useEffect(() => {
+    const onSpace = (event: KeyboardEvent): void => {
+      if (event.key !== " " && event.code !== "Space") return;
+      const workspace = workspaceRef.current;
+      const target = event.target;
+      if (
+        workspace === null ||
+        (!(target instanceof Node && workspace.contains(target)) &&
+          !(
+            target === document.body && document.activeElement === document.body
+          )) ||
+        event.defaultPrevented ||
+        isComposing(event) ||
+        isTextEntryTarget(target) ||
+        (target instanceof Element &&
+          target.closest('[role="dialog"], [role="menu"], [role="listbox"]') !==
+            null) ||
+        workspace.querySelector('[role="dialog"]') !== null
+      )
+        return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      togglePlayback();
+    };
+    window.addEventListener("keydown", onSpace, true);
+    return () => window.removeEventListener("keydown", onSpace, true);
+  });
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>): void => {
     if (event.defaultPrevented || isComposing(event)) return;
     if (escapeTextEntry(event)) return;
     if (isEditableTarget(event.target)) return;
-    if (event.key === " ") {
-      // Space is the workspace playback shortcut even when a button has focus;
-      // prevent native button activation (which can add duplicate events).
-      event.preventDefault();
-      togglePlayback();
-    } else if (event.key === "ArrowLeft") {
+    if (event.key === "ArrowLeft") {
       event.preventDefault();
       setPlaybackStartPosition(playbackStart - 10);
     } else if (event.key === "ArrowRight") {
