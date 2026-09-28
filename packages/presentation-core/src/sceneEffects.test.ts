@@ -61,10 +61,10 @@ describe("evaluateShakeOffset", () => {
     expect(evaluateShakeOffset(SHAKE, 300, 100, 400)).not.toEqual(first);
   });
 
-  it("keeps legacy seed 0 deterministic", () => {
-    const legacy: typeof SHAKE = { ...SHAKE, seed: 0 };
-    expect(evaluateShakeOffset(legacy, 200, 0, 400)).toEqual(
-      evaluateShakeOffset(legacy, 200, 0, 400),
+  it("keeps the default seed 0 deterministic", () => {
+    const shake: typeof SHAKE = { ...SHAKE, seed: 0 };
+    expect(evaluateShakeOffset(shake, 200, 0, 400)).toEqual(
+      evaluateShakeOffset(shake, 200, 0, 400),
     );
     expect(shakeSeedPhase(0, 0)).toBeGreaterThanOrEqual(0);
     expect(shakeSeedPhase(0, 0)).toBeLessThan(Math.PI * 2);
@@ -145,7 +145,6 @@ describe("evaluateScreenEffectFrame", () => {
 describe("seed bounds", () => {
   it("documents the JavaScript-safe upper bound", () => {
     expect(SHAKE_SEED_MAX).toBeLessThan(Number.MAX_SAFE_INTEGER);
-    expect(SHAKE_SEED_MAX).toBe(0xffffffff);
     expect(shakeSeedPhase(SHAKE_SEED_MAX, 0)).toBeGreaterThanOrEqual(0);
   });
 });

@@ -476,59 +476,32 @@ fn normalize_asset_layout(layout: &mut EditorLayout) {
 
 const GROUP_ID_PREFIX: &str = "group-";
 
-fn legacy_group_id(index: usize) -> String {
-    format!("{GROUP_ID_PREFIX}{index}")
-}
-
-/// Read either persisted shape into groups with stable, unique ids.  Legacy flat
-/// lists get deterministic `group-N` ids; a stored nested id is kept unless it
-/// is empty or a duplicate.  Mirrors the editor's `parseSceneGroups`.
-fn parse_scene_groups(wires: Vec<SceneGroupWire>) -> Vec<SceneGroup> {
-    let mut claimed: BTreeSet<String> = BTreeSet::new();
+/// Give every group a stable, unique id: a stored id is kept unless it is
+/// empty or a duplicate, which get a fresh `group-N` id instead.  Mirrors the
+/// editor's `parseSceneGroups`.
+fn assign_unique_group_ids(groups: Vec<SceneGroup>) -> Vec<SceneGroup> {
+    let mut claimed: BTreeSet<String> = groups
+        .iter()
+        .filter(|group| !group.id.is_empty())
+        .map(|group| group.id.clone())
+        .collect();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for wire in &wires {
-        if let SceneGroupWire::Nested(group) = wire {
-            if !group.id.is_empty() {
-                claimed.insert(group.id.clone());
-            }
-        }
-    }
     let mut auto = 0usize;
-    let mut next_auto = |claimed: &mut BTreeSet<String>| -> String {
-        loop {
-            let id = legacy_group_id(auto);
-            auto += 1;
-            if !claimed.contains(&id) {
-                claimed.insert(id.clone());
-                return id;
-            }
-        }
-    };
-    let mut result = Vec::with_capacity(wires.len());
-    for wire in wires {
-        match wire {
-            SceneGroupWire::Legacy(members) => {
-                let id = next_auto(&mut claimed);
-                let children = members
-                    .into_iter()
-                    .map(|node| GroupChildRef::Node { node })
-                    .collect();
-                result.push(SceneGroup { id, children });
-            }
-            SceneGroupWire::Nested(group) => {
-                let id = if group.id.is_empty() || !seen.insert(group.id.clone()) {
-                    next_auto(&mut claimed)
-                } else {
-                    group.id
+    groups
+        .into_iter()
+        .map(|mut group| {
+            if group.id.is_empty() || !seen.insert(group.id.clone()) {
+                group.id = loop {
+                    let id = format!("{GROUP_ID_PREFIX}{auto}");
+                    auto += 1;
+                    if claimed.insert(id.clone()) {
+                        break id;
+                    }
                 };
-                result.push(SceneGroup {
-                    id,
-                    children: group.children,
-                });
             }
-        }
-    }
-    result
+            group
+        })
+        .collect()
 }
 
 /// Drop un-ownable references: duplicate members within a group and any node or
@@ -650,15 +623,13 @@ fn repair_scene_groups(mut groups: Vec<SceneGroup>) -> Vec<SceneGroup> {
     groups
 }
 
-/// Migrate a persisted layout to canonical nested groups.  Editor-only, so a
-/// hand-edited or older layout still loads without rejecting the project.
+/// Repair persisted groups to unique ids, unique ownership and acyclic
+/// containment.  Editor-only, so a hand-edited layout still loads without
+/// rejecting the project.
 fn normalize_scene_groups(layout: &mut EditorLayout) {
     for scene in layout.scenes.values_mut() {
-        let wires = std::mem::take(&mut scene.groups);
-        scene.groups = repair_scene_groups(parse_scene_groups(wires))
-            .into_iter()
-            .map(SceneGroupWire::Nested)
-            .collect();
+        let groups = std::mem::take(&mut scene.groups);
+        scene.groups = repair_scene_groups(assign_unique_group_ids(groups));
     }
 }
 
@@ -714,16 +685,6 @@ enum BuildNodePreviewResult {
     },
 }
 
-/// Persisted group membership.  Older layouts stored a flat `Vec<Vec<String>>`
-/// of node ids; the canonical form carries a stable group id and explicit
-/// tagged child references so a group may contain nodes and nested groups.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-enum SceneGroupWire {
-    Legacy(Vec<String>),
-    Nested(SceneGroup),
-}
-
 /// One editor-only rigid group.  Ownership lives solely in `children`; `id` is
 /// stable and independent of node names, so a rename never reassigns a group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -750,7 +711,7 @@ struct SceneLayout {
     #[serde(default)]
     viewport: Option<EditorViewport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    groups: Vec<SceneGroupWire>,
+    groups: Vec<SceneGroup>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1442,7 +1403,7 @@ fn save_project_command(
             .map_err(validation_command_error)?;
         let actions = validate_action_file_set(&request.manifest, &request.actions)
             .map_err(validation_command_error)?;
-        let candidate = ContentCatalog::from_documents_with_all_documents_and_actions(
+        let candidate = ContentCatalog::from_documents_with_all_documents(
             session.root.clone(),
             request.manifest.clone(),
             scenes,
@@ -1668,7 +1629,7 @@ fn validate_project_command(
         .map_err(validation_command_error)?;
     let actions = validate_action_file_set(&request.manifest, &request.actions)
         .map_err(validation_command_error)?;
-    let candidate = ContentCatalog::from_documents_with_all_documents_and_actions(
+    let candidate = ContentCatalog::from_documents_with_all_documents(
         session.root.clone(),
         request.manifest,
         scenes,
@@ -2780,7 +2741,7 @@ fn build_preview_catalog(
         .map_err(validation_command_error)?;
     let actions = validate_action_file_set(&project.manifest, &project.actions)
         .map_err(validation_command_error)?;
-    ContentCatalog::from_documents_with_all_documents_and_actions(
+    ContentCatalog::from_documents_with_all_documents(
         session.root.clone(),
         project.manifest.clone(),
         scenes,
@@ -3350,8 +3311,6 @@ fn read_layout(root: &Path) -> Result<EditorLayout, String> {
     // A hand-edited or half-written layout must not make the whole project
     // unopenable; repair the editor-only asset metadata instead.
     normalize_asset_layout(&mut layout);
-    // Groups migrate legacy flat membership to the canonical nested forest and
-    // are repaired to unique ownership / acyclic containment on load.
     normalize_scene_groups(&mut layout);
     Ok(layout)
 }
@@ -6448,15 +6407,13 @@ mod tests {
         assert!(!text.contains("groups"), "{text}");
         // Group membership is editor-only and survives a layout round trip.
         let mut grouped = layout.clone();
-        grouped.scenes.get_mut("main").unwrap().groups = vec![SceneGroupWire::Nested(
-            SceneGroup {
-                id: "group-0".to_owned(),
-                children: vec![
-                    GroupChildRef::Node { node: "a".into() },
-                    GroupChildRef::Node { node: "b".into() },
-                ],
-            },
-        )];
+        grouped.scenes.get_mut("main").unwrap().groups = vec![SceneGroup {
+            id: "group-0".to_owned(),
+            children: vec![
+                GroupChildRef::Node { node: "a".into() },
+                GroupChildRef::Node { node: "b".into() },
+            ],
+        }];
         let serialized = serde_json::to_string(&grouped).unwrap();
         let reopened: EditorLayout = serde_json::from_str(&serialized).unwrap();
         assert_eq!(reopened.scenes["main"].groups, grouped.scenes["main"].groups);
@@ -6467,11 +6424,11 @@ mod tests {
         );
     }
 
-    fn nested_group(id: &str, children: Vec<GroupChildRef>) -> SceneGroupWire {
-        SceneGroupWire::Nested(SceneGroup {
+    fn nested_group(id: &str, children: Vec<GroupChildRef>) -> SceneGroup {
+        SceneGroup {
             id: id.to_owned(),
             children,
-        })
+        }
     }
 
     fn node_ref(id: &str) -> GroupChildRef {
@@ -6482,34 +6439,10 @@ mod tests {
         GroupChildRef::Group { group: id.to_owned() }
     }
 
-    fn scene_with_groups(groups: Vec<SceneGroupWire>) -> EditorLayout {
+    fn scene_with_groups(groups: Vec<SceneGroup>) -> EditorLayout {
         let mut layout = EditorLayout::default();
         layout.scenes.entry("main".to_owned()).or_default().groups = groups;
         layout
-    }
-
-    #[test]
-    fn layout_file_migrates_legacy_flat_groups_to_canonical_nested() {
-        let directory = tempdir().unwrap();
-        let root = directory.path();
-        fs::create_dir_all(root.join(".vectspace")).unwrap();
-        // `["c"]` collapses because a group needs two children; the surviving
-        // flat group becomes the canonical nested form with a stable id.
-        fs::write(
-            root.join(LAYOUT_RELATIVE_PATH),
-            br#"{"version":1,"scenes":{"main":{"nodes":{},"viewport":null,"groups":[["a","b"],["c"]]}}}"#,
-        )
-        .unwrap();
-        let layout = read_layout(root).unwrap();
-        assert_eq!(
-            layout.scenes["main"].groups,
-            vec![nested_group("group-0", vec![node_ref("a"), node_ref("b")])]
-        );
-        // The canonical form is what gets written back, never the flat list.
-        let text = serde_json::to_string(&layout).unwrap();
-        assert!(text.contains("\"id\":\"group-0\""), "{text}");
-        assert!(text.contains("\"node\":\"a\""), "{text}");
-        assert!(!text.contains("[[\"a\""), "{text}");
     }
 
     #[test]
@@ -6591,7 +6524,7 @@ mod tests {
     fn group_normalization_avoids_reusing_a_stored_id() {
         let mut layout = scene_with_groups(vec![
             nested_group("group-0", vec![node_ref("a"), node_ref("b")]),
-            SceneGroupWire::Legacy(vec!["c".into(), "d".into()]),
+            nested_group("", vec![node_ref("c"), node_ref("d")]),
         ]);
         normalize_scene_groups(&mut layout);
         assert_eq!(

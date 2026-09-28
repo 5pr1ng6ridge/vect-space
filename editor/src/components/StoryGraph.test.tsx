@@ -593,23 +593,6 @@ describe("StoryGraph nested groups", () => {
     expect(frame.className).toContain("is-selected");
   });
 
-  it("renders a frame for a legacy flat group", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [["a", "b"]],
-    };
-    const { view } = renderGraph({ layout, selectedNodeId: null });
-
-    // Legacy flat membership is migrated to a deterministic `group-N` id.
-    const frame = await groupFrame(view.container, "group-0");
-    expect(frame).toBeTruthy();
-  });
-
   it("wraps a group plus an additively selected node on Ctrl+L", async () => {
     const layout: SceneLayout = {
       nodes: {

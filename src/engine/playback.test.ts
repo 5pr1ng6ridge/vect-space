@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { DialoguePrompt, LongTextPrompt, PlaybackSnapshot } from "./types";
+import type {
+  DialoguePrompt,
+  LongTextPrompt,
+  PlaybackSnapshot,
+} from "@vectspace/presentation-core/types";
 import { canFastForwardPrompt } from "./playback";
 
 const normal: PlaybackSnapshot = {

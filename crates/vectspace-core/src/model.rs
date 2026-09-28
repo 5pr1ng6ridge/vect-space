@@ -1,11 +1,9 @@
 //! Stable content, runtime and persistence models shared by both desktop hosts.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use schemars::JsonSchema;
-use serde::de::value::MapAccessDeserializer;
-use serde::de::{self, MapAccess, Visitor};
+use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub type VariableMap = BTreeMap<String, ScalarValue>;
@@ -887,7 +885,6 @@ pub enum SceneNode {
     Background {
         background: Option<String>,
         #[serde(default)]
-        #[schemars(with = "BackgroundTransitionSchema")]
         transition: BackgroundTransitionSpec,
         #[serde(default = "default_medium_duration")]
         duration_ms: u64,
@@ -1114,7 +1111,6 @@ pub enum SceneNode {
         next: String,
     },
     ScreenEffect {
-        #[schemars(with = "ScreenEffectSchema")]
         effect: ScreenEffectSpec,
         #[serde(default = "default_short_duration")]
         duration_ms: u64,
@@ -1524,13 +1520,8 @@ pub enum AudioAction {
     Stop,
 }
 
-/// Canonical background transition.
-///
-/// Legacy one-word transitions keep working: the loader accepts
-/// `transition: cut` / `transition: cross_fade` and normalises them into this
-/// shape, so cues, hosts and generated schemas only ever observe the canonical
-/// form and never need a compatibility branch.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, JsonSchema)]
+/// Background transition of a `background` node and its cue.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BackgroundTransitionSpec {
     Cut,
@@ -1550,116 +1541,6 @@ pub enum BackgroundTransitionSpec {
         #[serde(default = "default_transition_softness")]
         softness: f32,
     },
-}
-
-/// Object-only mirror used by the custom deserializer.
-///
-/// Keeping a mirror means an invalid object reports serde's precise message
-/// ("missing field `direction`", "unknown variant `foo`") instead of the
-/// opaque one an `untagged` enum would produce, while the public type stays the
-/// single canonical shape.
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum BackgroundTransitionObject {
-    Cut,
-    CrossFade,
-    FadeThroughColor {
-        color: String,
-    },
-    Wipe {
-        direction: TransitionDirection,
-        #[serde(default = "default_transition_softness")]
-        softness: f32,
-    },
-    Push {
-        direction: TransitionDirection,
-        #[serde(default = "default_transition_softness")]
-        softness: f32,
-    },
-}
-
-impl BackgroundTransitionObject {
-    fn into_spec(self) -> BackgroundTransitionSpec {
-        match self {
-            Self::Cut => BackgroundTransitionSpec::Cut,
-            Self::CrossFade => BackgroundTransitionSpec::CrossFade,
-            Self::FadeThroughColor { color } => {
-                BackgroundTransitionSpec::FadeThroughColor { color }
-            }
-            Self::Wipe {
-                direction,
-                softness,
-            } => BackgroundTransitionSpec::Wipe {
-                direction,
-                softness,
-            },
-            Self::Push {
-                direction,
-                softness,
-            } => BackgroundTransitionSpec::Push {
-                direction,
-                softness,
-            },
-        }
-    }
-}
-
-struct BackgroundTransitionVisitor;
-
-impl<'de> Visitor<'de> for BackgroundTransitionVisitor {
-    type Value = BackgroundTransitionSpec;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(
-            "a background transition name (`cut` or `cross_fade`) or a `{ type, ... }` object",
-        )
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        match value {
-            "cut" => Ok(BackgroundTransitionSpec::Cut),
-            "cross_fade" => Ok(BackgroundTransitionSpec::CrossFade),
-            other => Err(E::unknown_variant(other, &["cut", "cross_fade"])),
-        }
-    }
-
-    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        BackgroundTransitionObject::deserialize(MapAccessDeserializer::new(map))
-            .map(BackgroundTransitionObject::into_spec)
-    }
-}
-
-impl<'de> Deserialize<'de> for BackgroundTransitionSpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(BackgroundTransitionVisitor)
-    }
-}
-
-/// Schema-only view used on fields so the generated JSON Schema accepts both
-/// the already-authored one-word form and the canonical object.
-#[allow(dead_code)]
-#[derive(JsonSchema)]
-#[serde(untagged)]
-enum BackgroundTransitionSchema {
-    Legacy(LegacyBackgroundTransitionName),
-    Canonical(BackgroundTransitionSpec),
-}
-
-#[allow(dead_code)]
-#[derive(JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum LegacyBackgroundTransitionName {
-    Cut,
-    CrossFade,
 }
 
 /// One of the four edge directions shared by `wipe` and `push` transitions.
@@ -1749,9 +1630,8 @@ pub enum Easing {
     EaseInOut,
 }
 
-/// Canonical, parameterised screen effect shared by `screen_effect` nodes and
-/// timeline events.  Legacy one-word effects (`effect: flash` / `effect: shake`)
-/// are normalised into this shape with the shipped defaults.
+/// Defaults of the parameterised screen effect shared by `screen_effect` nodes
+/// and timeline events; every omitted field falls back to these.
 pub const FLASH_COLOR_DEFAULT: &str = "#FFFFFF";
 pub const FLASH_PEAK_ALPHA_DEFAULT: f32 = 0.88;
 pub const FLASH_PEAK_ALPHA_MIN: f32 = 0.0;
@@ -1769,8 +1649,8 @@ pub const SHAKE_DECAY_DEFAULT: f32 = 1.0;
 pub const SHAKE_DECAY_MIN: f32 = 0.0;
 pub const SHAKE_DECAY_MAX: f32 = 1.0;
 /// Stable seed carried by the spec.  The evaluator converts it into a stable
-/// per-axis phase offset, so an old `effect: shake` (normalised to `0`) stays a
-/// valid deterministic seed instead of inventing randomness.
+/// per-axis phase offset, so the default `0` is a valid deterministic seed
+/// instead of inventing randomness.
 ///
 /// The seed crosses the WebView IPC boundary as a JSON number, so it stays well
 /// inside the JavaScript safe integer range (`<= 2^53 - 1`); `u32` keeps that
@@ -1778,7 +1658,7 @@ pub const SHAKE_DECAY_MAX: f32 = 1.0;
 pub const SHAKE_SEED_DEFAULT: u32 = 0;
 pub const SHAKE_SEED_MAX: u32 = u32::MAX;
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScreenEffectSpec {
     Flash {
@@ -1799,27 +1679,6 @@ pub enum ScreenEffectSpec {
         #[serde(default = "default_shake_seed")]
         seed: u32,
     },
-}
-
-impl ScreenEffectSpec {
-    /// The shipped flash, used when content only wrote `effect: flash`.
-    pub fn legacy_flash() -> Self {
-        Self::Flash {
-            color: FLASH_COLOR_DEFAULT.to_owned(),
-            peak_alpha: FLASH_PEAK_ALPHA_DEFAULT,
-        }
-    }
-
-    /// The shipped shake, used when content only wrote `effect: shake`.
-    pub fn legacy_shake() -> Self {
-        Self::Shake {
-            amplitude_x: SHAKE_AMPLITUDE_X_DEFAULT,
-            amplitude_y: SHAKE_AMPLITUDE_Y_DEFAULT,
-            frequency_hz: SHAKE_FREQUENCY_HZ_DEFAULT,
-            decay: SHAKE_DECAY_DEFAULT,
-            seed: SHAKE_SEED_DEFAULT,
-        }
-    }
 }
 
 fn default_flash_color() -> String {
@@ -1848,108 +1707,6 @@ fn default_shake_decay() -> f32 {
 
 fn default_shake_seed() -> u32 {
     SHAKE_SEED_DEFAULT
-}
-
-/// Object-only mirror used by the custom effect deserializer; see
-/// [`BackgroundTransitionObject`] for why the mirror exists.
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum ScreenEffectObject {
-    Flash {
-        #[serde(default = "default_flash_color")]
-        color: String,
-        #[serde(default = "default_flash_peak_alpha")]
-        peak_alpha: f32,
-    },
-    Shake {
-        #[serde(default = "default_shake_amplitude_x")]
-        amplitude_x: f32,
-        #[serde(default = "default_shake_amplitude_y")]
-        amplitude_y: f32,
-        #[serde(default = "default_shake_frequency_hz")]
-        frequency_hz: f32,
-        #[serde(default = "default_shake_decay")]
-        decay: f32,
-        #[serde(default = "default_shake_seed")]
-        seed: u32,
-    },
-}
-
-impl ScreenEffectObject {
-    fn into_spec(self) -> ScreenEffectSpec {
-        match self {
-            Self::Flash { color, peak_alpha } => ScreenEffectSpec::Flash { color, peak_alpha },
-            Self::Shake {
-                amplitude_x,
-                amplitude_y,
-                frequency_hz,
-                decay,
-                seed,
-            } => ScreenEffectSpec::Shake {
-                amplitude_x,
-                amplitude_y,
-                frequency_hz,
-                decay,
-                seed,
-            },
-        }
-    }
-}
-
-struct ScreenEffectVisitor;
-
-impl<'de> Visitor<'de> for ScreenEffectVisitor {
-    type Value = ScreenEffectSpec;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a screen effect name (`flash` or `shake`) or a `{ type, ... }` object")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        match value {
-            "flash" => Ok(ScreenEffectSpec::legacy_flash()),
-            "shake" => Ok(ScreenEffectSpec::legacy_shake()),
-            other => Err(E::unknown_variant(other, &["flash", "shake"])),
-        }
-    }
-
-    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        ScreenEffectObject::deserialize(MapAccessDeserializer::new(map))
-            .map(ScreenEffectObject::into_spec)
-    }
-}
-
-impl<'de> Deserialize<'de> for ScreenEffectSpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(ScreenEffectVisitor)
-    }
-}
-
-/// Schema-only view used on fields so the generated JSON Schema accepts both
-/// the already-authored one-word effect and the canonical object.
-#[allow(dead_code)]
-#[derive(JsonSchema)]
-#[serde(untagged)]
-enum ScreenEffectSchema {
-    Legacy(LegacyScreenEffectName),
-    Canonical(ScreenEffectSpec),
-}
-
-#[allow(dead_code)]
-#[derive(JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum LegacyScreenEffectName {
-    Flash,
-    Shake,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2090,7 +1847,6 @@ pub enum TimelineEvent {
     ScreenEffect {
         id: String,
         at_ms: u64,
-        #[schemars(with = "ScreenEffectSchema")]
         effect: ScreenEffectSpec,
         #[serde(default = "default_short_duration")]
         duration_ms: u64,
@@ -2215,9 +1971,7 @@ pub struct WorldSnapshot {
     #[serde(default)]
     pub ui_motion_bindings: UiMotionBindings,
     pub persistent_effects: Vec<String>,
-    /// Stable curtain state.  Defaulted so every save written before the
-    /// curtain existed still deserialises as "no curtain".
-    #[serde(default)]
+    /// Stable curtain state.
     pub curtain: CurtainSnapshot,
 }
 
@@ -2263,22 +2017,11 @@ pub struct SpriteSnapshot {
     pub rotation_deg: f32,
     #[serde(default)]
     pub flip_x: bool,
-    /// Normalized texture anchor.  Legacy snapshots used the VN default of
-    /// bottom-centre, so both fields remain serde-defaulted for old saves.
-    #[serde(default = "default_sprite_anchor_x")]
+    /// Normalized texture anchor.
     pub anchor_x: f32,
-    #[serde(default = "default_sprite_anchor_y")]
     pub anchor_y: f32,
     pub opacity: f32,
     pub z: i32,
-}
-
-fn default_sprite_anchor_x() -> f32 {
-    0.5
-}
-
-fn default_sprite_anchor_y() -> f32 {
-    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2310,25 +2053,9 @@ impl Default for CameraSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct AudioSnapshot {
     pub bgm: Option<LoopingAudioSnapshot>,
-    /// Four fixed optional slots. The whole object is omitted when empty so
-    /// pre-ambience snapshots and idle audio keep their compact legacy shape.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_ambience_snapshot_compat",
-        skip_serializing_if = "AmbienceSnapshot::is_empty"
-    )]
+    /// Four fixed optional slots. The whole object is omitted when empty.
+    #[serde(default, skip_serializing_if = "AmbienceSnapshot::is_empty")]
     pub ambience: AmbienceSnapshot,
-}
-
-/// Older hosts represented an empty ambience state as `null`; accept that
-/// spelling while keeping the canonical Rust model as four optional fields.
-fn deserialize_ambience_snapshot_compat<'de, D>(
-    deserializer: D,
-) -> Result<AmbienceSnapshot, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<AmbienceSnapshot>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2373,9 +2100,7 @@ pub enum PromptSnapshot {
     },
     Choice {
         prompt_id: String,
-        #[serde(default)]
         layout: ChoiceLayoutSnapshot,
-        #[serde(default)]
         diagnostics: Vec<ChoiceDiagnostic>,
         choices: Vec<ChoiceSnapshot>,
     },
@@ -2472,18 +2197,12 @@ pub struct ChoiceSnapshot {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    #[serde(default)]
     pub template: ChoiceTemplateSnapshot,
-    /// Effective item rect in the design space.  A snapshot written before
-    /// Choice presentation existed defaults to zero and is re-resolved from
-    /// the current content when the runtime loads it.
-    #[serde(default)]
+    /// Effective item rect in the design space, re-resolved from the current
+    /// content whenever the runtime loads a snapshot.
     pub x: f32,
-    #[serde(default)]
     pub y: f32,
-    #[serde(default)]
     pub width: f32,
-    #[serde(default)]
     pub height: f32,
 }
 
@@ -2501,9 +2220,7 @@ pub struct PresentationCue {
     pub cue_id: u64,
     pub gate: CueGate,
     /// Flattened tagged kind.  `deny_unknown_fields` is deliberately absent:
-    /// serde does not support it together with a flattened field, and without
-    /// this the whole cue (including the legacy-string round-trip) could not be
-    /// deserialized at all.
+    /// serde does not support it together with a flattened field.
     #[serde(flatten)]
     pub kind: PresentationCueKind,
 }
@@ -2799,22 +2516,6 @@ mod tests {
         assert_eq!(populated["ambience"]["slot_2"]["asset"], "ambience.forest");
         assert!(populated["ambience"].get("slot_1").is_none());
 
-        let legacy: AudioSnapshot = serde_json::from_value(serde_json::json!({
-            "bgm": null
-        }))
-        .unwrap();
-        assert!(legacy.ambience.is_empty());
-
-        let explicit_null: AudioSnapshot = serde_json::from_value(serde_json::json!({
-            "bgm": null,
-            "ambience": null
-        }))
-        .unwrap();
-        assert!(explicit_null.ambience.is_empty());
-        assert_eq!(
-            serde_json::to_value(explicit_null).unwrap(),
-            serde_json::json!({"bgm": null}),
-        );
     }
 
     #[test]
@@ -2855,7 +2556,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_background_transitions_normalise_to_the_canonical_spec() {
+    fn background_transitions_parse_with_defaults() {
         let default = parse_scene_node("type: background\nnext: end\n");
         assert!(matches!(
             default,
@@ -2865,27 +2566,6 @@ mod tests {
             }
         ));
 
-        let cut = parse_scene_node("type: background\ntransition: cut\nnext: end\n");
-        assert!(matches!(
-            cut,
-            SceneNode::Background {
-                transition: BackgroundTransitionSpec::Cut,
-                ..
-            }
-        ));
-
-        let cross_fade = parse_scene_node("type: background\ntransition: cross_fade\nnext: end\n");
-        assert!(matches!(
-            cross_fade,
-            SceneNode::Background {
-                transition: BackgroundTransitionSpec::CrossFade,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn canonical_background_transition_objects_parse_with_defaults() {
         let wipe = parse_scene_node(
             "type: background\ntransition:\n  type: wipe\n  direction: left_to_right\nnext: end\n",
         );
@@ -2927,8 +2607,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_screen_effects_normalise_to_the_shipped_defaults() {
-        let flash = parse_scene_node("type: screen_effect\neffect: flash\nnext: end\n");
+    fn screen_effect_objects_default_every_parameter() {
+        let flash = parse_scene_node("type: screen_effect\neffect: {type: flash}\nnext: end\n");
         assert!(matches!(
             flash,
             SceneNode::ScreenEffect {
@@ -2937,7 +2617,7 @@ mod tests {
             } if color == FLASH_COLOR_DEFAULT && peak_alpha == FLASH_PEAK_ALPHA_DEFAULT
         ));
 
-        let shake = parse_scene_node("type: screen_effect\neffect: shake\nnext: end\n");
+        let shake = parse_scene_node("type: screen_effect\neffect: {type: shake}\nnext: end\n");
         assert!(matches!(
             shake,
             SceneNode::ScreenEffect {
@@ -2958,7 +2638,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_screen_effect_objects_parse_with_defaults() {
+    fn screen_effect_objects_parse_overrides() {
         let flash = parse_scene_node(
             "type: screen_effect\neffect: {type: flash, color: \"#FF0000\"}\nnext: end\n",
         );
@@ -2994,11 +2674,11 @@ mod tests {
 
     #[test]
     fn timeline_events_share_the_canonical_screen_effect_spec() {
-        let legacy = parse_timeline_event(
-            "type: screen_effect\nid: parity_flash\nat_ms: 320\neffect: flash\nduration_ms: 120\n",
+        let flash = parse_timeline_event(
+            "type: screen_effect\nid: parity_flash\nat_ms: 320\neffect: {type: flash}\nduration_ms: 120\n",
         );
         assert!(matches!(
-            legacy,
+            flash,
             TimelineEvent::ScreenEffect {
                 at_ms: 320,
                 effect: ScreenEffectSpec::Flash { color, peak_alpha },
@@ -3007,27 +2687,16 @@ mod tests {
             } if color == FLASH_COLOR_DEFAULT && peak_alpha == FLASH_PEAK_ALPHA_DEFAULT
         ));
 
-        let canonical = parse_timeline_event(
+        let shake = parse_timeline_event(
             "type: screen_effect\nid: parity_shake\nat_ms: 320\neffect: {type: shake, seed: 42}\nduration_ms: 200\n",
         );
         assert!(matches!(
-            canonical,
+            shake,
             TimelineEvent::ScreenEffect {
                 effect: ScreenEffectSpec::Shake { amplitude_x, seed, .. },
                 ..
             } if amplitude_x == SHAKE_AMPLITUDE_X_DEFAULT && seed == 42
         ));
-    }
-
-    #[test]
-    fn legacy_world_snapshots_default_to_no_curtain() {
-        let yaml = "background: null\nsprites: {}\ncamera: {x: 0.0, y: 0.0, zoom: 1.0}\ndialogue_ui_visible: true\npersistent_effects: []\n";
-        let options = serde_saphyr::options! { strict_booleans: true };
-        let world: WorldSnapshot =
-            serde_saphyr::from_str_with_options(yaml, options).expect("legacy world must load");
-        assert!(!world.curtain.covered);
-        assert_eq!(world.curtain.fill, None);
-        assert_eq!(world.curtain, CurtainSnapshot::default());
     }
 
     #[test]
@@ -3126,7 +2795,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_choice_nodes_parse_without_presentation() {
+    fn choice_nodes_parse_without_presentation() {
         let node = parse_scene_node("type: choice\nchoices:\n- id: a\n  label: A\n  next: end\n");
         let SceneNode::Choice {
             presentation,

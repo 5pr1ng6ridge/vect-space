@@ -46,19 +46,8 @@
         "stop"
       ]
     },
-    "BackgroundTransitionSchema": {
-      "description": "Schema-only view used on fields so the generated JSON Schema accepts both\nthe already-authored one-word form and the canonical object.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/LegacyBackgroundTransitionName"
-        },
-        {
-          "$ref": "#/$defs/BackgroundTransitionSpec"
-        }
-      ]
-    },
     "BackgroundTransitionSpec": {
-      "description": "Canonical background transition.\n\nLegacy one-word transitions keep working: the loader accepts\n`transition: cut` / `transition: cross_fade` and normalises them into this\nshape, so cues, hosts and generated schemas only ever observe the canonical\nform and never need a compatibility branch.",
+      "description": "Background transition of a `background` node and its cue.",
       "oneOf": [
         {
           "type": "object",
@@ -685,20 +674,6 @@
         "ease_in_out"
       ]
     },
-    "LegacyBackgroundTransitionName": {
-      "type": "string",
-      "enum": [
-        "cut",
-        "cross_fade"
-      ]
-    },
-    "LegacyScreenEffectName": {
-      "type": "string",
-      "enum": [
-        "flash",
-        "shake"
-      ]
-    },
     "LiteralOperand": {
       "type": "object",
       "properties": {
@@ -872,7 +847,7 @@
               "type": "string"
             },
             "transition": {
-              "$ref": "#/$defs/BackgroundTransitionSchema",
+              "$ref": "#/$defs/BackgroundTransitionSpec",
               "default": {
                 "type": "cross_fade"
               }
@@ -1705,7 +1680,7 @@
               "minimum": 0
             },
             "effect": {
-              "$ref": "#/$defs/ScreenEffectSchema"
+              "$ref": "#/$defs/ScreenEffectSpec"
             },
             "next": {
               "type": "string"
@@ -2146,17 +2121,6 @@
         }
       ]
     },
-    "ScreenEffectSchema": {
-      "description": "Schema-only view used on fields so the generated JSON Schema accepts both\nthe already-authored one-word effect and the canonical object.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/LegacyScreenEffectName"
-        },
-        {
-          "$ref": "#/$defs/ScreenEffectSpec"
-        }
-      ]
-    },
     "ScreenEffectSpec": {
       "oneOf": [
         {
@@ -2329,7 +2293,7 @@
               "minimum": 0
             },
             "effect": {
-              "$ref": "#/$defs/ScreenEffectSchema"
+              "$ref": "#/$defs/ScreenEffectSpec"
             },
             "id": {
               "type": "string"

@@ -10,9 +10,10 @@ import type { Ref } from "react";
 import type {
   ButtonSnapshot,
   ResolvedAsset,
+  RuntimeUpdate,
+  Settings,
 } from "@vectspace/presentation-core/types";
-import type { RuntimeUpdate, Settings } from "./engine/types";
-import type { SceneCanvasHandle } from "./components/SceneCanvas";
+import type { SceneCanvasHandle } from "@vectspace/presentation-react/gameplay";
 
 const host = vi.hoisted(() => {
   const failures: Record<string, number> = {};
@@ -28,7 +29,7 @@ const host = vi.hoisted(() => {
     alignFailures: 0,
   };
 });
-vi.mock("./components/SceneCanvas", async () => {
+vi.mock("@vectspace/presentation-react/gameplay", async (importOriginal) => {
   const react = await import("react");
   const SceneCanvas = react.forwardRef(function SceneCanvas(
     _props: unknown,
@@ -65,7 +66,7 @@ vi.mock("./components/SceneCanvas", async () => {
     }));
     return null;
   });
-  return { SceneCanvas };
+  return { ...(await importOriginal<object>()), SceneCanvas };
 });
 vi.mock("./components/ChapterMapPage", () => ({
   ChapterMapPage: ({ onReplay }: { onReplay(id: string): void }) => (

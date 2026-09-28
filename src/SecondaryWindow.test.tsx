@@ -1,8 +1,8 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Ref } from "react";
-import type { RuntimeUpdate } from "./engine/types";
-import type { SceneCanvasHandle } from "./components/SceneCanvas";
+import type { RuntimeUpdate } from "@vectspace/presentation-core/types";
+import type { SceneCanvasHandle } from "@vectspace/presentation-react/gameplay";
 
 const host = vi.hoisted(() => {
   const listeners: Record<string, (event: unknown) => void> = {};
@@ -54,7 +54,7 @@ vi.mock("@tauri-apps/api/event", () => ({
     }),
 }));
 
-vi.mock("./components/SceneCanvas", async () => {
+vi.mock("@vectspace/presentation-react/gameplay", async (importOriginal) => {
   const react = await import("react");
   const SceneCanvas = react.forwardRef(function SceneCanvas(
     _props: unknown,
@@ -73,7 +73,7 @@ vi.mock("./components/SceneCanvas", async () => {
     }));
     return null;
   });
-  return { SceneCanvas };
+  return { ...(await importOriginal<object>()), SceneCanvas };
 });
 
 vi.mock("@tauri-apps/api/core", () => ({

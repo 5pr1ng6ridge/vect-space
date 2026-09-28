@@ -19,22 +19,19 @@ import {
   type MockInstance,
 } from "vitest";
 
-import { AudioManager } from "@vectspace/presentation-core/audio";
+import { AudioManager } from "./audio";
 import {
   createFramePump,
   createMemoryKit,
   createMemoryTextureLoader,
   type FramePump,
   type MemoryKit,
-} from "@vectspace/presentation-core/scene-test-kit";
-import {
-  createFakeMediaDom,
-  type FakeMediaDom,
-} from "@vectspace/presentation-core/session-test-kit";
-import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
+} from "./sceneTestKit";
+import { createFakeMediaDom, type FakeMediaDom } from "./sessionTestKit";
+import { UiMotionHost } from "./uiMotion";
 
-import { PresentationController } from "./presentation";
-import { SceneSurface } from "@vectspace/presentation-core/scene-surface";
+import { PresentationController } from "./gameplayHost";
+import { SceneSurface } from "./sceneSurface";
 import type {
   AmbienceSlot,
   AssetUrlMap,

@@ -5,7 +5,8 @@ nodes:
   room:
     type: background
     background: bg.test_1
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 350
     easing: ease_in_out
     await: true

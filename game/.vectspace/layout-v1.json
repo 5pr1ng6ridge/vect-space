@@ -12,67 +12,148 @@
     "ch0": {
       "nodes": {
         "ambience_background_start": {
-          "x": 392.0,
-          "y": 12.0
+          "x": 40.0,
+          "y": 229.0
         },
         "background_start": {
-          "x": 12.0,
-          "y": 12.0
+          "x": 36.0,
+          "y": 116.0
         },
         "long_text_say_say_say_start": {
-          "x": 3052.0,
-          "y": 12.0
+          "x": 0.0,
+          "y": 547.0
         },
         "long_text_say_say_say_start_continue": {
-          "x": 3812.0,
-          "y": 12.0
+          "x": 688.0,
+          "y": 547.0
         },
         "open_window_sprite_say_say_say_start": {
-          "x": 2672.0,
-          "y": 12.0
+          "x": 1376.0,
+          "y": 272.0
         },
         "say_say_say_start": {
-          "x": 1912.0,
-          "y": 12.0
+          "x": 1024.0,
+          "y": 180.0
         },
         "say_say_start": {
-          "x": 1532.0,
-          "y": 12.0
+          "x": 752.0,
+          "y": 164.0
         },
         "say_start": {
-          "x": 1152.0,
-          "y": 12.0
+          "x": 432.0,
+          "y": 157.0
         },
         "sprite_ambience_background_start": {
-          "x": 772.0,
-          "y": 12.0
+          "x": 432.0,
+          "y": 36.0
         },
         "sprite_long_text_say_say_say_start_continue": {
-          "x": 4160.0,
-          "y": 192.0
+          "x": 1032.0,
+          "y": 556.0
         },
         "sprite_say_say_say_start": {
-          "x": 2292.0,
-          "y": 12.0
+          "x": 1376.0,
+          "y": 48.0
         },
         "sprite_say_start": {
-          "x": 1492.0,
-          "y": 192.0
+          "x": 432.0,
+          "y": 308.0
         },
         "start": {
-          "x": 4192.0,
-          "y": 12.0
+          "x": 1376.0,
+          "y": 556.0
         },
         "timeline_start": {
-          "x": 3432.0,
-          "y": 12.0
+          "x": 344.0,
+          "y": 556.0
         }
       },
       "viewport": {
-        "x": -892.4801837423433,
-        "y": 191.84930532158353,
-        "zoom": 0.7412319155408176
-      }
+        "x": -324.17249012107993,
+        "y": -100.76443454381148,
+        "zoom": 0.791704746463741
+      },
+      "groups": [
+        {
+          "id": "group-0",
+          "children": [
+            {
+              "node": "background_start"
+            },
+            {
+              "node": "ambience_background_start"
+            }
+          ]
+        },
+        {
+          "id": "group-1",
+          "children": [
+            {
+              "node": "sprite_ambience_background_start"
+            },
+            {
+              "node": "say_start"
+            },
+            {
+              "node": "sprite_say_start"
+            },
+            {
+              "node": "say_say_start"
+            },
+            {
+              "node": "say_say_say_start"
+            }
+          ]
+        },
+        {
+          "id": "group-2",
+          "children": [
+            {
+              "node": "sprite_say_say_say_start"
+            },
+            {
+              "node": "open_window_sprite_say_say_say_start"
+            }
+          ]
+        },
+        {
+          "id": "group-3",
+          "children": [
+            {
+              "node": "long_text_say_say_say_start"
+            },
+            {
+              "node": "timeline_start"
+            },
+            {
+              "node": "long_text_say_say_say_start_continue"
+            },
+            {
+              "node": "sprite_long_text_say_say_say_start_continue"
+            },
+            {
+              "node": "start"
+            }
+          ]
+        },
+        {
+          "id": "group-4",
+          "children": [
+            {
+              "group": "group-2"
+            },
+            {
+              "group": "group-1"
+            },
+            {
+              "group": "group-0"
+            },
+            {
+              "group": "group-3"
+            }
+          ]
+        }
+      ]
     },
     "character_action_showcase": {
       "nodes": {
@@ -223,8 +304,8 @@
           "y": 874.0
         },
         "dialogue_show": {
-          "x": 4952.0,
-          "y": 849.0
+          "x": 4976.0,
+          "y": 688.0
         },
         "ending": {
           "x": 5332.0,
@@ -239,8 +320,8 @@
           "y": 874.0
         },
         "establish": {
-          "x": 4572.0,
-          "y": 849.0
+          "x": 4640.0,
+          "y": 688.0
         },
         "flash_result": {
           "x": 1912.0,
@@ -295,8 +376,8 @@
           "y": 744.0
         },
         "say": {
-          "x": 5332.0,
-          "y": 849.0
+          "x": 5296.0,
+          "y": 688.0
         },
         "say_2": {
           "x": 772.0,
@@ -328,10 +409,26 @@
         }
       },
       "viewport": {
-        "x": 318.9007219742309,
-        "y": -78.17189354469917,
-        "zoom": 0.6000000000000005
-      }
+        "x": -349.34057589576514,
+        "y": 168.0831408299827,
+        "zoom": 0.1723047532495558
+      },
+      "groups": [
+        {
+          "id": "group-0",
+          "children": [
+            {
+              "node": "dialogue_show"
+            },
+            {
+              "node": "establish"
+            },
+            {
+              "node": "say"
+            }
+          ]
+        }
+      ]
     },
     "sandbox": {
       "nodes": {
@@ -421,9 +518,9 @@
         }
       },
       "viewport": {
-        "x": -1341.2197468799725,
-        "y": 352.4636862817788,
-        "zoom": 0.6000000000000006
+        "x": 96.79600769682396,
+        "y": 357.59197606069665,
+        "zoom": 0.4547149699531199
       }
     },
     "surface_parity": {
@@ -507,9 +604,9 @@
         }
       },
       "viewport": {
-        "x": -422.903941236175,
-        "y": 184.57200436230755,
-        "zoom": 0.7542072648913443
+        "x": -769.2807767056445,
+        "y": 325.6329944074563,
+        "zoom": 0.7542072648913448
       }
     },
     "transition_lab": {

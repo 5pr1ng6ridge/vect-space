@@ -14,7 +14,6 @@ import {
   longTextFollowTarget,
   longTextMaxScroll,
   longTextParagraphTarget,
-  resolveLongTextScroll,
 } from "./longTextScroll";
 
 describe("LongTextPanel", () => {
@@ -134,55 +133,6 @@ describe("LongTextPanel", () => {
       LONG_TEXT_PAGE_HEIGHT - 1_080 + LONG_TEXT_BOTTOM_BROWSING_SPACE,
     );
     expect(LONG_TEXT_BOTTOM_BROWSING_SPACE).toBeGreaterThan(70);
-  });
-
-  it("jumps once for a new step, then waits for a long step to cross again", () => {
-    expect(
-      resolveLongTextScroll({
-        initialPositioned: false,
-        manuallyBrowsing: false,
-        stepStartY: 1_100,
-        cursorY: 1_100,
-        currentOffset: 0,
-        maxScroll: 900,
-      }),
-    ).toEqual({ offset: 540, instant: true });
-
-    expect(
-      resolveLongTextScroll({
-        initialPositioned: true,
-        manuallyBrowsing: false,
-        stepStartY: 1_100,
-        cursorY: 1_324,
-        currentOffset: 540,
-        maxScroll: 900,
-      }),
-    ).toBeNull();
-
-    expect(
-      resolveLongTextScroll({
-        initialPositioned: true,
-        manuallyBrowsing: false,
-        stepStartY: 1_100,
-        cursorY: 1_326,
-        currentOffset: 540,
-        maxScroll: 900,
-      }),
-    ).toEqual({ offset: 766, instant: false });
-  });
-
-  it("animates a new placement after the document has already been positioned", () => {
-    expect(
-      resolveLongTextScroll({
-        initialPositioned: false,
-        initialPlacementInstant: false,
-        manuallyBrowsing: false,
-        stepStartY: 1_700,
-        cursorY: 1_700,
-        currentOffset: 420,
-        maxScroll: 1_500,
-      }),
-    ).toEqual({ offset: 1_140, instant: false });
   });
 
   it("keeps the new follower bounded through a stalled frame and resumes from manual positions", () => {

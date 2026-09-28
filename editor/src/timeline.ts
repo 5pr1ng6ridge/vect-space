@@ -10,12 +10,7 @@ import type {
   TimelineNode,
   TimelineTrack,
 } from "./types";
-import {
-  applyEasing,
-  evaluateChannel,
-} from "@vectspace/presentation-core/timeline";
-
-export { evaluateChannel };
+import { applyEasing } from "@vectspace/presentation-core/timeline";
 
 export interface SpriteActionExpansionOptions {
   action: SpriteActionDefinition;

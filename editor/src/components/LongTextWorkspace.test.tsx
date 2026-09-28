@@ -7,7 +7,7 @@
  * textareas, and renders the *shared* `LongTextPanel` for paper, measurement,
  * pagination, reveal and scroll.  These tests pin exactly that boundary:
  *
- * - a workspace-local duplicate of the paper/text layer must not come back;
+ * - the paper/text layer is the shared panel's, not a workspace-local copy;
  * - the panel must receive the authored document (content, layout, pagination,
  *   colour, font identity) and the editor's playhead/scrub state;
  * - the controls must drive the panel's public API (`complete()`, a new reveal
@@ -464,20 +464,6 @@ describe("LongTextWorkspace shared panel", () => {
     expect(
       view.container.querySelectorAll(".long-text-paper").length,
     ).toBeGreaterThan(0);
-
-    // Nothing of the former hand-built paper/text layer may come back.
-    for (const legacy of [
-      ".long-text-workspace-window",
-      ".long-text-workspace-surface",
-      ".long-text-workspace-measure-root",
-      ".long-text-workspace-text-clip",
-      ".long-text-workspace-paper",
-      ".long-text-workspace-paper-background",
-      ".long-text-workspace-step-fragment",
-      ".long-text-workspace-step",
-    ]) {
-      expect(view.container.querySelector(legacy)).toBeNull();
-    }
 
     // The authored document (retained prefix + the node's own paragraph) is
     // inside the shared text surface.

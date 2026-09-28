@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { DialogueBox, type DialogueBoxHandle } from "./DialogueBox";
-import { staticImageSource } from "./useAnimatedImage";
+import { staticImageSource } from "../useAnimatedImage";
 import { MarkupText } from "./MarkupText";
 
 const page = {

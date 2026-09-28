@@ -1100,7 +1100,6 @@ impl RuntimeEngine {
         content: &ContentCatalog,
         mut snapshot: RuntimeSnapshot,
     ) -> Result<RuntimeUpdate, RuntimeError> {
-        hydrate_legacy_dialogue_page(&mut snapshot);
         resync_choice_prompt_from_content(content, &mut snapshot)?;
         validate_snapshot(content, &snapshot)?;
         match &mut snapshot.prompt {
@@ -3738,32 +3737,6 @@ fn resync_choice_prompt_from_content(
     Ok(())
 }
 
-fn hydrate_legacy_dialogue_page(snapshot: &mut RuntimeSnapshot) {
-    if snapshot.dialogue_page.is_some() {
-        return;
-    }
-    let PromptSnapshot::Dialogue {
-        prompt_id,
-        speaker_id,
-        speaker,
-        name_color,
-        text_color,
-        text,
-        ..
-    } = &snapshot.prompt
-    else {
-        return;
-    };
-    snapshot.dialogue_page = Some(DialoguePageSnapshot {
-        page_id: prompt_id.clone(),
-        speaker_id: speaker_id.clone(),
-        speaker: speaker.clone(),
-        name_color: name_color.clone(),
-        text_color: text_color.clone(),
-        segments: vec![text.clone()],
-    });
-}
-
 fn validate_snapshot_curtain(
     content: &ContentCatalog,
     snapshot: &RuntimeSnapshot,
@@ -6386,51 +6359,6 @@ mod tests {
     }
 
     #[test]
-    fn old_dialogue_snapshots_default_new_character_fields() {
-        let value = serde_json::json!({
-            "kind": "dialogue",
-            "prompt_id": "scene/line",
-            "speaker": "临时名",
-            "text": "文本"
-        });
-        let prompt: PromptSnapshot = serde_json::from_value(value).unwrap();
-        let PromptSnapshot::Dialogue {
-            speaker_id,
-            name_color,
-            text_color,
-            is_read,
-            ..
-        } = prompt
-        else {
-            panic!("expected dialogue")
-        };
-        assert_eq!((speaker_id, name_color, text_color), (None, None, None));
-        assert!(!is_read);
-    }
-
-    #[test]
-    fn loading_an_old_dialogue_snapshot_rebuilds_the_stable_page() {
-        let content = catalog();
-        let mut source = RuntimeEngine::new(&content).unwrap();
-        source.snapshot.location.node_id = "introduction".to_owned();
-        source.run_until_boundary(&content).unwrap();
-        let current = source.snapshot.clone();
-        assert!(matches!(current.prompt, PromptSnapshot::Dialogue { .. }));
-        let mut value = serde_json::to_value(current).unwrap();
-        value.as_object_mut().unwrap().remove("dialogue_page");
-        let legacy: RuntimeSnapshot = serde_json::from_value(value).unwrap();
-        assert!(legacy.dialogue_page.is_none());
-
-        let mut target = RuntimeEngine::new(&content).unwrap();
-        let loaded = target.load_snapshot(&content, legacy).unwrap();
-        let page = loaded.snapshot.dialogue_page.unwrap();
-        let PromptSnapshot::Dialogue { text, .. } = loaded.snapshot.prompt else {
-            panic!("expected dialogue prompt")
-        };
-        assert_eq!(page.segments, [text]);
-    }
-
-    #[test]
     fn long_text_keeps_a_stable_paper_until_its_final_step() {
         let mut content = catalog();
         let scene = content.scenes.get_mut("prologue").unwrap();
@@ -6861,24 +6789,6 @@ mod tests {
     }
 
     #[test]
-    fn old_long_text_pages_default_to_automatic_pagination() {
-        let page: LongTextPageSnapshot = serde_json::from_value(serde_json::json!({
-            "document_id": "prologue/lecture",
-            "paper": null,
-            "steps": [{
-                "step_id": "definition",
-                "text": "定义",
-                "page_break_before": false
-            }],
-            "active_step_index": 0
-        }))
-        .unwrap();
-
-        assert_eq!(page.pagination, crate::model::LongTextPagination::Auto);
-        assert_eq!(page.font_size, crate::model::LONG_TEXT_FONT_SIZE_DEFAULT);
-    }
-
-    #[test]
     fn feature_lab_yaml_exercises_presentation_text_and_cross_scene_boundaries() {
         let mut content = catalog();
         content.manifest.entry_scene = "feature_lab".to_owned();
@@ -7163,27 +7073,6 @@ mod tests {
         };
         assert!(is_read);
         assert!(text.contains("固定的"));
-    }
-
-    #[test]
-    fn old_runtime_snapshots_default_playback_policy() {
-        let content = catalog();
-        let snapshot = initial_snapshot(&content).unwrap();
-        let mut value = serde_json::to_value(snapshot).unwrap();
-        value.as_object_mut().unwrap().remove("playback");
-        let decoded: RuntimeSnapshot = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.playback, PlaybackSnapshot::default());
-    }
-
-    #[test]
-    fn old_runtime_snapshots_default_to_no_curtain() {
-        let content = catalog();
-        let snapshot = initial_snapshot(&content).unwrap();
-        let mut value = serde_json::to_value(snapshot).unwrap();
-        assert!(value["world"]["curtain"].is_object());
-        value["world"].as_object_mut().unwrap().remove("curtain");
-        let decoded: RuntimeSnapshot = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.world.curtain, CurtainSnapshot::default());
     }
 
     #[test]

@@ -5,7 +5,8 @@ nodes:
   establish:
     type: background
     background: bg.nvctsp
-    transition: cut
+    transition:
+      type: cut
     duration_ms: 0
     easing: linear
     await: false
@@ -51,7 +52,8 @@ nodes:
     next: flash
   flash:
     type: screen_effect
-    effect: flash
+    effect:
+      type: flash
     duration_ms: 10
     await: false
     next: bind_show_motion
@@ -157,7 +159,8 @@ nodes:
     - type: screen_effect
       id: shake
       at_ms: 60
-      effect: shake
+      effect:
+        type: shake
       duration_ms: 10
     next: wait_after_timeline
   wait_after_timeline:

@@ -11,17 +11,20 @@ import {
 import "katex/dist/katex.min.css";
 import "./App.css";
 
-import { DialogueBox, type DialogueBoxHandle } from "./components/DialogueBox";
 import { HistoryPanel } from "./components/HistoryPanel";
 import {
+  ButtonLayer,
+  DialogueBox,
   LongTextPanel,
+  MarkupText,
+  SceneCanvas,
+  useTextRevealSession,
+  type DialogueBoxHandle,
   type LongTextPanelHandle,
-} from "./components/LongTextPanel";
-import { MarkupText } from "./components/MarkupText";
-import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
+  type SceneCanvasHandle,
+} from "@vectspace/presentation-react/gameplay";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
-import { ButtonLayer } from "./components/ButtonLayer";
 import { ChoiceLayer } from "@vectspace/presentation-react/choice";
 import { ChapterMapPage } from "./components/ChapterMapPage";
 import {
@@ -33,14 +36,13 @@ import {
   requireSessionId,
   SessionTransitionController,
   type SessionTransitionToken,
-} from "./engine/session";
+} from "@vectspace/presentation-core/session-transition";
 import {
   autoReadingDelay,
   buildVisibleUnitCps,
   hasImmediateAutoAdvance,
   parseMarkup,
 } from "@vectspace/text";
-import { useTextRevealSession } from "./components/useTextRevealSession";
 import { canFastForwardPrompt } from "./engine/playback";
 import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type {
@@ -56,7 +58,7 @@ import type {
   Settings,
   ChapterMapSnapshot,
   TextRevealAnimation,
-} from "./engine/types";
+} from "@vectspace/presentation-core/types";
 import { useViewportMetrics } from "./viewport/viewport";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import type { WireU64 } from "../shared/generated/WireU64";

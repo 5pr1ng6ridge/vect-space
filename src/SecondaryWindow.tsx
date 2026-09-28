@@ -11,13 +11,15 @@ import {
 import "katex/dist/katex.min.css";
 import "./App.css";
 
-import { ButtonLayer } from "./components/ButtonLayer";
-import { DialogueBox, type DialogueBoxHandle } from "./components/DialogueBox";
 import {
+  ButtonLayer,
+  DialogueBox,
   LongTextPanel,
+  SceneCanvas,
+  type DialogueBoxHandle,
   type LongTextPanelHandle,
-} from "./components/LongTextPanel";
-import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
+  type SceneCanvasHandle,
+} from "@vectspace/presentation-react/gameplay";
 import { ChoiceLayer } from "@vectspace/presentation-react/choice";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
@@ -31,7 +33,7 @@ import {
   resolvedAssetsToUrls,
 } from "./engine/api";
 import { CommandError } from "../shared/commandError";
-import { requireSessionId } from "./engine/session";
+import { requireSessionId } from "@vectspace/presentation-core/session-transition";
 import { canFastForwardPrompt } from "./engine/playback";
 import type {
   AdvanceSource,
@@ -42,7 +44,7 @@ import type {
   RuntimeUpdate,
   Settings,
   TextRevealAnimation,
-} from "./engine/types";
+} from "@vectspace/presentation-core/types";
 import { useViewportMetrics } from "./viewport/viewport";
 import type { WireU64 } from "../shared/generated/WireU64";
 

@@ -26,11 +26,11 @@ import {
 } from "react";
 import {
   copyTimelineKeyframesFrom,
-  evaluateChannel,
   pasteTimelineKeyframesInto,
   snapTimelineTime,
   type TimelineKeyframeClipboard,
 } from "../timeline";
+import { evaluateChannel } from "@vectspace/presentation-core/timeline";
 import type {
   TimelineChannels,
   TimelineEasing,

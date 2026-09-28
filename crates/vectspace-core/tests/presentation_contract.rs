@@ -1,9 +1,7 @@
 //! Repository-level contract tests for the transition/effect/curtain wire.
 //!
 //! These exercise the public content and runtime API the way a host does:
-//! authored YAML is loaded, validated, executed and restored, so a change to
-//! the canonical transition/effect/curtain shape cannot silently break the
-//! legacy content that is already committed.
+//! authored YAML is loaded, validated, executed and restored.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,7 +11,7 @@ use vectspace_core::content::{ContentCatalog, ContentError};
 use vectspace_core::model::{
     BackgroundTransitionSpec, CueGate, CurtainAction, CurtainFill, CurtainSnapshot,
     CurtainTransitionSpec, Easing, PresentationCue, PresentationCueKind, SceneDefinition,
-    ScreenEffectSpec, StoryLocation, TransitionDirection,
+    StoryLocation, TransitionDirection,
 };
 use vectspace_core::runtime::RuntimeEngine;
 
@@ -55,76 +53,6 @@ fn rebuild(
 fn scene_from_yaml(yaml: &str) -> SceneDefinition {
     let options = serde_saphyr::options! { strict_booleans: true };
     serde_saphyr::from_str_with_options(yaml, options).expect("scene YAML must parse")
-}
-
-#[test]
-fn legacy_transition_and_effect_yaml_stays_schema_valid_and_runnable() {
-    let catalog = fixture_catalog();
-    let scene = scene_from_yaml(
-        r#"
-schema_version: 2
-id: legacy_contract
-entry: stage
-nodes:
-  stage:
-    type: background
-    background: bg.vector_space
-    transition: cut
-    duration_ms: 200
-    easing: linear
-    await: false
-    next: fade
-  fade:
-    type: background
-    background: bg.nvctsp
-    transition: cross_fade
-    duration_ms: 300
-    easing: ease_out
-    await: false
-    next: flash
-  flash:
-    type: screen_effect
-    effect: flash
-    duration_ms: 120
-    await: false
-    next: timeline
-  timeline:
-    type: timeline
-    duration_ms: 400
-    await: true
-    skippable: true
-    tracks: []
-    events:
-    - type: screen_effect
-      id: legacy-shake
-      at_ms: 0
-      effect: shake
-      duration_ms: 200
-    next: done
-  done:
-    type: end
-"#,
-    );
-    let mut scenes = catalog.scenes.clone();
-    scenes.insert("legacy_contract".to_owned(), scene);
-    let rebuilt = rebuild(&catalog, scenes).expect("legacy YAML must validate");
-
-    let stage = rebuilt.scenes["legacy_contract"].nodes["stage"].clone();
-    assert!(matches!(
-        stage,
-        vectspace_core::model::SceneNode::Background {
-            transition: BackgroundTransitionSpec::Cut,
-            ..
-        }
-    ));
-    let flash = &rebuilt.scenes["legacy_contract"].nodes["flash"];
-    assert!(matches!(
-        flash,
-        vectspace_core::model::SceneNode::ScreenEffect {
-            effect: ScreenEffectSpec::Flash { .. },
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -376,7 +304,7 @@ fn direction_and_type_typos_report_actionable_diagnostics() {
 }
 
 #[test]
-fn presentation_cues_round_trip_and_still_accept_legacy_strings() {
+fn presentation_cues_round_trip() {
     let cue = PresentationCue {
         cue_id: 7,
         gate: CueGate::Runtime,
@@ -394,32 +322,6 @@ fn presentation_cues_round_trip_and_still_accept_legacy_strings() {
     };
     let json = serde_json::to_string(&cue).unwrap();
     assert_eq!(serde_json::from_str::<PresentationCue>(&json).unwrap(), cue);
-
-    // A cue persisted by the previous runtime used the one-word forms.
-    let legacy: PresentationCue = serde_json::from_str(
-        r#"{"cue_id":1,"gate":"none","type":"background_transition","background":null,"transition":"cross_fade","duration_ms":300,"easing":"ease_out"}"#,
-    )
-    .unwrap();
-    assert!(matches!(
-        legacy.kind,
-        PresentationCueKind::BackgroundTransition {
-            transition: BackgroundTransitionSpec::CrossFade,
-            easing: Easing::EaseOut,
-            ..
-        }
-    ));
-
-    let legacy_effect: PresentationCue = serde_json::from_str(
-        r#"{"cue_id":2,"gate":"none","type":"screen_effect","effect":"shake","duration_ms":200}"#,
-    )
-    .unwrap();
-    assert!(matches!(
-        legacy_effect.kind,
-        PresentationCueKind::ScreenEffect {
-            effect: ScreenEffectSpec::Shake { .. },
-            duration_ms: 200,
-        }
-    ));
 }
 
 /// The generated schema must reject `{color, asset}` exactly like the loader.

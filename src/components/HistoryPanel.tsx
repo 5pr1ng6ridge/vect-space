@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactElement } from "react";
 
-import type { DialogueHistoryEntry } from "../engine/types";
-import { MarkupText } from "./MarkupText";
+import type { DialogueHistoryEntry } from "@vectspace/presentation-core/types";
+import { MarkupText } from "@vectspace/presentation-react/gameplay";
 
 export function HistoryPanel({
   entries,

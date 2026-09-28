@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { UiMotionPreset } from "./types";
-import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
+import { UiMotionHost } from "./uiMotion";
 
 const preset: UiMotionPreset = {
   schema_version: 1,

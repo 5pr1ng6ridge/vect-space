@@ -9,8 +9,6 @@ import {
   CHOICE_FALLBACK_BUTTON_WIDTH,
   CHOICE_FALLBACK_PANEL_X,
   CHOICE_FALLBACK_PANEL_Y,
-  CHOICE_STAGE_HEIGHT,
-  CHOICE_STAGE_WIDTH,
   layoutChoiceItems,
   legacyChoiceAnchor,
   resolveChoiceItemSize,
@@ -57,15 +55,6 @@ describe("choice layout conformance", () => {
         testCase.expected,
       );
     }
-  });
-
-  it("uses design-pixel defaults at the stage centre", () => {
-    expect(CHOICE_DEFAULT_ANCHOR_X).toBe(960);
-    expect(CHOICE_DEFAULT_ANCHOR_Y).toBe(540);
-    expect(CHOICE_FALLBACK_PANEL_X).toBe(470);
-    expect(CHOICE_FALLBACK_PANEL_Y).toBe(360);
-    expect(CHOICE_STAGE_WIDTH).toBe(1920);
-    expect(CHOICE_STAGE_HEIGHT).toBe(1080);
   });
 
   it("centres an explicit default group on 960/540 for one to three options", () => {

@@ -328,7 +328,7 @@ function EditorApp(): ReactElement {
   const [leftPanelVisible, setLeftPanelVisible] = useState(true);
   const [rightPanelVisible, setRightPanelVisible] = useState(true);
   const [route, setRoute] = useState<EditorRoute>(STORY_ROUTE);
-  // Legacy per-workspace names, derived from the single route.
+  // Per-workspace views of the single route.
   const timelineTarget = route.kind === "timeline" ? route : null;
   const longTextTarget = route.kind === "longText" ? route : null;
   const gameplayTarget = route.kind === "preview" ? route : null;

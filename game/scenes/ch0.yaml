@@ -161,7 +161,7 @@ nodes:
     tracks:
     - type: sprite
       sprite_id: character
-      asset: sprite.jelly
+      asset: sprite.alli_neutral
       remove_at_end: false
       channels:
         opacity:
@@ -235,29 +235,66 @@ nodes:
       channels:
         opacity:
         - at_ms: 0
-          value: inherit
-          easing: ease_in_out
-        - at_ms: 500
           value: 1.0
+          easing: linear
+        - at_ms: 150
+          value: 1.0
+          easing: linear
+        scale:
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 150
+          value: 2.8321242
           easing: linear
         x:
         - at_ms: 0
           value: inherit
-          easing: ease_in_out
+          easing: ease_out
+        - at_ms: 150
+          value: 991.71
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: inherit
+          easing: ease_out
+        - at_ms: 150
+          value: 3452.6426
+          easing: linear
+        z:
+        - at_ms: 0
+          value: 5.0
+          easing: linear
+    - type: sprite
+      sprite_id: black
+      asset: null
+      remove_at_end: false
+      channels:
+        opacity:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 500
+          value: 0.0
+          easing: linear
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: linear
         - at_ms: 500
           value: 960.0
           easing: linear
         "y":
         - at_ms: 0
           value: inherit
-          easing: ease_in_out
+          easing: linear
         - at_ms: 500
-          value: 1080.0
+          value: 1079.4154
           easing: linear
         z:
         - at_ms: 0
-          value: inherit
-          easing: step
+          value: 2.0
+          easing: linear
         - at_ms: 500
           value: 0.0
           easing: linear
@@ -325,10 +362,10 @@ nodes:
           easing: linear
         z:
         - at_ms: 0
-          value: 0.0
+          value: 2.0
           easing: step
         - at_ms: 500
-          value: 0.0
+          value: 2.0
           easing: linear
     events: []
     next: open_window_sprite_say_say_say_start
@@ -337,9 +374,9 @@ nodes:
     sprite_id: character
     action: move
     asset: sprite.alli_surprise
-    x: 960.0
-    "y": 1080.0
-    scale: 1.0
+    x: 524.0
+    "y": 1121.0
+    scale: 0.7
     opacity: 1.0
     z: 0
     duration_ms: 500
@@ -384,22 +421,17 @@ nodes:
         - at_ms: 500
           value: 1231.2759
           easing: linear
-        z:
-        - at_ms: 0
-          value: 0.0
-          easing: linear
     - type: sprite
       sprite_id: black
       asset: null
       remove_at_end: false
       channels:
-        x:
+        z:
         - at_ms: 0
-          value: 960.0
+          value: inherit
           easing: linear
-        "y":
-        - at_ms: 0
-          value: 1076.2759
+        - at_ms: 50
+          value: 2.0
           easing: linear
     events: []
     next: long_text_say_say_say_start_continue

@@ -397,7 +397,6 @@ export function ActionWorkspace({
           {error !== null && <p className="inline-error">{error}</p>}
           <TimelineEditor
             assets={assets}
-            hideStagePreview
             hideTransport
             onChange={applyNode}
             onPlayheadChange={(value) => previewRef.current?.seek(value)}

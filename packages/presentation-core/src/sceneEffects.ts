@@ -59,7 +59,7 @@ export function normalizedEffectProgress(
  * A fixed integer hash (32-bit xorshift-style mixing) maps the seed to
  * `[0, 2π)` without touching floating point randomness, so the same seed
  * always produces the same offset on every engine, host and seek position.
- * Seed `0` (what legacy `effect: shake` normalises to) is a valid, stable seed.
+ * Seed `0` (the default) is a valid, stable seed.
  */
 export function shakeSeedPhase(seed: number, axis: 0 | 1): number {
   const salt = axis === 0 ? 0x9e37_79b9 : 0x85eb_ca6b;

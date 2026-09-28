@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import corpus from "../../shared/timeline-conformance.json";
-import { evaluateChannel } from "@vectspace/presentation-core/timeline";
+import corpus from "../../../shared/timeline-conformance.json";
+import { evaluateChannel } from "./timeline";
 import type { TimelineEasing } from "./types";
 
 describe("timeline evaluator conformance", () => {

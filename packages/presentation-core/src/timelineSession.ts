@@ -1398,10 +1398,7 @@ export class TimelineSession {
     return this.#videoPosition(video, elapsedMs)?.desiredSeconds ?? null;
   }
 
-  /**
-   * Shared window math.  The editor's standalone preview imports the same
-   * `evaluateVideoClip` so the two stages cannot drift apart again.
-   */
+  /** Shared clip-window math (see `evaluateVideoClip`). */
   #videoPosition(
     video: SessionVideo,
     elapsedMs: number,

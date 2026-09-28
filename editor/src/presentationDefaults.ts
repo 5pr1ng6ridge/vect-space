@@ -1,11 +1,10 @@
 /**
- * Authoring defaults for the canonical presentation specs.
+ * Authoring defaults for the presentation specs.
  *
- * The Rust loader normalises legacy one-word YAML into these shapes with the
- * same shipped values, so every editor creator (a new node, a new timeline
- * event, or an inspector type switch) must hand out exactly those values; one
+ * Every editor creator (a new node, a new timeline event, or an inspector type
+ * switch) hands out these values, which mirror the Rust serde defaults; one
  * source keeps them from drifting apart.  Factories return fresh objects
- * because specs are copied on edit, and the wire shape is unchanged.
+ * because specs are copied on edit.
  */
 
 import type {
@@ -14,7 +13,7 @@ import type {
   ScreenEffectSpec,
 } from "./types";
 
-/** Default transition of a new `background` node (legacy `cross_fade`). */
+/** Default transition of a new `background` node. */
 export function defaultBackgroundTransition(): BackgroundTransitionSpec {
   return { type: "cross_fade" };
 }
@@ -29,12 +28,12 @@ export function defaultCurtainTransition(): CurtainTransitionSpec {
   return { type: "fade" };
 }
 
-/** Default effect of a new `screen_effect` node / timeline event (legacy `flash`). */
+/** Default effect of a new `screen_effect` node / timeline event. */
 export function defaultFlashEffect(): ScreenEffectSpec {
   return { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 };
 }
 
-/** Shipped shake parameters (legacy `shake`): 16×9.6, 18 Hz, decay 1, seed 0. */
+/** Default shake parameters: 16×9.6, 18 Hz, decay 1, seed 0. */
 export function defaultShakeEffect(): ScreenEffectSpec {
   return {
     type: "shake",

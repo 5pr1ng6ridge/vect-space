@@ -5,7 +5,8 @@ nodes:
   background:
     type: background
     background: bg.vector_space
-    transition: cut
+    transition:
+      type: cut
     duration_ms: 0
     easing: linear
     await: true

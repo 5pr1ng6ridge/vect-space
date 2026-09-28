@@ -190,7 +190,6 @@ describe("AudioLoopEditor", () => {
     // StrictMode runs the source effect as setup -> cleanup -> setup; the
     // element must still own its media afterwards.
     expect(audio.getAttribute("src")).toBe("C:/game/audio/a.ogg");
-    expect(audio.paused).toBeDefined();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 

@@ -20,19 +20,6 @@ export interface GroupBounds extends NodePosition {
 
 const PADDING = 24;
 
-/**
- * Either persisted shape, as handed to the model helpers: the canonical nested
- * forest or the legacy flat `string[][]` membership.  The graph UI normalizes
- * to the canonical form once and then works with `SceneGroup[]` only.
- */
-export type SceneGroupsInput = readonly (SceneGroup | readonly string[])[];
-
-function isLegacyGroup(
-  group: SceneGroup | readonly string[],
-): group is readonly string[] {
-  return Array.isArray(group);
-}
-
 // ---------------------------------------------------------------------------
 // Nested rigid layout: every root group collapses into one ELK unit
 // ---------------------------------------------------------------------------
@@ -225,23 +212,17 @@ function rawChildRef(value: unknown): GroupChildRef | null {
 }
 
 /**
- * Read either persisted shape into a list of groups with stable, unique ids.
- * Legacy flat lists get deterministic `group-N` ids; nested groups keep their
- * stored id and only a missing or duplicated id is regenerated.  References are
- * parsed defensively because this runs on hand-editable JSON.
+ * Read persisted groups into a list with stable, unique ids: a stored id is
+ * kept and only a missing or duplicated id is regenerated as `group-N`.
+ * References are parsed defensively because this runs on hand-editable JSON.
  */
 function parseSceneGroups(
-  groups: SceneGroupsInput | undefined | null,
+  groups: readonly SceneGroup[] | undefined | null,
 ): SceneGroup[] {
   if (groups === undefined || groups === null) return [];
   const claimed = new Set<string>();
   for (const group of groups) {
-    if (
-      !isLegacyGroup(group) &&
-      isNonEmptyString(group.id) &&
-      !claimed.has(group.id)
-    )
-      claimed.add(group.id);
+    if (isNonEmptyString(group.id)) claimed.add(group.id);
   }
   let auto = 0;
   const autoId = (): string => {
@@ -256,15 +237,6 @@ function parseSceneGroups(
   const seen = new Set<string>();
   const result: SceneGroup[] = [];
   for (const group of groups) {
-    if (isLegacyGroup(group)) {
-      result.push({
-        id: autoId(),
-        children: group
-          .filter((id): id is string => typeof id === "string")
-          .map((node) => ({ node })),
-      });
-      continue;
-    }
     let id = group.id;
     if (!isNonEmptyString(id) || seen.has(id)) id = autoId();
     else seen.add(id);
@@ -385,13 +357,13 @@ function repairSceneGroups(
 /**
  * Canonicalize persisted membership into a nested forest.
  *
- * Accepts the canonical nested form or the legacy flat `string[][]`.  Mutually
- * consistent repair: missing/duplicate members are dropped, every node/group is
- * owned at most once, containment stays acyclic, and a group with fewer than two
- * children is collapsed or removed while preserving its surviving children.
+ * Mutually consistent repair: missing/duplicate members are dropped, every
+ * node/group is owned at most once, containment stays acyclic, and a group with
+ * fewer than two children is collapsed or removed while preserving its
+ * surviving children.
  */
 export function normalizeSceneGroups(
-  groups: SceneGroupsInput | undefined | null,
+  groups: readonly SceneGroup[] | undefined | null,
   nodeIds: ReadonlySet<string>,
 ): SceneGroup[] {
   return repairSceneGroups(parseSceneGroups(groups), nodeIds);
@@ -648,7 +620,7 @@ export function dissolveGroup(
  * node) is promoted instead of silently discarding a nested group.
  */
 export function removeNodesFromGroups(
-  groups: SceneGroupsInput | undefined | null,
+  groups: readonly SceneGroup[] | undefined | null,
   removed: ReadonlySet<string>,
   nodeIds: ReadonlySet<string>,
 ): SceneGroup[] {
@@ -666,7 +638,7 @@ export function removeNodesFromGroups(
  * rename keeps group identity and nesting intact.
  */
 export function renameNodeInGroups(
-  groups: SceneGroupsInput | undefined | null,
+  groups: readonly SceneGroup[] | undefined | null,
   previousId: string,
   nextId: string,
   nodeIds: ReadonlySet<string>,

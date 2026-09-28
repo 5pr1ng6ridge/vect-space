@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { requireSessionId, SessionTransitionController } from "./session";
+import {
+  requireSessionId,
+  SessionTransitionController,
+} from "./sessionTransition";
 
 describe("SessionTransitionController", () => {
   it("only keeps the newest token current", () => {

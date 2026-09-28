@@ -1,4 +1,8 @@
-import type { PlaybackSnapshot, PromptSnapshot, SkipMode } from "./types";
+import type {
+  PlaybackSnapshot,
+  PromptSnapshot,
+  SkipMode,
+} from "@vectspace/presentation-core/types";
 
 export function canFastForwardPrompt(
   playback: PlaybackSnapshot,

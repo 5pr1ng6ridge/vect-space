@@ -121,10 +121,6 @@ export interface WorldSnapshot {
   curtain?: CurtainSnapshot | null;
 }
 
-/**
- * Canonical background transition.  Legacy one-word transitions are normalised
- * by the Rust loader, so the frontend only ever sees this shape.
- */
 export type TransitionDirection =
   "left_to_right" | "right_to_left" | "top_to_bottom" | "bottom_to_top";
 

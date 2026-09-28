@@ -1448,12 +1448,8 @@ impl EngineState {
         let update = candidate
             .load_snapshot(&self.content, snapshot)
             .map_err(WireCommandError::from)?;
-        // Schema v3 restores the merged ordered ledger.  A legacy v2 slot has no
-        // stored ledger, which keeps the historical "load clears history"
-        // behaviour for slots written before multiwindow support.
-        if !history.is_empty() {
-            candidate.replace_dialogue_history(history);
-        }
+        // Restore the merged ordered ledger stored with the slot.
+        candidate.replace_dialogue_history(history);
         // Stage the restored secondary before the profile write so a bad scene
         // id or snapshot aborts the load with no partial replacement.
         let staged = match secondary {

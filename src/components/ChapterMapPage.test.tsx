@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ChapterMapSnapshot } from "../engine/types";
+import type { ChapterMapSnapshot } from "@vectspace/presentation-core/types";
 import { ChapterMapPage } from "./ChapterMapPage";
 
 const MAP: ChapterMapSnapshot = {

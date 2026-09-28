@@ -188,38 +188,6 @@ describe("nested rigid graph layout", () => {
 });
 
 describe("nested scene groups", () => {
-  it("migrates legacy flat membership to deterministic group ids", () => {
-    const ids = new Set(["a", "b", "c", "d"]);
-    expect(
-      normalizeSceneGroups(
-        [
-          ["a", "b"],
-          ["c", "d"],
-        ],
-        ids,
-      ),
-    ).toEqual([
-      { id: "group-0", children: [{ node: "a" }, { node: "b" }] },
-      { id: "group-1", children: [{ node: "c" }, { node: "d" }] },
-    ]);
-  });
-
-  it("never reuses a stored id when assigning migration ids", () => {
-    const ids = new Set(["a", "b", "c", "d"]);
-    expect(
-      normalizeSceneGroups(
-        [
-          { id: "group-0", children: [{ node: "a" }, { node: "b" }] },
-          ["c", "d"],
-        ],
-        ids,
-      ),
-    ).toEqual([
-      { id: "group-0", children: [{ node: "a" }, { node: "b" }] },
-      { id: "group-1", children: [{ node: "c" }, { node: "d" }] },
-    ]);
-  });
-
   it("drops missing and duplicate members so every node has one owner", () => {
     const ids = new Set(["a", "b", "c", "d"]);
     expect(
@@ -404,16 +372,6 @@ describe("nested scene groups", () => {
     expect(
       removeNodesFromGroups(groups, new Set(["a"]), new Set(["b", "c"])),
     ).toEqual([{ id: "g1", children: [{ node: "b" }, { node: "c" }] }]);
-  });
-
-  it("migrates legacy membership while deleting a node", () => {
-    expect(
-      removeNodesFromGroups(
-        [["a", "b", "c"]],
-        new Set(["b"]),
-        new Set(["a", "c"]),
-      ),
-    ).toEqual([{ id: "group-0", children: [{ node: "a" }, { node: "c" }] }]);
   });
 
   it("renames node references without changing group ids", () => {

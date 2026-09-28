@@ -18,7 +18,7 @@ import type {
 } from "../types";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { editorImageSource } from "../imageAnimationMap";
-import { AnimatedImage } from "./AnimatedImage";
+import { AnimatedImage } from "@vectspace/presentation-react/animated-image";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import {
   Frame,

@@ -1,19 +1,10 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactElement,
-} from "react";
-import { assetUrl } from "../api";
+import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { firstVisibleAssetId } from "../assetLibrary";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import { DeferredInput } from "./Fields";
 import { AMBIENCE_SLOT_LABELS, FIT_LABELS } from "../labels";
 import { defaultFlashEffect } from "../presentationDefaults";
-import { evaluateVideoClip } from "@vectspace/presentation-core/video-clip";
-import { evaluateChannel, timelineTrackIdentity } from "../timeline";
+import { timelineTrackIdentity } from "../timeline";
 import {
   KeyframeInspector,
   TimelineSurface,
@@ -86,8 +77,8 @@ const DEFAULTS: Record<string, number> = {
 /**
  * Canonical `TimelineNode` adapter over the shared {@link TimelineSurface}.
  *
- * The story timeline keeps its own domain surface (asset/event controls,
- * standalone media stage) but the ruler, transport, marquee/selection,
+ * The story timeline keeps its own domain surface (asset/event controls) but
+ * the ruler, transport, marquee/selection,
  * keyframe drag, easing inspector, keyboard delete and copy/paste are the one
  * shared implementation every workspace uses.
  */
@@ -96,7 +87,6 @@ export function TimelineEditor({
   assets,
   onChange,
   hidePreview = false,
-  hideStagePreview = false,
   hideTransport = false,
   playheadOverride,
   playbackStartOverride,
@@ -109,9 +99,8 @@ export function TimelineEditor({
   node: TimelineNode;
   assets: EditorAsset[];
   onChange(node: TimelineNode): void;
+  /** Omit the timeline properties / keyframe inspector pane. */
   hidePreview?: boolean;
-  /** Keep the numeric/keyframe inspector but omit the legacy HTML media stage. */
-  hideStagePreview?: boolean;
   hideTransport?: boolean;
   playheadOverride?: number;
   playbackStartOverride?: number;
@@ -130,11 +119,9 @@ export function TimelineEditor({
   const visibleSfx = firstVisibleAssetId(assets, assetLayout, "sfx");
   const [internalSnap, setInternalSnap] = useState(50);
   const [channelName, setChannelName] = useState("x");
-  const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [selectedFrame, setSelectedFrame] =
     useState<TimelineSurfaceSelection | null>(null);
   const [trackType, setTrackType] = useState<TimelineTrack["type"]>("sprite");
-  const videoRef = useRef<HTMLVideoElement>(null);
   const playhead = playheadOverride ?? internalPlayhead;
   const playbackStart = playbackStartOverride ?? playhead;
   const snap = snapOverride ?? internalSnap;
@@ -148,44 +135,6 @@ export function TimelineEditor({
       onPlayheadChange?.(value);
     },
     [onPlayheadChange],
-  );
-
-  const videoTrack = node.tracks.find(
-    (track): track is Extract<TimelineTrack, { type: "video" }> =>
-      track.type === "video",
-  );
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video === null || videoTrack === undefined) return;
-    // `videoDuration` mirrors `loadedmetadata`; reading it here makes the
-    // effect re-run when the element finally reports its length, so a fixed
-    // `playheadOverride` (a paused workspace transport) is synced to the same
-    // clip-window target the shared runtime would seek to instead of staying
-    // at the clip start.
-    const knownSeconds =
-      videoDuration !== null && Number.isFinite(videoDuration)
-        ? videoDuration / 1_000
-        : null;
-    const mediaSeconds = Number.isFinite(video.duration)
-      ? video.duration
-      : knownSeconds;
-    if (mediaSeconds === null) return;
-    // The standalone stage uses the same window math as the shared runtime
-    // session: explicit clip end, media-duration fallback, loop wrap and the
-    // terminal hold must agree between authoring and playback.
-    const position = evaluateVideoClip(videoTrack, playhead, mediaSeconds);
-    if (position === null) return;
-    if (Math.abs(video.currentTime - position.desiredSeconds) > 0.04)
-      video.currentTime = position.desiredSeconds;
-    if (!video.paused && position.atEnd) video.pause();
-  }, [playhead, videoDuration, videoTrack]);
-
-  const urls = useMemo(
-    () =>
-      Object.fromEntries(
-        assets.map((asset) => [asset.id, assetUrl(asset.absolute_path)]),
-      ),
-    [assets],
   );
 
   const document = useMemo<TimelineSurfaceDocument<TimelineTrack>>(
@@ -293,39 +242,7 @@ export function TimelineEditor({
       tabIndex={-1}
     >
       {!hidePreview && (
-        <div
-          className={`timeline-preview-pane${hideStagePreview ? " timeline-preview-pane-properties-only" : ""}`}
-        >
-          {!hideStagePreview && (
-            <div className="timeline-preview-stage">
-              {node.tracks.map((track, index) =>
-                track.type === "sprite" && track.asset !== null ? (
-                  <img
-                    alt={track.sprite_id}
-                    key={`sprite-${index}`}
-                    src={urls[track.asset]}
-                    style={spriteStyle(track, playhead)}
-                  />
-                ) : null,
-              )}
-              {videoTrack !== undefined && (
-                <video
-                  className="timeline-video-preview"
-                  muted
-                  onLoadedMetadata={(event) => {
-                    const element = event.currentTarget;
-                    setVideoDuration(element.duration * 1000);
-                    element.currentTime = videoTrack.clip_start_ms / 1000;
-                  }}
-                  preload="metadata"
-                  ref={videoRef}
-                  src={urls[videoTrack.asset]}
-                  style={videoStyle(videoTrack, playhead)}
-                />
-              )}
-              <div className="timeline-safe-frame">1920 × 1080</div>
-            </div>
-          )}
+        <div className="timeline-preview-pane">
           <div className="timeline-properties">
             <strong>时间线属性</strong>
             <label>
@@ -365,15 +282,6 @@ export function TimelineEditor({
                 frame={selectedFrame.frame}
                 onChange={editSelectedKeyframe}
               />
-            )}
-            {videoTrack !== undefined && (
-              <small>
-                视频元数据由浏览器读取；裁剪：{videoTrack.clip_start_ms}–
-                {videoTrack.clip_end_ms ?? "结尾"} ms；素材时长：
-                {videoDuration === null
-                  ? "读取中"
-                  : `${Math.round(videoDuration)} ms`}
-              </small>
             )}
           </div>
         </div>
@@ -699,35 +607,4 @@ function uniqueEventId(node: TimelineNode, prefix: string): string {
   let index = node.events.length + 1;
   while (used.has(`${prefix}_${index}`)) index += 1;
   return `${prefix}_${index}`;
-}
-
-function spriteStyle(
-  track: Extract<TimelineTrack, { type: "sprite" }>,
-  time: number,
-): React.CSSProperties {
-  const scale = evaluateChannel(track.channels, "scale", time, 1);
-  return {
-    position: "absolute",
-    left: `${evaluateChannel(track.channels, "x", time, 960) / 19.2}%`,
-    top: `${evaluateChannel(track.channels, "y", time, 1080) / 10.8}%`,
-    opacity: evaluateChannel(track.channels, "opacity", time, 1),
-    zIndex: Math.round(evaluateChannel(track.channels, "z", time, 0)),
-    transformOrigin: "50% 100%",
-    transform: `translate(-50%, -100%) rotate(${evaluateChannel(track.channels, "rotation_deg", time, 0)}deg) scale(${scale * evaluateChannel(track.channels, "scale_x", time, 1)}, ${scale * evaluateChannel(track.channels, "scale_y", time, 1)})`,
-  };
-}
-function videoStyle(
-  track: Extract<TimelineTrack, { type: "video" }>,
-  time: number,
-): React.CSSProperties {
-  return {
-    position: "absolute",
-    left: `${evaluateChannel(track.channels, "x", time, 0) / 19.2}%`,
-    top: `${evaluateChannel(track.channels, "y", time, 0) / 10.8}%`,
-    width: `${evaluateChannel(track.channels, "width", time, 1920) / 19.2}%`,
-    height: `${evaluateChannel(track.channels, "height", time, 1080) / 10.8}%`,
-    objectFit: track.fit === "stretch" ? "fill" : track.fit,
-    opacity: evaluateChannel(track.channels, "opacity", time, 1),
-    zIndex: Math.round(evaluateChannel(track.channels, "z", time, 0)),
-  };
 }

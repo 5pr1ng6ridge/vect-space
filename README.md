@@ -194,11 +194,8 @@ background  curtain  sprite  say  long_text  long_text_control  choice  set  con
 playback  bgm  sfx  camera  screen_effect  dialogue_ui  timeline  end
 ```
 
-Background transitions and screen effects have one canonical wire shape. The
-loader still accepts the original one-word YAML (`transition: cut`,
-`transition: cross_fade`, `effect: flash`, `effect: shake`) and normalises it
-into the object form, so old content keeps loading and the WebView only ever
-sees one shape:
+Background transitions and screen effects are always written as a tagged
+object, which is also the only shape the WebView sees:
 
 ```yaml
 transition:

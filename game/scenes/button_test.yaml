@@ -5,7 +5,8 @@ nodes:
   background:
     type: background
     background: bg.vector_space
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 250
     easing: ease_in_out
     await: true

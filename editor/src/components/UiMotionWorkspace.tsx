@@ -25,7 +25,7 @@ import {
   selectGameplayFont,
   useGameplayFont,
 } from "@vectspace/presentation-react/gameplay";
-import { evaluateChannel } from "../timeline";
+import { evaluateChannel } from "@vectspace/presentation-core/timeline";
 import { escapeTextEntry, isComposing } from "../ui/keyboard";
 import { isEditableTarget } from "./nodeDeleteShortcut";
 import {

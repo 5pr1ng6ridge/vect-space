@@ -15,10 +15,6 @@ use vectspace_core::model::{
 };
 
 const SAVE_SCHEMA_VERSION: u32 = 3;
-/// Schema v2 is still readable: it simply has no merged history and no
-/// secondary state, which preserves the historical "loading clears the ledger"
-/// behaviour for slots written before multiwindow support.
-const SAVE_SCHEMA_VERSION_LEGACY: u32 = 2;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const PROFILE_SCHEMA_VERSION: u32 = 4;
 const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
@@ -26,8 +22,8 @@ const MAX_THUMBNAIL_LENGTH: usize = 2_800_000;
 // entry below.  A profile is user data, so malformed entries are repaired
 // rather than allowed to make the whole profile unreadable.
 const MAX_PROFILE_FILE_BYTES: usize = 64 * 1024 * 1024;
-/// Bounds a slot read the same way a profile read is bounded.  Schema v3 adds a
-/// dialogue ledger to the file, so an unbounded read would let a malformed slot
+/// Bounds a slot read the same way a profile read is bounded.  A slot carries
+/// the dialogue ledger, so an unbounded read would let a malformed slot
 /// allocate without limit before any validation runs.
 const MAX_SAVE_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 500;
@@ -114,8 +110,7 @@ pub struct SlotDocument<'a> {
 #[derive(Debug, Clone)]
 pub struct LoadedSlot {
     pub snapshot: RuntimeSnapshot,
-    /// Merged ledger stored by schema v3.  Empty for a legacy v2 slot, which
-    /// keeps the original behaviour of clearing the ledger on load.
+    /// Merged dialogue ledger (main + secondary occurrences).
     pub history: Vec<DialogueHistoryEntry>,
     pub secondary: Option<SecondaryState>,
 }
@@ -139,24 +134,7 @@ struct ProfileFile {
     /// otherwise valid profile variables and completion flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dialogue_history: Option<serde_json::Value>,
-    #[serde(default)]
     completed_scenes: std::collections::BTreeSet<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyProfileV2File {
-    schema_version: u32,
-    variables: VariableMap,
-    read_content_version: String,
-    read_dialogues: std::collections::BTreeSet<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyProfileFile {
-    schema_version: u32,
-    variables: VariableMap,
 }
 
 impl SaveManager {
@@ -198,9 +176,7 @@ impl SaveManager {
         validate_slot(slot)?;
         let (file, _from_backup) =
             read_json_with_backup_limit_source::<SaveFile>(&self.slot_path(slot), MAX_SAVE_FILE_BYTES)?;
-        if file.schema_version != SAVE_SCHEMA_VERSION
-            && file.schema_version != SAVE_SCHEMA_VERSION_LEGACY
-        {
+        if file.schema_version != SAVE_SCHEMA_VERSION {
             return Err(SaveError::InvalidData(format!(
                 "不支持 schema_version {}",
                 file.schema_version
@@ -212,8 +188,6 @@ impl SaveManager {
                 actual: file.content_version,
             });
         }
-        // A legacy slot has neither field; keep the pre-multiwindow behaviour
-        // of restoring only the main snapshot.
         let mut history = file.history;
         if history.len() > MAX_HISTORY_ENTRIES {
             let excess = history.len() - MAX_HISTORY_ENTRIES;
@@ -351,12 +325,9 @@ impl ProfileManager {
         };
         let (stored, mut rewrite) = match loaded {
             Ok(value)
-                if matches!(
-                    value.get("schema_version").and_then(|v| v.as_u64()),
-                    Some(4) | Some(3)
-                ) =>
+                if value.get("schema_version").and_then(|v| v.as_u64())
+                    == Some(u64::from(PROFILE_SCHEMA_VERSION)) =>
             {
-                let is_v3 = value.get("schema_version").and_then(|v| v.as_u64()) == Some(3);
                 match serde_json::from_value::<ProfileFile>(value) {
                     Ok(file) => {
                         let (dialogue_history, history_rewrite) =
@@ -370,60 +341,11 @@ impl ProfileManager {
                                 completed_scenes: file.completed_scenes,
                                 dialogue_history,
                             },
-                            is_v3 || history_rewrite,
+                            history_rewrite,
                         )
                     }
                     Err(error) => {
-                        eprintln!(
-                            "profile v{version} 内容损坏，已备份并重建: {error}",
-                            version = if is_v3 { 3 } else { 4 }
-                        );
-                        self.backup_incompatible()?;
-                        (self.default_state()?, true)
-                    }
-                }
-            }
-            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(2) => {
-                match serde_json::from_value::<LegacyProfileV2File>(value) {
-                    Ok(file) => {
-                        eprintln!("profile v2 已迁移为 v4，新增集合从空集合开始");
-                        (
-                            ProfileState {
-                                variables: file.variables,
-                                read_content_version: file.read_content_version,
-                                read_dialogues: file.read_dialogues,
-                                seen_presentations: Default::default(),
-                                completed_scenes: Default::default(),
-                                dialogue_history: Default::default(),
-                            },
-                            true,
-                        )
-                    }
-                    Err(error) => {
-                        eprintln!("profile v2 内容损坏，已备份并重建: {error}");
-                        self.backup_incompatible()?;
-                        (self.default_state()?, true)
-                    }
-                }
-            }
-            Ok(value) if value.get("schema_version").and_then(|v| v.as_u64()) == Some(1) => {
-                match serde_json::from_value::<LegacyProfileFile>(value) {
-                    Ok(file) => {
-                        eprintln!("profile v1 已迁移为 v4，已读与新增集合从空集合开始");
-                        (
-                            ProfileState {
-                                variables: file.variables,
-                                read_content_version: self.content_version.clone(),
-                                read_dialogues: Default::default(),
-                                seen_presentations: Default::default(),
-                                completed_scenes: Default::default(),
-                                dialogue_history: Default::default(),
-                            },
-                            true,
-                        )
-                    }
-                    Err(error) => {
-                        eprintln!("profile v1 内容损坏，已备份并重建: {error}");
+                        eprintln!("profile 内容损坏，已备份并重建: {error}");
                         self.backup_incompatible()?;
                         (self.default_state()?, true)
                     }
@@ -1031,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn ambience_volume_is_validated_and_sanitized_without_a_schema_bump() {
+    fn ambience_volume_is_validated_and_sanitized() {
         let invalid = Settings {
             ambience_volume: 1.1,
             ..Settings::default()
@@ -1042,8 +964,6 @@ mod tests {
             ..Settings::default()
         });
         assert_eq!(repaired.ambience_volume, 0.8);
-        assert_eq!(SETTINGS_SCHEMA_VERSION, 1);
-        assert_eq!(SAVE_SCHEMA_VERSION, 3);
     }
 
     #[test]
@@ -1128,60 +1048,6 @@ mod tests {
             serde_json::from_slice(&fs::read(directory.path().join("profile.json")).unwrap())
                 .unwrap();
         assert_eq!(profile_file["schema_version"], PROFILE_SCHEMA_VERSION);
-        assert_eq!(SAVE_SCHEMA_VERSION, 3);
-        assert_eq!(SETTINGS_SCHEMA_VERSION, 1);
-        assert_eq!(PROFILE_SCHEMA_VERSION, 4);
-    }
-
-    #[test]
-    fn schema_v2_slot_still_loads_without_history_or_secondary_state() {
-        use vectspace_core::model::{
-            AudioSnapshot, PlaybackSnapshot, RuntimeSnapshot, StoryLocation, WorldSnapshot,
-        };
-
-        let directory = tempdir().unwrap();
-        let manager =
-            SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
-        let snapshot = RuntimeSnapshot {
-            revision: 4,
-            location: StoryLocation {
-                scene_id: "prologue".to_owned(),
-                node_id: "intro".to_owned(),
-            },
-            variables: VariableMap::new(),
-            world: WorldSnapshot::default(),
-            audio: AudioSnapshot::default(),
-            playback: PlaybackSnapshot::default(),
-            dialogue_page: None,
-            long_text_page: None,
-            prompt: PromptSnapshot::None,
-        };
-        // A real schema-v2 document: the same snapshot without the fields the
-        // multiwindow schema added.
-        let legacy = serde_json::json!({
-            "schema_version": 2,
-            "content_version": "demo-c1",
-            "saved_at_unix_ms": 7,
-            "snapshot": snapshot,
-            "thumbnail_data_url": null
-        });
-        fs::write(
-            directory.path().join("slot-2.json"),
-            serde_json::to_vec_pretty(&legacy).unwrap(),
-        )
-        .unwrap();
-
-        let loaded = manager.load("2").unwrap();
-        assert_eq!(loaded.snapshot.location.scene_id, "prologue");
-        assert_eq!(loaded.snapshot.revision, 4);
-        assert!(loaded.history.is_empty());
-        assert!(loaded.secondary.is_none());
-        // Reading a legacy slot never rewrites it; it is only normalised when
-        // the player saves over it again.
-        let on_disk: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.path().join("slot-2.json")).unwrap())
-                .unwrap();
-        assert_eq!(on_disk["schema_version"], 2);
     }
 
     #[test]
@@ -1460,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_legacy_history_is_ignored_without_losing_profile_variables() {
+    fn malformed_history_is_ignored_without_losing_profile_variables() {
         let directory = tempdir().unwrap();
         fs::write(
             directory.path().join("profile.json"),
@@ -1593,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_v1_migrates_and_content_changes_only_clear_read_history() {
+    fn content_changes_only_clear_read_history() {
         let directory = tempdir().unwrap();
         let definitions = std::collections::BTreeMap::from([(
             "ending_seen".to_owned(),
@@ -1603,34 +1469,22 @@ mod tests {
                 default: ScalarValue::Boolean(false),
             },
         )]);
-        fs::write(
-            directory.path().join("profile.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": 1,
-                "variables": { "ending_seen": true }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let (manager, mut migrated) = ProfileManager::new(
+        let (manager, mut profile) = ProfileManager::new(
             directory.path().to_path_buf(),
             &definitions,
             "demo-2".to_owned(),
         )
         .unwrap();
-        assert_eq!(
-            migrated.variables.get("ending_seen"),
-            Some(&ScalarValue::Boolean(true))
-        );
-        assert!(migrated.read_dialogues.is_empty());
-        migrated
+        profile
+            .variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        profile
             .read_dialogues
             .insert("prologue/introduction".to_owned());
-        migrated
+        profile
             .seen_presentations
             .insert("prologue/timeline_showcase".to_owned());
-        manager.save(&migrated).unwrap();
+        manager.save(&profile).unwrap();
 
         let (_, changed) = ProfileManager::new(
             directory.path().to_path_buf(),
@@ -1645,41 +1499,5 @@ mod tests {
         assert_eq!(changed.read_content_version, "demo-3");
         assert!(changed.read_dialogues.is_empty());
         assert!(changed.seen_presentations.is_empty());
-    }
-
-    #[test]
-    fn profile_v2_migrates_to_v4_without_losing_variables_or_read_history() {
-        let directory = tempdir().unwrap();
-        let definitions = std::collections::BTreeMap::from([(
-            "ending_seen".to_owned(),
-            VariableDefinition {
-                scope: VariableScope::Profile,
-                value_type: VariableType::Boolean,
-                default: ScalarValue::Boolean(false),
-            },
-        )]);
-        fs::write(
-            directory.path().join("profile.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": 2,
-                "variables": { "ending_seen": true },
-                "read_content_version": "demo-2",
-                "read_dialogues": ["prologue/introduction"]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let (_, migrated) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &definitions,
-            "demo-2".to_owned(),
-        )
-        .unwrap();
-        assert_eq!(
-            migrated.variables.get("ending_seen"),
-            Some(&ScalarValue::Boolean(true))
-        );
-        assert!(migrated.read_dialogues.contains("prologue/introduction"));
-        assert!(migrated.seen_presentations.is_empty());
     }
 }

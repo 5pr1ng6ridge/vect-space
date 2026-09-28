@@ -5,7 +5,8 @@ nodes:
   background_start:
     type: background
     background: bg.taiwan
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 0
     easing: ease_in_out
     await: false

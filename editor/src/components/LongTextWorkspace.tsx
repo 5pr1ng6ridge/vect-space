@@ -48,7 +48,7 @@ import type {
 } from "../types";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { editorImageSource } from "../imageAnimationMap";
-import { AnimatedImage } from "./AnimatedImage";
+import { AnimatedImage } from "@vectspace/presentation-react/animated-image";
 import { AssetChooser } from "./AssetChooser";
 import { ColorSwatch, DeferredInput, DeferredTextArea } from "./Fields";
 import { escapeTextEntry, isComposing } from "../ui/keyboard";

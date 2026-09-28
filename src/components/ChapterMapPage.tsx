@@ -15,7 +15,7 @@ import type {
   ChapterMapDecorationSnapshot,
   ChapterMapHotspotSnapshot,
   ChapterMapSnapshot,
-} from "../engine/types";
+} from "@vectspace/presentation-core/types";
 import {
   clampMapCenter,
   mapDragExceededThreshold,
@@ -29,8 +29,10 @@ import {
   type AnimationMap,
   type ImageAssetSource,
 } from "@vectspace/presentation-core/image-animation";
-import { AnimatedImage } from "./AnimatedImage";
-import { useAnimatedImage } from "./useAnimatedImage";
+import {
+  AnimatedImage,
+  useAnimatedImage,
+} from "@vectspace/presentation-react/animated-image";
 
 interface ChapterMapPageProps {
   map: ChapterMapSnapshot;

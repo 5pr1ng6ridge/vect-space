@@ -107,14 +107,16 @@ nodes:
   establish:
     type: background
     background: bg.nvctsp
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 700
     easing: ease_in_out
     await: true
     next: dialogue_show
   flash_result:
     type: screen_effect
-    effect: flash
+    effect:
+      type: flash
     duration_ms: 260
     await: false
     next: camera_move

@@ -13,7 +13,7 @@ import "@vectspace/presentation-react/gameplay.css";
 import { assetUrl } from "../api";
 import { AssetChooser } from "./AssetChooser";
 import { escapeTextEntry, isComposing } from "../ui/keyboard";
-import { evaluateChannel } from "../timeline";
+import { evaluateChannel } from "@vectspace/presentation-core/timeline";
 import {
   KeyframeInspector,
   TimelineSurface,

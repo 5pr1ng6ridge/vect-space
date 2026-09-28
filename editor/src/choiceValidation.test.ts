@@ -224,9 +224,4 @@ describe("choice asset and template references", () => {
     expect(pasted.choices[1].template).toBeNull();
     expect(pasted.choices[1].icon).toBeNull();
   });
-
-  it("summarizes presentation without losing the option count", () => {
-    const summary = validateLive(project());
-    expect(summary).toBeDefined();
-  });
 });

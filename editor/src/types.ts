@@ -688,23 +688,11 @@ export interface SceneGroup {
   children: GroupChildRef[];
 }
 
-/**
- * Legacy flat membership persisted before groups had stable identities.  Every
- * inner list was a loose, first-come set of node ids.
- */
-export type LegacySceneGroups = string[][];
-
-/**
- * Persisted group membership.  New layouts store the canonical nested forest;
- * older layouts keep loading their flat `string[][]` lists.
- */
-export type SceneGroups = SceneGroup[] | LegacySceneGroups;
-
 export interface SceneLayout {
   nodes: Record<string, NodePosition>;
   viewport: EditorViewport | null;
   /** Rigid node clusters used only by the editor's automatic graph layout. */
-  groups?: SceneGroups;
+  groups?: SceneGroup[];
 }
 
 export interface EditorLayout {

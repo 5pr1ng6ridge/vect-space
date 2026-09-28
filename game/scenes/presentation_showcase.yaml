@@ -11,7 +11,8 @@ nodes:
   scan_in:
     type: background
     background: bg.anim_scan
-    transition: cross_fade
+    transition:
+      type: cross_fade
     duration_ms: 400
     easing: ease_in_out
     await: true

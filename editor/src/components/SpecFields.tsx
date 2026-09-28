@@ -1,10 +1,8 @@
 /**
- * Editors for the canonical presentation specs.
+ * Editors for the presentation specs.
  *
- * The Rust loader normalises legacy one-word YAML into these specs, so the
- * editor only ever authors (and the inspector only ever edits) the canonical
- * shape.  Keeping the editors here means the node inspector and the timeline
- * event editor expose exactly the same type-safe parameters and ranges.
+ * Keeping the editors here means the node inspector and the timeline event
+ * editor expose exactly the same type-safe parameters and ranges.
  */
 
 import type { ReactElement } from "react";

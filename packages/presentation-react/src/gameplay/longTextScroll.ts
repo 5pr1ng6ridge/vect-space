@@ -89,41 +89,6 @@ export function longTextMaxScroll(
   );
 }
 
-/** Legacy pure helper retained for older callers; new rendering uses the
- * frame-rate-independent controller above. */
-export interface LongTextScrollInput {
-  initialPositioned: boolean;
-  initialPlacementInstant?: boolean;
-  manuallyBrowsing: boolean;
-  stepStartY: number;
-  cursorY: number;
-  currentOffset: number;
-  maxScroll: number;
-}
-
-export interface LongTextScrollDecision {
-  offset: number;
-  instant: boolean;
-}
-
-export function resolveLongTextScroll(
-  input: LongTextScrollInput,
-): LongTextScrollDecision | null {
-  if (!input.initialPositioned) {
-    return {
-      offset: clamp(input.stepStartY - 560, 0, input.maxScroll),
-      instant: input.initialPlacementInstant ?? true,
-    };
-  }
-  if (input.manuallyBrowsing || input.cursorY - input.currentOffset < 785) {
-    return null;
-  }
-  const offset = clamp(input.cursorY - 560, 0, input.maxScroll);
-  return Math.abs(offset - input.currentOffset) < 1
-    ? null
-    : { offset, instant: false };
-}
-
 /** Frame-rate-independent, bounded first-order follower. */
 export function advanceLongTextScroll(
   current: number,

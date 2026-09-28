@@ -41,7 +41,7 @@ import {
   createEditorTimelinePreview,
   type EditorTimelinePreview,
 } from "../editor/src/components/timelinePreview";
-import { PresentationController } from "../src/engine/presentation";
+import { PresentationController } from "@vectspace/presentation-core/gameplay-host";
 
 const FIXTURE_URL = "/__parity/fixtures.json";
 

@@ -11,7 +11,7 @@ import type {
   Settings,
   PresentationOutcome,
   ChapterMapSnapshot,
-} from "./types";
+} from "@vectspace/presentation-core/types";
 import type { WireU64 } from "../../shared/generated/WireU64";
 import type { AnimationSource } from "@vectspace/presentation-core/image-animation";
 import { toCommandError } from "../../shared/commandError";

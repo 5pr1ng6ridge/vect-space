@@ -208,9 +208,7 @@ impl ContentCatalog {
         Self::from_documents_with_chapter_map(root, manifest, scenes, ui_motion_files, chapter_map)
     }
 
-    /// In-memory project construction with an optional room map.  The
-    /// compatibility wrapper above keeps existing editor/test callers that do
-    /// not model the map source compatible.
+    /// In-memory project construction with an explicit (optional) room map.
     pub fn from_documents_with_chapter_map(
         root: PathBuf,
         manifest: ContentManifest,
@@ -218,94 +216,27 @@ impl ContentCatalog {
         ui_motion_files: BTreeMap<String, UiMotionPreset>,
         chapter_map: Option<ChapterMapDefinition>,
     ) -> Result<Self, ContentError> {
-        Self::from_documents_with_chapter_map_and_asset_overrides(
-            root,
-            manifest,
-            scenes,
-            ui_motion_files,
-            chapter_map,
-            &BTreeMap::new(),
-        )
-    }
-
-    /// Builds an in-memory catalog while allowing trusted host code to supply
-    /// paths for newly staged assets.  The paths are only used for validation
-    /// and resolution; they are never accepted from the WebView directly.
-    pub fn from_documents_with_chapter_map_and_asset_overrides(
-        root: PathBuf,
-        manifest: ContentManifest,
-        scenes: BTreeMap<String, SceneDefinition>,
-        ui_motion_files: BTreeMap<String, UiMotionPreset>,
-        chapter_map: Option<ChapterMapDefinition>,
-        asset_overrides: &BTreeMap<String, PathBuf>,
-    ) -> Result<Self, ContentError> {
-        Self::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
-            root,
-            manifest,
-            scenes,
-            ui_motion_files,
-            chapter_map,
-            asset_overrides,
-            None,
-        )
-    }
-
-    /// Editor variant that validates unsaved button template documents from
-    /// memory while keeping the same trusted asset overlay rules.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_documents_with_chapter_map_and_asset_overrides_and_buttons(
-        root: PathBuf,
-        manifest: ContentManifest,
-        scenes: BTreeMap<String, SceneDefinition>,
-        ui_motion_files: BTreeMap<String, UiMotionPreset>,
-        chapter_map: Option<ChapterMapDefinition>,
-        asset_overrides: &BTreeMap<String, PathBuf>,
-        button_files: Option<BTreeMap<String, ButtonTemplate>>,
-    ) -> Result<Self, ContentError> {
         Self::from_documents_with_all_documents(
             root,
             manifest,
             scenes,
             ui_motion_files,
             chapter_map,
-            asset_overrides,
-            button_files,
+            &BTreeMap::new(),
+            None,
+            None,
             None,
         )
     }
 
     /// Deepest in-memory constructor.  Every optional document family can be
     /// supplied as an unsaved editor draft; `None` loads whatever the manifest
-    /// references from the trusted project root instead.
+    /// references from the trusted project root instead.  `asset_overrides`
+    /// lets trusted host code supply paths for newly staged assets; they are
+    /// only used for validation and resolution and are never accepted from the
+    /// WebView directly.
     #[allow(clippy::too_many_arguments)]
     pub fn from_documents_with_all_documents(
-        root: PathBuf,
-        manifest: ContentManifest,
-        scenes: BTreeMap<String, SceneDefinition>,
-        ui_motion_files: BTreeMap<String, UiMotionPreset>,
-        chapter_map: Option<ChapterMapDefinition>,
-        asset_overrides: &BTreeMap<String, PathBuf>,
-        button_files: Option<BTreeMap<String, ButtonTemplate>>,
-        animation_files: Option<BTreeMap<String, ImageAnimationDefinition>>,
-    ) -> Result<Self, ContentError> {
-        Self::from_documents_with_all_documents_and_actions(
-            root,
-            manifest,
-            scenes,
-            ui_motion_files,
-            chapter_map,
-            asset_overrides,
-            button_files,
-            animation_files,
-            None,
-        )
-    }
-
-    /// Deepest in-memory constructor, including unsaved reusable action
-    /// documents.  The previous constructor remains as a compatibility
-    /// wrapper for callers that do not model actions yet.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_documents_with_all_documents_and_actions(
         root: PathBuf,
         manifest: ContentManifest,
         scenes: BTreeMap<String, SceneDefinition>,
@@ -487,9 +418,8 @@ impl ContentCatalog {
                             absolute_path: path.to_string_lossy().into_owned(),
                         });
                     }
-                    // The legacy `absolute_path` keeps naming a real image so
-                    // hosts that only understand a single path still show the
-                    // first frame instead of failing.
+                    // `absolute_path` names the first frame so single-image
+                    // consumers (URL maps, thumbnails) still show real pixels.
                     let absolute_path = frames
                         .first()
                         .map(|frame| frame.absolute_path.clone())
@@ -3694,6 +3624,7 @@ mod tests {
             overrides,
             None,
             Some(animations),
+            None,
         )
     }
 
@@ -3755,7 +3686,7 @@ mod tests {
         assert_eq!(animation.frames[0].duration_ms, 400);
         assert_eq!(animation.frames[1].asset, "img.blink");
         assert!(animation.frames[0].absolute_path.ends_with("img_idle.png"));
-        // The legacy single path keeps pointing at a real frame.
+        // The single asset path points at the first frame.
         assert_eq!(resolved[0].absolute_path, animation.frames[0].absolute_path);
         assert_eq!(
             catalog.animations_referencing("img.blink"),

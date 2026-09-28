@@ -55,7 +55,7 @@ fn rebuild(catalog: &ContentCatalog, scenes: BTreeMap<String, SceneDefinition>) 
         .cloned()
         .zip(catalog.buttons.values().cloned())
         .collect();
-    ContentCatalog::from_documents_with_chapter_map_and_asset_overrides_and_buttons(
+    ContentCatalog::from_documents_with_all_documents(
         root,
         catalog.manifest.clone(),
         scenes,
@@ -63,6 +63,8 @@ fn rebuild(catalog: &ContentCatalog, scenes: BTreeMap<String, SceneDefinition>) 
         catalog.chapter_map.clone(),
         &BTreeMap::new(),
         Some(button_files),
+        None,
+        None,
     )
     .expect("choice fixture content must validate")
 }
@@ -990,32 +992,6 @@ nodes:
 }
 
 #[test]
-fn legacy_choice_prompt_json_deserializes_with_defaults() {
-    let legacy = r#"{"kind":"choice","prompt_id":"legacy/choice","choices":[{"id":"a","label":"A","enabled":true}]}"#;
-    let prompt: PromptSnapshot =
-        serde_json::from_str(legacy).expect("legacy choice prompts must still deserialize");
-    let PromptSnapshot::Choice {
-        prompt_id,
-        layout,
-        diagnostics,
-        choices,
-    } = prompt
-    else {
-        panic!("expected a choice prompt");
-    };
-    assert_eq!(prompt_id, "legacy/choice");
-    assert_eq!(layout, ChoiceLayoutSnapshot::default());
-    assert!(diagnostics.is_empty());
-    assert_eq!(choices.len(), 1);
-    assert_eq!(choices[0].template, ChoiceTemplateSnapshot::Fallback);
-    assert_eq!(choices[0].icon, None);
-    assert_eq!(choices[0].x, 0.0);
-    assert_eq!(choices[0].y, 0.0);
-    assert_eq!(choices[0].width, 0.0);
-    assert_eq!(choices[0].height, 0.0);
-}
-
-#[test]
 fn resolved_choice_prompts_round_trip_through_snapshot_json() {
     let catalog = fixture_catalog();
     let content = catalog_with_scene(&catalog, legacy_choice_scene());
@@ -1029,59 +1005,6 @@ fn resolved_choice_prompts_round_trip_through_snapshot_json() {
     let decoded: RuntimeSnapshot =
         serde_json::from_str(&json).expect("resolved snapshots must deserialize");
     assert_eq!(decoded, update.snapshot);
-}
-
-#[test]
-fn loading_a_legacy_snapshot_hydrates_the_choice_layout() {
-    let catalog = fixture_catalog();
-    let content = catalog_with_scene(&catalog, legacy_choice_scene());
-    let mut runtime = RuntimeEngine::new(&content).expect("engine");
-    let update = runtime
-        .start_scene_preview(&content, "legacy_choice")
-        .expect("scene preview");
-
-    // Drop every field that only the new runtime writes, producing exactly the
-    // shape a save slot written before Choice presentation contains.
-    let mut legacy = serde_json::to_value(&update.snapshot).expect("snapshot to value");
-    let prompt = legacy
-        .get_mut("prompt")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("prompt object");
-    prompt.remove("layout");
-    prompt.remove("diagnostics");
-    for choice in prompt["choices"].as_array_mut().expect("choices") {
-        let choice = choice.as_object_mut().expect("choice object");
-        for key in ["template", "icon", "x", "y", "width", "height"] {
-            choice.remove(key);
-        }
-    }
-    let legacy: RuntimeSnapshot =
-        serde_json::from_value(legacy).expect("legacy save must deserialize");
-
-    let loaded = runtime
-        .load_snapshot(&content, legacy)
-        .expect("a legacy choice save must load");
-    let PromptSnapshot::Choice {
-        layout,
-        diagnostics,
-        choices,
-        ..
-    } = loaded.snapshot.prompt
-    else {
-        panic!("expected a choice prompt after loading");
-    };
-    assert!(diagnostics.is_empty());
-    assert_eq!((layout.width, layout.height), (980.0, 204.0));
-    assert_eq!(layout.anchor_x, CHOICE_DEFAULT_ANCHOR_X);
-    assert_eq!(layout.anchor_y, CHOICE_FALLBACK_PANEL_Y + 204.0 / 2.0);
-    assert_eq!(layout.y, CHOICE_FALLBACK_PANEL_Y);
-    assert_eq!(choices.len(), 2);
-    assert_eq!(choices[0].label, "第一项");
-    for (index, choice) in choices.iter().enumerate() {
-        assert_eq!(choice.template, ChoiceTemplateSnapshot::Fallback);
-        assert_eq!(choice.y, 360.0 + index as f32 * 112.0);
-        assert_eq!(choice.width, CHOICE_FALLBACK_BUTTON_WIDTH);
-    }
 }
 
 #[test]
@@ -1217,6 +1140,7 @@ fn a_stale_choice_save_keeps_identity_but_reresolves_presentation() {
         "id": "ghost",
         "label": "幽灵",
         "enabled": true,
+        "template": { "kind": "fallback" },
         "x": 5.0,
         "y": 6.0,
         "width": 7.0,
