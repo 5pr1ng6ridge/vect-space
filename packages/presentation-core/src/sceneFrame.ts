@@ -8,7 +8,11 @@
  * makes scrubbing deterministic.
  */
 
-import { evaluateFlashAlpha, evaluateShakeOffset } from "./sceneEffects";
+import {
+  evaluateFlashAlpha,
+  evaluateShakeOffset,
+  type ScreenEffectOptions,
+} from "./sceneEffects";
 import {
   evaluateTimelineFrame,
   type ActiveScreenEffect,
@@ -392,6 +396,7 @@ export function composeWorldTransform(
 export function flashAlpha(
   elapsedMs: number,
   flash: ActiveScreenEffect | null,
+  options: ScreenEffectOptions = {},
 ): number {
   if (flash === null || flash.effect.type !== "flash") return 0;
   return evaluateFlashAlpha(
@@ -399,6 +404,7 @@ export function flashAlpha(
     elapsedMs,
     flash.startMs,
     flash.durationMs,
+    options,
   );
 }
 
@@ -406,6 +412,7 @@ export function flashAlpha(
 export function shakeOffset(
   elapsedMs: number,
   shake: ActiveScreenEffect | null,
+  options: ScreenEffectOptions = {},
 ): { x: number; y: number } {
   if (shake === null || shake.effect.type !== "shake") return { x: 0, y: 0 };
   return evaluateShakeOffset(
@@ -413,6 +420,7 @@ export function shakeOffset(
     elapsedMs,
     shake.startMs,
     shake.durationMs,
+    options,
   );
 }
 

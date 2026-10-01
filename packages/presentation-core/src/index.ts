@@ -6,6 +6,7 @@ export * from "./sceneEffects";
 export * from "./sceneTransitions";
 export * from "./sceneFrame";
 export * from "./sceneSurface";
+export * from "./sceneShaders";
 export * from "./sceneTextures";
 export * from "./timelineSession";
 export * from "./deferredSession";

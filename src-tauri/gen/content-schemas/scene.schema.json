@@ -2183,6 +2183,401 @@
           "required": [
             "type"
           ]
+        },
+        {
+          "description": "RGB channel split along `angle_deg`, weighted by the distance from the\ncentre.",
+          "type": "object",
+          "properties": {
+            "angle_deg": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0,
+              "maximum": 360.0,
+              "minimum": -360.0
+            },
+            "center_x": {
+              "type": "number",
+              "format": "float",
+              "default": 960.0,
+              "maximum": 1920.0,
+              "minimum": 0.0
+            },
+            "center_y": {
+              "type": "number",
+              "format": "float",
+              "default": 540.0,
+              "maximum": 1080.0,
+              "minimum": 0.0
+            },
+            "edge_weight": {
+              "type": "number",
+              "format": "float",
+              "default": 0.6000000238418579,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "fade_in": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "fade_out": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "intensity": {
+              "type": "number",
+              "format": "float",
+              "default": 12.0,
+              "maximum": 128.0,
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "chromatic_aberration"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Horizontal band displacement that changes `frequency_hz` times per\nsecond; the seed makes the pattern a pure function of the playhead.",
+          "type": "object",
+          "properties": {
+            "density": {
+              "type": "number",
+              "format": "float",
+              "default": 0.3499999940395355,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "displacement": {
+              "type": "number",
+              "format": "float",
+              "default": 48.0,
+              "maximum": 512.0,
+              "minimum": 0.0
+            },
+            "fade_in": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "fade_out": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "frequency_hz": {
+              "type": "number",
+              "format": "float",
+              "default": 12.0,
+              "maximum": 60.0,
+              "minimum": 0.10000000149011612
+            },
+            "seed": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 0,
+              "minimum": 0
+            },
+            "slice_count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 16,
+              "maximum": 32,
+              "minimum": 1
+            },
+            "type": {
+              "type": "string",
+              "const": "glitch"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A ring of radial distortion expanding from the centre to `max_radius`\nwhile its strength fades out.",
+          "type": "object",
+          "properties": {
+            "center_x": {
+              "type": "number",
+              "format": "float",
+              "default": 960.0,
+              "maximum": 1920.0,
+              "minimum": 0.0
+            },
+            "center_y": {
+              "type": "number",
+              "format": "float",
+              "default": 540.0,
+              "maximum": 1080.0,
+              "minimum": 0.0
+            },
+            "max_radius": {
+              "type": "number",
+              "format": "float",
+              "default": 1100.0,
+              "maximum": 4096.0,
+              "minimum": 1.0
+            },
+            "strength": {
+              "type": "number",
+              "format": "float",
+              "default": 28.0,
+              "maximum": 256.0,
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "shockwave"
+            },
+            "wave_width": {
+              "type": "number",
+              "format": "float",
+              "default": 140.0,
+              "maximum": 1024.0,
+              "minimum": 1.0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Straight-RGB colour grade blended into the world layer by the\nenveloped intensity.",
+          "type": "object",
+          "properties": {
+            "brightness": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0,
+              "maximum": 1.0,
+              "minimum": -1.0
+            },
+            "contrast": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0,
+              "maximum": 2.0,
+              "minimum": 0.0
+            },
+            "fade_in": {
+              "type": "number",
+              "format": "float",
+              "default": 0.10000000149011612,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "fade_out": {
+              "type": "number",
+              "format": "float",
+              "default": 0.20000000298023224,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "intensity": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "saturation": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0,
+              "maximum": 2.0,
+              "minimum": 0.0
+            },
+            "tint": {
+              "type": "string",
+              "default": "#ffffff"
+            },
+            "tint_strength": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "color_grade"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Variable-radius blur with a fully sharp centre disc and a soft\ntransition to a blurred, optionally darkened periphery.",
+          "type": "object",
+          "properties": {
+            "blur": {
+              "type": "number",
+              "format": "float",
+              "default": 8.0,
+              "maximum": 24.0,
+              "minimum": 0.0
+            },
+            "center_x": {
+              "type": "number",
+              "format": "float",
+              "default": 960.0,
+              "maximum": 1920.0,
+              "minimum": 0.0
+            },
+            "center_y": {
+              "type": "number",
+              "format": "float",
+              "default": 540.0,
+              "maximum": 1080.0,
+              "minimum": 0.0
+            },
+            "darkness": {
+              "type": "number",
+              "format": "float",
+              "default": 0.30000001192092896,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "fade_in": {
+              "type": "number",
+              "format": "float",
+              "default": 0.10000000149011612,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "fade_out": {
+              "type": "number",
+              "format": "float",
+              "default": 0.20000000298023224,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "intensity": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "radius": {
+              "type": "number",
+              "format": "float",
+              "default": 280.0,
+              "maximum": 2203.0,
+              "minimum": 0.0
+            },
+            "softness": {
+              "type": "number",
+              "format": "float",
+              "default": 160.0,
+              "maximum": 2203.0,
+              "minimum": 1.0
+            },
+            "type": {
+              "type": "string",
+              "const": "focus"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Concentric ripple rings travelling outwards from the centre, distinct\nfrom the single expanding ring of `shockwave`.",
+          "type": "object",
+          "properties": {
+            "amplitude": {
+              "type": "number",
+              "format": "float",
+              "default": 12.0,
+              "maximum": 64.0,
+              "minimum": 0.0
+            },
+            "center_x": {
+              "type": "number",
+              "format": "float",
+              "default": 960.0,
+              "maximum": 1920.0,
+              "minimum": 0.0
+            },
+            "center_y": {
+              "type": "number",
+              "format": "float",
+              "default": 540.0,
+              "maximum": 1080.0,
+              "minimum": 0.0
+            },
+            "damping": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0,
+              "maximum": 8.0,
+              "minimum": 0.0
+            },
+            "fade_in": {
+              "type": "number",
+              "format": "float",
+              "default": 0.10000000149011612,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "fade_out": {
+              "type": "number",
+              "format": "float",
+              "default": 0.20000000298023224,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "intensity": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0,
+              "maximum": 1.0,
+              "minimum": 0.0
+            },
+            "speed": {
+              "type": "number",
+              "format": "float",
+              "default": 240.0,
+              "maximum": 2000.0,
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "ripple"
+            },
+            "wavelength": {
+              "type": "number",
+              "format": "float",
+              "default": 160.0,
+              "maximum": 2203.0,
+              "minimum": 8.0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
         }
       ]
     },

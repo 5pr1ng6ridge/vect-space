@@ -20,7 +20,15 @@ import {
   summarizeNode,
 } from "./story";
 import { findAssetReferences } from "./components/assetReferences";
-import type { EditorProject, SceneNode } from "./types";
+import {
+  defaultChromaticAberrationEffect,
+  defaultColorGradeEffect,
+  defaultFocusEffect,
+  defaultGlitchEffect,
+  defaultRippleEffect,
+  defaultShockwaveEffect,
+} from "./presentationDefaults";
+import type { EditorProject, SceneNode, ScreenEffectSpec } from "./types";
 import { validateLive } from "./validation";
 import { buildScriptChainOptions } from "./components/scriptChains";
 
@@ -1377,6 +1385,139 @@ describe("canonical presentation authoring", () => {
         ].includes(diagnostic.code),
       ),
     ).toEqual([]);
+  });
+
+  it("validates the shader screen effects like the content model", () => {
+    const fixture = project();
+    const scene = fixture.scenes[0].definition;
+    const node = (effect: ScreenEffectSpec): SceneNode => ({
+      type: "screen_effect",
+      effect,
+      duration_ms: 200,
+      await: false,
+      next: "end",
+    });
+    scene.nodes.good_split = node(defaultChromaticAberrationEffect());
+    scene.nodes.good_glitch = node(defaultGlitchEffect());
+    scene.nodes.good_wave = node(defaultShockwaveEffect());
+    scene.nodes.good_grade = node(defaultColorGradeEffect());
+    scene.nodes.good_focus = node(defaultFocusEffect());
+    scene.nodes.good_ripple = node(defaultRippleEffect());
+    const shaderCodes = (): string[] =>
+      validateLive(fixture)
+        .map((diagnostic) => diagnostic.code)
+        .filter((code) =>
+          /^invalid_(chromatic|glitch|shockwave|color_grade|focus|ripple)_/.test(
+            code,
+          ),
+        );
+    expect(shaderCodes()).toEqual([]);
+
+    scene.nodes.bad_split = node({
+      type: "chromatic_aberration",
+      intensity: 200,
+      angle_deg: 400,
+      center_x: -1,
+      center_y: 540,
+      edge_weight: 2,
+      fade_in: 0.7,
+      fade_out: 0.7,
+    });
+    scene.nodes.bad_glitch = node({
+      type: "glitch",
+      displacement: 600,
+      slice_count: 2.5,
+      density: 1.5,
+      frequency_hz: 0,
+      seed: -1,
+      fade_in: 0,
+      fade_out: 0,
+    });
+    scene.nodes.bad_wave = node({
+      type: "shockwave",
+      center_x: 960,
+      center_y: 2000,
+      max_radius: 0,
+      wave_width: 2000,
+      strength: 300,
+    });
+    scene.nodes.bad_grade = node({
+      type: "color_grade",
+      brightness: 2,
+      contrast: -1,
+      saturation: 3,
+      tint: "not-a-color",
+      tint_strength: 2,
+      intensity: 2,
+      fade_in: 0.6,
+      fade_out: 0.6,
+    });
+    scene.nodes.bad_focus = node({
+      type: "focus",
+      center_x: 2000,
+      center_y: -1,
+      radius: 3000,
+      softness: 0,
+      blur: 40,
+      darkness: 2,
+      intensity: 2,
+      fade_in: 0.5,
+      fade_out: 0.6,
+    });
+    scene.nodes.bad_ripple = node({
+      type: "ripple",
+      center_x: -1,
+      center_y: 2000,
+      amplitude: 100,
+      wavelength: 2,
+      speed: 3000,
+      damping: 9,
+      intensity: -1,
+      fade_in: 0.5,
+      fade_out: 0.7,
+    });
+    expect(new Set(shaderCodes())).toEqual(
+      new Set([
+        "invalid_chromatic_intensity",
+        "invalid_chromatic_angle",
+        "invalid_chromatic_center",
+        "invalid_chromatic_edge_weight",
+        "invalid_chromatic_fade",
+        "invalid_glitch_displacement",
+        "invalid_glitch_slice_count",
+        "invalid_glitch_density",
+        "invalid_glitch_frequency",
+        "invalid_glitch_seed",
+        "invalid_shockwave_center",
+        "invalid_shockwave_radius",
+        "invalid_shockwave_width",
+        "invalid_shockwave_strength",
+        "invalid_color_grade_brightness",
+        "invalid_color_grade_contrast",
+        "invalid_color_grade_saturation",
+        "invalid_color_grade_tint_strength",
+        "invalid_color_grade_intensity",
+        "invalid_color_grade_fade",
+        "invalid_focus_center",
+        "invalid_focus_radius",
+        "invalid_focus_softness",
+        "invalid_focus_blur",
+        "invalid_focus_darkness",
+        "invalid_focus_intensity",
+        "invalid_focus_fade",
+        "invalid_ripple_center",
+        "invalid_ripple_amplitude",
+        "invalid_ripple_wavelength",
+        "invalid_ripple_speed",
+        "invalid_ripple_damping",
+        "invalid_ripple_intensity",
+        "invalid_ripple_fade",
+      ]),
+    );
+    // The tint uses the shared colour contract, not a shader-private range.
+    expect(
+      validateLive(fixture).map((diagnostic) => diagnostic.code),
+    ).toContain("invalid_color");
   });
 });
 

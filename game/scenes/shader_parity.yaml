@@ -1,0 +1,226 @@
+schema_version: 2
+id: shader_parity
+entry: stage
+# 开发夹具：为 `npm run parity:check` 提供真实 WebGL 的着色器像素断言目标。
+#
+# 场景本身只包含可复现的固定内容（背景 + 立绘 + 世界层效果），断言的期望值由
+# harness 在浏览器里对真实 Pixi 滤镜的像素读回计算，不依赖截图人工比对。
+nodes:
+  end:
+    type: end
+  stage:
+    type: background
+    background: bg.test_1
+    transition:
+      type: cross_fade
+    duration_ms: 0
+    easing: linear
+    await: true
+    next: show_prop
+  show_prop:
+    type: sprite
+    sprite_id: prop
+    action: show
+    asset: sprite.alli_neutral
+    x: 960.0
+    "y": 760.0
+    scale: 0.9
+    opacity: 1.0
+    z: 10
+    duration_ms: 0
+    easing: linear
+    await: true
+    next: shader_combo
+  # 六种着色器效果同时生效：mid（800ms）时三组新效果均为满强度。
+  shader_combo:
+    type: timeline
+    duration_ms: 1600
+    await: true
+    skippable: true
+    tracks: []
+    events:
+    - type: screen_effect
+      id: combo_grade
+      at_ms: 0
+      effect:
+        type: color_grade
+        brightness: 0.08
+        contrast: 1.2
+        saturation: 0.75
+        tint: "#88aaff"
+        tint_strength: 0.4
+        intensity: 1.0
+        fade_in: 0.0
+        fade_out: 0.0
+      duration_ms: 1600
+    - type: screen_effect
+      id: combo_focus
+      at_ms: 0
+      effect:
+        type: focus
+        center_x: 960
+        center_y: 540
+        radius: 280
+        softness: 160
+        blur: 12
+        darkness: 0.5
+        intensity: 1.0
+        fade_in: 0.0
+        fade_out: 0.0
+      duration_ms: 1600
+    - type: screen_effect
+      id: combo_ripple
+      at_ms: 0
+      effect:
+        type: ripple
+        center_x: 960
+        center_y: 540
+        amplitude: 16
+        wavelength: 200
+        speed: 300
+        damping: 1
+        intensity: 1.0
+        fade_in: 0.0
+        fade_out: 0.0
+      duration_ms: 1600
+    - type: screen_effect
+      id: combo_shockwave
+      at_ms: 0
+      effect:
+        type: shockwave
+        max_radius: 1100
+        wave_width: 160
+        strength: 30
+      duration_ms: 1600
+    - type: screen_effect
+      id: combo_glitch
+      at_ms: 0
+      effect:
+        type: glitch
+        displacement: 48
+        slice_count: 16
+        density: 0.35
+        frequency_hz: 12
+        seed: 0
+        fade_in: 0.0
+        fade_out: 0.0
+      duration_ms: 1600
+    - type: screen_effect
+      id: combo_chromatic
+      at_ms: 0
+      effect:
+        type: chromatic_aberration
+        intensity: 12
+        edge_weight: 0.6
+        fade_in: 0.0
+        fade_out: 0.0
+      duration_ms: 1600
+    next: shader_camera
+  # 镜头平移后聚焦：用于断言设计像素中心随镜头变换映射到正确的屏幕位置。
+  shader_camera:
+    type: timeline
+    duration_ms: 1600
+    await: true
+    skippable: true
+    tracks:
+    - type: camera
+      channels:
+        x:
+        - at_ms: 0
+          value: 384.0
+          easing: linear
+        - at_ms: 1600
+          value: 384.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: 216.0
+          easing: linear
+        - at_ms: 1600
+          value: 216.0
+          easing: linear
+        zoom:
+        - at_ms: 0
+          value: 1.0
+          easing: linear
+        - at_ms: 1600
+          value: 1.0
+          easing: linear
+        rotation_deg:
+        - at_ms: 0
+          value: 0.0
+          easing: linear
+        - at_ms: 1600
+          value: 0.0
+          easing: linear
+    events:
+    - type: screen_effect
+      id: camera_focus
+      at_ms: 0
+      effect:
+        type: focus
+        center_x: 960
+        center_y: 540
+        radius: 360
+        softness: 220
+        blur: 14
+        darkness: 0.65
+        intensity: 1.0
+        fade_in: 0.0
+        fade_out: 0.0
+      duration_ms: 1600
+    next: shader_camera_rotated
+  # 镜头缩放 + 旋转后聚焦：证明设计像素中心在缩放/旋转下同样不漂移。
+  shader_camera_rotated:
+    type: timeline
+    duration_ms: 1600
+    await: true
+    skippable: true
+    tracks:
+    - type: camera
+      channels:
+        x:
+        - at_ms: 0
+          value: 384.0
+          easing: linear
+        - at_ms: 1600
+          value: 384.0
+          easing: linear
+        "y":
+        - at_ms: 0
+          value: 216.0
+          easing: linear
+        - at_ms: 1600
+          value: 216.0
+          easing: linear
+        zoom:
+        - at_ms: 0
+          value: 1.25
+          easing: linear
+        - at_ms: 1600
+          value: 1.25
+          easing: linear
+        rotation_deg:
+        - at_ms: 0
+          value: 12.0
+          easing: linear
+        - at_ms: 1600
+          value: 12.0
+          easing: linear
+    events:
+    - type: screen_effect
+      id: camera_rotated_focus
+      at_ms: 0
+      effect:
+        type: focus
+        center_x: 960
+        center_y: 540
+        radius: 360
+        softness: 220
+        blur: 14
+        darkness: 0.65
+        intensity: 1.0
+        fade_in: 0.0
+        fade_out: 0.0
+      duration_ms: 1600
+    next: end

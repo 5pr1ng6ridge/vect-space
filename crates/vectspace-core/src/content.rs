@@ -18,12 +18,25 @@ use crate::model::{
     SceneDefinition, SceneNode, ScreenEffectSpec, SpriteAction, SpriteActionDefinition,
     TimelineChannels, TimelineEasing, TimelineEvent, TimelineTrack, UiMotionBindings,
     UiMotionPreset, ValueOperand, VariableDefinition, VariableOperation, VariableScope,
-    VariableType, FLASH_PEAK_ALPHA_MAX, FLASH_PEAK_ALPHA_MIN, IMAGE_ANIMATION_MAX_DECODED_BYTES,
+    VariableType, CHROMATIC_ANGLE_DEG_MAX, CHROMATIC_ANGLE_DEG_MIN, CHROMATIC_EDGE_WEIGHT_MAX,
+    CHROMATIC_EDGE_WEIGHT_MIN, CHROMATIC_INTENSITY_MAX, COLOR_GRADE_BRIGHTNESS_MAX,
+    COLOR_GRADE_BRIGHTNESS_MIN, COLOR_GRADE_CONTRAST_MAX, COLOR_GRADE_CONTRAST_MIN,
+    COLOR_GRADE_SATURATION_MAX, COLOR_GRADE_SATURATION_MIN, COLOR_GRADE_TINT_STRENGTH_MAX,
+    COLOR_GRADE_TINT_STRENGTH_MIN, FLASH_PEAK_ALPHA_MAX, FLASH_PEAK_ALPHA_MIN, FOCUS_BLUR_MAX,
+    FOCUS_BLUR_MIN, FOCUS_DARKNESS_MAX, FOCUS_DARKNESS_MIN, FOCUS_RADIUS_MAX, FOCUS_RADIUS_MIN,
+    FOCUS_SOFTNESS_MAX, FOCUS_SOFTNESS_MIN, GLITCH_DENSITY_MAX, GLITCH_DENSITY_MIN,
+    GLITCH_DISPLACEMENT_MAX, GLITCH_FREQUENCY_HZ_MAX, GLITCH_FREQUENCY_HZ_MIN,
+    GLITCH_SLICE_COUNT_MAX, GLITCH_SLICE_COUNT_MIN, IMAGE_ANIMATION_MAX_DECODED_BYTES,
     IMAGE_ANIMATION_MAX_EDGE, IMAGE_ANIMATION_MAX_FRAMES, IMAGE_ANIMATION_MAX_FRAME_MS,
     IMAGE_ANIMATION_MIN_FRAME_MS, IMAGE_ANIMATION_SCHEMA_VERSION, LONG_TEXT_FONT_SIZE_MAX,
-    LONG_TEXT_FONT_SIZE_MIN, SHAKE_AMPLITUDE_MAX, SHAKE_DECAY_MAX, SHAKE_DECAY_MIN,
-    SHAKE_FREQUENCY_HZ_MAX, SHAKE_FREQUENCY_HZ_MIN, SPRITE_ACTION_SCHEMA_VERSION,
-    TRANSITION_SOFTNESS_MAX,
+    LONG_TEXT_FONT_SIZE_MIN, RIPPLE_AMPLITUDE_MAX, RIPPLE_AMPLITUDE_MIN, RIPPLE_DAMPING_MAX,
+    RIPPLE_DAMPING_MIN, RIPPLE_SPEED_MAX, RIPPLE_SPEED_MIN, RIPPLE_WAVELENGTH_MAX,
+    RIPPLE_WAVELENGTH_MIN, SCREEN_EFFECT_CENTER_X_MAX, SCREEN_EFFECT_CENTER_Y_MAX,
+    SCREEN_EFFECT_FADE_MAX, SCREEN_EFFECT_FADE_MIN, SCREEN_EFFECT_INTENSITY_MAX,
+    SCREEN_EFFECT_INTENSITY_MIN, SHAKE_AMPLITUDE_MAX, SHAKE_DECAY_MAX, SHAKE_DECAY_MIN,
+    SHAKE_FREQUENCY_HZ_MAX, SHAKE_FREQUENCY_HZ_MIN, SHOCKWAVE_MAX_RADIUS_MAX,
+    SHOCKWAVE_MAX_RADIUS_MIN, SHOCKWAVE_STRENGTH_MAX, SHOCKWAVE_WAVE_WIDTH_MAX,
+    SHOCKWAVE_WAVE_WIDTH_MIN, SPRITE_ACTION_SCHEMA_VERSION, TRANSITION_SOFTNESS_MAX,
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
@@ -3119,7 +3132,387 @@ fn validate_screen_effect(
             }
             Ok(())
         }
+        ScreenEffectSpec::ChromaticAberration {
+            intensity,
+            angle_deg,
+            center_x,
+            center_y,
+            edge_weight,
+            fade_in,
+            fade_out,
+        } => {
+            let label = "chromatic_aberration";
+            validate_effect_range(
+                label,
+                "intensity",
+                *intensity,
+                0.0,
+                CHROMATIC_INTENSITY_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "angle_deg",
+                *angle_deg,
+                CHROMATIC_ANGLE_DEG_MIN,
+                CHROMATIC_ANGLE_DEG_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_center(label, *center_x, *center_y, scene_id, node_id)?;
+            validate_effect_range(
+                label,
+                "edge_weight",
+                *edge_weight,
+                CHROMATIC_EDGE_WEIGHT_MIN,
+                CHROMATIC_EDGE_WEIGHT_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_fades(label, *fade_in, *fade_out, scene_id, node_id)
+        }
+        ScreenEffectSpec::Glitch {
+            displacement,
+            slice_count,
+            density,
+            frequency_hz,
+            seed: _,
+            fade_in,
+            fade_out,
+        } => {
+            let label = "glitch";
+            validate_effect_range(
+                label,
+                "displacement",
+                *displacement,
+                0.0,
+                GLITCH_DISPLACEMENT_MAX,
+                scene_id,
+                node_id,
+            )?;
+            if !(GLITCH_SLICE_COUNT_MIN..=GLITCH_SLICE_COUNT_MAX).contains(slice_count) {
+                return node_error(
+                    scene_id,
+                    node_id,
+                    &format!(
+                        "glitch slice_count 必须在 {GLITCH_SLICE_COUNT_MIN} 到 {GLITCH_SLICE_COUNT_MAX} 之间"
+                    ),
+                );
+            }
+            validate_effect_range(
+                label,
+                "density",
+                *density,
+                GLITCH_DENSITY_MIN,
+                GLITCH_DENSITY_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "frequency_hz",
+                *frequency_hz,
+                GLITCH_FREQUENCY_HZ_MIN,
+                GLITCH_FREQUENCY_HZ_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_fades(label, *fade_in, *fade_out, scene_id, node_id)
+        }
+        ScreenEffectSpec::Shockwave {
+            center_x,
+            center_y,
+            max_radius,
+            wave_width,
+            strength,
+        } => {
+            let label = "shockwave";
+            validate_effect_center(label, *center_x, *center_y, scene_id, node_id)?;
+            validate_effect_range(
+                label,
+                "max_radius",
+                *max_radius,
+                SHOCKWAVE_MAX_RADIUS_MIN,
+                SHOCKWAVE_MAX_RADIUS_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "wave_width",
+                *wave_width,
+                SHOCKWAVE_WAVE_WIDTH_MIN,
+                SHOCKWAVE_WAVE_WIDTH_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "strength",
+                *strength,
+                0.0,
+                SHOCKWAVE_STRENGTH_MAX,
+                scene_id,
+                node_id,
+            )
+        }
+        ScreenEffectSpec::ColorGrade {
+            brightness,
+            contrast,
+            saturation,
+            tint,
+            tint_strength,
+            intensity,
+            fade_in,
+            fade_out,
+        } => {
+            let label = "color_grade";
+            validate_color(tint).map_err(|message| {
+                ContentError::Validation(format!("{scene_id}/{node_id}: {message}"))
+            })?;
+            validate_effect_range(
+                label,
+                "brightness",
+                *brightness,
+                COLOR_GRADE_BRIGHTNESS_MIN,
+                COLOR_GRADE_BRIGHTNESS_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "contrast",
+                *contrast,
+                COLOR_GRADE_CONTRAST_MIN,
+                COLOR_GRADE_CONTRAST_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "saturation",
+                *saturation,
+                COLOR_GRADE_SATURATION_MIN,
+                COLOR_GRADE_SATURATION_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "tint_strength",
+                *tint_strength,
+                COLOR_GRADE_TINT_STRENGTH_MIN,
+                COLOR_GRADE_TINT_STRENGTH_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_intensity(label, *intensity, scene_id, node_id)?;
+            validate_effect_fades(label, *fade_in, *fade_out, scene_id, node_id)
+        }
+        ScreenEffectSpec::Focus {
+            center_x,
+            center_y,
+            radius,
+            softness,
+            blur,
+            darkness,
+            intensity,
+            fade_in,
+            fade_out,
+        } => {
+            let label = "focus";
+            validate_effect_center(label, *center_x, *center_y, scene_id, node_id)?;
+            validate_effect_range(
+                label,
+                "radius",
+                *radius,
+                FOCUS_RADIUS_MIN,
+                FOCUS_RADIUS_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "softness",
+                *softness,
+                FOCUS_SOFTNESS_MIN,
+                FOCUS_SOFTNESS_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "blur",
+                *blur,
+                FOCUS_BLUR_MIN,
+                FOCUS_BLUR_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "darkness",
+                *darkness,
+                FOCUS_DARKNESS_MIN,
+                FOCUS_DARKNESS_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_intensity(label, *intensity, scene_id, node_id)?;
+            validate_effect_fades(label, *fade_in, *fade_out, scene_id, node_id)
+        }
+        ScreenEffectSpec::Ripple {
+            center_x,
+            center_y,
+            amplitude,
+            wavelength,
+            speed,
+            damping,
+            intensity,
+            fade_in,
+            fade_out,
+        } => {
+            let label = "ripple";
+            validate_effect_center(label, *center_x, *center_y, scene_id, node_id)?;
+            validate_effect_range(
+                label,
+                "amplitude",
+                *amplitude,
+                RIPPLE_AMPLITUDE_MIN,
+                RIPPLE_AMPLITUDE_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "wavelength",
+                *wavelength,
+                RIPPLE_WAVELENGTH_MIN,
+                RIPPLE_WAVELENGTH_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "speed",
+                *speed,
+                RIPPLE_SPEED_MIN,
+                RIPPLE_SPEED_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_range(
+                label,
+                "damping",
+                *damping,
+                RIPPLE_DAMPING_MIN,
+                RIPPLE_DAMPING_MAX,
+                scene_id,
+                node_id,
+            )?;
+            validate_effect_intensity(label, *intensity, scene_id, node_id)?;
+            validate_effect_fades(label, *fade_in, *fade_out, scene_id, node_id)
+        }
     }
+}
+
+fn validate_effect_intensity(
+    effect: &str,
+    intensity: f32,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    validate_effect_range(
+        effect,
+        "intensity",
+        intensity,
+        SCREEN_EFFECT_INTENSITY_MIN,
+        SCREEN_EFFECT_INTENSITY_MAX,
+        scene_id,
+        node_id,
+    )
+}
+
+fn validate_effect_range(
+    effect: &str,
+    field: &str,
+    value: f32,
+    minimum: f32,
+    maximum: f32,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+        return node_error(
+            scene_id,
+            node_id,
+            &format!("{effect} {field} 必须在 {minimum} 到 {maximum} 之间"),
+        );
+    }
+    Ok(())
+}
+
+fn validate_effect_center(
+    effect: &str,
+    center_x: f32,
+    center_y: f32,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    validate_effect_range(
+        effect,
+        "center_x",
+        center_x,
+        0.0,
+        SCREEN_EFFECT_CENTER_X_MAX,
+        scene_id,
+        node_id,
+    )?;
+    validate_effect_range(
+        effect,
+        "center_y",
+        center_y,
+        0.0,
+        SCREEN_EFFECT_CENTER_Y_MAX,
+        scene_id,
+        node_id,
+    )
+}
+
+fn validate_effect_fades(
+    effect: &str,
+    fade_in: f32,
+    fade_out: f32,
+    scene_id: &str,
+    node_id: &str,
+) -> Result<(), ContentError> {
+    validate_effect_range(
+        effect,
+        "fade_in",
+        fade_in,
+        SCREEN_EFFECT_FADE_MIN,
+        SCREEN_EFFECT_FADE_MAX,
+        scene_id,
+        node_id,
+    )?;
+    validate_effect_range(
+        effect,
+        "fade_out",
+        fade_out,
+        SCREEN_EFFECT_FADE_MIN,
+        SCREEN_EFFECT_FADE_MAX,
+        scene_id,
+        node_id,
+    )?;
+    if fade_in + fade_out > SCREEN_EFFECT_FADE_MAX {
+        return node_error(
+            scene_id,
+            node_id,
+            &format!("{effect} fade_in 与 fade_out 之和不能超过 1"),
+        );
+    }
+    Ok(())
 }
 
 fn validate_curtain_fill(
@@ -3537,7 +3930,9 @@ mod tests {
         ChapterMapHotspot, ChapterMapReveal, ImageAnimationFrame, LiteralOperand,
         SpriteActionDefinition, SpriteActionEnd, SpriteActionKeyframe, SpriteActionParameter,
         TimelineEasingPreset, TimelineKeyframe, TimelineKeyframeKeyword, TimelineKeyframeValue,
-        VariableMap, VariableOperand,
+        VariableMap, VariableOperand, COLOR_GRADE_TINT_DEFAULT, SCREEN_EFFECT_CENTER_X_DEFAULT,
+        SCREEN_EFFECT_CENTER_Y_DEFAULT, SCREEN_EFFECT_FADE_IN_DEFAULT,
+        SCREEN_EFFECT_FADE_OUT_DEFAULT,
     };
 
     /// Writes a real PNG header.  The animation validator only needs the
@@ -4354,6 +4749,185 @@ mod tests {
                 "generated schema is stale: {name}"
             );
         }
+    }
+
+    #[test]
+    fn generated_schema_tracks_canonical_screen_effect_bounds() {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(
+            crate_root.join("../../src-tauri/gen/content-schemas/scene.schema.json"),
+        )
+        .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let variants = schema["$defs"]["ScreenEffectSpec"]["oneOf"]
+            .as_array()
+            .expect("screen effect variants");
+        let properties = |name: &str| {
+            variants
+                .iter()
+                .find(|variant| variant["properties"]["type"]["const"] == name)
+                .unwrap_or_else(|| panic!("missing variant {name}"))["properties"]
+                .clone()
+        };
+        let bound = |value: &serde_json::Value, key: &str| {
+            value[key]
+                .as_f64()
+                .unwrap_or_else(|| panic!("missing {key} bound in {value}"))
+        };
+
+        let check = |props: &serde_json::Value, label: &str, cases: &[(&str, f32, f32)]| {
+            for (field, minimum, maximum) in cases {
+                assert_eq!(
+                    bound(&props[*field], "minimum"),
+                    f64::from(*minimum),
+                    "{label} {field} minimum"
+                );
+                assert_eq!(
+                    bound(&props[*field], "maximum"),
+                    f64::from(*maximum),
+                    "{label} {field} maximum"
+                );
+            }
+        };
+
+        // Regression for the accepted schedule/validator disagreement: the
+        // generated schema now carries the canonical 1..=32 slice-count bound.
+        let glitch = properties("glitch");
+        assert_eq!(
+            bound(&glitch["slice_count"], "minimum"),
+            f64::from(GLITCH_SLICE_COUNT_MIN)
+        );
+        assert_eq!(
+            bound(&glitch["slice_count"], "maximum"),
+            f64::from(GLITCH_SLICE_COUNT_MAX)
+        );
+        check(
+            &glitch,
+            "glitch",
+            &[
+                ("displacement", 0.0, GLITCH_DISPLACEMENT_MAX),
+                ("density", GLITCH_DENSITY_MIN, GLITCH_DENSITY_MAX),
+                (
+                    "frequency_hz",
+                    GLITCH_FREQUENCY_HZ_MIN,
+                    GLITCH_FREQUENCY_HZ_MAX,
+                ),
+                ("fade_in", SCREEN_EFFECT_FADE_MIN, SCREEN_EFFECT_FADE_MAX),
+                ("fade_out", SCREEN_EFFECT_FADE_MIN, SCREEN_EFFECT_FADE_MAX),
+            ],
+        );
+
+        check(
+            &properties("chromatic_aberration"),
+            "chromatic_aberration",
+            &[
+                ("intensity", 0.0, CHROMATIC_INTENSITY_MAX),
+                (
+                    "angle_deg",
+                    CHROMATIC_ANGLE_DEG_MIN,
+                    CHROMATIC_ANGLE_DEG_MAX,
+                ),
+                ("center_x", 0.0, SCREEN_EFFECT_CENTER_X_MAX),
+                ("center_y", 0.0, SCREEN_EFFECT_CENTER_Y_MAX),
+                (
+                    "edge_weight",
+                    CHROMATIC_EDGE_WEIGHT_MIN,
+                    CHROMATIC_EDGE_WEIGHT_MAX,
+                ),
+                ("fade_in", SCREEN_EFFECT_FADE_MIN, SCREEN_EFFECT_FADE_MAX),
+                ("fade_out", SCREEN_EFFECT_FADE_MIN, SCREEN_EFFECT_FADE_MAX),
+            ],
+        );
+
+        check(
+            &properties("shockwave"),
+            "shockwave",
+            &[
+                ("center_x", 0.0, SCREEN_EFFECT_CENTER_X_MAX),
+                ("center_y", 0.0, SCREEN_EFFECT_CENTER_Y_MAX),
+                (
+                    "max_radius",
+                    SHOCKWAVE_MAX_RADIUS_MIN,
+                    SHOCKWAVE_MAX_RADIUS_MAX,
+                ),
+                (
+                    "wave_width",
+                    SHOCKWAVE_WAVE_WIDTH_MIN,
+                    SHOCKWAVE_WAVE_WIDTH_MAX,
+                ),
+                ("strength", 0.0, SHOCKWAVE_STRENGTH_MAX),
+            ],
+        );
+
+        check(
+            &properties("color_grade"),
+            "color_grade",
+            &[
+                (
+                    "brightness",
+                    COLOR_GRADE_BRIGHTNESS_MIN,
+                    COLOR_GRADE_BRIGHTNESS_MAX,
+                ),
+                (
+                    "contrast",
+                    COLOR_GRADE_CONTRAST_MIN,
+                    COLOR_GRADE_CONTRAST_MAX,
+                ),
+                (
+                    "saturation",
+                    COLOR_GRADE_SATURATION_MIN,
+                    COLOR_GRADE_SATURATION_MAX,
+                ),
+                (
+                    "tint_strength",
+                    COLOR_GRADE_TINT_STRENGTH_MIN,
+                    COLOR_GRADE_TINT_STRENGTH_MAX,
+                ),
+                (
+                    "intensity",
+                    SCREEN_EFFECT_INTENSITY_MIN,
+                    SCREEN_EFFECT_INTENSITY_MAX,
+                ),
+                ("fade_in", SCREEN_EFFECT_FADE_MIN, SCREEN_EFFECT_FADE_MAX),
+                ("fade_out", SCREEN_EFFECT_FADE_MIN, SCREEN_EFFECT_FADE_MAX),
+            ],
+        );
+
+        check(
+            &properties("focus"),
+            "focus",
+            &[
+                ("center_x", 0.0, SCREEN_EFFECT_CENTER_X_MAX),
+                ("center_y", 0.0, SCREEN_EFFECT_CENTER_Y_MAX),
+                ("radius", FOCUS_RADIUS_MIN, FOCUS_RADIUS_MAX),
+                ("softness", FOCUS_SOFTNESS_MIN, FOCUS_SOFTNESS_MAX),
+                ("blur", FOCUS_BLUR_MIN, FOCUS_BLUR_MAX),
+                ("darkness", FOCUS_DARKNESS_MIN, FOCUS_DARKNESS_MAX),
+                (
+                    "intensity",
+                    SCREEN_EFFECT_INTENSITY_MIN,
+                    SCREEN_EFFECT_INTENSITY_MAX,
+                ),
+            ],
+        );
+
+        check(
+            &properties("ripple"),
+            "ripple",
+            &[
+                ("center_x", 0.0, SCREEN_EFFECT_CENTER_X_MAX),
+                ("center_y", 0.0, SCREEN_EFFECT_CENTER_Y_MAX),
+                ("amplitude", RIPPLE_AMPLITUDE_MIN, RIPPLE_AMPLITUDE_MAX),
+                ("wavelength", RIPPLE_WAVELENGTH_MIN, RIPPLE_WAVELENGTH_MAX),
+                ("speed", RIPPLE_SPEED_MIN, RIPPLE_SPEED_MAX),
+                ("damping", RIPPLE_DAMPING_MIN, RIPPLE_DAMPING_MAX),
+                (
+                    "intensity",
+                    SCREEN_EFFECT_INTENSITY_MIN,
+                    SCREEN_EFFECT_INTENSITY_MAX,
+                ),
+            ],
+        );
     }
 
     #[test]
@@ -5436,6 +6010,254 @@ mod tests {
                 }),
                 "decay",
             ),
+            (
+                "bad_chromatic_intensity",
+                effect(ScreenEffectSpec::ChromaticAberration {
+                    intensity: 200.0,
+                    angle_deg: 0.0,
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    edge_weight: 0.5,
+                    fade_in: 0.0,
+                    fade_out: 1.0,
+                }),
+                "intensity",
+            ),
+            (
+                "bad_chromatic_center",
+                effect(ScreenEffectSpec::ChromaticAberration {
+                    intensity: 8.0,
+                    angle_deg: 0.0,
+                    center_x: 960.0,
+                    center_y: 1200.0,
+                    edge_weight: 0.5,
+                    fade_in: 0.0,
+                    fade_out: 1.0,
+                }),
+                "center_y",
+            ),
+            (
+                "bad_chromatic_fades",
+                effect(ScreenEffectSpec::ChromaticAberration {
+                    intensity: 8.0,
+                    angle_deg: 0.0,
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    edge_weight: 0.5,
+                    fade_in: 0.6,
+                    fade_out: 0.6,
+                }),
+                "fade_in 与 fade_out",
+            ),
+            (
+                "bad_glitch_slices",
+                effect(ScreenEffectSpec::Glitch {
+                    displacement: 32.0,
+                    slice_count: 0,
+                    density: 0.5,
+                    frequency_hz: 12.0,
+                    seed: 0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                }),
+                "slice_count",
+            ),
+            (
+                "bad_glitch_density",
+                effect(ScreenEffectSpec::Glitch {
+                    displacement: 32.0,
+                    slice_count: 8,
+                    density: f32::NAN,
+                    frequency_hz: 12.0,
+                    seed: 0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                }),
+                "density",
+            ),
+            (
+                "bad_shockwave_width",
+                effect(ScreenEffectSpec::Shockwave {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    max_radius: 900.0,
+                    wave_width: 0.0,
+                    strength: 20.0,
+                }),
+                "wave_width",
+            ),
+            (
+                "bad_shockwave_strength",
+                effect(ScreenEffectSpec::Shockwave {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    max_radius: 900.0,
+                    wave_width: 120.0,
+                    strength: -1.0,
+                }),
+                "strength",
+            ),
+            (
+                "bad_color_grade_brightness",
+                effect(ScreenEffectSpec::ColorGrade {
+                    brightness: 1.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    tint: "#ffffff".to_owned(),
+                    tint_strength: 0.0,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "brightness",
+            ),
+            (
+                "bad_color_grade_tint",
+                effect(ScreenEffectSpec::ColorGrade {
+                    brightness: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    tint: "ffffff".to_owned(),
+                    tint_strength: 0.0,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "颜色",
+            ),
+            (
+                "bad_color_grade_saturation",
+                effect(ScreenEffectSpec::ColorGrade {
+                    brightness: 0.0,
+                    contrast: 1.0,
+                    saturation: f32::NAN,
+                    tint: "#ffffff".to_owned(),
+                    tint_strength: 0.0,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "saturation",
+            ),
+            (
+                "bad_color_grade_intensity",
+                effect(ScreenEffectSpec::ColorGrade {
+                    brightness: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    tint: "#ffffff".to_owned(),
+                    tint_strength: 0.0,
+                    intensity: 1.5,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "intensity",
+            ),
+            (
+                "bad_focus_softness",
+                effect(ScreenEffectSpec::Focus {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    radius: 280.0,
+                    softness: 0.0,
+                    blur: 8.0,
+                    darkness: 0.3,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "softness",
+            ),
+            (
+                "bad_focus_blur",
+                effect(ScreenEffectSpec::Focus {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    radius: 280.0,
+                    softness: 160.0,
+                    blur: 40.0,
+                    darkness: 0.3,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "blur",
+            ),
+            (
+                "bad_focus_center",
+                effect(ScreenEffectSpec::Focus {
+                    center_x: 960.0,
+                    center_y: 1400.0,
+                    radius: 280.0,
+                    softness: 160.0,
+                    blur: 8.0,
+                    darkness: 0.3,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "center_y",
+            ),
+            (
+                "bad_focus_fades",
+                effect(ScreenEffectSpec::Focus {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    radius: 280.0,
+                    softness: 160.0,
+                    blur: 8.0,
+                    darkness: 0.3,
+                    intensity: 1.0,
+                    fade_in: 0.6,
+                    fade_out: 0.6,
+                }),
+                "fade_in 与 fade_out",
+            ),
+            (
+                "bad_ripple_amplitude",
+                effect(ScreenEffectSpec::Ripple {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    amplitude: 128.0,
+                    wavelength: 160.0,
+                    speed: 240.0,
+                    damping: 1.0,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "amplitude",
+            ),
+            (
+                "bad_ripple_wavelength",
+                effect(ScreenEffectSpec::Ripple {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    amplitude: 12.0,
+                    wavelength: 4.0,
+                    speed: 240.0,
+                    damping: 1.0,
+                    intensity: 1.0,
+                    fade_in: 0.1,
+                    fade_out: 0.2,
+                }),
+                "wavelength",
+            ),
+            (
+                "bad_ripple_fades",
+                effect(ScreenEffectSpec::Ripple {
+                    center_x: 960.0,
+                    center_y: 540.0,
+                    amplitude: 12.0,
+                    wavelength: 160.0,
+                    speed: 240.0,
+                    damping: 1.0,
+                    intensity: 1.0,
+                    fade_in: 0.7,
+                    fade_out: 0.7,
+                }),
+                "fade_in 与 fade_out",
+            ),
         ];
         for (node_id, node, expected) in cases {
             let scenes = prologue_with_node(&catalog, node_id, node);
@@ -5444,6 +6266,63 @@ mod tests {
                 .to_string();
             assert!(error.contains(expected), "{node_id}: {error}");
         }
+    }
+
+    #[test]
+    fn composable_screen_effects_accept_their_defaults_and_boundaries() {
+        let catalog = fixture_catalog();
+        let valid = |node_id: &str, spec: ScreenEffectSpec| {
+            let node = SceneNode::ScreenEffect {
+                effect: spec,
+                duration_ms: 200,
+                await_completion: false,
+                next: "introduction".to_owned(),
+            };
+            let scenes = prologue_with_node(&catalog, node_id, node);
+            validate_fixture_scenes(&catalog, &scenes)
+                .unwrap_or_else(|error| panic!("{node_id}: {error}"));
+        };
+        valid(
+            "valid_color_grade",
+            ScreenEffectSpec::ColorGrade {
+                brightness: COLOR_GRADE_BRIGHTNESS_MIN,
+                contrast: COLOR_GRADE_CONTRAST_MAX,
+                saturation: COLOR_GRADE_SATURATION_MAX,
+                tint: COLOR_GRADE_TINT_DEFAULT.to_owned(),
+                tint_strength: COLOR_GRADE_TINT_STRENGTH_MAX,
+                intensity: SCREEN_EFFECT_INTENSITY_MAX,
+                fade_in: SCREEN_EFFECT_FADE_MIN,
+                fade_out: SCREEN_EFFECT_FADE_MAX,
+            },
+        );
+        valid(
+            "valid_focus",
+            ScreenEffectSpec::Focus {
+                center_x: SCREEN_EFFECT_CENTER_X_MAX,
+                center_y: SCREEN_EFFECT_CENTER_Y_MAX,
+                radius: FOCUS_RADIUS_MAX,
+                softness: FOCUS_SOFTNESS_MIN,
+                blur: FOCUS_BLUR_MAX,
+                darkness: FOCUS_DARKNESS_MAX,
+                intensity: SCREEN_EFFECT_INTENSITY_MIN,
+                fade_in: SCREEN_EFFECT_FADE_MAX,
+                fade_out: SCREEN_EFFECT_FADE_MIN,
+            },
+        );
+        valid(
+            "valid_ripple",
+            ScreenEffectSpec::Ripple {
+                center_x: SCREEN_EFFECT_CENTER_X_DEFAULT,
+                center_y: SCREEN_EFFECT_CENTER_Y_DEFAULT,
+                amplitude: RIPPLE_AMPLITUDE_MAX,
+                wavelength: RIPPLE_WAVELENGTH_MIN,
+                speed: RIPPLE_SPEED_MAX,
+                damping: RIPPLE_DAMPING_MAX,
+                intensity: SCREEN_EFFECT_INTENSITY_MAX,
+                fade_in: SCREEN_EFFECT_FADE_IN_DEFAULT,
+                fade_out: SCREEN_EFFECT_FADE_OUT_DEFAULT,
+            },
+        );
     }
 
     #[test]

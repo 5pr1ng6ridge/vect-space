@@ -27,6 +27,7 @@ import {
   Application,
   Container,
   Graphics,
+  Rectangle,
   Sprite,
   Texture,
   VideoSource,
@@ -44,6 +45,7 @@ import {
   hitTestSceneFrame,
   mergeSceneOverrides,
   shakeOffset,
+  stagePointToWorld,
   type SceneFrame,
   type SceneObjectFrame,
   type SceneObjectPatch,
@@ -62,10 +64,26 @@ import {
 } from "./imageAnimation";
 import type { ActiveScreenEffect } from "./timelineEvaluator";
 import {
+  EMPTY_SHADER_EFFECT_FRAME,
+  evaluateChromaticAberration,
+  evaluateColorGrade,
   evaluateFlashAlpha,
+  evaluateFocus,
+  evaluateGlitch,
+  evaluateRipple,
   evaluateScreenEffectFrame,
+  evaluateShaderEffectFrame,
   evaluateShakeOffset,
+  evaluateShockwave,
+  isShaderEffectFrameEmpty,
+  type ScreenEffectOptions,
+  type ShaderEffectFrame,
 } from "./sceneEffects";
+import {
+  createPixiShaderHost,
+  type SceneRect,
+  type SceneShaderHostLike,
+} from "./sceneShaders";
 import {
   evaluateBackgroundTransition,
   evaluateCurtainTransition,
@@ -86,6 +104,7 @@ import type {
   Easing,
   PresentationCue,
   ScreenEffectSpec,
+  ShaderScreenEffectType,
   SpriteSnapshot,
   TimelineTrack,
 } from "./types";
@@ -177,7 +196,13 @@ export interface SceneApplicationLike {
   init(options: SceneApplicationInit): Promise<void>;
   readonly stage: SceneNodeLike;
   readonly renderer: {
-    readonly extract: { canvas(target: SceneNodeLike): unknown };
+    readonly extract: {
+      canvas(
+        target:
+          | SceneNodeLike
+          | { readonly target: SceneNodeLike; readonly frame?: unknown },
+      ): unknown;
+    };
   };
   render(): void;
   destroy(
@@ -208,6 +233,8 @@ export interface SceneKit {
   textureFromImage(image: HTMLImageElement): SceneTextureLike;
   videoSource(element: HTMLVideoElement): SceneVideoSourceLike;
   videoSprite(source: SceneVideoSourceLike): SceneSpriteLike;
+  /** Post-processing host for the shader screen effects of one container. */
+  shaderHost(target: SceneNodeLike): SceneShaderHostLike;
 }
 
 /** Default kit backed by the real Pixi renderer. */
@@ -257,6 +284,8 @@ export function pixiSceneKit(): SceneKit {
       new Sprite(
         new Texture({ source: source as unknown as VideoSource }),
       ) as unknown as SceneSpriteLike,
+    shaderHost: (target) =>
+      createPixiShaderHost(target as unknown as Container),
   };
 }
 
@@ -415,6 +444,13 @@ export interface SceneFrameApplyOptions {
 export interface SceneActiveEffects {
   flash: ActiveScreenEffect | null;
   shake: ActiveScreenEffect | null;
+  /** Shader channels; omitted means inactive. */
+  chromatic_aberration?: ActiveScreenEffect | null;
+  glitch?: ActiveScreenEffect | null;
+  shockwave?: ActiveScreenEffect | null;
+  color_grade?: ActiveScreenEffect | null;
+  focus?: ActiveScreenEffect | null;
+  ripple?: ActiveScreenEffect | null;
   elapsedMs: number;
 }
 
@@ -480,6 +516,31 @@ const BACKGROUND_CUE = "background";
 const CURTAIN_CUE = "curtain";
 /** Cue-conflict key prefix for one sprite instance. */
 const SPRITE_CUE = "sprite:";
+/** Cue-conflict key prefix for one shader screen-effect channel. */
+const SHADER_CUE = "shader:";
+
+/**
+ * The effect types the world-layer shader host owns.
+ *
+ * Every other type is geometry (flash, shake) and must never fall through to
+ * the shake executor.  Keeping the test in one place makes the dispatch
+ * exhaustive for the newly added channels as well.
+ */
+function isShaderScreenEffect(
+  effect: ScreenEffectSpec,
+): effect is Extract<ScreenEffectSpec, { type: ShaderScreenEffectType }> {
+  switch (effect.type) {
+    case "chromatic_aberration":
+    case "glitch":
+    case "shockwave":
+    case "color_grade":
+    case "focus":
+    case "ripple":
+      return true;
+    default:
+      return false;
+  }
+}
 
 /** Screen-space z-order: world < curtain < screen effects < session curtain. */
 const CAMERA_LAYER_Z = 0;
@@ -552,6 +613,14 @@ export class SceneSurface {
   #flashColorAlpha = 1;
   #effectsState: SceneActiveEffects | null = null;
   #cueShake = { x: 0, y: 0 };
+  /** Post-processing of the world layer (the shader screen effects). */
+  readonly #shaderHost: SceneShaderHostLike;
+  /** Shader frames driven by node cues, one channel per effect type. */
+  #cueShaders: ShaderEffectFrame = EMPTY_SHADER_EFFECT_FRAME;
+  /** True while the shader host has at least one pass installed. */
+  #shadersActive = false;
+  /** Player accessibility preference; see `setReducedMotion`. */
+  #reducedMotion = false;
   /** Current curtain fill descriptor, so a cue only rebuilds on a real change. */
   #curtainFillKey: string | null = null;
   #curtainFill: SceneNodeLike | null = null;
@@ -658,6 +727,10 @@ export class SceneSurface {
     this.#transition = this.#kit.container();
     this.#curtainLayer = this.#kit.container();
     this.#sessionCurtainLayer = this.#kit.container();
+    // Shader effects post-process the world only: like shake, they never
+    // touch the curtain, the screen overlays, the host session curtain or the
+    // DOM dialogue/UI above the canvas.
+    this.#shaderHost = this.#kit.shaderHost(this.#cameraLayer);
     this.#store = new SceneTextureStore({
       load: options.textureLoader ?? ((url) => this.#loadTexture(url)),
       budget:
@@ -1041,9 +1114,10 @@ export class SceneSurface {
   /**
    * Sets the timeline-derived screen effects for the current playhead.
    *
-   * Flash and shake are both derived from the same position, so scrubbing,
-   * pausing and playing all agree, and the two effects coexist because shake is
-   * composed into the camera transform instead of overwriting it.
+   * Every channel is derived from the same position, so scrubbing, pausing and
+   * playing all agree.  The channels coexist: shake is composed into the
+   * camera transform instead of overwriting it, and the shader passes stack in
+   * their fixed order on top of the shaken world.
    */
   setActiveEffects(effects: SceneActiveEffects | null): void {
     this.#effectsState = effects;
@@ -1054,6 +1128,22 @@ export class SceneSurface {
 
   clearActiveEffects(): void {
     this.setActiveEffects(null);
+  }
+
+  get reducedMotion(): boolean {
+    return this.#reducedMotion;
+  }
+
+  /**
+   * Player accessibility preference: attenuates flashes, shakes and shader
+   * effects on both the timeline and the cue path, from the next frame on.
+   */
+  setReducedMotion(enabled: boolean): void {
+    if (this.#reducedMotion === enabled) return;
+    this.#reducedMotion = enabled;
+    this.#applyEffects();
+    this.#applyCamera();
+    this.#requestRender();
   }
 
   // -- cues ------------------------------------------------------------------
@@ -1464,10 +1554,15 @@ export class SceneSurface {
       if (context === null) return null;
       // preserveDrawingBuffer is deliberately disabled for normal rendering;
       // extracting the stage keeps thumbnails reliable without forcing a GPU
-      // readback on every frame.
-      const source = this.#application.renderer.extract.canvas(
-        this.#application.stage,
-      );
+      // readback on every frame.  The explicit stage frame keeps the extract
+      // render transform an identity (Pixi otherwise crops to the content
+      // bounds with a translate), so the post-processing passes see the same
+      // camera/world transform as the live canvas and a camera-translated
+      // scene anchors its effects to the same design pixel in both paths.
+      const source = this.#application.renderer.extract.canvas({
+        target: this.#application.stage,
+        frame: new Rectangle(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT),
+      });
       context.drawImage(source as unknown as CanvasImageSource, 0, 0, 320, 180);
       return thumbnail.toDataURL("image/png", 0.86);
     } catch (error) {
@@ -1502,6 +1597,8 @@ export class SceneSurface {
     this.#loop?.dispose();
     this.#loop = null;
     this.#store.destroy();
+    this.#shaderHost.destroy();
+    this.#shadersActive = false;
     this.#application.destroy({ removeView: false }, { children: true });
   }
 
@@ -1747,6 +1844,8 @@ export class SceneSurface {
     // that is still in flight gives up its cleanup (its token is stale once
     // the generation moves on), so this is the only place that releases them.
     this.#cueShake = { x: 0, y: 0 };
+    this.#cueShaders = EMPTY_SHADER_EFFECT_FRAME;
+    this.#syncShaders();
     this.#clearTransitionOverlay();
     this.#clearBackgroundMask();
     return this.#sceneGeneration;
@@ -2250,10 +2349,15 @@ export class SceneSurface {
 
   // -- internals: effects and camera ----------------------------------------
 
+  #effectOptions(): ScreenEffectOptions {
+    return { reducedMotion: this.#reducedMotion };
+  }
+
   #currentShake(): { x: number; y: number } {
     const timeline = shakeOffset(
       this.#effectsState?.elapsedMs ?? 0,
       this.#effectsState?.shake ?? null,
+      this.#effectOptions(),
     );
     return {
       x: timeline.x + this.#cueShake.x,
@@ -2270,6 +2374,7 @@ export class SceneSurface {
             effects.elapsedMs,
             effects.flash,
             effects.shake,
+            this.#effectOptions(),
           );
     const alpha = frame?.flash?.alpha ?? 0;
     const parsed =
@@ -2301,6 +2406,8 @@ export class SceneSurface {
   #clearEffects(): void {
     this.#effectsState = null;
     this.#cueShake = { x: 0, y: 0 };
+    this.#cueShaders = EMPTY_SHADER_EFFECT_FRAME;
+    this.#syncShaders();
     this.#flash?.destroy();
     this.#flash = null;
     this.#flashColorAlpha = 1;
@@ -2320,13 +2427,97 @@ export class SceneSurface {
     // `dispose()` destroyed the camera layer; writing a destroyed node's
     // position throws in Pixi.
     if (this.#disposed) return;
-    const transform = composeWorldTransform(this.#camera, this.#currentShake());
+    const shake = this.#currentShake();
+    const transform = composeWorldTransform(this.#camera, shake);
     // Base camera and shake are combined once, here, so no later camera
     // application can silently drop an in-flight shake.
     this.#cameraLayer.position.set(transform.positionX, transform.positionY);
     this.#cameraLayer.pivot.set(transform.pivotX, transform.pivotY);
     this.#cameraLayer.scale.set(transform.scale);
     this.#cameraLayer.rotation = transform.rotation;
+    // The filter area follows the camera, so every transform change re-syncs.
+    this.#syncShaders(shake);
+  }
+
+  /**
+   * Installs the shader passes of the current playhead and cue state.
+   *
+   * A timeline window owns its channel while it is active; a node cue fills
+   * the channel otherwise.  An idle frame removes every pass exactly once.
+   */
+  #syncShaders(shake: { x: number; y: number } = this.#currentShake()): void {
+    if (this.#disposed) return;
+    const frame = this.#shaderFrame();
+    if (isShaderEffectFrameEmpty(frame)) {
+      if (!this.#shadersActive) return;
+      this.#shadersActive = false;
+      this.#shaderHost.apply(frame, this.#stageAreaInWorld(shake));
+      return;
+    }
+    this.#shadersActive = true;
+    this.#shaderHost.apply(frame, this.#stageAreaInWorld(shake));
+  }
+
+  #shaderFrame(): ShaderEffectFrame {
+    const effects = this.#effectsState;
+    const cue = this.#cueShaders;
+    if (effects === null) return cue;
+    const timeline = evaluateShaderEffectFrame(
+      effects.elapsedMs,
+      {
+        chromatic_aberration: effects.chromatic_aberration ?? null,
+        glitch: effects.glitch ?? null,
+        shockwave: effects.shockwave ?? null,
+        color_grade: effects.color_grade ?? null,
+        focus: effects.focus ?? null,
+        ripple: effects.ripple ?? null,
+      },
+      this.#effectOptions(),
+    );
+    // An active timeline window owns its channel for its whole authored
+    // interval, even when the evaluated frame is `null` at zero intensity or
+    // at a fade boundary; only a channel with no active window lets a node cue
+    // fill it.  Falling back on `null` alone would let an overlapping cue show
+    // through at the exact start/end of a timeline effect.
+    return {
+      ripple: effects.ripple != null ? timeline.ripple : cue.ripple,
+      shockwave: effects.shockwave != null ? timeline.shockwave : cue.shockwave,
+      glitch: effects.glitch != null ? timeline.glitch : cue.glitch,
+      colorGrade:
+        effects.color_grade != null ? timeline.colorGrade : cue.colorGrade,
+      focus: effects.focus != null ? timeline.focus : cue.focus,
+      chromaticAberration:
+        effects.chromatic_aberration != null
+          ? timeline.chromaticAberration
+          : cue.chromaticAberration,
+    };
+  }
+
+  /**
+   * The whole stage mapped into the camera layer's local space.
+   *
+   * Used as the filter area, so the passes cover every design pixel even when
+   * the world is zoomed, rotated, shaken or does not fill the stage, and the
+   * shaders can treat their input as stage coordinates.  One pixel of margin
+   * absorbs rounding; Pixi clips the area to the viewport.
+   */
+  #stageAreaInWorld(shake: { x: number; y: number }): SceneRect {
+    const corners = [
+      { x: -1, y: -1 },
+      { x: DESIGN_WIDTH + 1, y: -1 },
+      { x: -1, y: DESIGN_HEIGHT + 1 },
+      { x: DESIGN_WIDTH + 1, y: DESIGN_HEIGHT + 1 },
+    ].map((point) => stagePointToWorld(point, this.#camera, shake));
+    const xs = corners.map((point) => point.x);
+    const ys = corners.map((point) => point.y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return {
+      x,
+      y,
+      width: Math.max(...xs) - x,
+      height: Math.max(...ys) - y,
+    };
   }
 
   #tickDecorations(deltaMs: number): boolean {
@@ -2828,12 +3019,18 @@ export class SceneSurface {
     durationMs: number,
     context: SceneCueContext,
   ): Promise<void> {
+    if (isShaderScreenEffect(effect)) {
+      await this.#shaderEffect(effect, durationMs, context);
+      return;
+    }
     const generation = this.#sceneGeneration;
     if (effect.type === "flash") {
       const parsed = parseColor(effect.color);
       const flash = this.#kit.graphics();
       flash.rect(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT).fill(parsed.color);
-      flash.alpha = effect.peak_alpha * parsed.alpha;
+      flash.alpha =
+        evaluateFlashAlpha(effect, 0, 0, durationMs, this.#effectOptions()) *
+        parsed.alpha;
       this.#effects.addChild(flash);
       this.#cueFlashes.add(flash);
       try {
@@ -2846,8 +3043,13 @@ export class SceneSurface {
           (progress) => {
             if (!this.#isCurrent(generation)) return;
             flash.alpha =
-              evaluateFlashAlpha(effect, progress * durationMs, 0, durationMs) *
-              parsed.alpha;
+              evaluateFlashAlpha(
+                effect,
+                progress * durationMs,
+                0,
+                durationMs,
+                this.#effectOptions(),
+              ) * parsed.alpha;
           },
           context,
         );
@@ -2870,6 +3072,7 @@ export class SceneSurface {
             progress * durationMs,
             0,
             durationMs,
+            this.#effectOptions(),
           );
           this.#applyCamera();
         },
@@ -2881,6 +3084,107 @@ export class SceneSurface {
         this.#applyCamera();
         this.#requestRender();
       }
+    }
+  }
+
+  /**
+   * Node-cue executor of one shader effect.
+   *
+   * The cue owns its channel as the newest writer of that effect type (an
+   * overlapping cue of the same type takes over, other types stack) and only
+   * the owner clears the channel when it ends, is cancelled or its generation
+   * moves on.
+   */
+  async #shaderEffect(
+    effect: Extract<ScreenEffectSpec, { type: ShaderScreenEffectType }>,
+    durationMs: number,
+    context: SceneCueContext,
+  ): Promise<void> {
+    const generation = this.#sceneGeneration;
+    const key = `${SHADER_CUE}${effect.type}`;
+    const token = this.#beginCue(key);
+    const write = (elapsedMs: number | null): void => {
+      const options = this.#effectOptions();
+      const current = this.#cueShaders;
+      switch (effect.type) {
+        case "shockwave":
+          this.#cueShaders = {
+            ...current,
+            shockwave:
+              elapsedMs === null
+                ? null
+                : evaluateShockwave(effect, elapsedMs, 0, durationMs, options),
+          };
+          break;
+        case "glitch":
+          this.#cueShaders = {
+            ...current,
+            glitch:
+              elapsedMs === null
+                ? null
+                : evaluateGlitch(effect, elapsedMs, 0, durationMs, options),
+          };
+          break;
+        case "chromatic_aberration":
+          this.#cueShaders = {
+            ...current,
+            chromaticAberration:
+              elapsedMs === null
+                ? null
+                : evaluateChromaticAberration(
+                    effect,
+                    elapsedMs,
+                    0,
+                    durationMs,
+                    options,
+                  ),
+          };
+          break;
+        case "color_grade":
+          this.#cueShaders = {
+            ...current,
+            colorGrade:
+              elapsedMs === null
+                ? null
+                : evaluateColorGrade(effect, elapsedMs, 0, durationMs, options),
+          };
+          break;
+        case "focus":
+          this.#cueShaders = {
+            ...current,
+            focus:
+              elapsedMs === null
+                ? null
+                : evaluateFocus(effect, elapsedMs, 0, durationMs, options),
+          };
+          break;
+        case "ripple":
+          this.#cueShaders = {
+            ...current,
+            ripple:
+              elapsedMs === null
+                ? null
+                : evaluateRipple(effect, elapsedMs, 0, durationMs, options),
+          };
+          break;
+        default:
+          effect satisfies never;
+      }
+      this.#syncShaders();
+      this.#requestRender();
+    };
+    try {
+      await this.#runAnimation(
+        durationMs,
+        "linear",
+        (progress) => {
+          if (!this.#isLatestCue(generation, key, token)) return;
+          write(progress * durationMs);
+        },
+        context,
+      );
+    } finally {
+      if (this.#isLatestCue(generation, key, token)) write(null);
     }
   }
 

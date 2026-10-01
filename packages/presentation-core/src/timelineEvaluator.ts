@@ -83,9 +83,23 @@ export interface ActiveScreenEffect {
   effect: ScreenEffectSpec;
 }
 
-export interface ActiveScreenEffects {
-  flash: ActiveScreenEffect | null;
-  shake: ActiveScreenEffect | null;
+/** One independent channel per effect type, keyed by the spec's `type`. */
+export type ActiveScreenEffects = Record<
+  ScreenEffectSpec["type"],
+  ActiveScreenEffect | null
+>;
+
+export function emptyActiveScreenEffects(): ActiveScreenEffects {
+  return {
+    flash: null,
+    shake: null,
+    chromatic_aberration: null,
+    glitch: null,
+    shockwave: null,
+    color_grade: null,
+    focus: null,
+    ripple: null,
+  };
 }
 
 /**
@@ -94,41 +108,34 @@ export interface ActiveScreenEffects {
  * Screen effects are presentation events rather than world state, so seeking
  * must derive them from the playhead instead of a wall clock.  When authored
  * intervals of one kind overlap, the latest start wins and an equal start
- * keeps the later array entry; flash and shake are independent, so both can be
- * active at the same playhead position.
+ * keeps the later array entry; different kinds are independent channels, so
+ * a flash, a shake and every shader effect can be active at the same playhead
+ * position.
  */
 export function evaluateActiveScreenEffects(
   events: readonly TimelineEvent[],
   elapsedMs: number,
 ): ActiveScreenEffects {
   const elapsed = Math.max(0, elapsedMs);
-  let flash: ActiveScreenEffect | null = null;
-  let shake: ActiveScreenEffect | null = null;
-  let flashStart = Number.NEGATIVE_INFINITY;
-  let shakeStart = Number.NEGATIVE_INFINITY;
+  const active = emptyActiveScreenEffects();
   for (const event of events) {
     if (event.type !== "screen_effect") continue;
     const durationMs = Math.max(1, event.duration_ms);
     if (event.at_ms <= elapsed && elapsed < event.at_ms + durationMs) {
-      const active = {
-        startMs: event.at_ms,
-        durationMs,
-        effect: event.effect,
-      };
+      const channel = event.effect.type;
+      const current = active[channel];
       // The latest start wins; an equal start keeps the later array entry,
       // which is the authored order the runtime stream also uses.
-      if (event.effect.type === "flash") {
-        if (event.at_ms >= flashStart) {
-          flash = active;
-          flashStart = event.at_ms;
-        }
-      } else if (event.at_ms >= shakeStart) {
-        shake = active;
-        shakeStart = event.at_ms;
+      if (current === null || event.at_ms >= current.startMs) {
+        active[channel] = {
+          startMs: event.at_ms,
+          durationMs,
+          effect: event.effect,
+        };
       }
     }
   }
-  return { flash, shake };
+  return active;
 }
 
 export interface TimelineCueForEvaluation {

@@ -18,6 +18,7 @@ import {
   createMemoryTextureLoader,
   type FramePump,
   type MemoryKit,
+  type MemoryShaderHost,
   type MemoryTexture,
 } from "./sceneTestKit";
 import type { AnimationMap } from "./imageAnimation";
@@ -1387,6 +1388,440 @@ describe("SceneSurface effects", () => {
     expect(harness.effects()).toHaveLength(0);
     const cameraLayer = harness.kit.applications[0]?.stage.children[0];
     expect(cameraLayer?.position.x).toBe(DESIGN_WIDTH / 2);
+    harness.surface.dispose();
+  });
+});
+
+describe("SceneSurface shader effects", () => {
+  const CHROMATIC = {
+    type: "chromatic_aberration",
+    intensity: 12,
+    angle_deg: 0,
+    center_x: 960,
+    center_y: 540,
+    edge_weight: 0.6,
+    fade_in: 0,
+    fade_out: 1,
+  } as const;
+  const SHOCKWAVE = {
+    type: "shockwave",
+    center_x: 400,
+    center_y: 300,
+    max_radius: 1100,
+    wave_width: 140,
+    strength: 28,
+  } as const;
+  const GLITCH = {
+    type: "glitch",
+    displacement: 48,
+    slice_count: 16,
+    density: 0.35,
+    frequency_hz: 12,
+    seed: 3,
+    fade_in: 0,
+    fade_out: 0,
+  } as const;
+  const COLOR_GRADE = {
+    type: "color_grade",
+    brightness: 0.2,
+    contrast: 1.3,
+    saturation: 1.4,
+    tint: "#ff8000",
+    tint_strength: 0.5,
+    intensity: 1,
+    fade_in: 0,
+    fade_out: 0,
+  } as const;
+  const FOCUS = {
+    type: "focus",
+    center_x: 960,
+    center_y: 540,
+    radius: 280,
+    softness: 160,
+    blur: 8,
+    darkness: 0.3,
+    intensity: 1,
+    fade_in: 0,
+    fade_out: 0,
+  } as const;
+  const RIPPLE = {
+    type: "ripple",
+    center_x: 960,
+    center_y: 540,
+    amplitude: 12,
+    wavelength: 160,
+    speed: 240,
+    damping: 1,
+    intensity: 1,
+    fade_in: 0,
+    fade_out: 0,
+  } as const;
+
+  function shaderHost(harness: Harness): MemoryShaderHost {
+    const host = harness.kit.shaderHosts[0];
+    if (host === undefined) throw new Error("surface has no shader host");
+    return host;
+  }
+
+  it("post-processes only the world layer over the whole stage", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    expect(host.target).toBe(harness.kit.applications[0]?.stage.children[0]);
+    // An idle surface never installs a pass.
+    expect(host.frames).toHaveLength(0);
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      chromatic_aberration: { startMs: 0, durationMs: 400, effect: CHROMATIC },
+      shockwave: { startMs: 0, durationMs: 700, effect: SHOCKWAVE },
+      elapsedMs: 100,
+    });
+    expect(host.current?.chromaticAberration?.offsetX).toBeCloseTo(9);
+    expect(host.current?.shockwave).toMatchObject({ centerX: 400 });
+    expect(host.current?.glitch).toBeNull();
+    const area = host.areas.at(-1);
+    expect(area?.x).toBeLessThanOrEqual(0);
+    expect(area?.y).toBeLessThanOrEqual(0);
+    expect((area?.x ?? 0) + (area?.width ?? 0)).toBeGreaterThanOrEqual(
+      DESIGN_WIDTH,
+    );
+    expect((area?.y ?? 0) + (area?.height ?? 0)).toBeGreaterThanOrEqual(
+      DESIGN_HEIGHT,
+    );
+    // The flash layer is not post-processed.
+    expect(harness.effects()).toHaveLength(0);
+    harness.surface.dispose();
+  });
+
+  it("removes every pass exactly once when the windows end", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    const chromatic = { startMs: 0, durationMs: 400, effect: CHROMATIC };
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      chromatic_aberration: chromatic,
+      elapsedMs: 100,
+    });
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      chromatic_aberration: chromatic,
+      elapsedMs: 400,
+    });
+    expect(host.current).toEqual({
+      ripple: null,
+      shockwave: null,
+      glitch: null,
+      colorGrade: null,
+      focus: null,
+      chromaticAberration: null,
+    });
+    const applied = host.frames.length;
+    harness.surface.setActiveEffects(null);
+    harness.surface.setCameraOverride({ zoom: 1.2 });
+    expect(host.frames).toHaveLength(applied);
+    harness.surface.dispose();
+    expect(host.destroyed).toBe(true);
+  });
+
+  it("maps the stage into the zoomed camera layer", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    harness.surface.applyFrame(
+      {
+        elapsed_ms: 0,
+        camera: { x: 100, y: 0, zoom: 2, rotation_deg: 0 },
+        objects: [],
+        bgm_volume: 1,
+      },
+      { phase: "playhead" },
+    );
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      shockwave: { startMs: 0, durationMs: 700, effect: SHOCKWAVE },
+      elapsedMs: 0,
+    });
+    const area = host.areas.at(-1);
+    // Half the stage around the camera centre, plus half a pixel of margin.
+    expect(area?.width).toBeCloseTo(DESIGN_WIDTH / 2 + 1);
+    expect(area?.x).toBeCloseTo(DESIGN_WIDTH / 4 + 100 - 0.5);
+    harness.surface.dispose();
+  });
+
+  it("drives cue shader effects and lets the newest cue of a type own it", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    const context = {
+      assets: URLS,
+      signal: new AbortController().signal,
+      getRate: () => 1,
+    };
+    const glitch = harness.surface.runCue(
+      {
+        cue_id: "g",
+        gate: "runtime",
+        type: "screen_effect",
+        effect: GLITCH,
+        duration_ms: 300,
+      },
+      context,
+    );
+    const first = harness.surface.runCue(
+      {
+        cue_id: "a",
+        gate: "runtime",
+        type: "screen_effect",
+        effect: CHROMATIC,
+        duration_ms: 400,
+      },
+      context,
+    );
+    harness.run(64);
+    expect(host.current?.glitch?.offsets).toHaveLength(16);
+    expect(host.current?.chromaticAberration).not.toBeNull();
+    const second = harness.surface.runCue(
+      {
+        cue_id: "b",
+        gate: "runtime",
+        type: "screen_effect",
+        effect: { ...CHROMATIC, intensity: 40, fade_out: 0 },
+        duration_ms: 600,
+      },
+      context,
+    );
+    harness.run(32);
+    expect(host.current?.chromaticAberration?.offsetX).toBeCloseTo(40);
+    harness.run(400);
+    await first;
+    await glitch;
+    // The older chromatic cue ended but did not clear the newer owner.
+    expect(host.current?.chromaticAberration?.offsetX).toBeCloseTo(40);
+    expect(host.current?.glitch).toBeNull();
+    harness.run(300);
+    await second;
+    expect(host.current?.chromaticAberration).toBeNull();
+    harness.surface.dispose();
+  });
+
+  it("releases cue shader effects on reset", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    const controller = new AbortController();
+    const cue = harness.surface.runCue(
+      {
+        cue_id: "w",
+        gate: "runtime",
+        type: "screen_effect",
+        effect: SHOCKWAVE,
+        duration_ms: 700,
+      },
+      { assets: URLS, signal: controller.signal, getRate: () => 1 },
+    );
+    harness.run(48);
+    expect(host.current?.shockwave).not.toBeNull();
+    harness.surface.reset();
+    expect(host.current?.shockwave).toBeNull();
+    controller.abort();
+    await cue;
+    harness.surface.dispose();
+  });
+
+  it("attenuates flashes, shakes and shaders under reduced motion", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    const effects = {
+      flash: {
+        startMs: 0,
+        durationMs: 400,
+        effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
+      },
+      shake: null,
+      chromatic_aberration: { startMs: 0, durationMs: 400, effect: CHROMATIC },
+      elapsedMs: 0,
+    } as const;
+    harness.surface.setActiveEffects(effects);
+    const flash = harness.effects()[0] as MemoryGraphics | undefined;
+    expect(flash?.alpha).toBeCloseTo(0.88);
+    expect(host.current?.chromaticAberration?.offsetX).toBeCloseTo(12);
+    harness.surface.setReducedMotion(true);
+    expect(harness.surface.reducedMotion).toBe(true);
+    expect(
+      (harness.effects()[0] as MemoryGraphics | undefined)?.alpha,
+    ).toBeCloseTo(0.3);
+    expect(host.current?.chromaticAberration?.offsetX).toBeCloseTo(6);
+    harness.surface.dispose();
+  });
+
+  it("routes every new effect to the world layer, never to shake", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    const controller = new AbortController();
+    const context = {
+      assets: URLS,
+      signal: controller.signal,
+      getRate: () => 1,
+    };
+    const running = [COLOR_GRADE, FOCUS, RIPPLE].map((effect) =>
+      harness.surface.runCue(
+        {
+          cue_id: effect.type,
+          gate: "runtime",
+          type: "screen_effect",
+          effect,
+          duration_ms: 400,
+        },
+        context,
+      ),
+    );
+    harness.run(32);
+    const frame = host.current;
+    expect(frame?.colorGrade).not.toBeNull();
+    expect(frame?.focus).not.toBeNull();
+    expect(frame?.ripple).not.toBeNull();
+    // The shake executor never ran: no flash node, a still camera layer.
+    expect(harness.effects()).toHaveLength(0);
+    expect(
+      harness.kit.applications[0]?.stage.children[0]?.position,
+    ).toMatchObject({ x: DESIGN_WIDTH / 2, y: DESIGN_HEIGHT / 2 });
+    controller.abort();
+    await Promise.all(running);
+    harness.surface.dispose();
+  });
+
+  it("keeps a timeline window owning its channel at zero strength", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    const controller = new AbortController();
+    const cued = { ...CHROMATIC, fade_out: 0 };
+    const cue = harness.surface.runCue(
+      {
+        cue_id: "a",
+        gate: "runtime",
+        type: "screen_effect",
+        effect: cued,
+        duration_ms: 600,
+      },
+      { assets: URLS, signal: controller.signal, getRate: () => 1 },
+    );
+    harness.run(32);
+    expect(host.current?.chromaticAberration?.offsetX).toBeCloseTo(12);
+    // An active timeline window owns the channel for its whole interval, even
+    // when the evaluated frame is null at zero intensity: the overlapping cue
+    // must not show through at the boundary.
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      chromatic_aberration: {
+        startMs: 0,
+        durationMs: 400,
+        effect: { ...cued, intensity: 0 },
+      },
+      elapsedMs: 100,
+    });
+    expect(host.current?.chromaticAberration).toBeNull();
+    // A fade-in boundary (progress 0, envelope 0) owns it just the same.
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      chromatic_aberration: {
+        startMs: 100,
+        durationMs: 400,
+        effect: { ...cued, intensity: 1, fade_in: 1 },
+      },
+      elapsedMs: 100,
+    });
+    expect(host.current?.chromaticAberration).toBeNull();
+    // Only releasing the timeline lets the still-running cue fill it again.
+    harness.surface.setActiveEffects(null);
+    expect(host.current?.chromaticAberration?.offsetX).toBeCloseTo(12);
+    controller.abort();
+    await cue;
+    harness.surface.dispose();
+  });
+
+  it("bypasses an identity or zero new-effect frame", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      color_grade: {
+        startMs: 0,
+        durationMs: 400,
+        effect: {
+          ...COLOR_GRADE,
+          brightness: 0,
+          contrast: 1,
+          saturation: 1,
+          tint_strength: 0,
+        },
+      },
+      focus: {
+        startMs: 0,
+        durationMs: 400,
+        effect: { ...FOCUS, blur: 0, darkness: 0 },
+      },
+      ripple: {
+        startMs: 0,
+        durationMs: 400,
+        effect: { ...RIPPLE, amplitude: 0 },
+      },
+      elapsedMs: 100,
+    });
+    // Every channel bypassed, so the host installed no pass.
+    expect(host.frames).toHaveLength(0);
+    harness.surface.dispose();
+  });
+
+  it("keeps the grade but drops ripple and focus blur under reduced motion", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    harness.surface.setReducedMotion(true);
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      color_grade: {
+        startMs: 0,
+        durationMs: 400,
+        effect: COLOR_GRADE,
+      },
+      focus: { startMs: 0, durationMs: 400, effect: FOCUS },
+      ripple: { startMs: 0, durationMs: 400, effect: RIPPLE },
+      elapsedMs: 0,
+    });
+    const frame = host.current;
+    expect(frame?.colorGrade).not.toBeNull();
+    expect(frame?.ripple).toBeNull();
+    expect(frame?.focus?.maxBlur).toBe(0);
+    expect(frame?.focus?.darkness).toBeCloseTo(0.3);
+    harness.surface.dispose();
+  });
+
+  it("maps the stage through a rotated camera for the new effects", async () => {
+    const harness = await createSurface();
+    const host = shaderHost(harness);
+    harness.surface.applyFrame(
+      {
+        elapsed_ms: 0,
+        camera: { x: 0, y: 0, zoom: 1, rotation_deg: 90 },
+        objects: [],
+        bgm_volume: 1,
+      },
+      { phase: "playhead" },
+    );
+    harness.surface.setActiveEffects({
+      flash: null,
+      shake: null,
+      focus: { startMs: 0, durationMs: 700, effect: FOCUS },
+      elapsedMs: 0,
+    });
+    const area = host.areas.at(-1);
+    // A quarter turn swaps the stage bounding box, plus the one-pixel margin.
+    expect(area?.width).toBeCloseTo(DESIGN_HEIGHT + 2);
+    expect(area?.height).toBeCloseTo(DESIGN_WIDTH + 2);
+    expect(host.current?.focus?.centerX).toBe(960);
     harness.surface.dispose();
   });
 });

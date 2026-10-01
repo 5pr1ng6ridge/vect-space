@@ -10,7 +10,11 @@
 // and editor surfaces are pixel-equal: confirmed differences are recorded in
 // `docs/scene-surface-migration-baseline.md`, never frozen as desired
 // behaviour.  A non-zero exit means the harness itself failed (missing
-// browser, payload export error, page exception, screenshot failure).
+// browser, payload export error, page exception, screenshot failure) or one of
+// the in-page real-WebGL assertions failed: the video fixture, the four-slot
+// ambience diagnostics, the ChoiceLayer layout probe and the composable-shader
+// pixel probe (each pass isolated by diffing the authored frame against the
+// same timeline with that pass zeroed/removed).
 //
 // Usage:
 //   npm run parity:check
@@ -761,6 +765,54 @@ async function main() {
       for (const problem of ambienceProblems) console.error(`  - ${problem}`);
     }
 
+    // Real-WebGL shader assertions: the harness isolates each composable pass
+    // by pixel-diffing the authored frame against the same timeline with that
+    // pass zeroed (and removed), so a new pass that is visually inert, wrongly
+    // anchored under a camera transform, or not identical at zero strength
+    // fails here instead of only leaving a plausible screenshot.  A target
+    // list without the shader fixture, or a fixture target whose probe
+    // produced no checks, fails rather than silently skipping the new effects.
+    const shaderProblems = [];
+    let shaderChecks = 0;
+    const shaderTargets = (
+      Array.isArray(report.targets) ? report.targets : []
+    ).filter((target) => target.shader?.fixture === true);
+    const expectedShaderTargets = [...targets.ids].filter((id) =>
+      id.startsWith("shader-"),
+    );
+    if (shaderTargets.length === 0) {
+      shaderProblems.push(
+        "没有任何目标执行着色器像素断言（夹具缺失，不得静默跳过）",
+      );
+    }
+    for (const target of shaderTargets) {
+      const checks = Array.isArray(target.shader.checks)
+        ? target.shader.checks
+        : [];
+      if (checks.length === 0) {
+        shaderProblems.push(`${target.id}: 没有执行任何着色器像素断言`);
+        continue;
+      }
+      shaderChecks += checks.length;
+      for (const check of checks) {
+        if (check.ok !== true) {
+          shaderProblems.push(`${target.id}/${check.name}: ${check.detail}`);
+        }
+      }
+    }
+    for (const id of expectedShaderTargets) {
+      if (!shaderTargets.some((target) => target.id === id)) {
+        shaderProblems.push(`${id}: 缺少着色器像素断言`);
+      }
+    }
+    console.log(
+      `着色器：${shaderTargets.length} 个目标 / ${shaderChecks} 项像素断言`,
+    );
+    if (shaderProblems.length > 0) {
+      console.error(`着色器像素断言失败：${shaderProblems.length} 处：`);
+      for (const problem of shaderProblems) console.error(`  - ${problem}`);
+    }
+
     // Browser-driven lifecycle: a cancelled game presentation must settle
     // `failed`, a cancelled/reset editor session must reload to exactly the
     // same deterministic frame, and a cancel must have released any media.
@@ -805,6 +857,7 @@ async function main() {
       scrubMediaProblems.length > 0 ||
       videoProblems.length > 0 ||
       ambienceProblems.length > 0 ||
+      shaderProblems.length > 0 ||
       lifecycleProblems.length > 0
     ) {
       process.exitCode = 1;

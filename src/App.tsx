@@ -72,6 +72,7 @@ const DEFAULT_SETTINGS: Settings = {
   text_speed_cps: 30,
   text_reveal_animation: "typewriter",
   skip_mode: "read_only",
+  reduce_motion: false,
 };
 
 type Phase = "booting" | "title" | "chapter_map" | "playing";
@@ -1845,6 +1846,22 @@ export function SettingsPanel({
             <option value="all">全部快进</option>
           </select>
           <output />
+        </label>
+        <label className="setting-row">
+          <span>减弱动态效果</span>
+          <input
+            aria-label="减弱动态效果"
+            checked={settings.reduce_motion ?? false}
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                reduce_motion: event.currentTarget.checked,
+              })
+            }
+            title="降低闪光亮度、震动幅度，以及色差、故障、冲击波等画面特效的强度与跳变速度"
+            type="checkbox"
+          />
+          <output>{settings.reduce_motion === true ? "开启" : "关闭"}</output>
         </label>
         <button className="primary-action" onClick={onSave} type="button">
           保存设置

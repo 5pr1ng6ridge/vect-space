@@ -1,7 +1,7 @@
 schema_version: 2
 id: transition_lab
 entry: intro
-# 开发夹具：一次走完「转场 / 幕布 / 参数化屏幕效果」的全部新表现。
+# 开发夹具：一次走完「转场 / 幕布 / 参数化屏幕效果 / 着色器效果」的全部新表现。
 #
 # 本场景刻意使用规范化对象写法（transition/effect 的 `{ type, ... }` 形式），
 # 旧的一词写法仍由 Rust 加载器兼容，并且继续由 surface_parity 夹具冻结。
@@ -282,6 +282,183 @@ nodes:
           decay: 1
           seed: 7
         duration_ms: 400
+    next: say_shaders
+  # —— 着色器屏幕效果：只作用于场景画面，对白框与按钮保持清晰 ——
+  say_shaders:
+    type: say
+    speaker: test
+    text: |-
+      着色器效果：色差、故障、冲击波、色彩修正、聚焦模糊与波纹只处理场景画面。
+      接下来依次演示「推理断裂」「空间冲击」「异常升级」三组演出预设，
+      以及可叠加的修正 / 聚焦 / 波纹。
+    mode: start
+    speed_cps: null
+    next: shader_shockwave
+  shader_shockwave:
+    type: screen_effect
+    effect:
+      type: shockwave
+      center_x: 960
+      center_y: 540
+      max_radius: 1100
+      wave_width: 140
+      strength: 28
+    duration_ms: 700
+    await: true
+    next: shader_presets
+  # 三组预设按时间线排开；不同类型的效果各占一个通道，可以同时叠加。
+  shader_presets:
+    type: timeline
+    duration_ms: 4600
+    await: true
+    skippable: true
+    tracks: []
+    events:
+      # 推理断裂：短促故障 + 轻微色差
+      - type: screen_effect
+        id: break_glitch
+        at_ms: 0
+        effect:
+          type: glitch
+          displacement: 72
+          slice_count: 18
+          density: 0.45
+          frequency_hz: 24
+          seed: 11
+          fade_out: 0.35
+        duration_ms: 260
+      - type: screen_effect
+        id: break_chromatic
+        at_ms: 0
+        effect:
+          type: chromatic_aberration
+          intensity: 8
+          edge_weight: 0.4
+        duration_ms: 420
+      # 空间冲击：冲击波 + 震动 + 弱闪光
+      - type: screen_effect
+        id: impact_shockwave
+        at_ms: 900
+        effect:
+          type: shockwave
+          max_radius: 1200
+          wave_width: 160
+          strength: 36
+        duration_ms: 800
+      - type: screen_effect
+        id: impact_shake
+        at_ms: 900
+        effect:
+          type: shake
+          amplitude_x: 18
+          amplitude_y: 10.8
+          frequency_hz: 20
+        duration_ms: 420
+      - type: screen_effect
+        id: impact_flash
+        at_ms: 900
+        effect:
+          type: flash
+          peak_alpha: 0.35
+        duration_ms: 180
+      # 异常升级：色差逐渐增强，间歇出现故障
+      - type: screen_effect
+        id: anomaly_chromatic
+        at_ms: 2000
+        effect:
+          type: chromatic_aberration
+          intensity: 22
+          edge_weight: 0.7
+          fade_in: 1
+          fade_out: 0
+        duration_ms: 2400
+      - type: screen_effect
+        id: anomaly_glitch_1
+        at_ms: 2900
+        effect:
+          type: glitch
+          displacement: 32
+          slice_count: 12
+          density: 0.3
+          frequency_hz: 18
+          seed: 3
+        duration_ms: 140
+      - type: screen_effect
+        id: anomaly_glitch_2
+        at_ms: 3600
+        effect:
+          type: glitch
+          displacement: 56
+          density: 0.4
+          frequency_hz: 20
+          seed: 5
+        duration_ms: 180
+      - type: screen_effect
+        id: anomaly_glitch_3
+        at_ms: 4100
+        effect:
+          type: glitch
+          displacement: 96
+          slice_count: 20
+          density: 0.55
+          frequency_hz: 24
+          seed: 8
+          fade_out: 0.3
+        duration_ms: 300
+    next: say_composable
+  # —— 可叠加效果：非中性色彩修正 + 聚焦模糊 + 波纹 ——
+  say_composable:
+    type: say
+    speaker: test
+    text: |-
+      色彩修正、聚焦模糊与波纹同样是世界层效果，与时间线上的其他效果各自占用一个通道，
+      可以同时叠加；这里演示冷调修正 + 中心清晰、边缘模糊压暗 + 中心向外扩散的波纹。
+    mode: start
+    speed_cps: null
+    next: shader_composable
+  shader_composable:
+    type: timeline
+    duration_ms: 2600
+    await: true
+    skippable: true
+    tracks: []
+    events:
+      # 非中性色彩修正：略提亮、降饱和、冷色着色。
+      - type: screen_effect
+        id: grade_cool
+        at_ms: 0
+        effect:
+          type: color_grade
+          brightness: 0.04
+          contrast: 1.15
+          saturation: 0.85
+          tint: "#8fb8ff"
+          tint_strength: 0.35
+          fade_in: 0.15
+          fade_out: 0.25
+        duration_ms: 2000
+      # 聚焦：中心 280px 保持清晰，边缘模糊并压暗（模糊/压暗按默认范围取值）。
+      - type: screen_effect
+        id: focus_center
+        at_ms: 200
+        effect:
+          type: focus
+          radius: 280
+          softness: 160
+          blur: 10
+          darkness: 0.35
+        duration_ms: 1600
+      # 波纹：从中心向外扩散的周期位移，与冲击波不同，不再是一个扩张圆环。
+      - type: screen_effect
+        id: ripple_center
+        at_ms: 600
+        effect:
+          type: ripple
+          amplitude: 14
+          wavelength: 180
+          speed: 260
+          damping: 1
+        duration_ms: 1400
     next: template_choice
   # —— 模板驱动选择：KaTeX 标签、条件过滤、默认/选项模板、gui 图标、禁用态 ——
   # 两个可见选项分别使用节点默认模板 demo.separate 与选项覆盖模板 demo.overlay；

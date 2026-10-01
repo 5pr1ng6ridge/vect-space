@@ -897,6 +897,61 @@ describe("TimelineWorkspace preview context", () => {
   });
 });
 
+describe("TimelineWorkspace screen effect presets", () => {
+  it("inserts a staging preset as ordinary events fitted to the timeline", async () => {
+    const { handle } = await renderWorkspace();
+    fireEvent.change(screen.getByLabelText("插入演出预设"), {
+      target: { value: "spatial_impact" },
+    });
+    const events = currentNode(handle).events;
+    expect(
+      events.map((event) =>
+        event.type === "screen_effect" ? event.effect.type : event.type,
+      ),
+    ).toEqual(["shockwave", "shake", "flash"]);
+    for (const event of events) {
+      expect(event.at_ms).toBe(0);
+      if (event.type === "screen_effect") {
+        // The 800 ms shockwave is clipped to the 1000 ms timeline.
+        expect(event.at_ms + event.duration_ms).toBeLessThanOrEqual(1_000);
+      }
+    }
+    // The menu resets so the same preset can be inserted again.
+    expect(screen.getByLabelText<HTMLSelectElement>("插入演出预设").value).toBe(
+      "",
+    );
+    fireEvent.change(screen.getByLabelText("插入演出预设"), {
+      target: { value: "reasoning_break" },
+    });
+    const ids = currentNode(handle).events.map((event) => event.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toHaveLength(5);
+  });
+
+  it("inserts the composable preset through the timeline event path", async () => {
+    const { handle } = await renderWorkspace();
+    fireEvent.change(screen.getByLabelText("插入演出预设"), {
+      target: { value: "correction_focus" },
+    });
+    const events = currentNode(handle).events;
+    expect(
+      events.map((event) =>
+        event.type === "screen_effect" ? event.effect.type : event.type,
+      ),
+    ).toEqual(["color_grade", "focus", "ripple"]);
+    const grade = events.find(
+      (event) =>
+        event.type === "screen_effect" && event.effect.type === "color_grade",
+    );
+    expect(grade?.type === "screen_effect" ? grade.effect : null).toMatchObject(
+      {
+        type: "color_grade",
+        tint: "#8fb8ff",
+      },
+    );
+  });
+});
+
 describe("TimelineWorkspace gestures and history", () => {
   it("focuses on entry and Space toggles playback from buttons but not editable fields", async () => {
     const { view, handle } = await renderWorkspace();

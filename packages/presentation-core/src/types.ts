@@ -142,7 +142,92 @@ export type ScreenEffectSpec =
       decay: number;
       /** JavaScript-safe integer (mirrors the Rust `u32` seed). */
       seed: number;
+    }
+  | {
+      type: "chromatic_aberration";
+      /** Peak channel offset in design pixels. */
+      intensity: number;
+      angle_deg: number;
+      center_x: number;
+      center_y: number;
+      edge_weight: number;
+      /** Fractions of the window spent ramping in / out; sum ≤ 1. */
+      fade_in: number;
+      fade_out: number;
+    }
+  | {
+      type: "glitch";
+      /** Peak horizontal band displacement in design pixels. */
+      displacement: number;
+      slice_count: number;
+      density: number;
+      frequency_hz: number;
+      /** JavaScript-safe integer (mirrors the Rust `u32` seed). */
+      seed: number;
+      fade_in: number;
+      fade_out: number;
+    }
+  | {
+      type: "shockwave";
+      center_x: number;
+      center_y: number;
+      max_radius: number;
+      wave_width: number;
+      strength: number;
+    }
+  | {
+      type: "color_grade";
+      /** Additive brightness in straight RGB. */
+      brightness: number;
+      contrast: number;
+      saturation: number;
+      /** `#RRGGBB` / `#RRGGBBAA` tint colour. */
+      tint: string;
+      tint_strength: number;
+      /** Shared strength and window ramp; `fade_in + fade_out ≤ 1`. */
+      intensity: number;
+      fade_in: number;
+      fade_out: number;
+    }
+  | {
+      type: "focus";
+      center_x: number;
+      center_y: number;
+      /** Radius of the sharp centre disc in design pixels. */
+      radius: number;
+      softness: number;
+      /** Maximum design-pixel blur reached at the periphery. */
+      blur: number;
+      darkness: number;
+      intensity: number;
+      fade_in: number;
+      fade_out: number;
+    }
+  | {
+      type: "ripple";
+      center_x: number;
+      center_y: number;
+      /** Peak radial displacement in design pixels. */
+      amplitude: number;
+      wavelength: number;
+      /** Outward ring speed in design pixels per second. */
+      speed: number;
+      damping: number;
+      intensity: number;
+      fade_in: number;
+      fade_out: number;
     };
+
+/** Screen effects rendered by a post-processing shader on the world layer. */
+export type ShaderScreenEffectType = Extract<
+  ScreenEffectSpec["type"],
+  | "chromatic_aberration"
+  | "glitch"
+  | "shockwave"
+  | "color_grade"
+  | "focus"
+  | "ripple"
+>;
 
 export type CurtainAction = "cover" | "reveal";
 
@@ -660,6 +745,8 @@ export interface Settings {
   text_speed_cps: number;
   text_reveal_animation: TextRevealAnimation;
   skip_mode: SkipMode;
+  /** Optional for settings files written before the shader effects. */
+  reduce_motion?: boolean;
 }
 import type { WireSessionMode } from "../../../shared/generated/WireSessionMode";
 import type { WireU64 } from "../../../shared/generated/WireU64";

@@ -290,6 +290,158 @@ describe("NodeInspector canonical presentation editors", () => {
         },
       }),
     );
+
+    fireEvent.change(screen.getByLabelText("效果类型"), {
+      target: { value: "glitch" },
+    });
+    expect(onChange).toHaveBeenLastCalledWith(
+      "target",
+      expect.objectContaining({
+        effect: {
+          type: "glitch",
+          displacement: 48,
+          slice_count: 16,
+          density: 0.35,
+          frequency_hz: 12,
+          seed: 0,
+          fade_in: 0,
+          fade_out: 0,
+        },
+      }),
+    );
+  });
+
+  it("edits the shader effect parameters", () => {
+    const { onChange } = renderInspector({
+      type: "screen_effect",
+      effect: {
+        type: "shockwave",
+        center_x: 960,
+        center_y: 540,
+        max_radius: 1100,
+        wave_width: 140,
+        strength: 28,
+      },
+      duration_ms: 700,
+      await: false,
+      next: "target",
+    });
+    expect(screen.getByLabelText("中心 X（0–1920）")).toBeDefined();
+    expect(screen.getByLabelText("波宽 px（1–1024）")).toBeDefined();
+    const strength = screen.getByLabelText("扭曲强度 px（0–256）");
+    fireEvent.change(strength, { target: { value: "40" } });
+    fireEvent.blur(strength);
+    expect(onChange).toHaveBeenLastCalledWith(
+      "target",
+      expect.objectContaining({
+        effect: {
+          type: "shockwave",
+          center_x: 960,
+          center_y: 540,
+          max_radius: 1100,
+          wave_width: 140,
+          strength: 40,
+        },
+      }),
+    );
+  });
+
+  it("edits the composable shader effects with canonical defaults", () => {
+    const { onChange } = renderInspector({
+      type: "screen_effect",
+      effect: {
+        type: "focus",
+        center_x: 960,
+        center_y: 540,
+        radius: 280,
+        softness: 160,
+        blur: 8,
+        darkness: 0.3,
+        intensity: 1,
+        fade_in: 0.1,
+        fade_out: 0.2,
+      },
+      duration_ms: 700,
+      await: false,
+      next: "target",
+    });
+    expect(screen.getByLabelText("清晰半径 px（0–2203）")).toBeDefined();
+    expect(screen.getByLabelText("边缘过渡 px（1–2203）")).toBeDefined();
+    expect(screen.getByLabelText("最大模糊 px（0–24）")).toBeDefined();
+    expect(screen.getByLabelText("边缘压暗（0–1）")).toBeDefined();
+    const blur = screen.getByLabelText("最大模糊 px（0–24）");
+    fireEvent.change(blur, { target: { value: "16" } });
+    fireEvent.blur(blur);
+    expect(onChange).toHaveBeenLastCalledWith(
+      "target",
+      expect.objectContaining({
+        effect: expect.objectContaining({ type: "focus", blur: 16 }),
+      }),
+    );
+
+    fireEvent.change(screen.getByLabelText("效果类型"), {
+      target: { value: "color_grade" },
+    });
+    expect(onChange).toHaveBeenLastCalledWith(
+      "target",
+      expect.objectContaining({
+        effect: {
+          type: "color_grade",
+          brightness: 0,
+          contrast: 1,
+          saturation: 1,
+          tint: "#ffffff",
+          tint_strength: 0,
+          intensity: 1,
+          fade_in: 0.1,
+          fade_out: 0.2,
+        },
+      }),
+    );
+
+    fireEvent.change(screen.getByLabelText("效果类型"), {
+      target: { value: "ripple" },
+    });
+    expect(onChange).toHaveBeenLastCalledWith(
+      "target",
+      expect.objectContaining({
+        effect: {
+          type: "ripple",
+          center_x: 960,
+          center_y: 540,
+          amplitude: 12,
+          wavelength: 160,
+          speed: 240,
+          damping: 1,
+          intensity: 1,
+          fade_in: 0.1,
+          fade_out: 0.2,
+        },
+      }),
+    );
+  });
+
+  it("renders the colour-grade tint editor", () => {
+    renderInspector({
+      type: "screen_effect",
+      effect: {
+        type: "color_grade",
+        brightness: 0.1,
+        contrast: 1.2,
+        saturation: 0.8,
+        tint: "#8fb8ff",
+        tint_strength: 0.3,
+        intensity: 1,
+        fade_in: 0.1,
+        fade_out: 0.2,
+      },
+      duration_ms: 700,
+      await: false,
+      next: "target",
+    });
+    expect(screen.getByLabelText("着色颜色")).toHaveValue("#8fb8ff");
+    expect(screen.getByLabelText("效果强度（0–1）")).toBeDefined();
+    expect(screen.getByLabelText("着色强度（0–1）")).toBeDefined();
   });
 
   it("keeps the preview surface and playhead across an unrelated rerender", async () => {

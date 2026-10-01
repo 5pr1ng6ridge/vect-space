@@ -140,9 +140,21 @@ shared core guarantees:
   failure; scrubbing is silent and deterministic, playback consumes crossed events,
   a backwards seek re-arms the target-and-later events, and a
   zero-time event fires once on the first play.
-- **one effect derivation** — flash and shake are evaluated from the playhead
-  (latest start wins, equal starts keep array order), shake is composed into the
-  camera transform once, and both can be active together.
+- **one effect derivation** — every screen effect is evaluated from the
+  playhead, one channel per effect type (latest start wins, equal starts keep
+  array order); shake is composed into the camera transform once, and all
+  channels can be active together.
+- **one shader boundary** — `chromatic_aberration`, `glitch`, `shockwave`,
+  `color_grade`, `focus` and `ripple` are post-processing passes on the Pixi
+  world layer only (curtain, flash, session curtain and the DOM dialogue/UI
+  stay crisp). `sceneEffects.ts` turns spec + playhead + seed into plain
+  uniforms, `sceneShaders.ts` owns the GLSL; passes run in a fixed order
+  (ripple → shockwave → glitch → colour grade → focus H/V → chromatic
+  aberration), clamp displaced samples to the stage edge, skip any pass whose
+  intensity or geometry is a no-op, and an idle scene installs no filter at
+  all. The player's `reduce_motion` setting caps flashes, scales down shake and
+  shader intensity, disables ripple and skips the focus blur (keeping the
+  optional darkening) on both the timeline and the cue path.
 - **one transition derivation** — background transitions, the persistent
   curtain and parameterised flash/shake are pure functions of the playhead;
   `SceneSurface` only applies the returned alpha/offset/mask/rect geometry, so
@@ -211,7 +223,26 @@ authored easing. `screen_effect` nodes and timeline events share the same
 `{ type: flash, color, peak_alpha }` / `{ type: shake, amplitude_x,
 amplitude_y, frequency_hz, decay, seed }` spec; the seed is a fixed integer, so
 the game, the editor preview and any seek position derive exactly the same
-shake. `curtain` is a persistent layer above the world and below screen
+shake. The shader effects use the same spec union:
+`{ type: chromatic_aberration, intensity, angle_deg, center_x, center_y,
+edge_weight, fade_in, fade_out }`, `{ type: glitch, displacement, slice_count,
+density, frequency_hz, seed, fade_in, fade_out }`, `{ type: shockwave,
+center_x, center_y, max_radius, wave_width, strength }`, `{ type: color_grade,
+brightness, contrast, saturation, tint, tint_strength, intensity, fade_in,
+fade_out }`, `{ type: focus, center_x, center_y, radius, softness, blur,
+darkness, intensity, fade_in, fade_out }` and `{ type: ripple, center_x,
+center_y, amplitude, wavelength, speed, damping, intensity, fade_in, fade_out }`
+(positions and lengths in design pixels, `fade_in + fade_out <= 1`, every field
+optional with a default). `color_grade` is a straight-RGB grade mixed by the
+enveloped `intensity` (a neutral grade — the default — bypasses entirely);
+`focus` keeps the `radius` disc sharp and appears only outside
+`radius + softness`, with a bounded separable Gaussian `blur` and a one-pass
+`darkness`; `ripple` is a distinct signed periodic concentric displacement (not
+an expanding shockwave ring). The timeline workspace also inserts staging
+presets that combine them — 推理断裂 (glitch + light chromatic split), 空间冲击
+(shockwave + shake + weak flash), 异常升级 (rising chromatic split with
+intermittent glitches) and 修正聚焦 (non-neutral cool grade + focus + ripple) —
+as ordinary, individually editable events. `curtain` is a persistent layer above the world and below screen
 effects: `cover` draws a colour or `gui` fill, `reveal` lowers whatever the
 current curtain shows, and the animation is `fade`, a four-direction `wipe`,
 `split_horizontal` or `split_vertical`. Only the stable cover/fill is saved;

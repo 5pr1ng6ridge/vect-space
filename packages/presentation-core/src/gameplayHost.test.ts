@@ -330,6 +330,47 @@ describe("PresentationController timeline wiring", () => {
     controller.destroy();
   });
 
+  it("renders timeline shader effects and applies the reduced-motion setting", async () => {
+    const { controller, kit } = createHost();
+    audioSpies();
+    await controller.init();
+    const playing = controller.present(
+      timelineUpdate({
+        events: [
+          {
+            type: "screen_effect",
+            id: "split",
+            at_ms: 0,
+            effect: {
+              type: "chromatic_aberration",
+              intensity: 20,
+              angle_deg: 0,
+              center_x: 960,
+              center_y: 540,
+              edge_weight: 0,
+              fade_in: 0,
+              fade_out: 0,
+            },
+            duration_ms: 5_000,
+          },
+        ],
+      }),
+      ASSETS,
+    );
+    const host = kit.shaderHosts[0];
+    await waitFor(
+      () => host?.current?.chromaticAberration != null,
+      "色差滤镜生效",
+    );
+    expect(host?.current?.chromaticAberration?.offsetX).toBeCloseTo(20);
+    controller.applySettings({ ...SETTINGS, reduce_motion: true });
+    expect(host?.current?.chromaticAberration?.offsetX).toBeCloseTo(10);
+    controller.cancelCurrentPresentation();
+    expect(await playing).toBe("failed");
+    controller.destroy();
+    expect(host?.destroyed).toBe(true);
+  });
+
   it("suppresses crossed one-shot SFX at 1x and 8x and forwards the rate", async () => {
     const { controller, dom } = createHost();
     const audio = audioSpies();

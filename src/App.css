@@ -539,6 +539,12 @@ button:disabled {
   accent-color: #75c8e7;
 }
 
+.setting-row input[type="checkbox"] {
+  justify-self: start;
+  width: 22px;
+  height: 22px;
+}
+
 .setting-row select {
   min-height: 40px;
   border: 1px solid rgb(158 231 255 / 30%);

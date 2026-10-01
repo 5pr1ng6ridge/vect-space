@@ -950,6 +950,7 @@ mod tests {
         );
         assert_eq!(settings.video_volume, 1.0);
         assert_eq!(settings.ambience_volume, 0.8);
+        assert!(!settings.reduce_motion);
     }
 
     #[test]

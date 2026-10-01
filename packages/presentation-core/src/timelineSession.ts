@@ -949,13 +949,13 @@ export class TimelineSession {
       this.#surface.geometry,
     );
     this.#surface.applyFrame(frame, { phase });
-    const { flash, shake } = evaluateActiveScreenEffects(
+    const active = evaluateActiveScreenEffects(
       this.#cue?.events ?? [],
       elapsedMs,
     );
     // Effects are derived from the playhead in both modes, so scrubbing and
-    // playback cannot drift apart and flash/shake can coexist.
-    this.#surface.setActiveEffects({ flash, shake, elapsedMs });
+    // playback cannot drift apart and every effect channel can coexist.
+    this.#surface.setActiveEffects({ ...active, elapsedMs });
     this.#applyTimelineAudioVolumes(evaluated);
     this.#onFrame?.(frame);
   }

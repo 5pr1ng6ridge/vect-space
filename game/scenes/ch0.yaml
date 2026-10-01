@@ -128,7 +128,7 @@ nodes:
     next: sprite_long_text_say_say_say_start_continue
   open_window_sprite_say_say_say_start:
     type: open_window
-    scene: surface_parity
+    scene: shader_parity
     next: long_text_say_say_say_start
   say_say_say_start:
     type: say

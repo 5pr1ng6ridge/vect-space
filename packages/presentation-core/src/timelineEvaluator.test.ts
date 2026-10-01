@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  emptyActiveScreenEffects,
   evaluateActiveScreenEffects,
   evaluateTimelineFrame,
 } from "./timelineEvaluator";
@@ -468,6 +469,191 @@ describe("evaluateActiveScreenEffects overlap rules", () => {
     expect(evaluateActiveScreenEffects(events, 1_050)).toMatchObject({
       flash: null,
       shake: null,
+    });
+  });
+});
+
+describe("evaluateActiveScreenEffects shader channels", () => {
+  const chromatic = {
+    type: "chromatic_aberration",
+    intensity: 12,
+    angle_deg: 0,
+    center_x: 960,
+    center_y: 540,
+    edge_weight: 0.6,
+    fade_in: 0,
+    fade_out: 1,
+  } as const;
+  const glitch = {
+    type: "glitch",
+    displacement: 48,
+    slice_count: 16,
+    density: 0.35,
+    frequency_hz: 12,
+    seed: 0,
+    fade_in: 0,
+    fade_out: 0,
+  } as const;
+  const events = [
+    {
+      type: "screen_effect",
+      id: "wave",
+      at_ms: 0,
+      effect: {
+        type: "shockwave",
+        center_x: 960,
+        center_y: 540,
+        max_radius: 1100,
+        wave_width: 140,
+        strength: 28,
+      },
+      duration_ms: 700,
+    },
+    {
+      type: "screen_effect",
+      id: "shake",
+      at_ms: 0,
+      effect: {
+        type: "shake",
+        amplitude_x: 16,
+        amplitude_y: 9.6,
+        frequency_hz: 18,
+        decay: 1,
+        seed: 0,
+      },
+      duration_ms: 400,
+    },
+    {
+      type: "screen_effect",
+      id: "split-a",
+      at_ms: 100,
+      effect: chromatic,
+      duration_ms: 800,
+    },
+    {
+      type: "screen_effect",
+      id: "break",
+      at_ms: 200,
+      effect: glitch,
+      duration_ms: 200,
+    },
+    {
+      type: "screen_effect",
+      id: "split-b",
+      at_ms: 300,
+      effect: { ...chromatic, intensity: 30 },
+      duration_ms: 100,
+    },
+  ] as const;
+
+  it("keeps every effect kind on its own channel", () => {
+    const active = evaluateActiveScreenEffects(events, 250);
+    expect(active.shockwave).toMatchObject({ startMs: 0, durationMs: 700 });
+    expect(active.shake).toMatchObject({ startMs: 0, durationMs: 400 });
+    expect(active.chromatic_aberration).toMatchObject({ startMs: 100 });
+    expect(active.glitch).toMatchObject({ startMs: 200, durationMs: 200 });
+    expect(active.flash).toBeNull();
+    // A shader effect never lands on the shake channel.
+    expect(active.shake?.effect.type).toBe("shake");
+  });
+
+  it("lets the latest chromatic window win and falls back when it ends", () => {
+    expect(
+      evaluateActiveScreenEffects(events, 350).chromatic_aberration,
+    ).toMatchObject({ startMs: 300, effect: { intensity: 30 } });
+    expect(
+      evaluateActiveScreenEffects(events, 450).chromatic_aberration,
+    ).toMatchObject({ startMs: 100, effect: { intensity: 12 } });
+    expect(evaluateActiveScreenEffects(events, 900)).toMatchObject({
+      shockwave: null,
+      chromatic_aberration: null,
+      glitch: null,
+    });
+  });
+
+  it("keys the new effects on their own channels", () => {
+    const colorGrade = {
+      type: "color_grade",
+      brightness: 0.2,
+      contrast: 1.3,
+      saturation: 1.4,
+      tint: "#ffffff",
+      tint_strength: 0.5,
+      intensity: 1,
+      fade_in: 0,
+      fade_out: 0,
+    } as const;
+    const focus = {
+      type: "focus",
+      center_x: 960,
+      center_y: 540,
+      radius: 280,
+      softness: 160,
+      blur: 8,
+      darkness: 0.3,
+      intensity: 1,
+      fade_in: 0,
+      fade_out: 0,
+    } as const;
+    const ripple = {
+      type: "ripple",
+      center_x: 960,
+      center_y: 540,
+      amplitude: 12,
+      wavelength: 160,
+      speed: 240,
+      damping: 1,
+      intensity: 1,
+      fade_in: 0,
+      fade_out: 0,
+    } as const;
+    const newEvents = [
+      {
+        type: "screen_effect",
+        id: "grade",
+        at_ms: 100,
+        effect: colorGrade,
+        duration_ms: 500,
+      },
+      {
+        type: "screen_effect",
+        id: "dof",
+        at_ms: 200,
+        effect: focus,
+        duration_ms: 500,
+      },
+      {
+        type: "screen_effect",
+        id: "wave",
+        at_ms: 300,
+        effect: ripple,
+        duration_ms: 500,
+      },
+    ] as const;
+    const active = evaluateActiveScreenEffects(newEvents, 350);
+    expect(active.color_grade).toMatchObject({ startMs: 100 });
+    expect(active.focus).toMatchObject({ startMs: 200 });
+    expect(active.ripple).toMatchObject({ startMs: 300 });
+    // None of them leak onto the geometric channels.
+    expect(active.shake).toBeNull();
+    expect(active.flash).toBeNull();
+    expect(evaluateActiveScreenEffects(newEvents, 1_000)).toMatchObject({
+      color_grade: null,
+      focus: null,
+      ripple: null,
+    });
+  });
+
+  it("opens every channel empty", () => {
+    expect(emptyActiveScreenEffects()).toEqual({
+      flash: null,
+      shake: null,
+      chromatic_aberration: null,
+      glitch: null,
+      shockwave: null,
+      color_grade: null,
+      focus: null,
+      ripple: null,
     });
   });
 });

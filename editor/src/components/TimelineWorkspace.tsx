@@ -10,6 +10,12 @@ import {
 } from "react";
 import { assetUrl, editorApi } from "../api";
 import { defaultFlashEffect } from "../presentationDefaults";
+import {
+  SCREEN_EFFECT_PRESETS,
+  findScreenEffectPreset,
+  presetTimelineEvents,
+  type ScreenEffectPreset,
+} from "../screenEffectPresets";
 import { projectRequest } from "../story";
 import { stringifyScalarJson } from "../scalars";
 import type {
@@ -124,6 +130,7 @@ const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
   "slot_3",
   "slot_4",
 ];
+const PRESET_NO_ROOM_MESSAGE = "播放头之后的时间线时长不足，无法插入演出预设。";
 
 export function TimelineWorkspace({
   project,
@@ -1087,6 +1094,27 @@ export function TimelineWorkspace({
     });
   };
 
+  const addScreenEffectPreset = (preset: ScreenEffectPreset): void => {
+    const current = nodeRef.current;
+    const atMs = snapTime(playheadRef.current, snap, current.duration_ms);
+    const inserted = presetTimelineEvents(
+      preset,
+      atMs,
+      current.duration_ms,
+      current.events.map((event) => event.id),
+    );
+    if (inserted.length === 0) {
+      onError(PRESET_NO_ROOM_MESSAGE);
+      return;
+    }
+    commitNode({
+      ...current,
+      events: [...current.events, ...inserted].sort(
+        (left, right) => left.at_ms - right.at_ms,
+      ),
+    });
+  };
+
   const beginTimelineResize = (
     event: ReactPointerEvent<HTMLDivElement>,
   ): void => {
@@ -1699,6 +1727,24 @@ export function TimelineWorkspace({
             >
               ＋闪光
             </button>
+            <select
+              aria-label="插入演出预设"
+              onChange={(event) => {
+                const preset = findScreenEffectPreset(
+                  event.currentTarget.value,
+                );
+                if (preset !== undefined) addScreenEffectPreset(preset);
+              }}
+              title="在播放头处插入一组组合好的屏幕效果事件，插入后可逐个调整"
+              value=""
+            >
+              <option value="">＋演出预设…</option>
+              {SCREEN_EFFECT_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}（{preset.description}）
+                </option>
+              ))}
+            </select>
           </div>
         </section>
         <aside className="timeline-workspace-inspector">

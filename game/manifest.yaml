@@ -330,6 +330,7 @@ scenes:
 - scenes/transition_lab.yaml
 - scenes/ambience_lab.yaml
 - scenes/surface_parity.yaml
+- scenes/shader_parity.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml

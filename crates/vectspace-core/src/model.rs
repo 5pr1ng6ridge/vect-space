@@ -1658,6 +1658,126 @@ pub const SHAKE_DECAY_MAX: f32 = 1.0;
 pub const SHAKE_SEED_DEFAULT: u32 = 0;
 pub const SHAKE_SEED_MAX: u32 = u32::MAX;
 
+/// Shader effects only post-process the Pixi world layer; positions are design
+/// pixels of the fixed 1920x1080 stage and default to its centre.
+pub const SCREEN_EFFECT_CENTER_X_DEFAULT: f32 = 960.0;
+pub const SCREEN_EFFECT_CENTER_Y_DEFAULT: f32 = 540.0;
+pub const SCREEN_EFFECT_CENTER_X_MAX: f32 = 1920.0;
+pub const SCREEN_EFFECT_CENTER_Y_MAX: f32 = 1080.0;
+/// `fade_in`/`fade_out` are fractions of the effect window spent ramping the
+/// intensity up from zero and back down to zero; their sum stays within `1`.
+pub const SCREEN_EFFECT_FADE_MIN: f32 = 0.0;
+pub const SCREEN_EFFECT_FADE_MAX: f32 = 1.0;
+/// Peak RGB channel offset in design pixels.
+pub const CHROMATIC_INTENSITY_DEFAULT: f32 = 12.0;
+pub const CHROMATIC_INTENSITY_MAX: f32 = 128.0;
+pub const CHROMATIC_ANGLE_DEG_DEFAULT: f32 = 0.0;
+pub const CHROMATIC_ANGLE_DEG_MIN: f32 = -360.0;
+pub const CHROMATIC_ANGLE_DEG_MAX: f32 = 360.0;
+/// `0` splits every pixel equally; `1` grows the split from nothing at the
+/// centre to the full intensity at the farthest stage corner.
+pub const CHROMATIC_EDGE_WEIGHT_DEFAULT: f32 = 0.6;
+pub const CHROMATIC_EDGE_WEIGHT_MIN: f32 = 0.0;
+pub const CHROMATIC_EDGE_WEIGHT_MAX: f32 = 1.0;
+/// A chromatic hit decays across the whole window by default, like a flash.
+pub const CHROMATIC_FADE_IN_DEFAULT: f32 = 0.0;
+pub const CHROMATIC_FADE_OUT_DEFAULT: f32 = 1.0;
+/// Peak horizontal band displacement in design pixels.
+pub const GLITCH_DISPLACEMENT_DEFAULT: f32 = 48.0;
+pub const GLITCH_DISPLACEMENT_MAX: f32 = 512.0;
+/// Horizontal bands the stage is cut into; the upper bound is the size of the
+/// shader's offset table.
+pub const GLITCH_SLICE_COUNT_DEFAULT: u32 = 16;
+pub const GLITCH_SLICE_COUNT_MIN: u32 = 1;
+pub const GLITCH_SLICE_COUNT_MAX: u32 = 32;
+/// Probability that one band is displaced during one step.
+pub const GLITCH_DENSITY_DEFAULT: f32 = 0.35;
+pub const GLITCH_DENSITY_MIN: f32 = 0.0;
+pub const GLITCH_DENSITY_MAX: f32 = 1.0;
+/// Steps per second: how often the band pattern changes.
+pub const GLITCH_FREQUENCY_HZ_DEFAULT: f32 = 12.0;
+pub const GLITCH_FREQUENCY_HZ_MIN: f32 = 0.1;
+pub const GLITCH_FREQUENCY_HZ_MAX: f32 = 60.0;
+/// Same JavaScript-safe `u32` contract as the shake seed.
+pub const GLITCH_SEED_DEFAULT: u32 = 0;
+pub const GLITCH_FADE_IN_DEFAULT: f32 = 0.0;
+pub const GLITCH_FADE_OUT_DEFAULT: f32 = 0.0;
+/// Radius in design pixels the ring reaches at the end of the window; the
+/// default reaches the stage corners from the centre.
+pub const SHOCKWAVE_MAX_RADIUS_DEFAULT: f32 = 1100.0;
+pub const SHOCKWAVE_MAX_RADIUS_MIN: f32 = 1.0;
+pub const SHOCKWAVE_MAX_RADIUS_MAX: f32 = 4096.0;
+/// Thickness of the distorted ring in design pixels.
+pub const SHOCKWAVE_WAVE_WIDTH_DEFAULT: f32 = 140.0;
+pub const SHOCKWAVE_WAVE_WIDTH_MIN: f32 = 1.0;
+pub const SHOCKWAVE_WAVE_WIDTH_MAX: f32 = 1024.0;
+/// Peak radial displacement in design pixels.
+pub const SHOCKWAVE_STRENGTH_DEFAULT: f32 = 28.0;
+pub const SHOCKWAVE_STRENGTH_MAX: f32 = 256.0;
+/// Shared strength of the composable `color_grade`, `focus` and `ripple`
+/// effects: `1` applies them fully, `0` is an identity no-op.
+pub const SCREEN_EFFECT_INTENSITY_DEFAULT: f32 = 1.0;
+pub const SCREEN_EFFECT_INTENSITY_MIN: f32 = 0.0;
+pub const SCREEN_EFFECT_INTENSITY_MAX: f32 = 1.0;
+/// Default ramp-in / ramp-out of the composable effects, as fractions of the
+/// effect window; their sum stays within `1`.
+pub const SCREEN_EFFECT_FADE_IN_DEFAULT: f32 = 0.1;
+pub const SCREEN_EFFECT_FADE_OUT_DEFAULT: f32 = 0.2;
+/// Additive brightness in straight RGB, applied to the graded signal.
+pub const COLOR_GRADE_BRIGHTNESS_DEFAULT: f32 = 0.0;
+pub const COLOR_GRADE_BRIGHTNESS_MIN: f32 = -1.0;
+pub const COLOR_GRADE_BRIGHTNESS_MAX: f32 = 1.0;
+/// Contrast multiplier pivoting around mid grey (`0.5`).
+pub const COLOR_GRADE_CONTRAST_DEFAULT: f32 = 1.0;
+pub const COLOR_GRADE_CONTRAST_MIN: f32 = 0.0;
+pub const COLOR_GRADE_CONTRAST_MAX: f32 = 2.0;
+/// Saturation multiplier around the pixel's luminance.
+pub const COLOR_GRADE_SATURATION_DEFAULT: f32 = 1.0;
+pub const COLOR_GRADE_SATURATION_MIN: f32 = 0.0;
+pub const COLOR_GRADE_SATURATION_MAX: f32 = 2.0;
+/// Multiplicative tint colour; same `#RRGGBB`/`#RRGGBBAA` contract as every
+/// other authored colour.
+pub const COLOR_GRADE_TINT_DEFAULT: &str = "#ffffff";
+/// How far the graded colour is pulled towards the multiplicative tint.
+pub const COLOR_GRADE_TINT_STRENGTH_DEFAULT: f32 = 0.0;
+pub const COLOR_GRADE_TINT_STRENGTH_MIN: f32 = 0.0;
+pub const COLOR_GRADE_TINT_STRENGTH_MAX: f32 = 1.0;
+/// Radius of the fully sharp centre disc in design pixels.
+pub const FOCUS_RADIUS_DEFAULT: f32 = 280.0;
+pub const FOCUS_RADIUS_MIN: f32 = 0.0;
+/// Half the stage diagonal: the largest meaningful design-pixel radius.
+pub const FOCUS_RADIUS_MAX: f32 = 2203.0;
+/// Width of the smoothstep band fading a sharp centre into a blurred
+/// periphery.
+pub const FOCUS_SOFTNESS_DEFAULT: f32 = 160.0;
+pub const FOCUS_SOFTNESS_MIN: f32 = 1.0;
+pub const FOCUS_SOFTNESS_MAX: f32 = 2203.0;
+/// Maximum design-pixel blur reached at the periphery.
+pub const FOCUS_BLUR_DEFAULT: f32 = 8.0;
+pub const FOCUS_BLUR_MIN: f32 = 0.0;
+pub const FOCUS_BLUR_MAX: f32 = 24.0;
+/// How far the periphery is darkened relative to the centre.
+pub const FOCUS_DARKNESS_DEFAULT: f32 = 0.3;
+pub const FOCUS_DARKNESS_MIN: f32 = 0.0;
+pub const FOCUS_DARKNESS_MAX: f32 = 1.0;
+/// Peak radial displacement of the ripple in design pixels.
+pub const RIPPLE_AMPLITUDE_DEFAULT: f32 = 12.0;
+pub const RIPPLE_AMPLITUDE_MIN: f32 = 0.0;
+pub const RIPPLE_AMPLITUDE_MAX: f32 = 64.0;
+/// Distance between two ripple crests in design pixels.
+pub const RIPPLE_WAVELENGTH_DEFAULT: f32 = 160.0;
+pub const RIPPLE_WAVELENGTH_MIN: f32 = 8.0;
+pub const RIPPLE_WAVELENGTH_MAX: f32 = 2203.0;
+/// Outward travel speed of the rings in design pixels per second.
+pub const RIPPLE_SPEED_DEFAULT: f32 = 240.0;
+pub const RIPPLE_SPEED_MIN: f32 = 0.0;
+pub const RIPPLE_SPEED_MAX: f32 = 2000.0;
+/// Spatial decay; `0` keeps the rings everywhere, larger values confine them
+/// near the centre.
+pub const RIPPLE_DAMPING_DEFAULT: f32 = 1.0;
+pub const RIPPLE_DAMPING_MIN: f32 = 0.0;
+pub const RIPPLE_DAMPING_MAX: f32 = 8.0;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScreenEffectSpec {
@@ -1678,6 +1798,163 @@ pub enum ScreenEffectSpec {
         decay: f32,
         #[serde(default = "default_shake_seed")]
         seed: u32,
+    },
+    /// RGB channel split along `angle_deg`, weighted by the distance from the
+    /// centre.
+    ChromaticAberration {
+        #[serde(default = "default_chromatic_intensity")]
+        #[schemars(range(min = 0.0, max = CHROMATIC_INTENSITY_MAX))]
+        intensity: f32,
+        #[serde(default = "default_chromatic_angle_deg")]
+        #[schemars(range(min = CHROMATIC_ANGLE_DEG_MIN, max = CHROMATIC_ANGLE_DEG_MAX))]
+        angle_deg: f32,
+        #[serde(default = "default_screen_effect_center_x")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_X_MAX))]
+        center_x: f32,
+        #[serde(default = "default_screen_effect_center_y")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_Y_MAX))]
+        center_y: f32,
+        #[serde(default = "default_chromatic_edge_weight")]
+        #[schemars(range(min = CHROMATIC_EDGE_WEIGHT_MIN, max = CHROMATIC_EDGE_WEIGHT_MAX))]
+        edge_weight: f32,
+        #[serde(default = "default_chromatic_fade_in")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_in: f32,
+        #[serde(default = "default_chromatic_fade_out")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_out: f32,
+    },
+    /// Horizontal band displacement that changes `frequency_hz` times per
+    /// second; the seed makes the pattern a pure function of the playhead.
+    Glitch {
+        #[serde(default = "default_glitch_displacement")]
+        #[schemars(range(min = 0.0, max = GLITCH_DISPLACEMENT_MAX))]
+        displacement: f32,
+        #[serde(default = "default_glitch_slice_count")]
+        #[schemars(range(min = GLITCH_SLICE_COUNT_MIN, max = GLITCH_SLICE_COUNT_MAX))]
+        slice_count: u32,
+        #[serde(default = "default_glitch_density")]
+        #[schemars(range(min = GLITCH_DENSITY_MIN, max = GLITCH_DENSITY_MAX))]
+        density: f32,
+        #[serde(default = "default_glitch_frequency_hz")]
+        #[schemars(range(min = GLITCH_FREQUENCY_HZ_MIN, max = GLITCH_FREQUENCY_HZ_MAX))]
+        frequency_hz: f32,
+        #[serde(default = "default_glitch_seed")]
+        seed: u32,
+        #[serde(default = "default_glitch_fade_in")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_in: f32,
+        #[serde(default = "default_glitch_fade_out")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_out: f32,
+    },
+    /// A ring of radial distortion expanding from the centre to `max_radius`
+    /// while its strength fades out.
+    Shockwave {
+        #[serde(default = "default_screen_effect_center_x")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_X_MAX))]
+        center_x: f32,
+        #[serde(default = "default_screen_effect_center_y")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_Y_MAX))]
+        center_y: f32,
+        #[serde(default = "default_shockwave_max_radius")]
+        #[schemars(range(min = SHOCKWAVE_MAX_RADIUS_MIN, max = SHOCKWAVE_MAX_RADIUS_MAX))]
+        max_radius: f32,
+        #[serde(default = "default_shockwave_wave_width")]
+        #[schemars(range(min = SHOCKWAVE_WAVE_WIDTH_MIN, max = SHOCKWAVE_WAVE_WIDTH_MAX))]
+        wave_width: f32,
+        #[serde(default = "default_shockwave_strength")]
+        #[schemars(range(min = 0.0, max = SHOCKWAVE_STRENGTH_MAX))]
+        strength: f32,
+    },
+    /// Straight-RGB colour grade blended into the world layer by the
+    /// enveloped intensity.
+    ColorGrade {
+        #[serde(default = "default_color_grade_brightness")]
+        #[schemars(range(min = COLOR_GRADE_BRIGHTNESS_MIN, max = COLOR_GRADE_BRIGHTNESS_MAX))]
+        brightness: f32,
+        #[serde(default = "default_color_grade_contrast")]
+        #[schemars(range(min = COLOR_GRADE_CONTRAST_MIN, max = COLOR_GRADE_CONTRAST_MAX))]
+        contrast: f32,
+        #[serde(default = "default_color_grade_saturation")]
+        #[schemars(range(min = COLOR_GRADE_SATURATION_MIN, max = COLOR_GRADE_SATURATION_MAX))]
+        saturation: f32,
+        #[serde(default = "default_color_grade_tint")]
+        tint: String,
+        #[serde(default = "default_color_grade_tint_strength")]
+        #[schemars(range(min = COLOR_GRADE_TINT_STRENGTH_MIN, max = COLOR_GRADE_TINT_STRENGTH_MAX))]
+        tint_strength: f32,
+        #[serde(default = "default_screen_effect_intensity")]
+        #[schemars(range(min = SCREEN_EFFECT_INTENSITY_MIN, max = SCREEN_EFFECT_INTENSITY_MAX))]
+        intensity: f32,
+        #[serde(default = "default_screen_effect_fade_in")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_in: f32,
+        #[serde(default = "default_screen_effect_fade_out")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_out: f32,
+    },
+    /// Variable-radius blur with a fully sharp centre disc and a soft
+    /// transition to a blurred, optionally darkened periphery.
+    Focus {
+        #[serde(default = "default_screen_effect_center_x")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_X_MAX))]
+        center_x: f32,
+        #[serde(default = "default_screen_effect_center_y")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_Y_MAX))]
+        center_y: f32,
+        #[serde(default = "default_focus_radius")]
+        #[schemars(range(min = FOCUS_RADIUS_MIN, max = FOCUS_RADIUS_MAX))]
+        radius: f32,
+        #[serde(default = "default_focus_softness")]
+        #[schemars(range(min = FOCUS_SOFTNESS_MIN, max = FOCUS_SOFTNESS_MAX))]
+        softness: f32,
+        #[serde(default = "default_focus_blur")]
+        #[schemars(range(min = FOCUS_BLUR_MIN, max = FOCUS_BLUR_MAX))]
+        blur: f32,
+        #[serde(default = "default_focus_darkness")]
+        #[schemars(range(min = FOCUS_DARKNESS_MIN, max = FOCUS_DARKNESS_MAX))]
+        darkness: f32,
+        #[serde(default = "default_screen_effect_intensity")]
+        #[schemars(range(min = SCREEN_EFFECT_INTENSITY_MIN, max = SCREEN_EFFECT_INTENSITY_MAX))]
+        intensity: f32,
+        #[serde(default = "default_screen_effect_fade_in")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_in: f32,
+        #[serde(default = "default_screen_effect_fade_out")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_out: f32,
+    },
+    /// Concentric ripple rings travelling outwards from the centre, distinct
+    /// from the single expanding ring of `shockwave`.
+    Ripple {
+        #[serde(default = "default_screen_effect_center_x")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_X_MAX))]
+        center_x: f32,
+        #[serde(default = "default_screen_effect_center_y")]
+        #[schemars(range(min = 0.0, max = SCREEN_EFFECT_CENTER_Y_MAX))]
+        center_y: f32,
+        #[serde(default = "default_ripple_amplitude")]
+        #[schemars(range(min = RIPPLE_AMPLITUDE_MIN, max = RIPPLE_AMPLITUDE_MAX))]
+        amplitude: f32,
+        #[serde(default = "default_ripple_wavelength")]
+        #[schemars(range(min = RIPPLE_WAVELENGTH_MIN, max = RIPPLE_WAVELENGTH_MAX))]
+        wavelength: f32,
+        #[serde(default = "default_ripple_speed")]
+        #[schemars(range(min = RIPPLE_SPEED_MIN, max = RIPPLE_SPEED_MAX))]
+        speed: f32,
+        #[serde(default = "default_ripple_damping")]
+        #[schemars(range(min = RIPPLE_DAMPING_MIN, max = RIPPLE_DAMPING_MAX))]
+        damping: f32,
+        #[serde(default = "default_screen_effect_intensity")]
+        #[schemars(range(min = SCREEN_EFFECT_INTENSITY_MIN, max = SCREEN_EFFECT_INTENSITY_MAX))]
+        intensity: f32,
+        #[serde(default = "default_screen_effect_fade_in")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_in: f32,
+        #[serde(default = "default_screen_effect_fade_out")]
+        #[schemars(range(min = SCREEN_EFFECT_FADE_MIN, max = SCREEN_EFFECT_FADE_MAX))]
+        fade_out: f32,
     },
 }
 
@@ -1707,6 +1984,138 @@ fn default_shake_decay() -> f32 {
 
 fn default_shake_seed() -> u32 {
     SHAKE_SEED_DEFAULT
+}
+
+fn default_screen_effect_center_x() -> f32 {
+    SCREEN_EFFECT_CENTER_X_DEFAULT
+}
+
+fn default_screen_effect_center_y() -> f32 {
+    SCREEN_EFFECT_CENTER_Y_DEFAULT
+}
+
+fn default_chromatic_intensity() -> f32 {
+    CHROMATIC_INTENSITY_DEFAULT
+}
+
+fn default_chromatic_angle_deg() -> f32 {
+    CHROMATIC_ANGLE_DEG_DEFAULT
+}
+
+fn default_chromatic_edge_weight() -> f32 {
+    CHROMATIC_EDGE_WEIGHT_DEFAULT
+}
+
+fn default_chromatic_fade_in() -> f32 {
+    CHROMATIC_FADE_IN_DEFAULT
+}
+
+fn default_chromatic_fade_out() -> f32 {
+    CHROMATIC_FADE_OUT_DEFAULT
+}
+
+fn default_glitch_displacement() -> f32 {
+    GLITCH_DISPLACEMENT_DEFAULT
+}
+
+fn default_glitch_slice_count() -> u32 {
+    GLITCH_SLICE_COUNT_DEFAULT
+}
+
+fn default_glitch_density() -> f32 {
+    GLITCH_DENSITY_DEFAULT
+}
+
+fn default_glitch_frequency_hz() -> f32 {
+    GLITCH_FREQUENCY_HZ_DEFAULT
+}
+
+fn default_glitch_seed() -> u32 {
+    GLITCH_SEED_DEFAULT
+}
+
+fn default_glitch_fade_in() -> f32 {
+    GLITCH_FADE_IN_DEFAULT
+}
+
+fn default_glitch_fade_out() -> f32 {
+    GLITCH_FADE_OUT_DEFAULT
+}
+
+fn default_shockwave_max_radius() -> f32 {
+    SHOCKWAVE_MAX_RADIUS_DEFAULT
+}
+
+fn default_shockwave_wave_width() -> f32 {
+    SHOCKWAVE_WAVE_WIDTH_DEFAULT
+}
+
+fn default_shockwave_strength() -> f32 {
+    SHOCKWAVE_STRENGTH_DEFAULT
+}
+
+fn default_screen_effect_intensity() -> f32 {
+    SCREEN_EFFECT_INTENSITY_DEFAULT
+}
+
+fn default_screen_effect_fade_in() -> f32 {
+    SCREEN_EFFECT_FADE_IN_DEFAULT
+}
+
+fn default_screen_effect_fade_out() -> f32 {
+    SCREEN_EFFECT_FADE_OUT_DEFAULT
+}
+
+fn default_color_grade_brightness() -> f32 {
+    COLOR_GRADE_BRIGHTNESS_DEFAULT
+}
+
+fn default_color_grade_contrast() -> f32 {
+    COLOR_GRADE_CONTRAST_DEFAULT
+}
+
+fn default_color_grade_saturation() -> f32 {
+    COLOR_GRADE_SATURATION_DEFAULT
+}
+
+fn default_color_grade_tint() -> String {
+    COLOR_GRADE_TINT_DEFAULT.to_owned()
+}
+
+fn default_color_grade_tint_strength() -> f32 {
+    COLOR_GRADE_TINT_STRENGTH_DEFAULT
+}
+
+fn default_focus_radius() -> f32 {
+    FOCUS_RADIUS_DEFAULT
+}
+
+fn default_focus_softness() -> f32 {
+    FOCUS_SOFTNESS_DEFAULT
+}
+
+fn default_focus_blur() -> f32 {
+    FOCUS_BLUR_DEFAULT
+}
+
+fn default_focus_darkness() -> f32 {
+    FOCUS_DARKNESS_DEFAULT
+}
+
+fn default_ripple_amplitude() -> f32 {
+    RIPPLE_AMPLITUDE_DEFAULT
+}
+
+fn default_ripple_wavelength() -> f32 {
+    RIPPLE_WAVELENGTH_DEFAULT
+}
+
+fn default_ripple_speed() -> f32 {
+    RIPPLE_SPEED_DEFAULT
+}
+
+fn default_ripple_damping() -> f32 {
+    RIPPLE_DAMPING_DEFAULT
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2431,6 +2840,10 @@ pub struct Settings {
     pub text_reveal_animation: TextRevealAnimation,
     #[serde(default)]
     pub skip_mode: SkipMode,
+    /// Player accessibility preference: attenuates flashes, shakes and the
+    /// shader screen effects.  Absent in settings files written before it.
+    #[serde(default)]
+    pub reduce_motion: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2453,6 +2866,7 @@ impl Default for Settings {
             text_speed_cps: 30.0,
             text_reveal_animation: TextRevealAnimation::Typewriter,
             skip_mode: SkipMode::ReadOnly,
+            reduce_motion: false,
         }
     }
 }
@@ -2670,6 +3084,281 @@ mod tests {
                 && decay == 0.75
                 && seed == 42
         ));
+    }
+
+    #[test]
+    fn shader_screen_effects_default_every_parameter() {
+        let chromatic = parse_scene_node(
+            "type: screen_effect\neffect: {type: chromatic_aberration}\nnext: end\n",
+        );
+        assert!(matches!(
+            chromatic,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::ChromaticAberration {
+                    intensity,
+                    angle_deg,
+                    center_x,
+                    center_y,
+                    edge_weight,
+                    fade_in,
+                    fade_out,
+                },
+                ..
+            } if intensity == CHROMATIC_INTENSITY_DEFAULT
+                && angle_deg == CHROMATIC_ANGLE_DEG_DEFAULT
+                && center_x == SCREEN_EFFECT_CENTER_X_DEFAULT
+                && center_y == SCREEN_EFFECT_CENTER_Y_DEFAULT
+                && edge_weight == CHROMATIC_EDGE_WEIGHT_DEFAULT
+                && fade_in == CHROMATIC_FADE_IN_DEFAULT
+                && fade_out == CHROMATIC_FADE_OUT_DEFAULT
+        ));
+
+        let glitch = parse_scene_node("type: screen_effect\neffect: {type: glitch}\nnext: end\n");
+        assert!(matches!(
+            glitch,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Glitch {
+                    displacement,
+                    slice_count,
+                    density,
+                    frequency_hz,
+                    seed,
+                    fade_in,
+                    fade_out,
+                },
+                ..
+            } if displacement == GLITCH_DISPLACEMENT_DEFAULT
+                && slice_count == GLITCH_SLICE_COUNT_DEFAULT
+                && density == GLITCH_DENSITY_DEFAULT
+                && frequency_hz == GLITCH_FREQUENCY_HZ_DEFAULT
+                && seed == GLITCH_SEED_DEFAULT
+                && fade_in == GLITCH_FADE_IN_DEFAULT
+                && fade_out == GLITCH_FADE_OUT_DEFAULT
+        ));
+
+        let shockwave =
+            parse_scene_node("type: screen_effect\neffect: {type: shockwave}\nnext: end\n");
+        assert!(matches!(
+            shockwave,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Shockwave {
+                    center_x,
+                    center_y,
+                    max_radius,
+                    wave_width,
+                    strength,
+                },
+                ..
+            } if center_x == SCREEN_EFFECT_CENTER_X_DEFAULT
+                && center_y == SCREEN_EFFECT_CENTER_Y_DEFAULT
+                && max_radius == SHOCKWAVE_MAX_RADIUS_DEFAULT
+                && wave_width == SHOCKWAVE_WAVE_WIDTH_DEFAULT
+                && strength == SHOCKWAVE_STRENGTH_DEFAULT
+        ));
+
+        let color_grade =
+            parse_scene_node("type: screen_effect\neffect: {type: color_grade}\nnext: end\n");
+        assert!(matches!(
+            color_grade,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::ColorGrade {
+                    brightness,
+                    contrast,
+                    saturation,
+                    tint,
+                    tint_strength,
+                    intensity,
+                    fade_in,
+                    fade_out,
+                },
+                ..
+            } if brightness == COLOR_GRADE_BRIGHTNESS_DEFAULT
+                && contrast == COLOR_GRADE_CONTRAST_DEFAULT
+                && saturation == COLOR_GRADE_SATURATION_DEFAULT
+                && tint == COLOR_GRADE_TINT_DEFAULT
+                && tint_strength == COLOR_GRADE_TINT_STRENGTH_DEFAULT
+                && intensity == SCREEN_EFFECT_INTENSITY_DEFAULT
+                && fade_in == SCREEN_EFFECT_FADE_IN_DEFAULT
+                && fade_out == SCREEN_EFFECT_FADE_OUT_DEFAULT
+        ));
+
+        let focus = parse_scene_node("type: screen_effect\neffect: {type: focus}\nnext: end\n");
+        assert!(matches!(
+            focus,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Focus {
+                    center_x,
+                    center_y,
+                    radius,
+                    softness,
+                    blur,
+                    darkness,
+                    intensity,
+                    fade_in,
+                    fade_out,
+                },
+                ..
+            } if center_x == SCREEN_EFFECT_CENTER_X_DEFAULT
+                && center_y == SCREEN_EFFECT_CENTER_Y_DEFAULT
+                && radius == FOCUS_RADIUS_DEFAULT
+                && softness == FOCUS_SOFTNESS_DEFAULT
+                && blur == FOCUS_BLUR_DEFAULT
+                && darkness == FOCUS_DARKNESS_DEFAULT
+                && intensity == SCREEN_EFFECT_INTENSITY_DEFAULT
+                && fade_in == SCREEN_EFFECT_FADE_IN_DEFAULT
+                && fade_out == SCREEN_EFFECT_FADE_OUT_DEFAULT
+        ));
+
+        let ripple = parse_scene_node("type: screen_effect\neffect: {type: ripple}\nnext: end\n");
+        assert!(matches!(
+            ripple,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Ripple {
+                    center_x,
+                    center_y,
+                    amplitude,
+                    wavelength,
+                    speed,
+                    damping,
+                    intensity,
+                    fade_in,
+                    fade_out,
+                },
+                ..
+            } if center_x == SCREEN_EFFECT_CENTER_X_DEFAULT
+                && center_y == SCREEN_EFFECT_CENTER_Y_DEFAULT
+                && amplitude == RIPPLE_AMPLITUDE_DEFAULT
+                && wavelength == RIPPLE_WAVELENGTH_DEFAULT
+                && speed == RIPPLE_SPEED_DEFAULT
+                && damping == RIPPLE_DAMPING_DEFAULT
+                && intensity == SCREEN_EFFECT_INTENSITY_DEFAULT
+                && fade_in == SCREEN_EFFECT_FADE_IN_DEFAULT
+                && fade_out == SCREEN_EFFECT_FADE_OUT_DEFAULT
+        ));
+    }
+
+    #[test]
+    fn composable_screen_effects_parse_overrides_and_reject_unknowns() {
+        let grade = parse_timeline_event(
+            "type: screen_effect\nid: grade\nat_ms: 0\neffect: {type: color_grade, brightness: 0.4, contrast: 1.6, saturation: 0.5, tint: \"#3366FF\", tint_strength: 0.5, intensity: 0.8, fade_in: 0.3, fade_out: 0.4}\nduration_ms: 240\n",
+        );
+        assert!(matches!(
+            grade,
+            TimelineEvent::ScreenEffect {
+                effect: ScreenEffectSpec::ColorGrade {
+                    brightness,
+                    contrast,
+                    saturation,
+                    tint,
+                    tint_strength,
+                    intensity,
+                    fade_in,
+                    fade_out,
+                },
+                ..
+            } if brightness == 0.4
+                && contrast == 1.6
+                && saturation == 0.5
+                && tint == "#3366FF"
+                && tint_strength == 0.5
+                && intensity == 0.8
+                && fade_in == 0.3
+                && fade_out == 0.4
+        ));
+
+        let focus = parse_scene_node(
+            "type: screen_effect\neffect: {type: focus, center_x: 640, center_y: 360, radius: 120, softness: 40, blur: 16, darkness: 0.6}\nnext: end\n",
+        );
+        assert!(matches!(
+            focus,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Focus {
+                    center_x,
+                    center_y,
+                    radius,
+                    softness,
+                    blur,
+                    darkness,
+                    intensity,
+                    ..
+                },
+                ..
+            } if center_x == 640.0
+                && center_y == 360.0
+                && radius == 120.0
+                && softness == 40.0
+                && blur == 16.0
+                && darkness == 0.6
+                && intensity == SCREEN_EFFECT_INTENSITY_DEFAULT
+        ));
+
+        let ripple = parse_scene_node(
+            "type: screen_effect\neffect: {type: ripple, amplitude: 24, wavelength: 320, speed: 500, damping: 2}\nnext: end\n",
+        );
+        assert!(matches!(
+            ripple,
+            SceneNode::ScreenEffect {
+                effect: ScreenEffectSpec::Ripple {
+                    amplitude,
+                    wavelength,
+                    speed,
+                    damping,
+                    ..
+                },
+                ..
+            } if amplitude == 24.0
+                && wavelength == 320.0
+                && speed == 500.0
+                && damping == 2.0
+        ));
+
+        for (name, effect) in [
+            ("color_grade", "color_grade, sharpness: 2"),
+            ("focus", "focus, depth: 3"),
+            ("ripple", "ripple, frequency: 5"),
+        ] {
+            let unknown: Result<TimelineEvent, _> = serde_saphyr::from_str_with_options(
+                &format!(
+                    "type: screen_effect\nid: bad_{name}\nat_ms: 0\neffect: {{type: {effect}}}\nduration_ms: 240\n"
+                ),
+                serde_saphyr::options! { strict_booleans: true },
+            );
+            assert!(unknown.is_err(), "unknown {name} parameters are rejected");
+        }
+    }
+
+    #[test]
+    fn shader_screen_effects_parse_overrides_on_timeline_events() {
+        let glitch = parse_timeline_event(
+            "type: screen_effect\nid: break\nat_ms: 0\neffect: {type: glitch, displacement: 64, slice_count: 20, density: 0.5, frequency_hz: 24, seed: 7, fade_out: 0.3}\nduration_ms: 240\n",
+        );
+        assert!(matches!(
+            glitch,
+            TimelineEvent::ScreenEffect {
+                effect: ScreenEffectSpec::Glitch {
+                    displacement,
+                    slice_count,
+                    density,
+                    frequency_hz,
+                    seed,
+                    fade_in,
+                    fade_out,
+                },
+                ..
+            } if displacement == 64.0
+                && slice_count == 20
+                && density == 0.5
+                && frequency_hz == 24.0
+                && seed == 7
+                && fade_in == GLITCH_FADE_IN_DEFAULT
+                && fade_out == 0.3
+        ));
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let unknown: Result<TimelineEvent, _> = serde_saphyr::from_str_with_options(
+            "type: screen_effect\nid: bad\nat_ms: 0\neffect: {type: shockwave, speed: 2}\nduration_ms: 240\n",
+            options,
+        );
+        assert!(unknown.is_err(), "unknown shader parameters are rejected");
     }
 
     #[test]

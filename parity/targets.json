@@ -17,6 +17,21 @@
       "node_id": "video_timeline"
     },
     {
+      "id": "shader-combo",
+      "scene_id": "shader_parity",
+      "node_id": "shader_combo"
+    },
+    {
+      "id": "shader-camera",
+      "scene_id": "shader_parity",
+      "node_id": "shader_camera"
+    },
+    {
+      "id": "shader-camera-rotated",
+      "scene_id": "shader_parity",
+      "node_id": "shader_camera_rotated"
+    },
+    {
       "id": "ambience-lab",
       "scene_id": "ambience_lab",
       "node_id": "mix_timeline"

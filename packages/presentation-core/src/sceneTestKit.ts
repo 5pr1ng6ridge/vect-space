@@ -20,6 +20,8 @@ import type {
   SceneSpriteLike,
   SceneVideoSourceLike,
 } from "./sceneSurface";
+import type { ShaderEffectFrame } from "./sceneEffects";
+import type { SceneRect, SceneShaderHostLike } from "./sceneShaders";
 import type { SceneTextureLike } from "./sceneTextures";
 
 export class MemoryPoint implements ScenePointLike {
@@ -155,6 +157,36 @@ export class MemoryGraphics extends MemoryNode implements SceneGraphicsLike {
   }
 }
 
+/**
+ * Records every frame the surface hands to its shader host, standing in for
+ * the Pixi filters (the GLSL itself is only exercised by a real renderer).
+ */
+export class MemoryShaderHost implements SceneShaderHostLike {
+  readonly target: SceneNodeLike;
+  readonly frames: ShaderEffectFrame[] = [];
+  readonly areas: SceneRect[] = [];
+  destroyed = false;
+
+  constructor(target: SceneNodeLike) {
+    this.target = target;
+  }
+
+  /** Last applied frame, or `null` before the first pass was installed. */
+  get current(): ShaderEffectFrame | null {
+    return this.frames.at(-1) ?? null;
+  }
+
+  apply(frame: ShaderEffectFrame, area: SceneRect): void {
+    if (this.destroyed) throw new Error("shader host used after destroy");
+    this.frames.push(frame);
+    this.areas.push({ ...area });
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+  }
+}
+
 export class MemoryApplication implements SceneApplicationLike {
   readonly stage = new MemoryNode();
   renders = 0;
@@ -180,6 +212,7 @@ export class MemoryApplication implements SceneApplicationLike {
 export interface MemoryKit {
   kit: SceneKit;
   readonly applications: MemoryApplication[];
+  readonly shaderHosts: MemoryShaderHost[];
   renderCount(): number;
 }
 
@@ -220,6 +253,7 @@ export function createMemoryTextureLoader(
 
 export function createMemoryKit(): MemoryKit {
   const applications: MemoryApplication[] = [];
+  const shaderHosts: MemoryShaderHost[] = [];
   const kit: SceneKit = {
     application: () => {
       const application = new MemoryApplication();
@@ -242,10 +276,16 @@ export function createMemoryKit(): MemoryKit {
     }),
     videoSprite: () =>
       new MemorySprite({ width: 1920, height: 1080, destroy: () => undefined }),
+    shaderHost: (target) => {
+      const host = new MemoryShaderHost(target);
+      shaderHosts.push(host);
+      return host;
+    },
   };
   return {
     kit,
     applications,
+    shaderHosts,
     renderCount: () =>
       applications.reduce(
         (total, application) => total + application.renders,

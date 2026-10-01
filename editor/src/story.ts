@@ -266,8 +266,24 @@ export function summarizeTransitionSpec(
 
 /** Short author-facing description of one canonical screen effect. */
 export function summarizeScreenEffect(effect: ScreenEffectSpec): string {
-  if (effect.type === "flash") return `闪光 ${effect.color}`;
-  return `震动 ${effect.amplitude_x}×${effect.amplitude_y} · ${effect.frequency_hz}Hz · seed ${effect.seed}`;
+  switch (effect.type) {
+    case "flash":
+      return `闪光 ${effect.color}`;
+    case "shake":
+      return `震动 ${effect.amplitude_x}×${effect.amplitude_y} · ${effect.frequency_hz}Hz · seed ${effect.seed}`;
+    case "chromatic_aberration":
+      return `色差 ${effect.intensity}px · ${effect.angle_deg}°`;
+    case "glitch":
+      return `故障 ${effect.displacement}px · ${effect.slice_count} 切片 · ${effect.frequency_hz}Hz · seed ${effect.seed}`;
+    case "shockwave":
+      return `冲击波 (${effect.center_x}, ${effect.center_y}) · 半径 ${effect.max_radius}px`;
+    case "color_grade":
+      return `色彩修正 亮度 ${effect.brightness} · 对比度 ${effect.contrast} · 饱和度 ${effect.saturation}`;
+    case "focus":
+      return `聚焦 (${effect.center_x}, ${effect.center_y}) · 清晰半径 ${effect.radius}px · 模糊 ${effect.blur}px`;
+    case "ripple":
+      return `波纹 (${effect.center_x}, ${effect.center_y}) · 振幅 ${effect.amplitude}px · 波长 ${effect.wavelength}px`;
+  }
 }
 
 export function directionLabel(direction: TransitionDirection): string {

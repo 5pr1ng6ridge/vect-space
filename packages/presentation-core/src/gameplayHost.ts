@@ -115,6 +115,7 @@ export class PresentationController {
     // The session starts audible in host mode; a muted host (master volume
     // zero) silences the one-shot voices and the media element up front.
     this.#session.setMuted(settings.master_volume <= 0);
+    this.#surface.setReducedMotion(settings.reduce_motion ?? false);
   }
 
   async init(): Promise<void> {
@@ -142,6 +143,7 @@ export class PresentationController {
     // Zero master volume is a host mute: the timeline session must not start
     // one-shot voices or unmute the media element behind the graph.
     this.#session.setMuted(settings.master_volume <= 0);
+    this.#surface.setReducedMotion(settings.reduce_motion ?? false);
   }
 
   setTypingSfx(
