@@ -49,7 +49,7 @@ export function searchProject(
       results.push({
         key: `scene:${sceneId}`,
         title: sceneId,
-        detail: `场景 · ${Object.keys(file.definition.nodes).length} 个节点`,
+        detail: `场景 · ${file.definition.window_role === "secondary" ? "副窗口 · " : ""}${Object.keys(file.definition.nodes).length} 个节点`,
         kind: "scene",
         sceneId,
         nodeId: null,

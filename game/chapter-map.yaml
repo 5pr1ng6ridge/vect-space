@@ -155,3 +155,18 @@ hotspots:
   replay:
     mode: always
   variable_overrides: {}
+- id: window_pair
+  scene_id: window_pair_main
+  title: window_pair
+  hover_text: 双窗口演示：标题互相引用、跨窗阻挡与脚本推进、计时器解锁选项和等待动画。
+  x: 1800
+  "y": 720
+  width: 280
+  height: 160
+  z: 10
+  asset: gui.button_pulse
+  reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}

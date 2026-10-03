@@ -17,6 +17,7 @@ import {
   type AnimationDraft,
 } from "../imageAnimation";
 import { isCanonicalIntegerText } from "../scalars";
+import { sceneRole, WINDOW_ROLE_LABELS } from "../windowInteraction";
 import { useAssetFont } from "../useAssetFont";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import {
@@ -49,6 +50,7 @@ import {
 } from "../assetLibrary";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import {
+  AppWindow,
   Clapperboard,
   FolderInput,
   CopyPlus,
@@ -87,6 +89,7 @@ import type {
   ScalarValue,
   VariableDefinition,
   VariableType,
+  WindowRole,
 } from "../types";
 
 interface ProjectSidebarProps {
@@ -95,9 +98,11 @@ interface ProjectSidebarProps {
   activeSceneId: string;
   diagnostics: EditorDiagnostic[];
   onSelectScene(sceneId: string): void;
-  onAddScene(id: string): boolean;
+  onAddScene(id: string, role?: WindowRole): boolean;
   onRenameScene(previousId: string, nextId: string): boolean;
   onDeleteScene(sceneId: string): void;
+  /** Change which window a Scene is written for (main / secondary). */
+  onSetSceneRole?(sceneId: string, role: WindowRole): void;
   onManifestChange(manifest: ContentManifest): void;
   onImportAssets(items: ImportDraft[]): Promise<void>;
   onRemoveAsset(id: string): boolean;
@@ -280,6 +285,7 @@ export function ProjectSidebar({
   onAddScene,
   onRenameScene,
   onDeleteScene,
+  onSetSceneRole,
   onManifestChange,
   onImportAssets,
   onRemoveAsset,
@@ -396,6 +402,7 @@ export function ProjectSidebar({
           onRenameScene={onRenameScene}
           onScrollOffset={onScrollOffset}
           onSelectScene={onSelectScene}
+          onSetSceneRole={onSetSceneRole}
           project={project}
           scrollStore={scrollStore}
         />
@@ -576,16 +583,18 @@ function ScenesPanel({
   onRenameScene,
   onScrollOffset,
   onSelectScene,
+  onSetSceneRole,
   project,
   scrollStore,
 }: {
   activeSceneId: string;
   diagnostics: EditorDiagnostic[];
-  onAddScene(id: string): boolean;
+  onAddScene(id: string, role?: WindowRole): boolean;
   onDeleteScene(sceneId: string): void;
   onRenameScene(previousId: string, nextId: string): boolean;
   onScrollOffset?(tab: SidebarTab, offset: number): void;
   onSelectScene(sceneId: string): void;
+  onSetSceneRole?(sceneId: string, role: WindowRole): void;
   project: EditorProject;
   scrollStore?: SidebarScrollStore;
 }): ReactElement {
@@ -595,6 +604,7 @@ function ScenesPanel({
     value: string;
     mode: "add" | "rename";
     previous?: string;
+    role?: WindowRole;
   } | null>(null);
   const scenes = project.scenes.filter((file) =>
     file.definition.id.toLowerCase().includes(query.trim().toLowerCase()),
@@ -620,6 +630,20 @@ function ScenesPanel({
             setDialog({ title: "新场景 ID", value: "new_scene", mode: "add" });
           }}
           tooltip="新建场景"
+          variant="secondary"
+        />
+        <IconButton
+          icon={AppWindow}
+          label="添加副窗口场景"
+          onClick={() => {
+            setDialog({
+              title: "新副窗口场景 ID",
+              value: "new_side_scene",
+              mode: "add",
+              role: "secondary",
+            });
+          }}
+          tooltip="新建副窗口专用场景"
           variant="secondary"
         />
       </div>
@@ -651,6 +675,7 @@ function ScenesPanel({
                   <small>
                     {Object.keys(scene.nodes).length} 个节点
                     {entry ? " · 项目入口" : ""}
+                    {sceneRole(scene) === "secondary" ? " · 副窗口专用" : ""}
                   </small>
                 </span>
                 {issueCount > 0 && (
@@ -660,6 +685,29 @@ function ScenesPanel({
                 )}
               </button>
               <div className="scene-row-actions">
+                {onSetSceneRole !== undefined && (
+                  <IconButton
+                    aria-pressed={sceneRole(scene) === "secondary"}
+                    icon={AppWindow}
+                    label={
+                      sceneRole(scene) === "secondary"
+                        ? "设为主窗口专用"
+                        : "设为副窗口专用"
+                    }
+                    onClick={() =>
+                      onSetSceneRole(
+                        scene.id,
+                        sceneRole(scene) === "secondary" ? "main" : "secondary",
+                      )
+                    }
+                    size="sm"
+                    tooltip={
+                      sceneRole(scene) === "secondary"
+                        ? `当前：${WINDOW_ROLE_LABELS.secondary}专用，点击改为主窗口专用`
+                        : `当前：${WINDOW_ROLE_LABELS.main}专用，点击改为副窗口专用（只能被「打开副窗口」使用）`
+                    }
+                  />
+                )}
                 <IconButton
                   icon={Pencil}
                   label="重命名场景"
@@ -696,7 +744,7 @@ function ScenesPanel({
           onSubmit={(value) => {
             const accepted =
               dialog.mode === "add"
-                ? onAddScene(value)
+                ? onAddScene(value, dialog.role)
                 : dialog.previous !== undefined && value !== dialog.previous
                   ? onRenameScene(dialog.previous, value)
                   : true;
@@ -2917,11 +2965,20 @@ function ProjectPanel({
                 })
               }
             >
-              {project.scenes.map((file) => (
-                <option key={file.definition.id} value={file.definition.id}>
-                  {file.definition.id}
-                </option>
-              ))}
+              {project.scenes
+                .filter(
+                  (file) =>
+                    sceneRole(file.definition) === "main" ||
+                    file.definition.id === manifest.entry_scene,
+                )
+                .map((file) => (
+                  <option key={file.definition.id} value={file.definition.id}>
+                    {file.definition.id}
+                    {sceneRole(file.definition) === "secondary"
+                      ? "（副窗口专用，不能作为入口）"
+                      : ""}
+                  </option>
+                ))}
             </select>
           </label>
         </>

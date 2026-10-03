@@ -941,3 +941,62 @@ describe("StoryGraph node double-click", () => {
     expect(onPreview).not.toHaveBeenCalled();
   });
 });
+
+describe("timer effect references", () => {
+  const timerScene: SceneDefinition = {
+    schema_version: 2,
+    id: "main",
+    entry: "arm",
+    nodes: {
+      arm: {
+        type: "timer",
+        id: "pulse",
+        action: "start",
+        delay_ms: 500,
+        interval_ms: null,
+        target: "fx",
+        next: "end",
+      },
+      fx: { type: "sfx", asset: "", volume: 1, next: "end" },
+      end: { type: "end" },
+    },
+  };
+
+  it("draws a connectable effect port and a dashed reference edge", async () => {
+    const view = renderGraph({ scene: timerScene, selectedNodeId: null });
+    const card = await nodeCard("arm");
+    expect(card.querySelector(".story-port-effect")).not.toBeNull();
+    expect(card.querySelector(".story-handle-effect")).not.toBeNull();
+    // The reference is not a story step: no flow edge leaves through it.
+    await waitFor(() =>
+      expect(
+        view.view.container.querySelector(
+          '.react-flow__handle[data-handleid="effect"]',
+        ),
+      ).not.toBeNull(),
+    );
+  });
+
+  it("offers the port even before a target is chosen, and not for stop", async () => {
+    const unset = {
+      ...timerScene,
+      nodes: {
+        ...timerScene.nodes,
+        arm: { ...timerScene.nodes.arm, target: null },
+      },
+    } as SceneDefinition;
+    renderGraph({ scene: unset, selectedNodeId: null });
+    expect(await screen.findByText(/触发效果（未选）/)).toBeInTheDocument();
+    cleanup();
+    const stopped = {
+      ...timerScene,
+      nodes: {
+        ...timerScene.nodes,
+        arm: { ...timerScene.nodes.arm, action: "stop", target: null },
+      },
+    } as SceneDefinition;
+    renderGraph({ scene: stopped, selectedNodeId: null });
+    await nodeCard("arm");
+    expect(screen.queryByText(/触发效果/)).toBeNull();
+  });
+});

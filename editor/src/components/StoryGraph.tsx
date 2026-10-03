@@ -55,6 +55,7 @@ import {
   normalizeSceneGroups,
 } from "./graphGroups";
 import { outputPorts, type InsertSide } from "../story";
+import { effectReferences } from "../windowInteraction";
 import { nodeTypeEntries } from "./nodeTypeMenu";
 import type {
   ContentManifest,
@@ -388,6 +389,23 @@ function StoryGraphInner({
           type: "smoothstep",
           markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
           className: `story-edge${branch ? " story-edge-branch" : ""}`,
+          labelBgPadding: [6, 3],
+          labelBgBorderRadius: 4,
+        });
+      }
+      // A timer's effect target is a reference, not a story step: drawn
+      // dashed and labelled so it can never be mistaken for the main flow.
+      for (const reference of effectReferences(node)) {
+        if (scene.nodes[reference.target] === undefined) continue;
+        edges.push({
+          id: `${sourceId}:${reference.id}`,
+          source: sourceId,
+          sourceHandle: reference.id,
+          target: reference.target,
+          label: reference.label,
+          type: "smoothstep",
+          markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+          className: "story-edge story-edge-effect",
           labelBgPadding: [6, 3],
           labelBgBorderRadius: 4,
         });

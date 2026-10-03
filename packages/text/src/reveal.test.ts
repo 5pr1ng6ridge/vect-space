@@ -247,4 +247,56 @@ describe("TextRevealSession timing boundaries", () => {
     expect(completed.state.revealedCount).toBe(3);
     expect(cancelled.state.status).toBe("cancelled");
   });
+
+  describe("rebased", () => {
+    const options = (text: string) => ({
+      units: parseMarkup(text),
+      initialCps: 20,
+      defaultCps: 20,
+    });
+
+    it("keeps the revealed count when the text grows mid-reveal", () => {
+      const running = new TextRevealSession(options("ABCD")).advance(120);
+      expect(running.state.revealedCount).toBe(2);
+      const rebased = running.rebased(options("ABCDEFGH"));
+      expect(rebased.state.status).toBe("revealing");
+      expect(rebased.state.revealedCount).toBe(2);
+      // It then continues with the new, longer plan instead of restarting.
+      expect(rebased.advance(50).state.revealedCount).toBe(3);
+      expect(rebased.plan.events).toHaveLength(8);
+    });
+
+    it("clamps progress to shorter content", () => {
+      const running = new TextRevealSession(options("ABCDEF")).advance(220);
+      expect(running.state.revealedCount).toBe(4);
+      const rebased = running.rebased(options("AB"));
+      expect(rebased.state.status).toBe("completed");
+      expect(rebased.state.revealedCount).toBe(2);
+    });
+
+    it("never replays a completed reveal", () => {
+      const done = new TextRevealSession(options("ABC")).completeReveal();
+      const rebased = done.rebased(options("ABCXYZ"));
+      expect(rebased.state.status).toBe("completed");
+      expect(rebased.state.revealedCount).toBe(6);
+    });
+
+    it("stays paused, and a restored presentation stays restored", () => {
+      const paused = new TextRevealSession(options("ABCD"))
+        .advance(120)
+        .pause();
+      expect(paused.rebased(options("ABCDE")).state.status).toBe("paused");
+      const restored = new TextRevealSession(
+        options("AB"),
+      ).restorePresentation();
+      expect(restored.rebased(options("ABC")).state.restored).toBe(true);
+    });
+
+    it("leaves a reveal that has not started untouched", () => {
+      const fresh = new TextRevealSession(options("AB"));
+      const rebased = fresh.rebased(options("XYZ"));
+      expect(rebased.state.status).toBe("preparing");
+      expect(rebased.state.revealedCount).toBe(0);
+    });
+  });
 });

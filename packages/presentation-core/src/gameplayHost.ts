@@ -73,6 +73,17 @@ export class PresentationController {
   #suppressOneShots = false;
   #paused = false;
   #timelineSkippable = false;
+  /**
+   * Timer effects run beside the story, never instead of it.  Each owns an
+   * abort controller and the resources it touches so a newer effect on the same
+   * resource can supersede it without cancelling the story or other effects.
+   */
+  readonly #effects = new Map<number, EffectRun>();
+  #effectSequence = 0;
+  /** Generation of the story update whose cues/reconcile are still running. */
+  #activeStory: number | null = null;
+  /** Newest authoritative snapshot (story or effect), the reconcile target. */
+  #latestSnapshot: RuntimeSnapshot | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -178,7 +189,10 @@ export class PresentationController {
   cancelCurrentPresentation(): void {
     this.#abort.abort();
     this.#abort = new AbortController();
+    this.#cancelEffects();
     this.#generation += 1;
+    this.#activeStory = null;
+    this.#latestSnapshot = null;
     this.#currentUpdateId = null;
     this.#currentPromise = null;
     this.#timelineSkippable = false;
@@ -210,6 +224,9 @@ export class PresentationController {
     }
     this.#abort.abort();
     this.#abort = new AbortController();
+    // A story update is a boundary: it supersedes timer effects too, because
+    // its snapshot already contains everything they committed.
+    this.#cancelEffects();
     // Aborting the previous update stops every signal-aware cue, but an
     // already-loaded timeline keeps ticking on the session clock.  The new
     // update is authoritative, so release the stale timeline here; otherwise
@@ -219,10 +236,18 @@ export class PresentationController {
     if (this.#paused) this.#session.setPaused(true);
     const signal = this.#abort.signal;
     const generation = ++this.#generation;
+    this.#activeStory = generation;
+    this.#latestSnapshot = update.snapshot;
     this.#currentUpdateId = update.update_id;
+    const storyGuard = (): boolean => this.#effects.size === 0;
     const operation = (async () => {
       if (update.cues.length === 0) {
-        await this.#reconcile(update.snapshot, assets, signal);
+        await this.#reconcile(
+          this.#latestSnapshot ?? update.snapshot,
+          assets,
+          signal,
+          storyGuard,
+        );
         return "completed" as const;
       }
       // Most cues are independent and should start together (for example a
@@ -270,12 +295,111 @@ export class PresentationController {
       // update appears completed after cancelCurrentPresentation().
       if (signal.aborted || generation !== this.#generation) outcome = "failed";
       if (generation === this.#generation && !signal.aborted) {
-        await this.#reconcile(update.snapshot, assets, signal);
+        await this.#reconcile(
+          this.#latestSnapshot ?? update.snapshot,
+          assets,
+          signal,
+          storyGuard,
+        );
       }
       return outcome;
-    })();
+    })().finally(() => {
+      if (this.#activeStory === generation) this.#activeStory = null;
+    });
     this.#currentPromise = operation;
     return this.#currentPromise;
+  }
+
+  /**
+   * Runs a timer effect beside the current story presentation.
+   *
+   * It reuses the story's cue executors but never cancels the story, never
+   * replaces the story's update identity and never acknowledges anything: the
+   * caller settles an effect (if the host asked for an acknowledgement) with the
+   * returned outcome.  Resource arbitration is per effect: a newer effect that
+   * touches the same sprite / audio slot supersedes an older one, and a
+   * superseded or cancelled effect never reconciles, so a late completion can
+   * not write an older snapshot over newer state.  The final world alignment
+   * always targets the newest snapshot and is skipped while any other
+   * presentation work is still running (its last finisher aligns instead).
+   */
+  async runEffect(
+    update: RuntimeUpdate,
+    assets: AssetUrlMap,
+    owner: string | null = update.effect_timer ?? null,
+  ): Promise<PresentationOutcome> {
+    this.#latestSnapshot = update.snapshot;
+    if (update.cues.length === 0) return "completed";
+    const resources = new Set(update.cues.flatMap(cueResourceIds));
+    for (const [otherId, other] of [...this.#effects]) {
+      if ([...resources].some((resource) => other.resources.has(resource))) {
+        other.abort.abort();
+        this.#effects.delete(otherId);
+      }
+    }
+    const run: EffectRun = { abort: new AbortController(), resources, owner };
+    const id = ++this.#effectSequence;
+    this.#effects.set(id, run);
+    const signal = run.abort.signal;
+    try {
+      const lastByResource = new Map<string, Promise<PresentationOutcome>>();
+      const tasks = update.cues.map((cue) => {
+        const cueResources = cueResourceIds(cue);
+        const predecessors = cueResources
+          .map((resource) => lastByResource.get(resource))
+          .filter(
+            (task): task is Promise<PresentationOutcome> => task !== undefined,
+          );
+        const task = (async (): Promise<PresentationOutcome> => {
+          await Promise.allSettled(predecessors);
+          return this.#executeCue(update, cue, assets, signal);
+        })();
+        for (const resource of cueResources) lastByResource.set(resource, task);
+        return task;
+      });
+      const results = await Promise.allSettled(tasks);
+      let outcome: PresentationOutcome = "completed";
+      for (const result of results) {
+        if (result.status === "rejected") {
+          console.error("Effect cue failed; reconciling", result.reason);
+          this.#diagnostic(`表现 Cue 失败：${errorMessage(result.reason)}`);
+          outcome = "failed";
+        } else if (result.value === "failed") {
+          outcome = "failed";
+        } else if (result.value === "skipped" && outcome !== "failed") {
+          outcome = "skipped";
+        }
+      }
+      if (signal.aborted) return "failed";
+      // This effect's cues are done, so the guard below only sees *other* work.
+      this.#effects.delete(id);
+      await this.#reconcile(
+        this.#latestSnapshot ?? update.snapshot,
+        assets,
+        signal,
+        () => this.#activeStory === null && this.#effects.size === 0,
+      );
+      return outcome;
+    } finally {
+      this.#effects.delete(id);
+    }
+  }
+
+  /**
+   * Cancels the in-flight effects one timer started, leaving the story and the
+   * other timers' effects alone.  Used when that timer was stopped.
+   */
+  cancelEffectsOf(owner: string): void {
+    for (const [id, run] of [...this.#effects]) {
+      if (run.owner !== owner) continue;
+      run.abort.abort();
+      this.#effects.delete(id);
+    }
+  }
+
+  #cancelEffects(): void {
+    for (const run of this.#effects.values()) run.abort.abort();
+    this.#effects.clear();
   }
 
   async applySnapshotImmediately(
@@ -284,7 +408,10 @@ export class PresentationController {
   ): Promise<void> {
     this.#abort.abort();
     this.#abort = new AbortController();
+    this.#cancelEffects();
     this.#generation += 1;
+    this.#activeStory = null;
+    this.#latestSnapshot = snapshot;
     this.#currentUpdateId = null;
     this.#currentPromise = null;
     this.#timelineSkippable = false;
@@ -359,6 +486,7 @@ export class PresentationController {
 
   destroy(): void {
     this.#abort.abort();
+    this.#cancelEffects();
     this.#session.dispose();
     this.#surface.dispose();
     this.#oneShotLedger.clear();
@@ -495,6 +623,7 @@ export class PresentationController {
     snapshot: RuntimeSnapshot,
     assets: AssetUrlMap,
     signal: AbortSignal,
+    mayCommit: () => boolean = () => true,
   ): Promise<void> {
     this.#uiMotionHost.reconcileDialogueVisible(
       snapshot.world.dialogue_ui_visible,
@@ -503,13 +632,22 @@ export class PresentationController {
       { world: snapshot.world, assets },
       signal,
     );
-    if (preparation === null || signal.aborted) {
+    if (preparation === null || signal.aborted || !mayCommit()) {
+      // Committing a world starts a new visual generation and would silence a
+      // cue another presentation is still running, so a reconcile that is not
+      // the last one yields to the work that is.
       if (preparation !== null) this.#surface.discardPreparation(preparation);
       return;
     }
     this.#surface.applyWorld(preparation);
     await this.#audio.reconcile(snapshot.audio, assets, signal);
   }
+}
+
+interface EffectRun {
+  abort: AbortController;
+  resources: ReadonlySet<string>;
+  owner: string | null;
 }
 
 function cueResourceIds(cue: PresentationCue): string[] {

@@ -46,11 +46,14 @@ const host = vi.hoisted(() => ({
   choose: null as null | ((request: unknown) => Promise<unknown>),
   clickButton: null as null | ((request: unknown) => Promise<unknown>),
   ack: null as null | ((request: unknown) => Promise<unknown>),
+  tick: null as null | ((sessionId: string) => Promise<unknown>),
   stopCalls: [] as string[],
   cancels: 0,
   skips: 0,
   canvasProps: null as null | {
     update: RuntimeUpdate | null;
+    effects?: RuntimeUpdate[];
+    activeTimers?: string[] | null;
     assets: Record<string, string>;
     onSettled(update: RuntimeUpdate, outcome: string): void;
   },
@@ -117,6 +120,8 @@ vi.mock("../api", async (importOriginal) => {
         required(host.clickButton, "clickButton")(request),
       previewSessionPresentationComplete: (request: unknown) =>
         required(host.ack, "ack")(request),
+      previewSessionTick: (sessionId: string) =>
+        required(host.tick, "tick")(sessionId),
       previewSessionStop: (sessionId: string) => {
         host.stopCalls.push(sessionId);
         return Promise.resolve(true);
@@ -235,6 +240,8 @@ beforeEach(() => {
   host.choose = () => Promise.reject(new Error("no choose handler"));
   host.clickButton = () => Promise.reject(new Error("no click handler"));
   host.ack = () => Promise.reject(new Error("no ack handler"));
+  host.tick = () =>
+    Promise.resolve({ updates: [], notes: [], diagnostics: [] });
 });
 
 afterEach(() => {
@@ -486,12 +493,28 @@ function projectWithFont(): EditorProject {
   };
 }
 
-function started(update: RuntimeUpdate, sessionId = "7") {
+function started(update: RuntimeUpdate, sessionId = "7", notes?: string[]) {
   return {
     status: "started" as const,
     session_id: sessionId,
     update,
     assets: [],
+    ...(notes === undefined ? {} : { notes }),
+  };
+}
+
+/** The same update with window interaction state attached to its snapshot. */
+function withInteraction(
+  update: RuntimeUpdate,
+  interaction: NonNullable<RuntimeSnapshot["interaction"]>,
+  kind?: RuntimeUpdate["kind"],
+  patch: Partial<RuntimeUpdate> = {},
+): RuntimeUpdate {
+  return {
+    ...update,
+    ...(kind === undefined ? {} : { kind }),
+    ...patch,
+    snapshot: { ...update.snapshot, interaction },
   };
 }
 
@@ -1171,6 +1194,102 @@ describe("GameplayPreview", () => {
       await Promise.resolve();
     });
     expect(screen.queryByText(/游戏字体加载失败/)).not.toBeInTheDocument();
+  });
+
+  it("asks the host to run timers and plays their effects beside the story", async () => {
+    const timers = {
+      pulse: { target: "flash", remaining_ms: 100, interval_ms: 500 },
+    };
+    await startScene(
+      withInteraction(dialogueUpdate("1"), {
+        titles: { main: "VECTSPACE", secondary: "" },
+        timers,
+      }),
+    );
+    const effect = withInteraction(
+      withUpdateId(dialogueUpdate("3"), "9"),
+      {
+        titles: { main: "VECTSPACE", secondary: "" },
+        timers,
+      },
+      "effect",
+      { effect_timer: "pulse" },
+    );
+    let delivered = false;
+    host.tick = () => {
+      const updates = delivered ? [] : [effect];
+      delivered = true;
+      return Promise.resolve({ updates, notes: [], diagnostics: [] });
+    };
+    // The story update keeps its identity; the effect arrives separately.
+    await waitFor(() => expect(host.canvasProps?.effects).toHaveLength(1));
+    expect(host.canvasProps?.update?.update_id).toBe("1");
+    expect(host.canvasProps?.activeTimers).toEqual(["pulse"]);
+
+    // A command is issued against the revision the effect bumped.
+    const advanceCalls: unknown[] = [];
+    host.advance = (request) => {
+      advanceCalls.push(request);
+      return Promise.resolve(dialogueUpdate("4"));
+    };
+    fireEvent.click(screen.getByRole("button", { name: "推进 / 完成打字" }));
+    fireEvent.click(screen.getByRole("button", { name: "推进 / 完成打字" }));
+    await waitFor(() => expect(advanceCalls.length).toBeGreaterThan(0));
+    expect(
+      (advanceCalls[0] as { expected_revision: string }).expected_revision,
+    ).toBe("3");
+  });
+
+  it("stops asking the host once no timer is running", async () => {
+    let calls = 0;
+    host.tick = () => {
+      calls += 1;
+      return Promise.resolve({ updates: [], notes: [], diagnostics: [] });
+    };
+    await startScene(dialogueUpdate("1"));
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(calls).toBe(0);
+  });
+
+  it("never sends an advance while a script block is active and says why", async () => {
+    await startScene(
+      withInteraction(dialogueUpdate("1"), {
+        titles: { main: "VECTSPACE", secondary: "" },
+        blocks: [
+          {
+            id: "gate",
+            source: "secondary",
+            source_scene: "side",
+            message: "先在副窗口里选一个答案",
+          },
+        ],
+      }),
+    );
+    expect(
+      await screen.findByText(/先在副窗口里选一个答案/),
+    ).toBeInTheDocument();
+    const advanceCalls: unknown[] = [];
+    host.advance = (request) => {
+      advanceCalls.push(request);
+      return Promise.resolve(dialogueUpdate("2"));
+    };
+    fireEvent.click(screen.getByRole("button", { name: "推进 / 完成打字" }));
+    fireEvent.click(screen.getByRole("button", { name: "推进 / 完成打字" }));
+    fireEvent.keyDown(window, { key: " " });
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+    expect(advanceCalls).toHaveLength(0);
+  });
+
+  it("shows what a single-window preview could not do", async () => {
+    renderPreview();
+    host.start = () =>
+      Promise.resolve(
+        started(dialogueUpdate("1"), "7", [
+          "预览是单窗口：另一窗口的标题修改未应用，请在桌面双窗口运行验证",
+        ]),
+      );
+    fireEvent.click(screen.getByRole("button", { name: "从场景入口开始" }));
+    expect(await screen.findByText(/另一窗口的标题修改未应用/)).toBeVisible();
   });
 
   it("surfaces a non-fatal notice when the gameplay font fails", async () => {

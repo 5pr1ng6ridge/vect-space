@@ -1,5 +1,16 @@
 import { outputPorts } from "./story";
 import { validateTemplate } from "./textTemplate";
+import {
+  isWindowVariable,
+  MAX_SCENE_TIMERS,
+  MAX_TIMER_DURATION_MS,
+  MIN_TIMER_INTERVAL_MS,
+  readableVariables,
+  sceneRole,
+  timerTargetProblem,
+  WINDOW_ROLE_LABELS,
+  windowTitleProblem,
+} from "./windowInteraction";
 import { isIntegerScalar, scalarType } from "./scalars";
 import {
   IMAGE_ANIMATION_MAX_DECODED_BYTES,
@@ -50,6 +61,16 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
 
   if (!sceneById.has(project.manifest.entry_scene)) {
     diagnostics.push(error("missing_entry_scene", "项目入口场景不存在"));
+  } else if (
+    sceneRole(sceneById.get(project.manifest.entry_scene)) !== "main"
+  ) {
+    diagnostics.push(
+      error(
+        "secondary_entry_scene",
+        "项目入口场景不能是副窗口专用 Scene；请换一个主窗口 Scene 作为入口",
+        project.manifest.entry_scene,
+      ),
+    );
   }
 
   if (project.manifest.schema_version !== 2) {
@@ -60,6 +81,14 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
   for (const [id, definition] of Object.entries(project.manifest.variables)) {
     if (!ID_PATTERN.test(id)) {
       diagnostics.push(error("invalid_variable", `变量名非法：${id}`));
+    }
+    if (isWindowVariable(id)) {
+      diagnostics.push(
+        error(
+          "reserved_window_variable",
+          `变量 ${id} 是内置的只读窗口标题变量，不能声明同名变量`,
+        ),
+      );
     }
     if (!valueMatchesType(definition.default, definition.type)) {
       diagnostics.push(
@@ -698,6 +727,33 @@ export function validateLive(project: EditorProject): EditorDiagnostic[] {
       );
     }
     seenScenes.add(scene.id);
+    if (
+      scene.window_role !== undefined &&
+      scene.window_role !== "main" &&
+      scene.window_role !== "secondary"
+    ) {
+      diagnostics.push(
+        error(
+          "invalid_window_role",
+          "Scene 用途必须是 main（主窗口）或 secondary（副窗口）",
+          scene.id,
+        ),
+      );
+    }
+    const timerIds = new Set(
+      Object.values(scene.nodes)
+        .filter((node) => node.type === "timer" && node.action === "start")
+        .map((node) => (node.type === "timer" ? node.id : "")),
+    );
+    if (timerIds.size > MAX_SCENE_TIMERS) {
+      diagnostics.push({
+        severity: "warning",
+        code: "too_many_timers",
+        message: `Scene 里有 ${timerIds.size} 个不同的计时器 ID；同时活动的计时器最多 ${MAX_SCENE_TIMERS} 个，超出会在运行时停止`,
+        scene_id: scene.id,
+        node_id: null,
+      });
+    }
     if (scene.nodes[scene.entry] === undefined) {
       diagnostics.push(
         error(
@@ -1067,6 +1123,12 @@ function validateChapterMap(
       issue("object_id", `章节热点 ID 非法或重复：${item.id}`, item.id);
     if (!scenes.has(item.scene_id))
       issue("scene", `章节热点引用未知 Scene：${item.scene_id}`, item.id);
+    else if (sceneRole(scenes.get(item.scene_id)) !== "main")
+      issue(
+        "scene_secondary",
+        `章节热点 ${item.id} 不能进入副窗口专用 Scene：${item.scene_id}`,
+        item.id,
+      );
     if (!scenesInMap.add(item.scene_id))
       issue(
         "scene_duplicate",
@@ -1109,6 +1171,7 @@ function validateChapterMap(
         item.reveal.condition,
         (code, message) =>
           issue(code, `章节热点 ${item.id}：${message}`, item.id),
+        false,
       );
     for (const [variable, value] of Object.entries(item.variable_overrides)) {
       const definition = project.manifest.variables[variable];
@@ -1569,7 +1632,12 @@ function validateNode(
     case "set":
       if (!ID_PATTERN.test(node.variable))
         issue("invalid_variable", "变量名非法");
-      if (project.manifest.variables[node.variable] === undefined) {
+      if (isWindowVariable(node.variable)) {
+        issue(
+          "readonly_window_variable",
+          `${node.variable} 是只读的窗口标题变量，不能用「设置变量」修改；请使用「设置窗口标题」节点`,
+        );
+      } else if (project.manifest.variables[node.variable] === undefined) {
         issue("unknown_variable", `变量未声明：${node.variable}`);
       } else validateMutation(project, node, issue);
       break;
@@ -1909,20 +1977,50 @@ function validateNode(
       }
       break;
     }
-    case "jump":
     case "end":
       break;
-    case "open_window":
+    case "jump": {
+      // A Scene belongs to one window: a jump never changes which window the
+      // story is written for.
+      const destination =
+        node.scene === null
+          ? undefined
+          : project.scenes.find(
+              (candidate) => candidate.definition.id === node.scene,
+            );
+      if (
+        destination !== undefined &&
+        scene !== undefined &&
+        sceneRole(destination.definition) !== sceneRole(scene.definition)
+      ) {
+        issue(
+          "window_role_mismatch",
+          `不能从${WINDOW_ROLE_LABELS[sceneRole(scene.definition)]}专用 Scene 跳转到${WINDOW_ROLE_LABELS[sceneRole(destination.definition)]}专用 Scene ${node.scene}；跳转只能在相同用途的 Scene 之间进行`,
+        );
+      }
+      break;
+    }
+    case "open_window": {
       // Non-blocking: the story continues to `next` in this Scene. The named
       // window Scene is resolved across scenes and must exist.
+      const destination = project.scenes.find(
+        (candidate) => candidate.definition.id === node.scene,
+      );
       if (node.scene.length === 0) {
         issue("missing_window_scene", "副窗口必须指定目标场景");
-      } else if (
-        !project.scenes.some(
-          (candidate) => candidate.definition.id === node.scene,
-        )
-      ) {
+      } else if (destination === undefined) {
         issue("unknown_window_scene", `副窗口指向未声明的场景 ${node.scene}`);
+      } else if (sceneRole(destination.definition) !== "secondary") {
+        issue(
+          "window_scene_not_secondary",
+          `场景 ${node.scene} 不是副窗口专用 Scene；请在场景列表中把它的用途设置为「副窗口」`,
+        );
+      }
+      if (scene !== undefined && sceneRole(scene.definition) !== "main") {
+        issue(
+          "secondary_opens_window",
+          "只有主窗口 Scene 可以打开副窗口；副窗口 Scene 不能再打开窗口",
+        );
       }
       if (
         scene === undefined ||
@@ -1931,6 +2029,80 @@ function validateNode(
         issue("missing_next_node", "open_window 的 next 节点不存在");
       }
       break;
+    }
+    case "window_title": {
+      const problem = windowTitleProblem(node.title);
+      if (problem !== null) issue("invalid_window_title", problem);
+      validateTextTemplate(project, node.title, issue);
+      break;
+    }
+    case "window_control": {
+      if (node.target !== "main" && node.target !== "secondary") {
+        issue("invalid_window_target", "目标窗口必须是主窗口或副窗口");
+      }
+      if (node.action !== "advance" && !ID_PATTERN.test(node.id ?? "")) {
+        issue(
+          "invalid_block_id",
+          "阻挡 ID 不能为空，且只能使用字母、数字、点、下划线和连字符",
+        );
+      }
+      const message = node.message ?? "";
+      const problem = windowTitleProblem(message);
+      if (problem !== null)
+        issue("invalid_block_message", problem.replace("窗口标题", "阻挡提示"));
+      validateTextTemplate(project, message, issue);
+      break;
+    }
+    case "timer": {
+      if (!ID_PATTERN.test(node.id)) {
+        issue(
+          "invalid_timer_id",
+          "计时器 ID 非法（字母、数字、点、下划线、连字符）",
+        );
+      }
+      if (node.action !== "start" && node.action !== "stop") {
+        issue("invalid_timer_action", "计时器操作必须是启动或停止");
+      }
+      if (node.action === "start") {
+        const delay = node.delay_ms ?? 0;
+        if (
+          !Number.isInteger(delay) ||
+          delay < 0 ||
+          delay > MAX_TIMER_DURATION_MS
+        ) {
+          issue(
+            "invalid_timer_delay",
+            `计时器延迟必须在 0–${MAX_TIMER_DURATION_MS} ms 之间`,
+          );
+        }
+        if (node.interval_ms != null) {
+          if (
+            !Number.isInteger(node.interval_ms) ||
+            node.interval_ms < MIN_TIMER_INTERVAL_MS ||
+            node.interval_ms > MAX_TIMER_DURATION_MS
+          ) {
+            issue(
+              "invalid_timer_interval",
+              `重复间隔必须在 ${MIN_TIMER_INTERVAL_MS}–${MAX_TIMER_DURATION_MS} ms 之间`,
+            );
+          }
+        }
+        if (node.target == null || node.target === "") {
+          issue("missing_timer_target", "启动计时器必须选择一个效果节点");
+        } else {
+          const problem = timerTargetProblem(
+            scene?.definition.nodes[node.target],
+          );
+          if (problem !== null) {
+            issue(
+              "invalid_timer_target",
+              `计时器目标 ${node.target} 无效：${problem}`,
+            );
+          }
+        }
+      }
+      break;
+    }
   }
 }
 
@@ -2240,6 +2412,13 @@ function validateButtonAction(
   if (action.sets.length > 64)
     issue("too_many_button_sets", "按钮变量修改超过 64 条");
   for (const set of action.sets) {
+    if (isWindowVariable(set.variable)) {
+      issue(
+        "readonly_window_variable",
+        `按钮不能修改只读的窗口标题变量 ${set.variable}`,
+      );
+      continue;
+    }
     if (
       !ID_PATTERN.test(set.variable) ||
       project.manifest.variables[set.variable] === undefined
@@ -2279,6 +2458,17 @@ function validateButtonAction(
       issue(
         "unknown_button_target",
         `按钮跳转目标节点不存在：${destinationId}/${action.next.target}`,
+      );
+    } else if (
+      sceneRole(destination) !==
+      sceneRole(
+        project.scenes.find((file) => file.definition.id === sceneId)
+          ?.definition,
+      )
+    ) {
+      issue(
+        "window_role_mismatch",
+        `按钮不能跨主/副窗口用途跳转到场景 ${destinationId}`,
       );
     }
   }
@@ -2465,7 +2655,7 @@ function mutationValueType(
   issue: (code: string, message: string) => void,
 ): VariableType | null {
   if (typeof value === "object" && value !== null) {
-    const definition = project.manifest.variables[value.variable];
+    const definition = readableVariables(project.manifest)[value.variable];
     if (definition === undefined) {
       issue("unknown_variable", `操作数引用了未声明变量：${value.variable}`);
       return null;
@@ -2490,10 +2680,9 @@ function validateTextTemplate(
   issue: (code: string, message: string) => void,
 ): void {
   const types = Object.fromEntries(
-    Object.entries(project.manifest.variables).map(([id, definition]) => [
-      id,
-      definition.type,
-    ]),
+    Object.entries(readableVariables(project.manifest)).map(
+      ([id, definition]) => [id, definition.type],
+    ),
   );
   for (const message of validateTemplate(source, types)) {
     issue("invalid_interpolation", message);
@@ -2512,6 +2701,7 @@ function validateCondition(
   project: EditorProject,
   condition: ConditionExpression,
   issue: (code: string, message: string) => void,
+  allowWindowVariables = true,
 ): void {
   let nodes = 0;
   const visit = (candidate: ConditionExpression, depth: number): void => {
@@ -2527,8 +2717,18 @@ function validateCondition(
     switch (candidate.op) {
       case "eq":
       case "ne": {
-        const left = operandType(project, candidate.left, issue);
-        const right = operandType(project, candidate.right, issue);
+        const left = operandType(
+          project,
+          candidate.left,
+          issue,
+          allowWindowVariables,
+        );
+        const right = operandType(
+          project,
+          candidate.right,
+          issue,
+          allowWindowVariables,
+        );
         if (
           left !== null &&
           right !== null &&
@@ -2543,8 +2743,18 @@ function validateCondition(
       case "le":
       case "gt":
       case "ge": {
-        const left = operandType(project, candidate.left, issue);
-        const right = operandType(project, candidate.right, issue);
+        const left = operandType(
+          project,
+          candidate.left,
+          issue,
+          allowWindowVariables,
+        );
+        const right = operandType(
+          project,
+          candidate.right,
+          issue,
+          allowWindowVariables,
+        );
         if (
           (left !== null && !isNumericType(left)) ||
           (right !== null && !isNumericType(right))
@@ -2572,9 +2782,12 @@ function operandType(
   project: EditorProject,
   operand: ValueOperand,
   issue: (code: string, message: string) => void,
+  allowWindowVariables = true,
 ): VariableType | null {
   if ("variable" in operand) {
-    const definition = project.manifest.variables[operand.variable];
+    const definition = allowWindowVariables
+      ? readableVariables(project.manifest)[operand.variable]
+      : project.manifest.variables[operand.variable];
     if (definition === undefined) {
       issue("unknown_variable", `条件引用了未声明变量：${operand.variable}`);
       return null;
@@ -2620,6 +2833,8 @@ function reachabilityWarnings(
   const entry = sceneById.get(project.manifest.entry_scene);
   if (entry === undefined || entry.nodes[entry.entry] === undefined) return [];
   const reached = new Set<string>();
+  // Nodes that only run as a timer's effect: reachable, but not a flow source.
+  const effectReached = new Set<string>();
   const queue: [string, string][] = [[entry.id, entry.entry]];
   // The room map is a second way into the story.  A hotspot that is always
   // revealed *and* always replayable is enterable without ever reaching the
@@ -2646,6 +2861,12 @@ function reachabilityWarnings(
     for (const port of outputPorts(node)) {
       queue.push([port.targetScene ?? sceneId, port.target]);
     }
+    // A timer's effect target runs without following the target's own `next`,
+    // so the target itself is reachable but its successors are not implied.
+    if (node.type === "timer" && node.action === "start" && node.target) {
+      if (scene?.nodes[node.target] !== undefined)
+        effectReached.add(`${sceneId}\u0000${node.target}`);
+    }
     // The secondary runtime enters its own scene while the main flow follows next.
     if (node.type === "open_window") {
       const windowScene = sceneById.get(node.scene);
@@ -2656,7 +2877,8 @@ function reachabilityWarnings(
   const warnings: EditorDiagnostic[] = [];
   for (const file of project.scenes) {
     for (const nodeId of Object.keys(file.definition.nodes)) {
-      if (!reached.has(`${file.definition.id}\u0000${nodeId}`)) {
+      const key = `${file.definition.id}\u0000${nodeId}`;
+      if (!reached.has(key) && !effectReached.has(key)) {
         warnings.push({
           severity: "warning",
           code: "unreachable_node",

@@ -23,6 +23,14 @@ variables:
     scope: save
     type: integer
     default: 0
+  test_string:
+    scope: save
+    type: string
+    default: test_string_test
+  pair_ready:
+    scope: save
+    type: boolean
+    default: false
 characters:
   alli:
     display_name: Alli
@@ -331,6 +339,8 @@ scenes:
 - scenes/ambience_lab.yaml
 - scenes/surface_parity.yaml
 - scenes/shader_parity.yaml
+- scenes/window_pair_main.yaml
+- scenes/window_pair_side.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml

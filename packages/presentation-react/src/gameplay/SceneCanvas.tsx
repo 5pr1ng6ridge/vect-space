@@ -9,6 +9,7 @@ import {
 
 import { PresentationController } from "@vectspace/presentation-core/gameplay-host";
 import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
+import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import type {
@@ -35,7 +36,25 @@ export interface SceneCanvasHandle {
 }
 
 interface SceneCanvasProps {
+  /**
+   * The story update that owns the presentation.  Only its identity
+   * (`session_id` + `update_id`) restarts the presentation: a live refresh of
+   * the same story update (new snapshot object, same ids) must not cancel the
+   * running cues or the pending settle callback.
+   */
   update: RuntimeUpdate | null;
+  /**
+   * Timer effect updates delivered since the story update, in order.  Each one
+   * runs once, beside the story, through the controller's effect path.
+   */
+  effects?: readonly RuntimeUpdate[];
+  /**
+   * Ids of the Scene timers that are still active in the live snapshot
+   * (`snapshot.interaction.timers`), or `null`/absent when unknown.  A repeating
+   * timer that disappears from it was stopped: its in-flight effects are
+   * cancelled, nothing else is touched.
+   */
+  activeTimers?: readonly string[] | null;
   assets: AssetUrlMap;
   animations: AnimationMap;
   settings: Settings;
@@ -54,6 +73,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
   function SceneCanvas(
     {
       update,
+      effects = NO_EFFECTS,
+      activeTimers = null,
       assets,
       animations,
       settings,
@@ -80,11 +101,27 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       null,
     );
     const [initializationFailed, setInitializationFailed] = useState(false);
+    // The presentation effect is keyed by story identity, not by object
+    // identity, so it reads everything else through this ref.  It is written in
+    // an effect declared before the presentation effects, which React runs in
+    // order within one commit.
+    const latestRef = useRef({ update, assets, onSettled, onDiagnostic });
+    const effectLedgerRef = useRef(new BoundedLedger<string>(256));
+    // Timers whose effect re-armed itself (still present in the effect's own
+    // snapshot): only those can be "stopped" by vanishing from the live state.
+    // A one-shot timer is removed when it fires, and its effect must run on.
+    const repeatingOwnersRef = useRef(new Set<string>());
+    const activeTimerKey =
+      activeTimers === null ? null : JSON.stringify([...activeTimers].sort());
 
     useEffect(() => {
       diagnosticRef.current = onDiagnostic;
       uiMotionHostRef.current = uiMotionHost;
     }, [onDiagnostic, uiMotionHost]);
+
+    useEffect(() => {
+      latestRef.current = { update, assets, onSettled, onDiagnostic };
+    }, [assets, onDiagnostic, onSettled, update]);
 
     useEffect(() => {
       const canvas = canvasRef.current;
@@ -168,21 +205,26 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
         });
     }, [assets, controller, onDiagnostic, typingSfxActive, typingSfxCps]);
 
+    const storyUpdateId = update?.update_id ?? null;
+    const storySessionId = update?.session_id ?? null;
     useEffect(() => {
-      if (controller === null || update === null) {
+      const target = latestRef.current.update;
+      if (controller === null || target === null) {
         return;
       }
       let active = true;
       let outcome: PresentationOutcome = "failed";
       void controller
-        .present(update, assets)
+        .present(target, latestRef.current.assets)
         .then((result) => {
           outcome = result;
         })
         .catch((error: unknown) => {
           if (active) {
             console.error("Presentation update failed", error);
-            onDiagnostic(`表现同步失败：${errorMessage(error)}`);
+            latestRef.current.onDiagnostic(
+              `表现同步失败：${errorMessage(error)}`,
+            );
           }
         })
         .finally(() => {
@@ -191,22 +233,83 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
           // generation as well as the React effect lifetime, otherwise a
           // title/replay transition could acknowledge an old RuntimeUpdate
           // after the host has already switched sessions.
-          if (active && controller.isPresentationCurrent(update.update_id)) {
-            onSettled(update, outcome);
+          if (active && controller.isPresentationCurrent(target.update_id)) {
+            const current = latestRef.current.update;
+            latestRef.current.onSettled(
+              current?.update_id === target.update_id ? current : target,
+              outcome,
+            );
           }
         });
       return () => {
         active = false;
       };
-    }, [assets, controller, onDiagnostic, onSettled, update]);
+      // Deliberately keyed by story identity: a state refresh replaces the
+      // update object but must not restart (or orphan the settle of) the
+      // presentation that is still running.
+    }, [controller, storyUpdateId, storySessionId]);
 
     useEffect(() => {
-      if (initializationFailed && update !== null) {
+      effectLedgerRef.current.clear();
+      repeatingOwnersRef.current.clear();
+    }, [controller]);
+
+    useEffect(() => {
+      if (controller === null || activeTimerKey === null) return;
+      const active = new Set(JSON.parse(activeTimerKey) as string[]);
+      for (const owner of [...repeatingOwnersRef.current]) {
+        if (active.has(owner)) continue;
+        repeatingOwnersRef.current.delete(owner);
+        controller.cancelEffectsOf(owner);
+      }
+    }, [activeTimerKey, controller]);
+
+    useEffect(() => {
+      if (controller === null || effects.length === 0) return;
+      for (const effect of effects) {
+        const key = `${effect.session_id ?? ""}:${effect.update_id}`;
+        if (!effectLedgerRef.current.consume(key)) continue;
+        const owner = effect.effect_timer ?? null;
+        if (
+          owner !== null &&
+          effect.snapshot.interaction?.timers?.[owner] !== undefined
+        ) {
+          // A repeating timer that the live state already shows as stopped must
+          // not start another cycle from an effect that was still queued.
+          if (
+            activeTimerKey !== null &&
+            !(JSON.parse(activeTimerKey) as string[]).includes(owner)
+          ) {
+            continue;
+          }
+          repeatingOwnersRef.current.add(owner);
+        }
+        void controller
+          .runEffect(effect, latestRef.current.assets)
+          .then((result) => {
+            // The host never expects an acknowledgement for a timer effect
+            // today, but if it ever does the pending presentation must settle.
+            if (effect.requires_ack) {
+              latestRef.current.onSettled(effect, result);
+            }
+          })
+          .catch((error: unknown) => {
+            console.error("Timer effect failed", error);
+            latestRef.current.onDiagnostic(
+              `表现同步失败：${errorMessage(error)}`,
+            );
+          });
+      }
+    }, [activeTimerKey, controller, effects]);
+
+    useEffect(() => {
+      const target = latestRef.current.update;
+      if (initializationFailed && target !== null) {
         // A rendering failure must not leave a Runtime-gated story permanently locked.
         // Renderer initialization failures release gates without marking them seen.
-        onSettled(update, "failed");
+        latestRef.current.onSettled(target, "failed");
       }
-    }, [initializationFailed, onSettled, update]);
+    }, [initializationFailed, storyUpdateId, storySessionId]);
 
     useImperativeHandle(
       ref,
@@ -241,6 +344,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
     );
   },
 );
+
+const NO_EFFECTS: readonly RuntimeUpdate[] = [];
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);

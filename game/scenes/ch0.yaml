@@ -133,7 +133,7 @@ nodes:
   say_say_say_start:
     type: say
     speaker: test
-    text: 我还没写好剧情。
+    text: 我还没写好剧情。[var=test_string]
     mode: start
     speed_cps: null
     next: sprite_say_say_say_start

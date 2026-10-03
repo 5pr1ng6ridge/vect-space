@@ -24,6 +24,11 @@ import { ChoiceLayer } from "@vectspace/presentation-react/choice";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
+import {
+  activeTimerIds,
+  advanceBlockMessages,
+  isAdvanceBlocked,
+} from "@vectspace/presentation-core/live-update";
 import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import { autoReadingDelay } from "@vectspace/text";
 
@@ -35,6 +40,11 @@ import {
 import { CommandError } from "../shared/commandError";
 import { requireSessionId } from "@vectspace/presentation-core/session-transition";
 import { canFastForwardPrompt } from "./engine/playback";
+import { RuntimeFeed } from "./engine/runtimeFeed";
+import { StoryPauseSync } from "./engine/storyPause";
+import { useTextOccurrence } from "./engine/textOccurrence";
+import { useLiveUpdate } from "./engine/useLiveUpdate";
+import { AdvanceBlockNotice } from "./components/AdvanceBlockNotice";
 import type {
   AdvanceSource,
   AssetUrlMap,
@@ -104,9 +114,14 @@ export default function SecondaryWindow(): ReactElement {
   // must never be applied to the newer session.
   const generationRef = useRef(0);
   const sessionRef = useRef<WireU64>("0");
+  // The shared ordered receive path (notification event + sync + responses).
+  // It only feeds the window while a bootstrap has established its session.
+  const feedRef = useRef<RuntimeFeed | null>(null);
+  const feedReadyRef = useRef(false);
+  const pauseRef = useRef<StoryPauseSync | null>(null);
 
   const [status, setStatus] = useState<Status>("booting");
-  const [update, setUpdate] = useState<RuntimeUpdate | null>(null);
+  const { update, effects, receive, setUpdate } = useLiveUpdate();
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [animations, setAnimations] = useState<AnimationMap>({});
   const [defaultFontId, setDefaultFontId] = useState<string | null>(null);
@@ -126,10 +141,23 @@ export default function SecondaryWindow(): ReactElement {
   const [lockedTextSettings, setLockedTextSettings] =
     useState<LockedTextSettings | null>(null);
 
-  const applyUpdate = useCallback((next: RuntimeUpdate): void => {
-    sessionRef.current = requireSessionId(next.session_id);
-    setUpdate(next);
-  }, []);
+  /**
+   * Single entry of every host update (response, event, sync) into the window.
+   * Updates of any other session, or arriving while a bootstrap is replacing
+   * the session, are dropped here.
+   */
+  const applyIncoming = useCallback(
+    (next: RuntimeUpdate): void => {
+      if (!feedReadyRef.current) return;
+      if (
+        next.session_id !== undefined &&
+        next.session_id !== sessionRef.current
+      )
+        return;
+      receive(next);
+    },
+    [receive],
+  );
 
   /**
    * Fetch the authoritative update for this window's current host session.
@@ -145,6 +173,7 @@ export default function SecondaryWindow(): ReactElement {
     // to its generation, so nothing else would ever clear it.
     busyRef.current = false;
     setBusy(false);
+    feedReadyRef.current = false;
     acknowledgedUpdates.current.clear();
     setUpdate(null);
     setStatus("booting");
@@ -160,6 +189,12 @@ export default function SecondaryWindow(): ReactElement {
       setAnimations(resolvedAssetsToAnimations(resolved));
       setDefaultFontId(payload.default_font ?? null);
       sessionRef.current = requireSessionId(payload.update.session_id);
+      // Updates committed since the bootstrap position are fetched in order;
+      // anything the listener heard while this was loading is remembered.
+      feedRef.current?.sequencer.adopt(sessionRef.current, payload.update.seq);
+      feedReadyRef.current = true;
+      // The host cleared this window's pause reasons when it re-bootstrapped.
+      pauseRef.current?.reset();
       setUpdate(payload.update);
       setStatus("playing");
       await sceneRef.current?.unlockAudio();
@@ -168,11 +203,26 @@ export default function SecondaryWindow(): ReactElement {
       setError(errorMessage(reason));
       setStatus("failed");
     }
-  }, []);
+  }, [setUpdate]);
 
   const recoverReplacedSession = useCallback((): void => {
     void bootstrap();
   }, [bootstrap]);
+
+  useEffect(() => {
+    pauseRef.current = new StoryPauseSync((_reason, active) =>
+      engineApi.secondarySetStoryPause(sessionRef.current, active),
+    );
+    return () => {
+      pauseRef.current = null;
+    };
+  }, []);
+
+  // Only a genuinely hidden document counts; moving focus to the other game
+  // window never does, so the pair keeps running while either one is visible.
+  useEffect(() => {
+    pauseRef.current?.set("hidden", pageHidden);
+  }, [pageHidden]);
 
   /**
    * The replacement listener is registered *before* the first bootstrap so a
@@ -184,7 +234,20 @@ export default function SecondaryWindow(): ReactElement {
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | null = null;
+    const feed = new RuntimeFeed("secondary", {
+      apply: applyIncoming,
+      onNewerSession: () => {
+        void bootstrap();
+      },
+      onError: (reason) => {
+        if (isStaleSessionError(reason)) recoverReplacedSession();
+        else console.error("副窗口更新同步失败", reason);
+      },
+    });
+    feedRef.current = feed;
     const start = async (): Promise<void> => {
+      // Both listeners are registered before the first bootstrap.
+      await feed.subscribe();
       try {
         const stop = await listen(SECONDARY_SESSION_EVENT, () => {
           void bootstrap();
@@ -211,8 +274,10 @@ export default function SecondaryWindow(): ReactElement {
       active = false;
       window.clearTimeout(frame);
       unlisten?.();
+      feed.dispose();
+      if (feedRef.current === feed) feedRef.current = null;
     };
-  }, [bootstrap]);
+  }, [applyIncoming, bootstrap, recoverReplacedSession]);
 
   useEffect(() => {
     const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
@@ -265,7 +330,10 @@ export default function SecondaryWindow(): ReactElement {
           recoverReplacedSession();
           return false;
         }
-        applyUpdate(next);
+        // Responses take the same ordered path as events: a response that has
+        // already been delivered (or overtaken by a newer one) is dropped.
+        if (feedRef.current === null) receive(next);
+        else feedRef.current.sequencer.offer(next);
         return true;
       } catch (reason: unknown) {
         if (generation === generationRef.current) {
@@ -277,6 +345,9 @@ export default function SecondaryWindow(): ReactElement {
             recoverReplacedSession();
           } else {
             setError(errorMessage(reason));
+            // A rejected (typically out-of-date) command: refresh from the
+            // host instead of trusting a notification that may have been lost.
+            feedRef.current?.sequencer.resync();
           }
         }
         return false;
@@ -287,7 +358,7 @@ export default function SecondaryWindow(): ReactElement {
         }
       }
     },
-    [applyUpdate, recoverReplacedSession],
+    [receive, recoverReplacedSession],
   );
 
   const handlePresentationSettled = useCallback(
@@ -327,7 +398,10 @@ export default function SecondaryWindow(): ReactElement {
       if (
         snapshot === undefined ||
         (snapshot.prompt.kind !== "dialogue" &&
-          snapshot.prompt.kind !== "long_text")
+          snapshot.prompt.kind !== "long_text") ||
+        // A script block forbids turning the page (manual, auto and Ctrl alike);
+        // the host re-checks authoritatively, this only avoids a doomed request.
+        isAdvanceBlocked(snapshot)
       ) {
         return;
       }
@@ -458,21 +532,17 @@ export default function SecondaryWindow(): ReactElement {
       (DEFAULT_SETTINGS.skip_mode === "read_only" &&
         runtimeTimelineCue.is_seen));
 
-  const textCueCps = useMemo(
-    () => textRevealSpeed(update, textPrompt),
-    [textPrompt, update],
-  );
-  const hasTextRevealCue =
-    update?.cues.some(
-      (cue) =>
-        (cue.type === "dialogue_reveal" || cue.type === "long_text_reveal") &&
-        cue.prompt_id === textPrompt?.prompt_id,
-    ) ?? false;
-  const cueRevealAnimation = textRevealAnimation(update, textPrompt);
-  const textInstanceKey =
-    textPrompt === null
-      ? null
-      : `${update?.update_id ?? "none"}:${textPrompt.prompt_id}`;
+  // Reveal settings and identity belong to the prompt *occurrence*: they are
+  // decided when it is first shown and survive refreshes of the same prompt.
+  const occurrence = useTextOccurrence(update, textPrompt);
+  const textCueCps = occurrence?.speedCps;
+  const hasTextRevealCue = occurrence?.hasRevealCue ?? false;
+  const cueRevealAnimation = occurrence?.animation ?? null;
+  const textInstanceKey = occurrence?.key ?? null;
+  const advanceBlocked =
+    update !== undefined &&
+    update !== null &&
+    isAdvanceBlocked(update.snapshot);
   const currentTextSettings = useMemo<LockedTextSettings | null>(() => {
     if (textPrompt === null) return null;
     return {
@@ -554,6 +624,9 @@ export default function SecondaryWindow(): ReactElement {
   useEffect(() => {
     let timer = 0;
     if (status !== "playing" || busy || runtimeLocked) return;
+    // While blocked, auto / forced / Ctrl advance must not keep asking: they
+    // resume by themselves when the refresh that lifts the block arrives.
+    if (advanceBlocked) return;
     if (textPrompt === null || completedPromptKey !== textInstanceKey) return;
     if (forcedAuto) {
       timer = window.setTimeout(
@@ -566,6 +639,7 @@ export default function SecondaryWindow(): ReactElement {
     return () => window.clearTimeout(timer);
   }, [
     advance,
+    advanceBlocked,
     busy,
     completedPromptKey,
     fastForwardDialogueAllowed,
@@ -641,6 +715,10 @@ export default function SecondaryWindow(): ReactElement {
           typingSfxActive={typingSfxActive && !fastForwardActive}
           typingSfxCps={typingSfxCps}
           update={update}
+          effects={effects}
+          activeTimers={
+            update === null ? null : activeTimerIds(update.snapshot)
+          }
           uiMotionHost={uiMotionHost}
           visible={status === "playing"}
         />
@@ -676,7 +754,7 @@ export default function SecondaryWindow(): ReactElement {
                 }
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
-                key={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${update.snapshot.revision}`}`}
+                key={textInstanceKey ?? `retained:${update.update_id}`}
                 motionHost={uiMotionHost}
                 nameBoxSource={
                   resolveImageAsset("gui.name_box", assets, animations) ?? null
@@ -690,7 +768,11 @@ export default function SecondaryWindow(): ReactElement {
                 measurementScale={viewportMetrics.scale}
                 ref={dialogueRef}
                 revealImmediately={dialogue === null || !hasTextRevealCue}
-                sessionKey={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${renderedDialoguePage.page_id}`}`}
+                sessionKey={
+                  dialogue === null
+                    ? `retained:${renderedDialoguePage.page_id}`
+                    : (textInstanceKey ?? update.update_id)
+                }
                 suspended={pageHidden}
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
@@ -723,7 +805,11 @@ export default function SecondaryWindow(): ReactElement {
                 fontKey={defaultFontId ?? "system"}
                 ref={longTextRef}
                 revealImmediately={!hasTextRevealCue}
-                sessionKey={`${update.update_id}:${longText?.prompt_id ?? `retained:${longTextPage.active_step_index}`}`}
+                sessionKey={
+                  longText === null
+                    ? `retained:${longTextPage.document_id}:${longTextPage.active_step_index}`
+                    : (textInstanceKey ?? update.update_id)
+                }
                 suspended={pageHidden}
                 visible={longTextPage.visible !== false}
               />
@@ -747,6 +833,10 @@ export default function SecondaryWindow(): ReactElement {
                 {/* No action: the main window owns the secondary's lifecycle. */}
               </div>
             )}
+
+            <AdvanceBlockNotice
+              messages={advanceBlockMessages(update.snapshot)}
+            />
 
             {runtimeLocked && <div className="runtime-lock">表现同步中…</div>}
           </>
@@ -777,38 +867,6 @@ export default function SecondaryWindow(): ReactElement {
       </section>
     </main>
   );
-}
-
-function textRevealSpeed(
-  update: RuntimeUpdate | null,
-  prompt: DialoguePrompt | LongTextPrompt | null,
-): number | null | undefined {
-  if (update === null || prompt === null) return undefined;
-  const cue = update.cues.find(
-    (candidate) =>
-      (candidate.type === "dialogue_reveal" ||
-        candidate.type === "long_text_reveal") &&
-      candidate.prompt_id === prompt.prompt_id,
-  );
-  return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
-    ? cue.speed_cps
-    : undefined;
-}
-
-function textRevealAnimation(
-  update: RuntimeUpdate | null,
-  prompt: DialoguePrompt | LongTextPrompt | null,
-): TextRevealAnimation | null {
-  if (update === null || prompt === null) return null;
-  const cue = update.cues.find(
-    (candidate) =>
-      (candidate.type === "dialogue_reveal" ||
-        candidate.type === "long_text_reveal") &&
-      candidate.prompt_id === prompt.prompt_id,
-  );
-  return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
-    ? (cue.reveal_animation ?? null)
-    : null;
 }
 
 function errorMessage(reason: unknown): string {

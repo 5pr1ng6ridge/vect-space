@@ -12,6 +12,10 @@ import {
   setPortTarget,
 } from "../story";
 import { removeNodesFromGroups } from "../components/graphGroups";
+import {
+  effectReferences,
+  setEffectReferenceTarget,
+} from "../windowInteraction";
 import type { EditorProject, SceneDefinition } from "../types";
 
 export interface DeletionOption {
@@ -159,6 +163,13 @@ export function deleteNodes(
         for (const port of outputPorts(changed)) {
           if (port.targetScene === null && removed.has(port.target))
             changed = setPortTarget(changed, port.id, fallback);
+        }
+        // A timer's effect target is not a flow edge: the flow fallback would
+        // usually be an invalid effect, so the reference is cleared and the
+        // timer is reported until the author picks a new target.
+        for (const reference of effectReferences(changed)) {
+          if (removed.has(reference.target))
+            changed = setEffectReferenceTarget(changed, reference.id, null);
         }
       }
       if (

@@ -1,28 +1,35 @@
+mod pair;
 mod save;
+mod sync;
+mod timers;
 
 use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, MutexGuard,
+        mpsc, Arc, Mutex, MutexGuard,
     },
     time::{Duration, Instant},
 };
 
+use pair::{Authority, Committed, Pair};
 use save::{LoadedSlot, ProfileManager, SaveError, SaveManager, SecondaryState, SlotDocument};
+use sync::{Outboxes, PauseState};
 use tauri::{path::BaseDirectory, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use vectspace_core::{
     content::ContentCatalog,
+    interaction::{WindowRole, WindowTitles, DEFAULT_MAIN_TITLE, DEFAULT_SECONDARY_TITLE},
     model::{
-        AdvanceSource, ChapterMapSnapshot, CueGate, DialogueHistoryEntry, PresentationCueKind,
+        AdvanceSource, ChapterMapSnapshot, CueGate, PresentationCueKind,
         PresentationOutcome, ProfileState, ResolvedAsset, RuntimeUpdate, SaveSlotRequest,
-        SaveSlotSummary, SceneNode, Settings, VariableMap,
+        SaveSlotSummary, SceneNode, Settings,
     },
     runtime::{self, RuntimeEngine},
 };
 use vectspace_protocol::{
     WireBootstrapPayload, WireCommandError, WireCommandErrorCode, WireDialogueHistoryEntry,
-    WireRuntimeSnapshot, WireRuntimeUpdate, WireSessionMode, WireU64,
+    WirePauseAck, WirePauseReason, WireRuntimeSnapshot, WireRuntimeUpdate, WireSessionMode,
+    WireSyncBatch, WireU64, WireUpdateNotice,
 };
 
 struct EngineState {
@@ -59,6 +66,56 @@ struct EngineState {
     windows: Arc<dyn NativeWindowOps>,
     saves: SaveManager,
     profile: ProfileManager,
+    /// Bounded committed-update buffers, one per window, in the order the
+    /// frontends must apply them (see `sync.rs`).  Always locked last.
+    outbox: Mutex<Outboxes>,
+    /// Why story timers are paused right now (see `sync.rs`).
+    pause: Mutex<PauseState>,
+    /// The window titles the native windows currently show, so a transition only
+    /// issues native calls for titles that really changed and a failed one is
+    /// retried by the next transition.
+    native_titles: Mutex<NativeTitles>,
+    /// Wakes the timer scheduler thread; `None` when no scheduler runs (tests).
+    timer_wake: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+/// What the native windows currently show.  `None` means unknown, which forces
+/// the next sync to set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeTitles {
+    main: Option<String>,
+    secondary: Option<String>,
+}
+
+impl EngineState {
+    fn new(
+        content: ContentCatalog,
+        runtime: RuntimeEngine,
+        windows: Arc<dyn NativeWindowOps>,
+        saves: SaveManager,
+        profile: ProfileManager,
+    ) -> Self {
+        Self {
+            content,
+            runtime: Mutex::new(runtime),
+            replay: Mutex::new(None),
+            secondary: Mutex::new(None),
+            session_gate: Mutex::new(()),
+            replay_generation: AtomicU64::new(0),
+            session_id: AtomicU64::new(1),
+            secondary_generation: AtomicU64::new(0),
+            windows,
+            saves,
+            profile,
+            outbox: Mutex::new(Outboxes::default()),
+            pause: Mutex::new(PauseState::default()),
+            native_titles: Mutex::new(NativeTitles {
+                main: Some(DEFAULT_MAIN_TITLE.to_owned()),
+                secondary: None,
+            }),
+            timer_wake: Mutex::new(None),
+        }
+    }
 }
 
 /// Who currently owns the single secondary window.  The owner answers two
@@ -106,12 +163,6 @@ struct SecondarySession {
     owner: SecondaryOwner,
     /// Wire token identifying this secondary instance.
     token: u64,
-    /// A runtime-gated presentation produced while this session was being
-    /// staged.  The frontend has not seen it yet, so the first bootstrap
-    /// delivers this exact update (same update id) instead of a cue-less one:
-    /// the runtime is otherwise waiting for an acknowledgement nothing would
-    /// ever send, which would block the secondary's gameplay forever.
-    initial_update: Option<RuntimeUpdate>,
 }
 
 /// Native window work for the secondary window.  The host never performs it
@@ -147,6 +198,22 @@ trait NativeWindowOps: Send + Sync {
     /// request, which is always prevented.
     fn is_closing_secondary(&self) -> bool {
         false
+    }
+    /// Show `title` as the native title of the given window.  Like every native
+    /// operation it is fallible, never called while a runtime mutex is held, and
+    /// a failure rolls the whole transaction back.
+    fn set_title(&self, role: WindowRole, title: &str) -> Result<(), WireCommandError> {
+        let _ = (role, title);
+        Ok(())
+    }
+    /// Announce that a window has new committed updates.  Best effort: a lost
+    /// notification is recovered by the frontend's own incremental sync.
+    fn notify_updated(&self, role: WindowRole, notice: &WireUpdateNotice) {
+        let _ = (role, notice);
+    }
+    /// Surface a diagnostic that has no command to fail (a stopped timer...).
+    fn report_diagnostic(&self, message: &str) {
+        eprintln!("{message}");
     }
 }
 
@@ -198,6 +265,16 @@ impl NativeWindowOps for TauriWindowOps {
             .get_webview_window(SECONDARY_WINDOW_LABEL)
             .is_some();
         let window = ensure_secondary_window(&self.app, &self.closing_secondary)?;
+        if reused {
+            // A surviving window may still carry the title of its previous
+            // session; the new session starts from the default title.
+            window.set_title(DEFAULT_SECONDARY_TITLE).map_err(|error| {
+                WireCommandError::new(
+                    WireCommandErrorCode::Internal,
+                    format!("无法重置副窗口标题: {error}"),
+                )
+            })?;
+        }
         if needs_session_refresh(replaced, reused) {
             // Tell the frontend to cancel the old presentation and re-bootstrap
             // under the new token.  A notification that is missed anyway is
@@ -266,6 +343,40 @@ impl NativeWindowOps for TauriWindowOps {
         ensure_secondary_window(&self.app, &self.closing_secondary)?;
         Ok(true)
     }
+
+    fn set_title(&self, role: WindowRole, title: &str) -> Result<(), WireCommandError> {
+        let label = match role {
+            WindowRole::Main => MAIN_WINDOW_LABEL,
+            WindowRole::Secondary => SECONDARY_WINDOW_LABEL,
+        };
+        let window = self.app.get_webview_window(label).ok_or_else(|| {
+            WireCommandError::new(
+                WireCommandErrorCode::Internal,
+                format!("无法设置窗口标题: 窗口 {label} 不存在"),
+            )
+        })?;
+        window.set_title(title).map_err(|error| {
+            WireCommandError::new(
+                WireCommandErrorCode::Internal,
+                format!("无法设置窗口标题: {error}"),
+            )
+        })
+    }
+
+    fn notify_updated(&self, role: WindowRole, notice: &WireUpdateNotice) {
+        let label = match role {
+            WindowRole::Main => MAIN_WINDOW_LABEL,
+            WindowRole::Secondary => SECONDARY_WINDOW_LABEL,
+        };
+        if let Err(error) = self.app.emit_to(label, sync::UPDATED_EVENT, notice) {
+            eprintln!("更新通知投递失败（前端会通过增量同步恢复）: {error}");
+        }
+    }
+
+    fn report_diagnostic(&self, message: &str) {
+        eprintln!("{message}");
+        let _ = self.app.emit_to(MAIN_WINDOW_LABEL, HOST_DIAGNOSTIC_EVENT, message);
+    }
 }
 
 impl TauriWindowOps {
@@ -311,16 +422,11 @@ const REPLAY_ID_STRIDE: u64 = 1 << 32;
 /// never share a revision/update namespace with a replay session.
 const SECONDARY_ID_STRIDE: u64 = 1 << 40;
 const SECONDARY_REPLACED_EVENT: &str = "vectspace://secondary-session";
+const HOST_DIAGNOSTIC_EVENT: &str = "vectspace://host-diagnostic";
 
 /// Which window a command was invoked from.  This is derived from the WebView
 /// label the host itself assigned, never from a JS-supplied value, so a crafted
 /// payload cannot impersonate the main window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WindowRole {
-    Main,
-    Secondary,
-}
-
 fn window_role(window: &tauri::WebviewWindow) -> Option<WindowRole> {
     role_for_label(window.label())
 }
@@ -381,45 +487,15 @@ enum SecondaryPlan {
     Hide,
 }
 
-/// The secondary-window work a main transition implies, built off to the side.
-/// Staging never touches the live slot: the session only exists in this
-/// candidate until the profile write and the native window step have both
-/// succeeded.
-struct StagedSecondary {
-    /// The session that should replace the live slot, if any.
-    session: Option<SecondarySession>,
-    plan: SecondaryPlan,
-    /// Shared-map effects produced while the staged session evaluated its
-    /// opening Scene.  They are published to the main candidate in the same
-    /// transaction, so a secondary startup can never mutate a copy of the
-    /// shared state that the main runtime then overwrites.
-    save_variables: Option<VariableMap>,
-    profile_variables: Option<VariableMap>,
-    /// Occurrences produced by the staged session's opening evaluation, in
-    /// order, which join the merged ledger as part of the same transaction.
-    appended_history: Vec<DialogueHistoryEntry>,
-}
-
-impl StagedSecondary {
-    fn none(plan: SecondaryPlan) -> Self {
-        Self {
-            session: None,
-            plan,
-            save_variables: None,
-            profile_variables: None,
-            appended_history: Vec::new(),
-        }
-    }
-}
-
 /// A committed main-story transaction.  The native window step happens after
 /// the in-memory commit because window creation/destruction can re-enter the
 /// platform event loop; `previous_*` keeps the rollback data for the one case
 /// where that step fails, so the host can never report success while the native
-/// window and the runtime disagree.
+/// window and the runtime disagree.  Nothing in `committed` is published to a
+/// WebView before that step (and the profile write) has succeeded.
 #[derive(Debug)]
 struct MainTransition {
-    update: RuntimeUpdate,
+    committed: Committed,
     plan: SecondaryPlan,
     previous_runtime: RuntimeEngine,
     previous_secondary: SecondaryBaseline,
@@ -437,7 +513,7 @@ struct MainTransition {
 /// window.
 #[derive(Debug)]
 struct ReplayTransition {
-    update: RuntimeUpdate,
+    committed: Committed,
     plan: SecondaryPlan,
     previous_replay: Option<ReplaySession>,
     previous_secondary: SecondaryBaseline,
@@ -449,8 +525,8 @@ enum SecondaryBaseline {
     /// The transition did not touch the slot at all, so a rollback must leave
     /// the live session exactly where it is.
     Untouched,
-    /// The transition replaced or cleared the slot; the previous contents are
-    /// restored on rollback.
+    /// The transition replaced, advanced or cleared the slot; the previous
+    /// contents are restored on rollback.
     Restore(Box<Option<SecondarySession>>),
 }
 
@@ -483,6 +559,9 @@ struct ReplaySession {
     scene_id: String,
     ending: bool,
     generation: u64,
+    /// Whether the host was on the title screen (the chapter map) when the
+    /// replay started; leaving the replay goes back there.
+    was_title: bool,
 }
 
 impl EngineState {
@@ -527,8 +606,8 @@ impl EngineState {
         Ok(true)
     }
 
-    /// Run one main-story command against a clone, then perform its staged
-    /// native window step.
+    /// Run one main-story command against a clone of **both** windows, then
+    /// perform its staged native window work.
     ///
     /// Lock order: `session_gate` (held by the caller) -> `runtime`/`secondary`
     /// -> released -> native window calls.  Native calls are never made while a
@@ -536,11 +615,11 @@ impl EngineState {
     /// the window event handler; the session gate is still held, so no other
     /// command can observe the gap.  A failed native step rolls the whole
     /// transaction back instead of reporting success with a missing or orphaned
-    /// window.
+    /// window, and nothing is published before it has succeeded.
     fn transact_runtime(
         &self,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
-    ) -> Result<RuntimeUpdate, WireCommandError> {
+    ) -> Result<Committed, WireCommandError> {
         self.finish_transition(self.commit_main_runtime(operation)?)
     }
 
@@ -551,14 +630,15 @@ impl EngineState {
         &self,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
         force_hide: bool,
-    ) -> Result<RuntimeUpdate, WireCommandError> {
+    ) -> Result<Committed, WireCommandError> {
         self.finish_transition(self.commit_main_runtime_forced(operation, force_hide)?)
     }
 
-    /// The pure, testable half of a main-story transaction: clone, mutate, stage
-    /// the secondary transition, publish the staged session's startup effects to
-    /// the candidate, persist the profile and commit both runtimes in memory.
-    /// No native API is touched, so host tests can exercise it without a window.
+    /// The pure, testable half of a main-story transaction: clone both
+    /// runtimes, run the command, settle the pair (host-control nodes, shared
+    /// state, derived prompts), persist the profile and commit both runtimes in
+    /// memory.  No native API is touched, so host tests can exercise it without a
+    /// window.
     fn commit_main_runtime(
         &self,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
@@ -571,52 +651,60 @@ impl EngineState {
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
         force_hide: bool,
     ) -> Result<MainTransition, WireCommandError> {
+        self.commit_story_pair(
+            force_hide,
+            |pair| {
+                let update = operation(&mut pair.primary).map_err(WireCommandError::from)?;
+                pair.push(WindowRole::Main, update);
+                Ok(())
+            },
+            Some(WindowRole::Main),
+        )
+    }
+
+    /// The common story-owned transaction over the pair.  `run` produces the
+    /// command's updates on the candidate pair; `origin` names the window whose
+    /// first update is the command's response.
+    fn commit_story_pair(
+        &self,
+        force_hide: bool,
+        run: impl FnOnce(&mut Pair) -> Result<(), WireCommandError>,
+        origin: Option<WindowRole>,
+    ) -> Result<MainTransition, WireCommandError> {
         let mut runtime = self.runtime()?;
-        let mut candidate = runtime.clone();
-        let mut update = operation(&mut candidate).map_err(WireCommandError::from)?;
-        let previous_scene = runtime.snapshot().location.scene_id.clone();
-        let opened = take_open_window_request(&mut update);
-        let scene_changed = candidate.snapshot().location.scene_id != previous_scene;
-        // Staging happens before the profile write and the in-memory commit so a
-        // failure here — or a rejected Scene id — leaves the previous valid
-        // session completely untouched.
-        let staged = self.stage_main_transition(&candidate, opened, scene_changed, force_hide)?;
-        if let Some(variables) = &staged.save_variables {
-            candidate.set_save_variables(variables.clone());
+        let live = self.secondary()?.clone();
+        let live_before = live.is_some();
+        let mut pair = Pair::new(Authority::Story, runtime.clone(), live, live_before);
+        if force_hide {
+            // A hard ownership boundary (new game, load): the previous window is
+            // gone before any node runs, so no authored request can address it.
+            pair.hide_secondary();
         }
-        if let Some(variables) = &staged.profile_variables {
-            candidate.set_profile_variables(variables.clone());
-        }
-        if !staged.appended_history.is_empty() {
-            // The Scene the secondary window opens on may already produce its
-            // own opening line. That line is a real occurrence the player sees
-            // in the secondary window, so it joins the merged ledger with the
-            // very command that opened the window (after this command's own
-            // main-story occurrences).
-            candidate.extend_dialogue_history(staged.appended_history.clone());
-        }
+        pair.seed_secondary();
+        // Everything below works on the candidate: a failure anywhere leaves the
+        // previous valid pair completely untouched.
+        run(&mut pair)?;
+        self.settle(&mut pair)?;
+        self.finish_pair(&mut pair, force_hide)?;
+        let plan = self.plan_for(&pair);
+        let committed = Committed::from_pair(&mut pair, origin);
+        let (candidate, staged) = (pair.primary, pair.secondary);
         let previous_profile = runtime.profile_state(&self.content);
         let profile_written = self.commit_runtime(&runtime, &candidate)?;
         let previous_runtime = std::mem::replace(&mut *runtime, candidate);
         drop(runtime);
-        // Only the plans that actually change the secondary touch its slot: a
-        // command that neither opens a window nor leaves its owning Scene must
-        // not disturb the live session.
+        // The secondary advances with every command (shared state, derived
+        // prompt), so its slot is always part of the rollback baseline.
         let mut slot = self.secondary()?;
-        let previous_secondary = match staged.plan {
-            SecondaryPlan::None => SecondaryBaseline::Untouched,
-            SecondaryPlan::Show { .. } => {
-                SecondaryBaseline::Restore(Box::new(std::mem::replace(
-                    &mut *slot,
-                    staged.session,
-                )))
-            }
-            SecondaryPlan::Hide => SecondaryBaseline::Restore(Box::new(slot.take())),
+        let previous_secondary = if live_before || staged.is_some() {
+            SecondaryBaseline::Restore(Box::new(std::mem::replace(&mut *slot, staged)))
+        } else {
+            SecondaryBaseline::Untouched
         };
         drop(slot);
         Ok(MainTransition {
-            update,
-            plan: staged.plan,
+            committed,
+            plan,
             previous_runtime,
             previous_secondary,
             previous_profile,
@@ -625,13 +713,10 @@ impl EngineState {
     }
 
     /// Perform the staged native work for a committed transition, rolling the
-    /// whole transition back if the native window cannot be made to match the
-    /// new state.
-    fn finish_transition(
-        &self,
-        transition: MainTransition,
-    ) -> Result<RuntimeUpdate, WireCommandError> {
-        if let Err(error) = self.apply_secondary_plan(transition.plan.clone()) {
+    /// whole transition back if the native window or its title cannot be made to
+    /// match the new state.
+    fn finish_transition(&self, transition: MainTransition) -> Result<Committed, WireCommandError> {
+        if let Err(error) = self.apply_native_plan(&transition.plan) {
             // Every rollback action is attempted, and every failure is reported:
             // a cleanup failure must never hide the fact that memory and the
             // profile were restored, and the caller must never be told only half
@@ -639,11 +724,18 @@ impl EngineState {
             let cleanup_failures = self.rollback_main_transition(&transition);
             return Err(aggregate_transition_failure(error, cleanup_failures));
         }
-        // The native step only enqueued its work (see [`TauriWindowOps`]), so
-        // this is where a missing window or an orphaned one is corrected.
-        debug_assert_no_window_cue(&transition.update);
-        self.reconcile_secondary_window(&transition.plan);
-        Ok(transition.update)
+        Ok(transition.committed)
+    }
+
+    /// The native half of every transition: the window plan, the best-effort
+    /// reconciliation of a window the runtime never created, and the native
+    /// titles.  The native step only enqueues its work (see [`TauriWindowOps`]),
+    /// so the reconciliation is where a missing window or an orphaned one is
+    /// corrected.
+    fn apply_native_plan(&self, plan: &SecondaryPlan) -> Result<(), WireCommandError> {
+        self.apply_secondary_plan(plan.clone())?;
+        self.reconcile_secondary_window(plan);
+        self.sync_native_titles()
     }
 
     /// Perform the staged native work.  Called with every runtime mutex released:
@@ -653,9 +745,81 @@ impl EngineState {
     fn apply_secondary_plan(&self, plan: SecondaryPlan) -> Result<(), WireCommandError> {
         match plan {
             SecondaryPlan::None => Ok(()),
-            SecondaryPlan::Show { replaced } => self.windows.show_secondary(replaced),
-            SecondaryPlan::Hide => self.windows.hide_secondary(),
+            SecondaryPlan::Show { replaced } => {
+                self.windows.show_secondary(replaced)?;
+                // A shown window starts from the default title (a surviving
+                // window is reset by the seam).
+                self.note_native_secondary_title(Some(DEFAULT_SECONDARY_TITLE));
+                Ok(())
+            }
+            SecondaryPlan::Hide => self.hide_native_secondary(),
         }
+    }
+
+    /// Destroy the native secondary window; whatever title it showed is gone.
+    fn hide_native_secondary(&self) -> Result<(), WireCommandError> {
+        self.windows.hide_secondary()?;
+        self.forget_native_secondary_title();
+        Ok(())
+    }
+
+    fn forget_native_secondary_title(&self) {
+        self.note_native_secondary_title(None);
+    }
+
+    fn note_native_secondary_title(&self, title: Option<&str>) {
+        if let Ok(mut applied) = self.native_titles.lock() {
+            applied.secondary = title.map(str::to_owned);
+        }
+    }
+
+    /// The titles the native windows should show right now.  The authority is
+    /// the active story's (or replay's) runtime; the title screen shows the
+    /// default title and no secondary exists.
+    fn desired_titles(&self) -> Result<(String, Option<String>), WireCommandError> {
+        if self.pause_state()?.title {
+            return Ok((DEFAULT_MAIN_TITLE.to_owned(), None));
+        }
+        let titles = match self.replay()?.as_ref() {
+            Some(replay) => replay.runtime.snapshot().interaction.titles.clone(),
+            None => self.runtime()?.snapshot().interaction.titles.clone(),
+        };
+        let secondary = self
+            .secondary()?
+            .as_ref()
+            .map(|_| titles.secondary.clone());
+        Ok((titles.main, secondary))
+    }
+
+    /// Make the native titles match the committed state.  Only titles that
+    /// differ from what the windows show are touched; a failure leaves the
+    /// applied record untouched so the next transition retries it.
+    fn sync_native_titles(&self) -> Result<(), WireCommandError> {
+        let (main, secondary) = self.desired_titles()?;
+        let applied = self
+            .native_titles
+            .lock()
+            .map_err(|_| WireCommandError::new(WireCommandErrorCode::Internal, "窗口标题互斥锁已损坏"))?
+            .clone();
+        let set = |role: WindowRole, title: &str| -> Result<(), WireCommandError> {
+            self.windows.set_title(role, title)?;
+            if let Ok(mut applied) = self.native_titles.lock() {
+                match role {
+                    WindowRole::Main => applied.main = Some(title.to_owned()),
+                    WindowRole::Secondary => applied.secondary = Some(title.to_owned()),
+                }
+            }
+            Ok(())
+        };
+        if applied.main.as_deref() != Some(main.as_str()) {
+            set(WindowRole::Main, &main)?;
+        }
+        if let Some(secondary) = secondary {
+            if applied.secondary.as_deref() != Some(secondary.as_str()) {
+                set(WindowRole::Secondary, &secondary)?;
+            }
+        }
+        Ok(())
     }
 
     /// Undo a committed transition whose native window step failed, so the host
@@ -688,81 +852,21 @@ impl EngineState {
         // retry path refreshes it because it is a reused native window.
         let restored_without_secondary = transition.previous_secondary.restored_without_secondary();
         if restored_without_secondary && matches!(transition.plan, SecondaryPlan::Show { .. }) {
-            if let Err(error) = self.windows.hide_secondary() {
+            if let Err(error) = self.hide_native_secondary() {
                 failures.push(WireCommandError::new(
                     WireCommandErrorCode::Internal,
                     format!("副窗口回滚清理失败，可能残留未受管理的原生窗口: {}", error.message),
                 ));
             }
         }
-        failures
-    }
-
-    /// Compute the secondary-window work a committed main transition implies and
-    /// build the session it needs, without touching the live slot.  `candidate`
-    /// is the main runtime that is about to be committed, so the secondary is
-    /// seeded from the state the main story is entering — never from the state it
-    /// is leaving behind.  Staging happens *before* the profile write and the
-    /// in-memory commit so a failure here leaves the previous valid session
-    /// completely untouched.
-    fn stage_main_transition(
-        &self,
-        candidate: &RuntimeEngine,
-        opened: Option<String>,
-        scene_changed: bool,
-        force_hide: bool,
-    ) -> Result<StagedSecondary, WireCommandError> {
-        let live = self.secondary()?.is_some();
-        // A window request in this same update takes precedence over tearing the
-        // previous owner down: the Scene the update lands in owns the window it
-        // asks for, exactly like a repeated `open_window` inside one Scene.  This
-        // is what makes an entry path work — the new game's first update, or an
-        // update that opens a window and leaves the Scene in the same immediate
-        // chain — instead of silently dropping the request.
-        //
-        // Only when the update carries no request does leaving the owning Scene
-        // tear the secondary down, exactly like a new game, a load or a return to
-        // the title.
-        let Some(scene_id) = opened else {
-            return Ok(StagedSecondary::none(if (force_hide || scene_changed) && live {
-                SecondaryPlan::Hide
-            } else {
-                SecondaryPlan::None
-            }));
-        };
-        if !self.content.scenes.contains_key(&scene_id) {
-            return Err(WireCommandError::new(
-                WireCommandErrorCode::Validation,
-                format!("open_window 指向未声明的场景 {scene_id}"),
+        // The native titles follow the restored state again.
+        if let Err(error) = self.sync_native_titles() {
+            failures.push(WireCommandError::new(
+                WireCommandErrorCode::Internal,
+                format!("窗口标题回滚失败: {}", error.message),
             ));
         }
-        let owning_scene = candidate.snapshot().location.scene_id.clone();
-        let token = self.bump_secondary_generation()?;
-        let id_base = token
-            .checked_mul(SECONDARY_ID_STRIDE)
-            .ok_or_else(|| WireCommandError::new(WireCommandErrorCode::Internal, "副窗口编号耗尽"))?;
-        let mut session = self.build_secondary_session(
-            candidate,
-            &scene_id,
-            SecondaryOwner::Story {
-                scene_id: owning_scene,
-            },
-            token,
-            id_base,
-        )?;
-        // The staged session keeps its own copy of the shared maps; the effects
-        // of its opening evaluation are handed back so the caller can publish
-        // them to the main candidate in the same transaction.
-        let save_variables = session.runtime.snapshot().variables.clone();
-        let profile_variables = session.runtime.profile_variables_map().clone();
-        let appended_history = session.runtime.take_appended_history();
-        Ok(StagedSecondary {
-            session: Some(session),
-            plan: SecondaryPlan::Show { replaced: live },
-            save_variables: Some(save_variables),
-            profile_variables: Some(profile_variables),
-            appended_history,
-        })
+        failures
     }
 
     /// A fresh runtime pre-seeded with the main runtime's shared state.
@@ -788,8 +892,10 @@ impl EngineState {
     }
 
     /// Build the secondary runtime for `scene_id` in an isolated ID namespace,
-    /// seeded from `main` — which is the main runtime this command is about to
-    /// commit — before any node of the opening Scene evaluates.
+    /// seeded from `main` — which is the candidate this transaction is about to
+    /// commit — before any node of the opening Scene evaluates.  Returns the
+    /// session and the update of its opening run, which the caller records on
+    /// the pair like any other step.
     fn build_secondary_session(
         &self,
         main: &RuntimeEngine,
@@ -797,132 +903,27 @@ impl EngineState {
         owner: SecondaryOwner,
         token: u64,
         id_base: u64,
-    ) -> Result<SecondarySession, WireCommandError> {
+        titles: WindowTitles,
+    ) -> Result<(SecondarySession, RuntimeUpdate), WireCommandError> {
         let mut runtime = self.seed_secondary_runtime(main)?;
         runtime.prepare_session_ids(id_base, id_base, id_base);
         // The secondary shares the host-authoritative variable maps, so its own
         // Scene boundaries must preserve them.
         runtime.set_shared_save_variables(true);
-        let mut first = runtime
+        // The opening nodes already see the live window titles.
+        runtime.prepare_window_titles(titles);
+        let first = runtime
             .start_scene_preview(&self.content, scene_id)
             .map_err(WireCommandError::from)?;
-        // A control cue is a host instruction and must never reach a WebView,
-        // not even the one that just opened; this also recomputes the
-        // acknowledgement requirement from the presentation that is actually
-        // delivered.
-        take_open_window_request(&mut first);
-        debug_assert_eq!(first.snapshot.location.scene_id, scene_id);
-        Ok(SecondarySession {
-            runtime,
-            scene_id: scene_id.to_owned(),
-            owner,
-            token,
-            // Only a runtime-gated opening presentation has to survive into the
-            // first bootstrap: without it the secondary's gate could never be
-            // acknowledged and gameplay would be blocked forever.
-            initial_update: first.requires_ack.then_some(first),
-        })
-    }
-
-    /// The native window work an *in-replay* transition implies.  A replay only
-    /// ever touches the window it owns: a story-owned slot cannot be live while a
-    /// replay is running, and `closing` (the replay left the Scene that owns the
-    /// window, or is over) hides the slot that carries this replay's generation.
-    fn stage_replay_secondary(
-        &self,
-        candidate: &RuntimeEngine,
-        opened: Option<String>,
-        closing: bool,
-        generation: u64,
-    ) -> Result<StagedSecondary, WireCommandError> {
-        let (any_live, owned) = {
-            let slot = self.secondary()?;
-            (
-                slot.is_some(),
-                slot.as_ref().is_some_and(|session| {
-                    session.owner == SecondaryOwner::Replay { generation }
-                }),
-            )
-        };
-        if closing {
-            return Ok(StagedSecondary::none(if owned {
-                SecondaryPlan::Hide
-            } else {
-                SecondaryPlan::None
-            }));
-        }
-        let Some(scene_id) = opened else {
-            return Ok(StagedSecondary::none(SecondaryPlan::None));
-        };
-        self.stage_replay_open_window(candidate, &scene_id, generation, any_live)
-    }
-
-    /// The native window work a replay *entry* implies.  Entry is an ownership
-    /// boundary: the main story is suspended behind the replay, so a story-owned
-    /// window cannot outlive it — unless the replay's own entry opens a window,
-    /// in which case the very same native window is re-pointed to the replay
-    /// instead of being destroyed and rebuilt (a destroy is only queued, and the
-    /// label it leaves behind must never be adopted by a new owner).
-    fn stage_replay_entry_secondary(
-        &self,
-        candidate: &RuntimeEngine,
-        opened: Option<String>,
-        ending: bool,
-        generation: u64,
-    ) -> Result<StagedSecondary, WireCommandError> {
-        let any_live = self.secondary()?.is_some();
-        let Some(scene_id) = opened.filter(|_| !ending) else {
-            return Ok(StagedSecondary::none(if any_live {
-                SecondaryPlan::Hide
-            } else {
-                SecondaryPlan::None
-            }));
-        };
-        self.stage_replay_open_window(candidate, &scene_id, generation, any_live)
-    }
-
-    /// Stage a fresh-token re-point of the single secondary slot onto `scene_id`,
-    /// seeded from `candidate` — the replay runtime this command is about to
-    /// commit — and owned by the replay `generation`.  The staged session keeps
-    /// its own copy of the shared maps; the effects of its opening evaluation are
-    /// handed back so the caller can publish them into the replay runtime in the
-    /// same transaction.
-    fn stage_replay_open_window(
-        &self,
-        candidate: &RuntimeEngine,
-        scene_id: &str,
-        generation: u64,
-        any_live: bool,
-    ) -> Result<StagedSecondary, WireCommandError> {
-        if !self.content.scenes.contains_key(scene_id) {
-            return Err(WireCommandError::new(
-                WireCommandErrorCode::Validation,
-                format!("open_window 指向未声明的场景 {scene_id}"),
-            ));
-        }
-        let token = self.bump_secondary_generation()?;
-        let id_base = token
-            .checked_mul(SECONDARY_ID_STRIDE)
-            .ok_or_else(|| WireCommandError::new(WireCommandErrorCode::Internal, "副窗口编号耗尽"))?;
-        let mut session = self.build_secondary_session(
-            candidate,
-            scene_id,
-            SecondaryOwner::Replay { generation },
-            token,
-            id_base,
-        )?;
-        let save_variables = session.runtime.snapshot().variables.clone();
-        let profile_variables = session.runtime.profile_variables_map().clone();
-        let appended_history = session.runtime.take_appended_history();
-        Ok(StagedSecondary {
-            session: Some(session),
-            // Re-pointing the one native window is what keeps the single-slot
-            // contract: a replay never creates a second window.
-            plan: SecondaryPlan::Show { replaced: any_live },
-            save_variables: Some(save_variables),
-            profile_variables: Some(profile_variables),
-            appended_history,
-        })
+        Ok((
+            SecondarySession {
+                runtime,
+                scene_id: scene_id.to_owned(),
+                owner,
+                token,
+            },
+            first,
+        ))
     }
 
     fn bump_secondary_generation(&self) -> Result<u64, WireCommandError> {
@@ -938,30 +939,82 @@ impl EngineState {
     fn transact_replay(
         &self,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
-    ) -> Result<RuntimeUpdate, WireCommandError> {
+    ) -> Result<Committed, WireCommandError> {
         self.finish_replay_transition(self.commit_replay(operation)?)
     }
 
-    /// The pure half of a replay transaction: clone the replay runtime, run the
-    /// operation, consume the host-only window cue, stage the secondary work the
-    /// replay's new state implies and commit the replay runtime together with the
-    /// secondary slot.  No native API is touched here, so host tests can drive
-    /// every replay path without a window.
+    /// The pure half of a replay transaction: clone the replay runtime and the
+    /// secondary it owns, run the command, settle the pair and commit both.  No
+    /// native API is touched here, so host tests can drive every replay path
+    /// without a window.
     ///
     /// A replay stays isolated from the player's runtime: it borrows a cloned
-    /// profile/default state at start and is never persisted, so the staged
-    /// session's startup effects are published to the *replay* runtime only —
-    /// never to `runtime`, [`Self::commit_runtime`] or the profile file.
+    /// profile/default state at start and is never persisted, so everything the
+    /// pair produces is published to the *replay* runtime only — never to
+    /// `runtime`, [`Self::commit_runtime`] or the profile file.
     fn commit_replay(
         &self,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
     ) -> Result<ReplayTransition, WireCommandError> {
+        self.commit_replay_pair_for(
+            None,
+            |pair| {
+                let update = operation(&mut pair.primary).map_err(WireCommandError::from)?;
+                pair.push(WindowRole::Main, update);
+                Ok(())
+            },
+            Some(WindowRole::Main),
+        )
+    }
+
+    fn commit_replay_pair(
+        &self,
+        run: impl FnOnce(&mut Pair) -> Result<(), WireCommandError>,
+        origin: Option<WindowRole>,
+    ) -> Result<ReplayTransition, WireCommandError> {
+        self.commit_replay_pair_for(None, run, origin)
+    }
+
+    /// `expected_generation` pins the transaction to one replay: a delayed
+    /// command from an ended replay is refused instead of mutating a newer one.
+    fn commit_replay_pair_for(
+        &self,
+        expected_generation: Option<u64>,
+        run: impl FnOnce(&mut Pair) -> Result<(), WireCommandError>,
+        origin: Option<WindowRole>,
+    ) -> Result<ReplayTransition, WireCommandError> {
         let mut slot = self.replay()?;
         let session = slot.take().ok_or_else(replay_missing)?;
         let generation = session.generation;
-        let mut runtime = session.runtime.clone();
-        let mut update = match operation(&mut runtime).map_err(WireCommandError::from) {
-            Ok(update) => update,
+        let candidate = (|| {
+            if expected_generation.is_some_and(|expected| expected != generation) {
+                return Err(WireCommandError::new(
+                    WireCommandErrorCode::StaleSession,
+                    "重演会话已结束，请重新连接运行时",
+                ));
+            }
+            let live = self
+                .secondary()?
+                .as_ref()
+                .filter(|candidate| candidate.owner == SecondaryOwner::Replay { generation })
+                .cloned();
+            let live_before = live.is_some();
+            let mut pair = Pair::new(
+                Authority::Replay { generation },
+                session.runtime.clone(),
+                live,
+                live_before,
+            );
+            pair.replay_ending_before = session.ending;
+            pair.set_scene_baseline(&session.scene_id);
+            pair.seed_secondary();
+            run(&mut pair)?;
+            self.settle(&mut pair)?;
+            self.finish_pair(&mut pair, false)?;
+            Ok(pair)
+        })();
+        let mut pair = match candidate {
+            Ok(pair) => pair,
             Err(error) => {
                 // An invalid acknowledgement or a rejected operation leaves the
                 // live replay exactly where it was.
@@ -969,60 +1022,33 @@ impl EngineState {
                 return Err(error);
             }
         };
-        let opened = take_open_window_request(&mut update);
-        debug_assert_no_window_cue(&update);
-        let crossed = runtime.snapshot().location.scene_id != session.scene_id;
-        let ended = matches!(
-            runtime.snapshot().prompt,
-            vectspace_core::model::PromptSnapshot::End { .. }
-        );
-        // A replay closes its window exactly like the main story closes its own:
-        // when it leaves the Scene that owns the window, or when it is over.  It
-        // only ever closes the slot that carries its own generation.
-        let closing = session.ending || crossed || ended;
-        let staged = match self.stage_replay_secondary(&runtime, opened, closing, generation) {
-            Ok(staged) => staged,
-            Err(error) => {
-                *slot = Some(session);
-                return Err(error);
-            }
-        };
-        if let Some(variables) = &staged.save_variables {
-            runtime.set_save_variables(variables.clone());
-        }
-        if let Some(variables) = &staged.profile_variables {
-            runtime.set_profile_variables(variables.clone());
-        }
-        if !staged.appended_history.is_empty() {
-            runtime.extend_dialogue_history(staged.appended_history.clone());
-        }
-        let committed = ReplaySession {
+        let plan = self.plan_for(&pair);
+        let live_before = pair.live_before;
+        let committed = Committed::from_pair(&mut pair, origin);
+        let closing = pair.closing;
+        let (runtime, staged) = (pair.primary, pair.secondary);
+        // Keep the *exact* previous session for rollback: the slot was taken at
+        // the top of this transaction, so replacing into it would report `None`
+        // and a failed native step would clear a replay that is still live.
+        *slot = Some(ReplaySession {
             runtime,
             scene_id: session.scene_id.clone(),
             ending: closing,
             generation,
-        };
-        // Keep the *exact* previous session for rollback: the slot was taken at
-        // the top of this transaction, so replacing into it would report `None`
-        // and a failed native step would clear a replay that is still live.
-        *slot = Some(committed);
+            was_title: session.was_title,
+        });
         let previous_replay = Some(session);
         drop(slot);
         let mut secondary = self.secondary()?;
-        let previous_secondary = match staged.plan {
-            SecondaryPlan::None => SecondaryBaseline::Untouched,
-            SecondaryPlan::Show { .. } => {
-                SecondaryBaseline::Restore(Box::new(std::mem::replace(
-                    &mut *secondary,
-                    staged.session,
-                )))
-            }
-            SecondaryPlan::Hide => SecondaryBaseline::Restore(Box::new(secondary.take())),
+        let previous_secondary = if live_before || staged.is_some() {
+            SecondaryBaseline::Restore(Box::new(std::mem::replace(&mut *secondary, staged)))
+        } else {
+            SecondaryBaseline::Untouched
         };
         drop(secondary);
         Ok(ReplayTransition {
-            update,
-            plan: staged.plan,
+            committed,
+            plan,
             previous_replay,
             previous_secondary,
         })
@@ -1034,8 +1060,8 @@ impl EngineState {
     fn finish_replay_transition(
         &self,
         transition: ReplayTransition,
-    ) -> Result<RuntimeUpdate, WireCommandError> {
-        if let Err(error) = self.apply_secondary_plan(transition.plan.clone()) {
+    ) -> Result<Committed, WireCommandError> {
+        if let Err(error) = self.apply_native_plan(&transition.plan) {
             let cleanup_failures = self.rollback_replay_state(
                 transition.previous_replay.clone(),
                 &transition.previous_secondary,
@@ -1043,8 +1069,7 @@ impl EngineState {
             );
             return Err(aggregate_transition_failure(error, cleanup_failures));
         }
-        self.reconcile_secondary_window(&transition.plan);
-        Ok(transition.update)
+        Ok(transition.committed)
     }
 
     /// Restore the replay slot and the secondary slot after a rolled-back replay
@@ -1073,7 +1098,7 @@ impl EngineState {
         // reported instead of swallowed.
         let restored_without_secondary = previous_secondary.restored_without_secondary();
         if restored_without_secondary && matches!(plan, SecondaryPlan::Show { .. }) {
-            if let Err(error) = self.windows.hide_secondary() {
+            if let Err(error) = self.hide_native_secondary() {
                 failures.push(WireCommandError::new(
                     WireCommandErrorCode::Internal,
                     format!(
@@ -1082,6 +1107,12 @@ impl EngineState {
                     ),
                 ));
             }
+        }
+        if let Err(error) = self.sync_native_titles() {
+            failures.push(WireCommandError::new(
+                WireCommandErrorCode::Internal,
+                format!("窗口标题回滚失败: {}", error.message),
+            ));
         }
         failures
     }
@@ -1098,8 +1129,12 @@ impl EngineState {
             return;
         }
         let expected_live = matches!(self.secondary().map(|slot| slot.is_some()), Ok(true));
-        if let Err(error) = self.windows.reconcile_secondary(expected_live) {
-            eprintln!("副窗口原生窗口状态校正失败: {}", error.message);
+        match self.windows.reconcile_secondary(expected_live) {
+            // A rebuilt window carries the default title again; a removed one no
+            // title at all.
+            Ok(true) => self.note_native_secondary_title(expected_live.then_some(DEFAULT_SECONDARY_TITLE)),
+            Ok(false) => {}
+            Err(error) => eprintln!("副窗口原生窗口状态校正失败: {}", error.message),
         }
     }
 
@@ -1144,12 +1179,13 @@ impl EngineState {
     ///   file or the official ledger.
     ///
     /// Both branches keep the session's own progression metadata (read/seen/
-    /// completed) and never let its Scene boundary reset the shared Save map.
+    /// completed), never let its Scene boundary reset the shared Save map, and
+    /// re-derive the *main* window's prompt from whatever the command changed.
     fn transact_secondary(
         &self,
         expected_session_id: Option<&WireU64>,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
-    ) -> Result<(RuntimeUpdate, u64), WireCommandError> {
+    ) -> Result<(Committed, u64), WireCommandError> {
         let token = self.check_secondary_session(expected_session_id)?;
         let owner = {
             let slot = self.secondary()?;
@@ -1165,39 +1201,38 @@ impl EngineState {
         }
     }
 
-    /// A story-owned secondary command: publish into the main runtime and
-    /// persist the resulting profile, exactly like the single-window host.
-    fn transact_secondary_against_story(
-        &self,
+    /// The step of one secondary command: validate the token, run the operation
+    /// on the secondary candidate and record its update.
+    fn secondary_step(
+        pair: &mut Pair,
         token: u64,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
-    ) -> Result<(RuntimeUpdate, u64), WireCommandError> {
-        let mut main = self.runtime()?;
-        let mut slot = self.secondary()?;
-        let session = slot.as_mut().ok_or_else(secondary_missing)?;
+    ) -> Result<(), WireCommandError> {
+        let session = pair.secondary.as_mut().ok_or_else(secondary_missing)?;
         if session.token != token {
             return Err(WireCommandError::new(
                 WireCommandErrorCode::StaleSession,
                 "副窗口会话已切换，请重新连接运行时",
             ));
         }
-        let mut main_candidate = main.clone();
-        let mut candidate = session.runtime.clone();
-        candidate.set_save_variables(main_candidate.snapshot().variables.clone());
-        candidate.set_profile_variables(main_candidate.profile_variables_map().clone());
-        let mut update = operation(&mut candidate).map_err(WireCommandError::from)?;
-        // A secondary update can never carry a window control cue to any
-        // WebView, even if authored content reached this node in this runtime.
-        take_open_window_request(&mut update);
-        debug_assert_no_window_cue(&update);
-        main_candidate.set_save_variables(candidate.snapshot().variables.clone());
-        main_candidate.set_profile_variables(candidate.profile_variables_map().clone());
-        main_candidate.extend_dialogue_history(candidate.take_appended_history());
-        self.commit_runtime(&main, &main_candidate)?;
-        *main = main_candidate;
-        session.runtime = candidate;
-        session.scene_id = update.snapshot.location.scene_id.clone();
-        Ok((update, token))
+        let update = operation(&mut session.runtime).map_err(WireCommandError::from)?;
+        pair.push(WindowRole::Secondary, update);
+        Ok(())
+    }
+
+    /// A story-owned secondary command: publish into the main runtime and
+    /// persist the resulting profile, exactly like the single-window host.
+    fn transact_secondary_against_story(
+        &self,
+        token: u64,
+        operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
+    ) -> Result<(Committed, u64), WireCommandError> {
+        let transition = self.commit_story_pair(
+            false,
+            |pair| Self::secondary_step(pair, token, operation),
+            Some(WindowRole::Secondary),
+        )?;
+        Ok((self.finish_transition(transition)?, token))
     }
 
     /// A replay-owned secondary command: the replay runtime is the only
@@ -1208,71 +1243,57 @@ impl EngineState {
         token: u64,
         generation: u64,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
-    ) -> Result<(RuntimeUpdate, u64), WireCommandError> {
-        let mut replay = self.replay()?;
-        let session = replay
-            .as_mut()
-            .filter(|session| session.generation == generation)
-            .ok_or_else(|| {
-                WireCommandError::new(
-                    WireCommandErrorCode::StaleSession,
-                    "重演会话已结束，请重新连接运行时",
-                )
-            })?;
-        let mut slot = self.secondary()?;
-        let secondary = slot.as_mut().ok_or_else(secondary_missing)?;
-        if secondary.token != token {
-            return Err(WireCommandError::new(
-                WireCommandErrorCode::StaleSession,
-                "副窗口会话已切换，请重新连接运行时",
-            ));
-        }
-        let mut candidate = secondary.runtime.clone();
-        candidate.set_save_variables(session.runtime.snapshot().variables.clone());
-        candidate.set_profile_variables(session.runtime.profile_variables_map().clone());
-        let mut update = operation(&mut candidate).map_err(WireCommandError::from)?;
-        take_open_window_request(&mut update);
-        debug_assert_no_window_cue(&update);
-        // Replay play stays ephemeral: the shared maps and the new occurrences
-        // are published to the replay runtime only.  Nothing is persisted, so a
-        // replayed line can never appear in a save, the profile file or the
-        // official ledger.
-        session
-            .runtime
-            .set_save_variables(candidate.snapshot().variables.clone());
-        session
-            .runtime
-            .set_profile_variables(candidate.profile_variables_map().clone());
-        let appended_history = candidate.take_appended_history();
-        session.runtime.extend_dialogue_history(appended_history);
-        secondary.runtime = candidate;
-        secondary.scene_id = update.snapshot.location.scene_id.clone();
-        Ok((update, token))
+    ) -> Result<(Committed, u64), WireCommandError> {
+        let transition = self.commit_replay_pair_for(
+            Some(generation),
+            |pair| Self::secondary_step(pair, token, operation),
+            Some(WindowRole::Secondary),
+        )?;
+        Ok((self.finish_replay_transition(transition)?, token))
     }
 
+    /// Run one command of the main window against the active runtime (the
+    /// replay's while one runs), publish everything it produced and return the
+    /// update the main window receives as its response.
     fn transact_active_runtime(
         &self,
         expected_session_id: Option<&WireU64>,
         operation: impl FnOnce(&mut RuntimeEngine) -> Result<RuntimeUpdate, runtime::RuntimeError>,
-    ) -> Result<(RuntimeUpdate, u64, WireSessionMode), WireCommandError> {
+    ) -> Result<WireRuntimeUpdate, WireCommandError> {
         let _gate = self.session_gate()?;
         // The session check must happen while holding the same gate as the
         // runtime mutation.  Checking before acquiring it leaves a race in
         // which a replay can be entered between the check and the operation,
         // allowing a stale story request to mutate the new session.
         self.check_session(expected_session_id)?;
-        if self.replay()?.is_some() {
+        let committed = if self.replay()?.is_some() {
             // Every replay path consumes the host-only window cue and stages the
             // window work it implies, so the cue can never reach the main window
             // and a replay can really own the secondary.
-            let update = self.transact_replay(operation)?;
-            return Ok((update, self.current_session_id(), WireSessionMode::Replay));
-        }
-        let update = self.transact_runtime(operation)?;
-        Ok((update, self.current_session_id(), WireSessionMode::Story))
+            self.transact_replay(operation)?
+        } else {
+            self.transact_runtime(operation)?
+        };
+        self.deliver(committed, WindowRole::Main)
     }
 
-    fn enter_replay(&self, scene_id: &str) -> Result<RuntimeUpdate, WireCommandError> {
+    /// A replay is a running story: it leaves the title screen (the chapter
+    /// map), so its native titles and timers are live.  A failed entry puts the
+    /// previous title-screen state back.
+    fn enter_replay(&self, scene_id: &str) -> Result<Committed, WireCommandError> {
+        let was_title = self.set_title_screen(false);
+        let entered = self.enter_replay_session(scene_id, was_title);
+        if entered.is_err() {
+            self.restore_title_screen(was_title);
+        }
+        entered
+    }
+
+    fn enter_replay_session(
+        &self,
+        scene_id: &str,
+        was_title: bool,
+    ) -> Result<Committed, WireCommandError> {
         if self.replay()?.is_some() {
             return Err(WireCommandError::new(
                 WireCommandErrorCode::Runtime,
@@ -1313,6 +1334,17 @@ impl EngineState {
                 "该 Scene 尚未完成，不能重演",
             ));
         }
+        if self
+            .content
+            .scenes
+            .get(scene_id)
+            .is_some_and(|scene| scene.window_role != WindowRole::Main)
+        {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Validation,
+                "副窗口专用 Scene 不能作为章节重演入口",
+            ));
+        }
         let map_definition = self
             .content
             .chapter_map
@@ -1342,64 +1374,85 @@ impl EngineState {
                 WireCommandError::new(WireCommandErrorCode::Internal, "重演会话编号耗尽")
             })?;
         replay_runtime.prepare_session_ids(id_base, id_base, id_base);
-        let mut first = replay_runtime
+        // Entry is an ownership boundary: the main story is suspended behind the
+        // replay, so a story-owned window cannot outlive it — unless the replay's
+        // own entry opens a window, in which case the very same native window is
+        // re-pointed to the replay instead of being destroyed and rebuilt (a
+        // destroy is only queued, and the label it leaves behind must never be
+        // adopted by a new owner).  The pair therefore starts without a
+        // secondary while the live one only counts as `live_before`.
+        let live_before = self.secondary()?.is_some();
+        // The story-owned window is destroyed by this entry, so the advance
+        // blocks it placed on the suspended story and its title go with it.
+        let detached_story = if live_before {
+            let mut story = self.runtime()?.clone();
+            detach_secondary_effects(&mut story);
+            Some(story)
+        } else {
+            None
+        };
+        let mut pair = Pair::new(
+            Authority::Replay { generation },
+            replay_runtime,
+            None,
+            live_before,
+        );
+        pair.set_scene_baseline(scene_id);
+        let first = pair
+            .primary
             .start_scene_preview(&self.content, scene_id)
             .map_err(WireCommandError::from)?;
-        // The replay's entry is an entry path like the main story's: the
-        // host-only cue is consumed here (and the acknowledgement requirement is
-        // recomputed) instead of leaking to the main window, where the wire type
-        // could not even represent it.
-        let opened = take_open_window_request(&mut first);
-        debug_assert_no_window_cue(&first);
-        let ending = matches!(
-            first.snapshot.prompt,
-            vectspace_core::model::PromptSnapshot::End { .. }
-        );
-        let staged = self.stage_replay_entry_secondary(&replay_runtime, opened, ending, generation)?;
-        if let Some(variables) = &staged.save_variables {
-            replay_runtime.set_save_variables(variables.clone());
-        }
-        if let Some(variables) = &staged.profile_variables {
-            replay_runtime.set_profile_variables(variables.clone());
-        }
-        if !staged.appended_history.is_empty() {
-            replay_runtime.extend_dialogue_history(staged.appended_history.clone());
-        }
+        pair.push(WindowRole::Main, first);
+        self.settle(&mut pair)?;
+        self.finish_pair(&mut pair, false)?;
+        let plan = self.plan_for(&pair);
+        let committed = Committed::from_pair(&mut pair, Some(WindowRole::Main));
+        let ending = pair.closing;
+        let (runtime, staged) = (pair.primary, pair.secondary);
         let previous_replay = (*self.replay()?).replace(ReplaySession {
-            runtime: replay_runtime,
+            runtime,
             scene_id: scene_id.to_owned(),
             ending,
             generation,
+            was_title,
         });
+        let previous_story = match detached_story {
+            Some(story) => Some(std::mem::replace(&mut *self.runtime()?, story)),
+            None => None,
+        };
         let mut secondary = self.secondary()?;
-        let previous_secondary = match staged.plan {
-            SecondaryPlan::None => SecondaryBaseline::Untouched,
-            SecondaryPlan::Show { .. } => {
-                SecondaryBaseline::Restore(Box::new(std::mem::replace(
-                    &mut *secondary,
-                    staged.session,
-                )))
-            }
-            SecondaryPlan::Hide => SecondaryBaseline::Restore(Box::new(secondary.take())),
+        let previous_secondary = if live_before || staged.is_some() {
+            SecondaryBaseline::Restore(Box::new(std::mem::replace(&mut *secondary, staged)))
+        } else {
+            SecondaryBaseline::Untouched
         };
         drop(secondary);
-        if let Err(error) = self.apply_secondary_plan(staged.plan.clone()) {
-            let cleanup_failures =
-                self.rollback_replay_state(previous_replay, &previous_secondary, &staged.plan);
+        if let Err(error) = self.apply_native_plan(&plan) {
+            let mut cleanup_failures =
+                self.rollback_replay_state(previous_replay, &previous_secondary, &plan);
+            if let Some(story) = previous_story {
+                match self.runtime() {
+                    Ok(mut runtime) => *runtime = story,
+                    Err(error) => cleanup_failures.push(error),
+                }
+            }
             return Err(aggregate_transition_failure(error, cleanup_failures));
         }
-        self.reconcile_secondary_window(&staged.plan);
         // The generation only changes once the entry really committed, so a
         // failed entry leaves the previous session id valid for the frontend.
         self.bump_session_id()?;
-        Ok(first)
+        Ok(committed)
     }
 
     /// Leave the live replay.  A replay-owned secondary is closed *before* the
     /// replay slot is cleared: a failed destroy keeps both, so the exit can be
     /// retried instead of orphaning a window that no session owns any more.
     fn exit_replay(&self) -> Result<(), WireCommandError> {
-        let Some(generation) = self.replay()?.as_ref().map(|session| session.generation) else {
+        let Some((generation, was_title)) = self
+            .replay()?
+            .as_ref()
+            .map(|session| (session.generation, session.was_title))
+        else {
             return Ok(());
         };
         let owned = {
@@ -1410,11 +1463,19 @@ impl EngineState {
         if owned {
             // Native work with no runtime mutex held; the session gate is still
             // held, so no other command can observe the gap.
-            self.windows.hide_secondary()?;
+            self.hide_native_secondary()?;
             *self.secondary()? = None;
         }
         *self.replay()? = None;
         self.bump_session_id()?;
+        // Back on the chapter map the suspended story's timers stand still
+        // again, and the real story's (or the default) titles come back.  A
+        // failure here is only a stale native title: the next transition
+        // retries it.
+        self.set_title_screen(was_title);
+        if let Err(error) = self.sync_native_titles() {
+            eprintln!("退出重演后恢复窗口标题失败: {}", error.message);
+        }
         Ok(())
     }
 
@@ -1427,7 +1488,7 @@ impl EngineState {
         if !live {
             return Ok(());
         }
-        self.windows.hide_secondary()?;
+        self.hide_native_secondary()?;
         *self.secondary()? = None;
         Ok(())
     }
@@ -1437,49 +1498,66 @@ impl EngineState {
     /// leaves the previous session — including its live secondary window —
     /// completely intact.  The native window step is part of the same
     /// transaction and rolls everything back when it fails.
-    fn apply_loaded_slot(&self, loaded: LoadedSlot) -> Result<RuntimeUpdate, WireCommandError> {
+    fn apply_loaded_slot(&self, loaded: LoadedSlot) -> Result<Committed, WireCommandError> {
         let LoadedSlot {
             snapshot,
             history,
-            secondary,
+            secondary: stored,
         } = loaded;
-        let mut runtime = self.runtime()?;
-        let mut candidate = runtime.clone();
-        let update = candidate
-            .load_snapshot(&self.content, snapshot)
-            .map_err(WireCommandError::from)?;
-        // Restore the merged ordered ledger stored with the slot.
-        candidate.replace_dialogue_history(history);
-        // Stage the restored secondary before the profile write so a bad scene
-        // id or snapshot aborts the load with no partial replacement.
-        let staged = match secondary {
-            Some(stored) => Some(self.build_secondary_from_slot(&candidate, &stored)?),
-            None => None,
-        };
-        let had_secondary = self.secondary()?.is_some();
-        let plan = if staged.is_some() {
-            SecondaryPlan::Show {
-                replaced: had_secondary,
-            }
-        } else if had_secondary {
-            SecondaryPlan::Hide
-        } else {
-            SecondaryPlan::None
-        };
-        let previous_profile = runtime.profile_state(&self.content);
-        let profile_written = self.commit_runtime(&runtime, &candidate)?;
-        let previous_secondary =
-            SecondaryBaseline::Restore(Box::new(std::mem::replace(&mut *self.secondary()?, staged)));
-        let previous_runtime = std::mem::replace(&mut *runtime, candidate);
-        drop(runtime);
-        self.finish_transition(MainTransition {
-            update,
-            plan,
-            previous_runtime,
-            previous_secondary,
-            previous_profile,
-            profile_written,
-        })
+        let transition = self.commit_story_pair(
+            false,
+            |pair| {
+                if self
+                    .content
+                    .scenes
+                    .get(&snapshot.location.scene_id)
+                    .is_some_and(|scene| scene.window_role != WindowRole::Main)
+                {
+                    return Err(WireCommandError::new(
+                        WireCommandErrorCode::Validation,
+                        "存档的主窗口位置位于副窗口专用 Scene，已拒绝读取",
+                    ));
+                }
+                // The previous window belongs to the previous session; it is gone
+                // (with its blocks and title) before the saved state is read, so
+                // nothing it left behind can be mistaken for restored state.
+                pair.hide_secondary();
+                let update = pair
+                    .primary
+                    .load_snapshot(&self.content, snapshot)
+                    .map_err(WireCommandError::from)?;
+                // Restore the merged ordered ledger stored with the slot.
+                pair.primary.replace_dialogue_history(history);
+                // Stage the restored secondary before the profile write so a bad
+                // scene id or snapshot aborts the load with no partial
+                // replacement.
+                if let Some(stored) = stored {
+                    let session = self.build_secondary_from_slot(&pair.primary, &stored)?;
+                    pair.secondary = Some(session);
+                    pair.staged = true;
+                    pair.keep_owner = true;
+                }
+                let mut titles = pair.titles();
+                if pair.secondary.is_none() {
+                    titles.secondary.clear();
+                } else if titles.secondary.is_empty() {
+                    titles.secondary = DEFAULT_SECONDARY_TITLE.to_owned();
+                }
+                pair.set_titles(titles);
+                pair.validate_restored_interaction()?;
+                // The restored prompt follows the restored shared state (current
+                // choices, interpolated text) without executing any node.
+                pair.primary
+                    .refresh_prompt(&self.content)
+                    .map_err(WireCommandError::from)?;
+                let mut update = update;
+                update.snapshot = pair.primary.snapshot().clone();
+                pair.push(WindowRole::Main, update);
+                Ok(())
+            },
+            Some(WindowRole::Main),
+        )?;
+        self.finish_transition(transition)
     }
 
     /// Rebuild a secondary runtime from persisted state.  Shared variables come
@@ -1490,10 +1568,26 @@ impl EngineState {
         main: &RuntimeEngine,
         stored: &SecondaryState,
     ) -> Result<SecondarySession, WireCommandError> {
-        if !self.content.scenes.contains_key(&stored.scene_id) {
+        let Some(scene) = self.content.scenes.get(&stored.scene_id) else {
             return Err(WireCommandError::new(
                 WireCommandErrorCode::Validation,
                 format!("存档中的副窗口场景不存在: {}", stored.scene_id),
+            ));
+        };
+        if scene.window_role != WindowRole::Secondary {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Validation,
+                format!("存档中的副窗口场景 {} 不是副窗口专用 Scene", stored.scene_id),
+            ));
+        }
+        if stored.owning_scene != main.snapshot().location.scene_id {
+            return Err(WireCommandError::new(
+                WireCommandErrorCode::Validation,
+                format!(
+                    "存档中的副窗口属于场景 {}，与主窗口当前场景 {} 不一致",
+                    stored.owning_scene,
+                    main.snapshot().location.scene_id
+                ),
             ));
         }
         let token = self.bump_secondary_generation()?;
@@ -1517,41 +1611,22 @@ impl EngineState {
                 scene_id: stored.owning_scene.clone(),
             },
             token,
-            // Loading never evaluates the secondary's Scene, so no pending
-            // presentation can be left behind by the restore.
-            initial_update: None,
         })
     }
 
     /// The secondary window's bootstrap payload.  It never loads settings, save
     /// slots, chapter maps or history: the secondary has normal gameplay and
     /// nothing else.  A runtime-gated presentation produced while the session
-    /// was staged is delivered verbatim, with its original update id: the
-    /// runtime is waiting for exactly that acknowledgement, and a cue-less
-    /// bootstrap would leave the secondary permanently locked.  Once it has
-    /// been acknowledged the ordinary bootstrap is authoritative again.
+    /// was staged is delivered with its original update id: the runtime is
+    /// waiting for exactly that acknowledgement, and a cue-less bootstrap would
+    /// leave the secondary permanently locked.  Once it has been acknowledged
+    /// the ordinary bootstrap is authoritative again.
     fn secondary_bootstrap_payload(&self) -> Result<WireBootstrapPayload, WireCommandError> {
-        let slot = self.secondary()?;
-        let session = slot.as_ref().ok_or_else(|| {
-            WireCommandError::new(WireCommandErrorCode::Runtime, "当前没有正在运行的副窗口会话")
-        })?;
-        let token = session.token;
-        let pending_initial = session
-            .initial_update
-            .as_ref()
-            .filter(|update| {
-                update.requires_ack
-                    && session.runtime.pending_runtime_update() == Some(update.update_id)
-            })
-            .cloned();
-        let mut runtime = session.runtime.clone();
-        drop(slot);
-        let mut payload = runtime.bootstrap(&self.content);
-        if let Some(update) = pending_initial {
-            payload.update = update;
-        }
+        let (update, payload) = self.bootstrap_update(WindowRole::Secondary)?;
+        // The window starts over: whatever it reported about itself is void.
+        self.clear_pause_reports(WindowRole::Secondary);
         Ok(WireBootstrapPayload {
-            update: wire_secondary_update(token, payload.update),
+            update,
             asset_ids: payload.asset_ids,
             content_version: payload.content_version,
             chapter_map_available: false,
@@ -1569,9 +1644,14 @@ impl EngineState {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             });
-        previous
+        let next = previous
             .map(|value| value + 1)
-            .map_err(|_| WireCommandError::new(WireCommandErrorCode::Internal, "会话编号耗尽"))
+            .map_err(|_| WireCommandError::new(WireCommandErrorCode::Internal, "会话编号耗尽"))?;
+        // Whatever the windows reported about themselves belongs to the old
+        // session; the frontends re-report what still applies.
+        self.reset_pause_reports();
+        self.wake_timers();
+        Ok(next)
     }
 
     fn check_session(&self, expected: Option<&WireU64>) -> Result<(), WireCommandError> {
@@ -1591,6 +1671,25 @@ impl EngineState {
         }
         Ok(())
     }
+}
+
+/// Drop what a closed secondary window left on the story runtime: the advance
+/// blocks it placed and its title.
+fn detach_secondary_effects(runtime: &mut RuntimeEngine) {
+    let scenes: Vec<String> = runtime
+        .snapshot()
+        .interaction
+        .blocks
+        .iter()
+        .filter(|block| block.source == WindowRole::Secondary)
+        .map(|block| block.source_scene.clone())
+        .collect();
+    for scene in scenes {
+        runtime.clear_blocks_from(WindowRole::Secondary, &scene);
+    }
+    let mut titles = runtime.snapshot().interaction.titles.clone();
+    titles.secondary.clear();
+    runtime.set_window_titles(titles);
 }
 
 /// Whether showing the secondary window must tell the current native window to
@@ -1641,18 +1740,6 @@ fn aggregate_transition_failure(
         error.code,
         format!("{}；回滚清理失败: {details}", error.message),
     )
-}
-
-fn wire_update(
-    state: &EngineState,
-    update: RuntimeUpdate,
-    mode: WireSessionMode,
-) -> WireRuntimeUpdate {
-    WireRuntimeUpdate::with_session(update, WireU64::from(state.current_session_id()), mode)
-}
-
-fn wire_secondary_update(token: u64, update: RuntimeUpdate) -> WireRuntimeUpdate {
-    WireRuntimeUpdate::with_session(update, WireU64::from(token), WireSessionMode::Secondary)
 }
 
 /// Consume the host control cues from an update.  The cue is a host instruction,
@@ -1779,7 +1866,7 @@ fn ensure_secondary_window(
         SECONDARY_WINDOW_LABEL,
         WebviewUrl::App("index.html".into()),
     )
-    .title("VECTSPACE — 副窗口")
+    .title(DEFAULT_SECONDARY_TITLE)
     .inner_size(960.0, 540.0)
     .min_inner_size(480.0, 270.0)
     .build()
@@ -1836,8 +1923,12 @@ fn wire_snapshot(
     state: &EngineState,
     snapshot: vectspace_core::model::RuntimeSnapshot,
     mode: WireSessionMode,
-) -> WireRuntimeSnapshot {
-    WireRuntimeSnapshot::with_session(snapshot, WireU64::from(state.current_session_id()), mode)
+) -> Result<WireRuntimeSnapshot, WireCommandError> {
+    let seq = state.latest_seq(WindowRole::Main)?;
+    Ok(
+        WireRuntimeSnapshot::with_session(snapshot, WireU64::from(state.current_session_id()), mode)
+            .with_seq(seq),
+    )
 }
 
 #[tauri::command]
@@ -1847,15 +1938,17 @@ async fn bootstrap(
 ) -> Result<WireBootstrapPayload, WireCommandError> {
     require_main(&window)?;
     let _gate = state.session_gate()?;
-    let payload = state.runtime()?.bootstrap(&state.content);
     // `RuntimeEngine::bootstrap` returns the cue-less snapshot by construction
     // (`update_without_cues`), so there is never a host-only window cue on this
-    // path to consume or stage — the assertion keeps that contract explicit.  A
-    // story whose *entry* node opens a window is reached through
-    // `start_new_game`, not through the bootstrap.
+    // path to consume or stage.  A story whose *entry* node opens a window is
+    // reached through `start_new_game`, not through the bootstrap.  The update
+    // carries the window's latest delivery sequence as the frontend's baseline.
+    let (update, payload) = state.bootstrap_update(WindowRole::Main)?;
     debug_assert_no_window_cue(&payload.update);
+    // The window starts over: whatever it reported about itself is void.
+    state.clear_pause_reports(WindowRole::Main);
     Ok(WireBootstrapPayload {
-        update: wire_update(&state, payload.update, WireSessionMode::Story),
+        update,
         asset_ids: payload.asset_ids,
         content_version: payload.content_version,
         chapter_map_available: payload.chapter_map_available,
@@ -1893,12 +1986,21 @@ async fn start_new_game(
     // A new game is a hard ownership boundary: any secondary window (and the
     // merged ledger, which the runtime just reset) must not outlive it, even
     // when the new game happens to start in the Scene that owns the window.
-    let update = state.transact_runtime_forced(
+    let was_title = state.set_title_screen(false);
+    let committed = match state.transact_runtime_forced(
         |runtime| runtime.start_new_game(&state.content),
         true,
-    )?;
+    ) {
+        Ok(committed) => committed,
+        Err(error) => {
+            state.restore_title_screen(was_title);
+            return Err(error);
+        }
+    };
+    // The new session is adopted before anything is published, so the
+    // response carries the new session's first sequence number.
     state.bump_session_id()?;
-    Ok(wire_update(&state, update, WireSessionMode::Story))
+    state.deliver(committed, WindowRole::Main)
 }
 
 #[tauri::command]
@@ -1911,15 +2013,10 @@ async fn advance(
 ) -> Result<WireRuntimeUpdate, WireCommandError> {
     require_main(&window)?;
     let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
-    let (update, session_id, mode) = state.transact_active_runtime(
+    state.transact_active_runtime(
         expected_session_id.as_ref(),
         |runtime| runtime.advance(&state.content, expected_revision, source),
-    )?;
-    Ok(WireRuntimeUpdate::with_session(
-        update,
-        session_id.into(),
-        mode,
-    ))
+    )
 }
 
 #[tauri::command]
@@ -1932,15 +2029,10 @@ async fn choose(
 ) -> Result<WireRuntimeUpdate, WireCommandError> {
     require_main(&window)?;
     let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
-    let (update, session_id, mode) = state.transact_active_runtime(
+    state.transact_active_runtime(
         expected_session_id.as_ref(),
         |runtime| runtime.choose(&state.content, &choice_id, expected_revision),
-    )?;
-    Ok(WireRuntimeUpdate::with_session(
-        update,
-        session_id.into(),
-        mode,
-    ))
+    )
 }
 
 #[tauri::command]
@@ -1953,15 +2045,10 @@ async fn click_button(
 ) -> Result<WireRuntimeUpdate, WireCommandError> {
     require_main(&window)?;
     let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
-    let (update, session_id, mode) = state.transact_active_runtime(
+    state.transact_active_runtime(
         expected_session_id.as_ref(),
         |runtime| runtime.click_button(&state.content, &instance_id, expected_revision),
-    )?;
-    Ok(WireRuntimeUpdate::with_session(
-        update,
-        session_id.into(),
-        mode,
-    ))
+    )
 }
 
 #[tauri::command]
@@ -1986,19 +2073,19 @@ async fn presentation_complete(
             .replay()?
             .as_ref()
             .is_some_and(|session| session.ending);
-        let update = if ending {
+        let committed = if ending {
             state.transact_replay(|runtime| runtime.finish_replay_boundary(update_id))?
         } else {
             state.transact_replay(|runtime| {
                 runtime.presentation_complete(&state.content, update_id, outcome)
             })?
         };
-        return Ok(wire_update(&state, update, WireSessionMode::Replay));
+        return state.deliver(committed, WindowRole::Main);
     }
-    let update = state.transact_runtime(|runtime| {
+    let committed = state.transact_runtime(|runtime| {
         runtime.presentation_complete(&state.content, update_id, outcome)
     })?;
-    Ok(wire_update(&state, update, WireSessionMode::Story))
+    state.deliver(committed, WindowRole::Main)
 }
 
 #[tauri::command]
@@ -2009,17 +2096,17 @@ async fn get_snapshot(
     require_main(&window)?;
     let _gate = state.session_gate()?;
     if let Some(replay) = state.replay()?.as_ref() {
-        return Ok(wire_snapshot(
+        return wire_snapshot(
             &state,
             replay.runtime.snapshot().clone(),
             WireSessionMode::Replay,
-        ));
+        );
     }
-    Ok(wire_snapshot(
+    wire_snapshot(
         &state,
         state.runtime()?.snapshot().clone(),
         WireSessionMode::Story,
-    ))
+    )
 }
 
 #[tauri::command]
@@ -2029,6 +2116,7 @@ async fn secondary_snapshot(
 ) -> Result<WireRuntimeSnapshot, WireCommandError> {
     require_secondary(&window)?;
     let _gate = state.session_gate()?;
+    let seq = state.latest_seq(WindowRole::Secondary)?;
     let slot = state.secondary()?;
     let session = slot.as_ref().ok_or_else(|| {
         WireCommandError::new(WireCommandErrorCode::Runtime, "当前没有正在运行的副窗口会话")
@@ -2037,7 +2125,8 @@ async fn secondary_snapshot(
         session.runtime.snapshot().clone(),
         session.token.into(),
         WireSessionMode::Secondary,
-    ))
+    )
+    .with_seq(seq))
 }
 
 #[tauri::command]
@@ -2118,8 +2207,8 @@ async fn start_scene_replay(
     // Entry is one transaction over the replay runtime, the secondary slot and
     // the native window plan, so a replay can really own the window its own
     // `open_window` node opens or re-points without ever leaving an orphan.
-    let update = state.enter_replay(&scene_id)?;
-    Ok(wire_update(&state, update, WireSessionMode::Replay))
+    let committed = state.enter_replay(&scene_id)?;
+    state.deliver(committed, WindowRole::Main)
 }
 
 #[tauri::command]
@@ -2155,7 +2244,76 @@ async fn invalidate_session(
     // leaves the story session exactly as it was.
     state.close_secondary()?;
     let next = state.bump_session_id()?;
+    // The title screen has no running story: timers stand still and the native
+    // titles go back to the default.  A cosmetic title failure must not strand
+    // the player on a story they left.
+    state.set_title_screen(true);
+    if let Err(error) = state.sync_native_titles() {
+        eprintln!("返回标题后恢复窗口标题失败: {}", error.message);
+    }
     Ok(next.into())
+}
+
+/// Incremental, ordered update synchronisation for the main window.  Events only
+/// announce that something is new (`vectspace://runtime-updated`); this is where
+/// the updates themselves are fetched, so a lost event or a lost command response
+/// never loses a story advance or a presentation cue.
+#[tauri::command]
+async fn sync_updates(
+    window: tauri::WebviewWindow,
+    expected_session_id: Option<WireU64>,
+    after_seq: WireU64,
+    state: State<'_, EngineState>,
+) -> Result<WireSyncBatch, WireCommandError> {
+    require_main(&window)?;
+    let after_seq = after_seq.parse().map_err(WireCommandError::from)?;
+    let _gate = state.session_gate()?;
+    state.check_session(expected_session_id.as_ref())?;
+    state.sync_batch(WindowRole::Main, after_seq)
+}
+
+#[tauri::command]
+async fn secondary_sync_updates(
+    window: tauri::WebviewWindow,
+    expected_session_id: Option<WireU64>,
+    after_seq: WireU64,
+    state: State<'_, EngineState>,
+) -> Result<WireSyncBatch, WireCommandError> {
+    require_secondary(&window)?;
+    let after_seq = after_seq.parse().map_err(WireCommandError::from)?;
+    let _gate = state.session_gate()?;
+    state.check_secondary_session(expected_session_id.as_ref())?;
+    state.sync_batch(WindowRole::Secondary, after_seq)
+}
+
+/// The main window reports panel visibility (save/settings/history) and
+/// `document.hidden`.  Window focus is deliberately not a pause reason.
+#[tauri::command]
+async fn set_story_pause(
+    window: tauri::WebviewWindow,
+    expected_session_id: Option<WireU64>,
+    reason: WirePauseReason,
+    active: bool,
+    state: State<'_, EngineState>,
+) -> Result<WirePauseAck, WireCommandError> {
+    require_main(&window)?;
+    let _gate = state.session_gate()?;
+    state.check_session(expected_session_id.as_ref())?;
+    state.set_pause(WindowRole::Main, reason, active)
+}
+
+#[tauri::command]
+async fn secondary_set_story_pause(
+    window: tauri::WebviewWindow,
+    expected_session_id: Option<WireU64>,
+    reason: WirePauseReason,
+    active: bool,
+    state: State<'_, EngineState>,
+) -> Result<WirePauseAck, WireCommandError> {
+    require_secondary(&window)?;
+    let _gate = state.session_gate()?;
+    state.check_secondary_session(expected_session_id.as_ref())?;
+    state.set_pause(WindowRole::Secondary, reason, active)
 }
 
 #[tauri::command]
@@ -2265,9 +2423,16 @@ async fn load_slot(
         ));
     }
     let loaded = state.saves.load(&slot).map_err(save_error)?;
-    let update = state.apply_loaded_slot(loaded)?;
+    let was_title = state.set_title_screen(false);
+    let committed = match state.apply_loaded_slot(loaded) {
+        Ok(committed) => committed,
+        Err(error) => {
+            state.restore_title_screen(was_title);
+            return Err(error);
+        }
+    };
     state.bump_session_id()?;
-    Ok(wire_update(&state, update, WireSessionMode::Story))
+    state.deliver(committed, WindowRole::Main)
 }
 
 #[tauri::command]
@@ -2300,10 +2465,10 @@ async fn secondary_advance(
     require_secondary(&window)?;
     let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
     let _gate = state.session_gate()?;
-    let (update, token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
+    let (committed, _token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
         runtime.advance(&state.content, expected_revision, source)
     })?;
-    Ok(wire_secondary_update(token, update))
+    state.deliver(committed, WindowRole::Secondary)
 }
 
 #[tauri::command]
@@ -2317,10 +2482,10 @@ async fn secondary_choose(
     require_secondary(&window)?;
     let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
     let _gate = state.session_gate()?;
-    let (update, token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
+    let (committed, _token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
         runtime.choose(&state.content, &choice_id, expected_revision)
     })?;
-    Ok(wire_secondary_update(token, update))
+    state.deliver(committed, WindowRole::Secondary)
 }
 
 #[tauri::command]
@@ -2334,10 +2499,10 @@ async fn secondary_click_button(
     require_secondary(&window)?;
     let expected_revision = expected_revision.parse().map_err(WireCommandError::from)?;
     let _gate = state.session_gate()?;
-    let (update, token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
+    let (committed, _token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
         runtime.click_button(&state.content, &instance_id, expected_revision)
     })?;
-    Ok(wire_secondary_update(token, update))
+    state.deliver(committed, WindowRole::Secondary)
 }
 
 #[tauri::command]
@@ -2351,10 +2516,10 @@ async fn secondary_presentation_complete(
     require_secondary(&window)?;
     let update_id = update_id.parse().map_err(WireCommandError::from)?;
     let _gate = state.session_gate()?;
-    let (update, token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
+    let (committed, _token) = state.transact_secondary(expected_session_id.as_ref(), |runtime| {
         runtime.presentation_complete(&state.content, update_id, outcome)
     })?;
-    Ok(wire_secondary_update(token, update))
+    state.deliver(committed, WindowRole::Secondary)
 }
 
 fn save_error(error: SaveError) -> WireCommandError {
@@ -2461,16 +2626,10 @@ pub fn run() {
                 Some(valid_locations),
             )?;
             let runtime = RuntimeEngine::with_profile(&content, profile_state)?;
-            app.manage(EngineState {
+            app.manage(EngineState::new(
                 content,
-                runtime: Mutex::new(runtime),
-                replay: Mutex::new(None),
-                secondary: Mutex::new(None),
-                session_gate: Mutex::new(()),
-                replay_generation: AtomicU64::new(0),
-                session_id: AtomicU64::new(1),
-                secondary_generation: AtomicU64::new(0),
-                windows: Arc::new(TauriWindowOps {
+                runtime,
+                Arc::new(TauriWindowOps {
                     app: app.handle().clone(),
                     closing_secondary: AtomicBool::new(false),
                     pending_destroy_since: Mutex::new(None),
@@ -2478,7 +2637,13 @@ pub fn run() {
                 }),
                 saves,
                 profile,
-            });
+            ));
+            // Story timers run on a host thread with a monotonic clock; the
+            // WebViews never own an authoritative timer.
+            let wake = timers::spawn_timer_scheduler(app.handle().clone());
+            if let Ok(mut slot) = app.state::<EngineState>().timer_wake.lock() {
+                *slot = Some(wake);
+            }
             Ok(())
         })
         // The secondary window may only be destroyed by a host transition. A
@@ -2521,6 +2686,10 @@ pub fn run() {
             secondary_choose,
             secondary_click_button,
             secondary_presentation_complete,
+            sync_updates,
+            secondary_sync_updates,
+            set_story_pause,
+            secondary_set_story_pause,
             get_snapshot,
             secondary_snapshot,
             get_dialogue_history,
@@ -2575,8 +2744,15 @@ mod tests {
     }
 
     fn secondary_test_catalog() -> ContentCatalog {
-        ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
-            .unwrap()
+        let mut content =
+            ContentCatalog::from_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../game"))
+                .unwrap();
+        // The host fixtures open these Scenes as secondary windows; the Scene
+        // purpose is part of the content contract.
+        for id in ["ambience_lab", "surface_parity"] {
+            content.scenes.get_mut(id).unwrap().window_role = WindowRole::Secondary;
+        }
+        content
     }
 
     /// An injectable native seam: the window-failure paths must be reachable in
@@ -2620,9 +2796,28 @@ mod tests {
         recover_calls: AtomicU64,
         /// Bounded re-attempts of a destroy the runtime never completed.
         destroy_retry_calls: AtomicU64,
+        /// Native titles applied, in order.
+        titles: Mutex<Vec<(WindowRole, String)>>,
+        /// Setting a native title fails.
+        fail_title: AtomicBool,
+        /// `runtime-updated` notifications as (window, latest sequence).
+        notices: Mutex<Vec<(WindowRole, String)>>,
+        /// Diagnostics that had no command to fail.
+        diagnostics: Mutex<Vec<String>>,
     }
 
     impl RecordingWindowOps {
+        /// The title a window was last given.
+        fn last_title(&self, role: WindowRole) -> Option<String> {
+            self.titles
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(candidate, _)| *candidate == role)
+                .map(|(_, title)| title.clone())
+        }
+
         /// Let the runtime process a destroy that was only queued.
         fn finish_queued_destroy(&self) {
             self.queued_destroy.store(false, Ordering::Release);
@@ -2660,6 +2855,28 @@ mod tests {
     }
 
     impl NativeWindowOps for RecordingWindowOps {
+        fn set_title(&self, role: WindowRole, title: &str) -> Result<(), WireCommandError> {
+            if self.fail_title.load(Ordering::Acquire) {
+                return Err(WireCommandError::new(
+                    WireCommandErrorCode::Internal,
+                    "测试: 无法设置窗口标题",
+                ));
+            }
+            self.titles.lock().unwrap().push((role, title.to_owned()));
+            Ok(())
+        }
+
+        fn notify_updated(&self, role: WindowRole, notice: &WireUpdateNotice) {
+            self.notices
+                .lock()
+                .unwrap()
+                .push((role, notice.latest_seq.0.clone()));
+        }
+
+        fn report_diagnostic(&self, message: &str) {
+            self.diagnostics.lock().unwrap().push(message.to_owned());
+        }
+
         fn show_secondary(&self, replaced: bool) -> Result<(), WireCommandError> {
             self.show_calls.fetch_add(1, Ordering::AcqRel);
             if replaced {
@@ -2768,19 +2985,7 @@ mod tests {
         )
         .unwrap();
         let runtime = RuntimeEngine::with_profile(&content, profile_state).unwrap();
-        EngineState {
-            content,
-            runtime: Mutex::new(runtime),
-            replay: Mutex::new(None),
-            secondary: Mutex::new(None),
-            session_gate: Mutex::new(()),
-            replay_generation: AtomicU64::new(0),
-            session_id: AtomicU64::new(1),
-            secondary_generation: AtomicU64::new(0),
-            windows,
-            saves,
-            profile,
-        }
+        EngineState::new(content, runtime, windows, saves, profile)
     }
 
     /// Build a host state over the real game content with no secondary.
@@ -2818,7 +3023,7 @@ mod tests {
     fn show_test_secondary(
         state: &EngineState,
         scene_id: &str,
-    ) -> Result<RuntimeUpdate, WireCommandError> {
+    ) -> Result<Committed, WireCommandError> {
         state.transact_runtime(open_window_operation(state, scene_id))
     }
 
@@ -3041,6 +3246,7 @@ mod tests {
         content.scenes.insert(
             "replay_lab".to_owned(),
             SceneDefinition {
+                window_role: WindowRole::Main,
                 schema_version: 1,
                 id: "replay_lab".to_owned(),
                 entry: "open_child".to_owned(),
@@ -3068,6 +3274,7 @@ mod tests {
         content.scenes.insert(
             "replay_cross".to_owned(),
             SceneDefinition {
+                window_role: WindowRole::Main,
                 schema_version: 1,
                 id: "replay_cross".to_owned(),
                 entry: "open_child".to_owned(),
@@ -3161,6 +3368,8 @@ mod tests {
         let catalog = secondary_test_catalog();
         let snapshot = RuntimeEngine::new(&catalog).unwrap().snapshot().clone();
         let mut update = RuntimeUpdate {
+            kind: Default::default(),
+            effect_timer: None,
             update_id: 1,
             snapshot,
             cues: vec![
@@ -3198,6 +3407,8 @@ mod tests {
         let catalog = secondary_test_catalog();
         let snapshot = RuntimeEngine::new(&catalog).unwrap().snapshot().clone();
         let mut update = RuntimeUpdate {
+            kind: Default::default(),
+            effect_timer: None,
             update_id: 4,
             snapshot: snapshot.clone(),
             cues: vec![
@@ -3231,6 +3442,8 @@ mod tests {
         // runtime-gated presentation must not keep requiring an ack the runtime
         // is not waiting for.
         let mut plain = RuntimeUpdate {
+            kind: Default::default(),
+            effect_timer: None,
             update_id: 5,
             snapshot,
             cues: vec![PresentationCue {
@@ -3255,6 +3468,8 @@ mod tests {
         let catalog = secondary_test_catalog();
         let snapshot = RuntimeEngine::new(&catalog).unwrap().snapshot().clone();
         let mut update = RuntimeUpdate {
+            kind: Default::default(),
+            effect_timer: None,
             update_id: 7,
             snapshot,
             cues: vec![
@@ -3436,8 +3651,6 @@ mod tests {
     fn one_secondary_slot_is_reused_on_replace_and_cleared_on_scene_change() {
         let directory = tempdir().unwrap();
         let state = secondary_test_state(&directory);
-        let committed = state.runtime().unwrap().clone();
-
         let first = stage_test_secondary(&state, "ambience_lab");
         assert_eq!(
             state
@@ -3448,38 +3661,34 @@ mod tests {
             Some("ambience_lab".to_owned())
         );
 
-        // Repeating open_window stages a re-point of the same slot with a fresh
-        // token instead of creating a second secondary.
-        let staged = state
-            .stage_main_transition(&committed, Some("ambience_lab".to_owned()), false, false)
-            .unwrap();
-        assert_eq!(staged.plan, SecondaryPlan::Show { replaced: true });
-        let replaced = staged.session.as_ref().unwrap().token;
-        assert_eq!(replaced, first + 1);
-        // Staging is only a candidate: the live slot is untouched until the
-        // transition commits its profile write and native step.
-        assert_eq!(
-            state.secondary().unwrap().as_ref().map(|slot| slot.token),
-            Some(first)
-        );
-        *state.secondary().unwrap() = staged.session;
+        // Repeating open_window re-points the same slot with a fresh token
+        // instead of creating a second secondary.
+        let transition = open_secondary_transition(&state, "ambience_lab").unwrap();
+        assert_eq!(transition.plan, SecondaryPlan::Show { replaced: true });
+        let replaced = state.secondary().unwrap().as_ref().map(|slot| slot.token);
+        assert_eq!(replaced, Some(first + 1));
 
         // An undeclared Scene is rejected and leaves the live session intact.
-        assert!(state
-            .stage_main_transition(&committed, Some("does_not_exist".to_owned()), false, false)
-            .is_err());
+        assert!(open_secondary_transition(&state, "does_not_exist").is_err());
         assert_eq!(
             state.secondary().unwrap().as_ref().map(|slot| slot.token),
-            Some(replaced)
+            replaced
+        );
+        // So is a Scene that is not a secondary-window Scene.
+        assert!(open_secondary_transition(&state, "prologue")
+            .unwrap_err()
+            .message
+            .contains("副窗口专用"));
+        assert_eq!(
+            state.secondary().unwrap().as_ref().map(|slot| slot.token),
+            replaced
         );
 
-        // Leaving the owning main Scene tears the secondary down.
-        let staged = state
-            .stage_main_transition(&committed, None, true, false)
+        // A hard ownership boundary tears the secondary down.
+        let transition = state
+            .commit_main_runtime_forced(|runtime| Ok(runtime.bootstrap(&state.content).update), true)
             .unwrap();
-        assert_eq!(staged.plan, SecondaryPlan::Hide);
-        assert!(staged.session.is_none());
-        *state.secondary().unwrap() = staged.session;
+        assert_eq!(transition.plan, SecondaryPlan::Hide);
         assert!(state.secondary().unwrap().is_none());
     }
 
@@ -3744,19 +3953,13 @@ mod tests {
         )
         .unwrap();
         let runtime = RuntimeEngine::with_profile(&content, profile_state).unwrap();
-        let state = EngineState {
+        let state = EngineState::new(
             content,
-            runtime: Mutex::new(runtime),
-            replay: Mutex::new(None),
-            secondary: Mutex::new(None),
-            session_gate: Mutex::new(()),
-            replay_generation: AtomicU64::new(0),
-            session_id: AtomicU64::new(1),
-            secondary_generation: AtomicU64::new(0),
-            windows: Arc::new(RecordingWindowOps::default()),
+            runtime,
+            Arc::new(RecordingWindowOps::default()),
             saves,
             profile,
-        };
+        );
         let before = state.runtime().unwrap().snapshot().clone();
         assert!(state.check_session(Some(&WireU64::from(1))).is_ok());
         assert!(matches!(
@@ -3827,19 +4030,13 @@ mod tests {
         )
         .unwrap();
         let runtime = RuntimeEngine::with_profile(&content, profile_state).unwrap();
-        let state = EngineState {
+        let state = EngineState::new(
             content,
-            runtime: Mutex::new(runtime),
-            replay: Mutex::new(None),
-            secondary: Mutex::new(None),
-            session_gate: Mutex::new(()),
-            replay_generation: AtomicU64::new(0),
-            session_id: AtomicU64::new(1),
-            secondary_generation: AtomicU64::new(0),
-            windows: Arc::new(RecordingWindowOps::default()),
+            runtime,
+            Arc::new(RecordingWindowOps::default()),
             saves,
             profile,
-        };
+        );
         let before = state.runtime().unwrap().snapshot().clone();
         let result = state.commit_main_runtime(|runtime| runtime.start_new_game(&state.content));
         assert!(result.unwrap_err().message.contains("溢出"));
@@ -3864,23 +4061,17 @@ mod tests {
         )
         .unwrap();
         let runtime = RuntimeEngine::with_profile(&content, profile_state).unwrap();
-        let state = EngineState {
+        let state = EngineState::new(
             content,
-            runtime: Mutex::new(runtime),
-            replay: Mutex::new(None),
-            secondary: Mutex::new(None),
-            session_gate: Mutex::new(()),
-            replay_generation: AtomicU64::new(0),
-            session_id: AtomicU64::new(1),
-            secondary_generation: AtomicU64::new(0),
-            windows: Arc::new(RecordingWindowOps::default()),
+            runtime,
+            Arc::new(RecordingWindowOps::default()),
             saves,
             profile,
-        };
+        );
         let first = state
             .commit_main_runtime(|runtime| runtime.start_new_game(&state.content))
             .unwrap()
-            .update;
+            .committed;
         let dialogue = state
             .commit_main_runtime(|runtime| {
                 runtime.presentation_complete(
@@ -3890,7 +4081,7 @@ mod tests {
                 )
             })
             .unwrap()
-            .update;
+            .committed;
         assert!(matches!(
             dialogue.snapshot.prompt,
             vectspace_core::model::PromptSnapshot::Dialogue { .. }
@@ -4049,21 +4240,30 @@ mod tests {
             .unwrap();
         // Defect 1: the control cue is stripped, but the acknowledgement the
         // remaining `wait` needs is still required of the main window.
-        assert!(transition.update.requires_ack);
+        assert!(transition.committed.requires_ack);
         assert!(!transition
-            .update
+            .committed
             .cues
             .iter()
             .any(|cue| matches!(cue.kind, PresentationCueKind::OpenWindow { .. })));
         assert!(transition
-            .update
+            .committed
             .cues
             .iter()
             .any(|cue| cue.gate == CueGate::Runtime));
 
         // Defect 3: the secondary's own pending opening presentation is
         // delivered by its bootstrap with the exact update id the runtime is
-        // waiting for.
+        // waiting for.  The update only becomes deliverable once the transaction
+        // has been published (after its native step succeeded).
+        let committed = transition.committed.clone();
+        let published = state.publish(committed.produced, committed.diagnostics).unwrap();
+        let secondary_update = published
+            .iter()
+            .find(|(role, _)| *role == WindowRole::Secondary)
+            .map(|(_, update)| update.clone())
+            .expect("the secondary's opening update is published");
+        assert_eq!(secondary_update.seq, WireU64::from(1));
         let token = state.secondary().unwrap().as_ref().unwrap().token;
         let pending = state
             .secondary()
@@ -4077,6 +4277,9 @@ mod tests {
         assert!(payload.update.requires_ack);
         assert_eq!(payload.update.update_id, WireU64::from(pending));
         assert_eq!(payload.update.session_id, WireU64::from(token));
+        // The bootstrap's sequence is the window's latest, so the frontend only
+        // syncs for notifications that are really newer.
+        assert_eq!(payload.update.seq, WireU64::from(1));
 
         // Acknowledging that exact gate unblocks ordinary gameplay.
         state
@@ -5021,4 +5224,6 @@ mod tests {
             }
         }
     }
+
+    mod interaction;
 }

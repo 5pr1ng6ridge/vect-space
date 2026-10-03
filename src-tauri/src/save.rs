@@ -987,6 +987,7 @@ mod tests {
         let mut ambience = AmbienceSnapshot::default();
         ambience.set(AmbienceSlot::Slot2, Some(state.clone()));
         let snapshot = RuntimeSnapshot {
+            interaction: Default::default(),
             revision: 7,
             location: StoryLocation {
                 scene_id: "prologue".to_owned(),
@@ -1061,6 +1062,7 @@ mod tests {
         let manager =
             SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
         let snapshot = RuntimeSnapshot {
+            interaction: Default::default(),
             revision: 9,
             location: StoryLocation {
                 scene_id: "prologue".to_owned(),
@@ -1155,6 +1157,71 @@ mod tests {
             history,
             "history must survive without a live secondary window"
         );
+    }
+
+    #[test]
+    fn interaction_state_round_trips_and_an_old_save_without_it_still_loads() {
+        use vectspace_core::interaction::{
+            AdvanceBlock, SceneTimer, WindowRole, WindowTitles,
+        };
+        use vectspace_core::model::{
+            AudioSnapshot, PlaybackSnapshot, RuntimeSnapshot, StoryLocation, WorldSnapshot,
+        };
+
+        let directory = tempdir().unwrap();
+        let manager =
+            SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
+        let mut snapshot = RuntimeSnapshot {
+            interaction: Default::default(),
+            revision: 3,
+            location: StoryLocation {
+                scene_id: "prologue".to_owned(),
+                node_id: "intro".to_owned(),
+            },
+            variables: VariableMap::new(),
+            world: WorldSnapshot::default(),
+            audio: AudioSnapshot::default(),
+            playback: PlaybackSnapshot::default(),
+            dialogue_page: None,
+            long_text_page: None,
+            prompt: PromptSnapshot::None,
+        };
+        snapshot.interaction.titles = WindowTitles {
+            main: "Main!".to_owned(),
+            secondary: "Side".to_owned(),
+        };
+        snapshot.interaction.blocks.push(AdvanceBlock {
+            id: "lock".to_owned(),
+            source: WindowRole::Secondary,
+            source_scene: "ambience_lab".to_owned(),
+            message: "wait".to_owned(),
+            message_template: None,
+        });
+        snapshot.interaction.timers.insert(
+            "t".to_owned(),
+            SceneTimer {
+                target: "bump".to_owned(),
+                remaining_ms: 321,
+                interval_ms: Some(100),
+            },
+        );
+        snapshot.interaction.prompt_instance = "7".to_owned();
+        let document = SlotDocument {
+            snapshot: &snapshot,
+            history: &[],
+            secondary: None,
+        };
+        manager.save("2", document, None).unwrap();
+        // Remaining time, not an absolute process time, is what is stored.
+        assert_eq!(manager.load("2").unwrap().snapshot, snapshot);
+
+        // A save written before this state existed has no `interaction` key.
+        let path = directory.path().join("slot-2.json");
+        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["snapshot"].as_object_mut().unwrap().remove("interaction");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let old = manager.load("2").unwrap();
+        assert_eq!(old.snapshot.interaction, Default::default());
     }
 
     #[test]

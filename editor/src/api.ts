@@ -9,12 +9,13 @@ import type {
   PreviewResolvedAsset,
   PreviewSessionStartRequest,
   PreviewSessionStartResult,
+  PreviewSessionTickResult,
   SaveProjectRequest,
   SaveProjectResult,
   AssetInspection,
 } from "./types";
 import type { RuntimeUpdate } from "@vectspace/presentation-core/types";
-import type { ScalarValue, VariableType } from "./types";
+import type { AdvanceSource, ScalarValue, VariableType } from "./types";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import type { WireScalarValue } from "../../shared/generated/WireScalarValue";
 import { toCommandError } from "../../shared/commandError";
@@ -96,6 +97,7 @@ export const editorApi = {
   previewSessionChoose,
   previewSessionClickButton,
   previewSessionPresentationComplete,
+  previewSessionTick,
   previewSessionStop,
 };
 
@@ -126,7 +128,7 @@ function previewSessionStart(
 function previewSessionAdvance(request: {
   session_id: string;
   expected_revision: string;
-  source: "manual" | "auto" | "fast_forward" | "forced_auto";
+  source: AdvanceSource;
 }): Promise<RuntimeUpdate> {
   return command<unknown>("preview_session_advance", { request }).then(
     (value) => decodeWireValue(value) as RuntimeUpdate,
@@ -161,6 +163,18 @@ function previewSessionPresentationComplete(request: {
   return command<unknown>("preview_session_presentation_complete", {
     request,
   }).then((value) => decodeWireValue(value) as RuntimeUpdate);
+}
+
+/**
+ * Advance the preview's Scene timers.  The host measures the elapsed time on
+ * its own monotonic clock; the WebView only decides *when to ask*.
+ */
+function previewSessionTick(
+  sessionId: string,
+): Promise<PreviewSessionTickResult> {
+  return command<unknown>("preview_session_tick", {
+    request: { session_id: sessionId },
+  }).then((value) => decodeWireValue(value) as PreviewSessionTickResult);
 }
 
 function previewSessionStop(sessionId: string): Promise<boolean> {

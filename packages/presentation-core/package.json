@@ -27,6 +27,8 @@
     "./deferred-session": "./src/deferredSession.ts",
     "./gameplay-host": "./src/gameplayHost.ts",
     "./session-transition": "./src/sessionTransition.ts",
+    "./live-update": "./src/liveUpdate.ts",
+    "./update-sequencer": "./src/updateSequencer.ts",
     "./motion": "./src/motion.ts",
     "./scene-test-kit": "./src/sceneTestKit.ts",
     "./session-test-kit": "./src/sessionTestKit.ts"

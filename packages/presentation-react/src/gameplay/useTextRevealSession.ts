@@ -166,20 +166,33 @@ export function useTextRevealSession(
   // A prompt instance is the only unconditional reset boundary.  Timing
   // metrics may settle before the reveal begins; while still preparing it is
   // safe to replace the plan, but once it has visible text its plan remains
-  // fixed until the next instance.
+  // fixed until the next instance - with one exception: when the *text itself*
+  // changes under the same instance (a variable interpolated into the line was
+  // updated by another window or timer), the plan is rebuilt and the player's
+  // progress is carried over instead of being reset or left pointing at stale
+  // content.  A completed line stays completed and is never replayed.
+  const unitsRef = useRef(units);
   useLayoutEffect(() => {
     const current = sessionRef.current;
     const changedInstance = instanceRef.current !== instanceKey;
+    const unitsChanged = unitsRef.current !== units;
+    unitsRef.current = units;
     const mayRefreshPlan =
       changedInstance ||
       current.state.status === "preparing" ||
       current.state.status === "cancelled";
-    if (!mayRefreshPlan) return;
+    if (!mayRefreshPlan) {
+      if (unitsChanged) {
+        epochRef.current += 1;
+        commit(current.rebased(planInput), true);
+      }
+      return;
+    }
     epochRef.current += 1;
     instanceRef.current = instanceKey;
     completionRef.current = null;
     commit(makeSession(shouldRestore), true);
-  }, [commit, instanceKey, makeSession, shouldRestore]);
+  }, [commit, instanceKey, makeSession, planInput, shouldRestore, units]);
 
   // Loading a stable snapshot can arrive after the component has mounted
   // (for example while a cue is being replaced).  It is intentionally the

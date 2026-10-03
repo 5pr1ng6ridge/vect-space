@@ -213,6 +213,37 @@ export function cancelRevealSession(
 }
 
 /**
+ * Carries a reveal's progress over to a plan built from changed text (for
+ * example a variable interpolation that changed while the line is on screen).
+ *
+ * A completed reveal stays completed instead of replaying.  A running one keeps
+ * the number of units the player has already seen, clamped to the new content;
+ * the new plan then continues from the matching moment of its own timeline.
+ */
+export function rebaseRevealState(
+  plan: RevealPlan,
+  state: RevealSessionState,
+): RevealSessionState {
+  if (state.status === "cancelled") {
+    return cancelRevealSession(initialRevealSessionState(plan));
+  }
+  if (state.status === "completed") {
+    return completeRevealSession(plan, state.restored);
+  }
+  const revealed = state.revealedCount;
+  const elapsed =
+    revealed <= 0
+      ? Math.min(state.elapsedMs, plan.completionMs)
+      : revealed >= plan.events.length
+        ? plan.completionMs
+        : (plan.events[revealed - 1]?.atMs ?? 0);
+  const next = makeState(plan, elapsed, false, state.restored);
+  return state.status === "paused" && next.status !== "completed"
+    ? { ...next, status: "paused" }
+    : next;
+}
+
+/**
  * Immutable façade used by React controllers. Each operation returns a new
  * session, so a stale animation callback cannot mutate a newer prompt.
  */
@@ -265,6 +296,18 @@ export class TextRevealSession {
     return TextRevealSession.fromPlan(
       this.plan,
       completeRevealSession(this.plan),
+    );
+  }
+
+  /**
+   * Rebuilds the plan for changed text while keeping the player's progress.
+   * Only the content changes: a completed reveal is not replayed.
+   */
+  rebased(options: TextRevealSessionOptions): TextRevealSession {
+    const plan = createRevealPlan(options);
+    return TextRevealSession.fromPlan(
+      plan,
+      rebaseRevealState(plan, this.state),
     );
   }
 

@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use image::{GenericImageView, ImageReader};
@@ -21,11 +21,14 @@ use tauri::{AppHandle, Manager, State};
 use ttf_parser::Face;
 use vectspace_core::{
     content::ContentCatalog,
+    interaction::{WindowRole, WindowTitles, DEFAULT_MAIN_TITLE, DEFAULT_SECONDARY_TITLE},
     model::{
         AssetDefinition, AssetKind, AdvanceSource, ButtonTemplate, ChapterMapDefinition, ChapterMapReplay,
         ChapterMapReveal, ChoiceSnapshot, ContentManifest, CurtainFill, ImageAnimationDefinition,
-        PresentationOutcome, ResolvedAsset, SceneDefinition, SceneNode, SpriteActionDefinition,
-        StoryLocation, TimelineEvent, TimelineTrack, UiMotionPreset, VariableMap,
+        PresentationCueKind, PresentationOutcome, ResolvedAsset, RuntimeUpdate, SceneDefinition,
+        SceneNode,
+        SpriteActionDefinition, StoryLocation, TimelineEvent, TimelineTrack, UiMotionPreset,
+        VariableMap,
     },
     runtime::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
@@ -78,6 +81,65 @@ struct LivePreviewSession {
     session_id: u64,
     catalog: ContentCatalog,
     runtime: RuntimeEngine,
+    /// The window the previewed Scene is written for.  A single-window preview
+    /// applies only the title/blocks/advance requests that target it.
+    local: WindowRole,
+    /// Author-facing explanations (for example a request for the other window
+    /// that a single-window preview cannot honour) not yet shown.
+    notes: Vec<String>,
+    /// Monotonic clock of the previous timer tick; elapsed time is computed
+    /// here so the WebView never owns an authoritative timer.
+    last_tick: Instant,
+}
+
+impl LivePreviewSession {
+    fn push_notes(&mut self, notes: Vec<String>) {
+        for note in notes {
+            if !self.notes.contains(&note) {
+                self.notes.push(note);
+            }
+        }
+    }
+}
+
+/// Longest span one tick may advance the preview timers.  A stalled or hidden
+/// WebView therefore never makes timers fire in a burst when it wakes up.
+const PREVIEW_MAX_TICK: Duration = Duration::from_millis(1_000);
+
+/// A single-window preview cannot open the secondary window.  The cue is a host
+/// instruction, not a presentation one, so it never reaches the surface; the
+/// author is told instead of the node silently doing nothing.
+fn strip_open_window_cues(update: &mut RuntimeUpdate, notes: &mut Vec<String>) {
+    update.cues.retain(|cue| match &cue.kind {
+        PresentationCueKind::OpenWindow { scene } => {
+            notes.push(format!(
+                "预览是单窗口：「打开副窗口」（{scene}）不会真的打开窗口，请在桌面双窗口运行验证"
+            ));
+            false
+        }
+        _ => true,
+    });
+}
+
+/// Role of the Scene a preview starts in; unknown Scenes fall back to `main`
+/// (the runtime reports the real error when it starts).
+fn preview_local_role(catalog: &ContentCatalog, scene_id: &str) -> WindowRole {
+    catalog
+        .scenes
+        .get(scene_id)
+        .map_or(WindowRole::Main, |scene| scene.window_role)
+}
+
+/// A secondary Scene previews as if its window had just been created.
+fn prepare_preview_titles(runtime: &mut RuntimeEngine, local: WindowRole) {
+    runtime.prepare_window_titles(WindowTitles {
+        main: DEFAULT_MAIN_TITLE.to_owned(),
+        secondary: if local == WindowRole::Secondary {
+            DEFAULT_SECONDARY_TITLE.to_owned()
+        } else {
+            String::new()
+        },
+    });
 }
 
 /// Width of the per-session id window reserved for a live preview.
@@ -2658,6 +2720,10 @@ fn build_node_preview_command(
         variable_map_from_wire(request.variable_overrides).map_err(validation_command_error)?;
     let mut runtime = RuntimeEngine::with_preview_overrides(&catalog, &variable_overrides)
         .map_err(validation_command_error)?;
+    prepare_preview_titles(
+        &mut runtime,
+        preview_local_role(&catalog, &request.target.scene_id),
+    );
     let preview = runtime.preview_to_from_scene_entry(
         &catalog,
         &request.target.scene_id,
@@ -2800,6 +2866,8 @@ enum PreviewSessionStartResult {
         session_id: WireU64,
         update: WireRuntimeUpdate,
         assets: Vec<ResolvedAsset>,
+        /// Things a single-window preview could not do (see `LivePreviewSession::notes`).
+        notes: Vec<String>,
     },
     NeedsChoice {
         location: StoryLocation,
@@ -2849,6 +2917,55 @@ struct PreviewSessionAckRequest {
 #[serde(deny_unknown_fields)]
 struct PreviewSessionStopRequest {
     session_id: WireU64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewSessionTickRequest {
+    session_id: WireU64,
+}
+
+/// What one timer tick produced, in presentation order.
+#[derive(Debug, Serialize)]
+struct PreviewSessionTickResult {
+    /// `effect` updates of fired timers, then any `story` update a local
+    /// script advance caused, then a `state_refresh` when titles or blocks
+    /// changed without another update to carry them.
+    updates: Vec<WireRuntimeUpdate>,
+    /// Single-window limitations and other author-facing explanations.
+    notes: Vec<String>,
+    /// Timers the runtime stopped because their effect failed.
+    diagnostics: Vec<String>,
+}
+
+/// Run one runtime command on the live preview, settle the window requests it
+/// left behind, and roll the whole command back if either step fails so a
+/// preview never ends up half-applied.
+fn run_preview_command(
+    session: &mut LivePreviewSession,
+    command: impl FnOnce(
+        &mut RuntimeEngine,
+        &ContentCatalog,
+    ) -> Result<RuntimeUpdate, vectspace_core::runtime::RuntimeError>,
+) -> Result<WireRuntimeUpdate, WireCommandError> {
+    let backup = session.runtime.clone();
+    let mut notes = Vec::new();
+    let result = command(&mut session.runtime, &session.catalog).and_then(|update| {
+        session
+            .runtime
+            .settle_local_host(&session.catalog, session.local, update, &mut notes)
+    });
+    match result {
+        Ok(mut update) => {
+            strip_open_window_cues(&mut update, &mut notes);
+            session.push_notes(notes);
+            Ok(update.into())
+        }
+        Err(error) => {
+            session.runtime = backup;
+            Err(runtime_command_error(error))
+        }
+    }
 }
 
 /// Lock the live preview and reject a request that does not belong to it.
@@ -2913,6 +3030,8 @@ fn preview_session_start_command(
     let mut runtime = RuntimeEngine::with_preview_overrides(&catalog, &variable_overrides)
         .map_err(validation_command_error)?;
     runtime.prepare_session_ids(namespace, namespace, namespace);
+    let local = preview_local_role(&catalog, &request.scene_id);
+    prepare_preview_titles(&mut runtime, local);
     // A node preview only owns the path from its own Scene entry; choices from
     // other scenes are stale metadata and are ignored.
     let decisions = request
@@ -2976,6 +3095,13 @@ fn preview_session_start_command(
             )
             .map_err(validation_command_error)?,
     };
+    // Window requests reached on the way (a `window_title` / `window_control`
+    // node) are applied to this single window before the first presentation.
+    let mut notes = Vec::new();
+    let mut update = runtime
+        .settle_local_host(&catalog, local, update, &mut notes)
+        .map_err(validation_command_error)?;
+    strip_open_window_cues(&mut update, &mut notes);
     let assets = catalog
         .resolve_assets(&catalog.asset_ids())
         .map_err(validation_command_error)?;
@@ -2983,15 +3109,22 @@ fn preview_session_start_command(
         .preview
         .lock()
         .map_err(|_| internal_command_error("预览会话锁已损坏"))?;
-    *guard = Some(LivePreviewSession {
+    let mut session = LivePreviewSession {
         session_id,
         catalog,
         runtime,
-    });
+        local,
+        notes: Vec::new(),
+        last_tick: Instant::now(),
+    };
+    session.push_notes(notes);
+    let notes = std::mem::take(&mut session.notes);
+    *guard = Some(session);
     Ok(PreviewSessionStartResult::Started {
         session_id: WireU64::from(session_id),
         update: update.into(),
         assets,
+        notes,
     })
 }
 
@@ -3012,11 +3145,9 @@ fn preview_session_advance_command(
         .parse()
         .map_err(|_| validation_command_error("无效的修订号"))?;
     with_preview_session(state, &request.session_id, |session| {
-        session
-            .runtime
-            .advance(&session.catalog, revision, request.source)
-            .map(Into::into)
-            .map_err(runtime_command_error)
+        run_preview_command(session, |runtime, catalog| {
+            runtime.advance(catalog, revision, request.source)
+        })
     })
 }
 
@@ -3037,11 +3168,9 @@ fn preview_session_choose_command(
         .parse()
         .map_err(|_| validation_command_error("无效的修订号"))?;
     with_preview_session(state, &request.session_id, |session| {
-        session
-            .runtime
-            .choose(&session.catalog, &request.choice_id, revision)
-            .map(Into::into)
-            .map_err(runtime_command_error)
+        run_preview_command(session, |runtime, catalog| {
+            runtime.choose(catalog, &request.choice_id, revision)
+        })
     })
 }
 
@@ -3062,11 +3191,9 @@ fn preview_session_click_button_command(
         .parse()
         .map_err(|_| validation_command_error("无效的修订号"))?;
     with_preview_session(state, &request.session_id, |session| {
-        session
-            .runtime
-            .click_button(&session.catalog, &request.instance_id, revision)
-            .map(Into::into)
-            .map_err(runtime_command_error)
+        run_preview_command(session, |runtime, catalog| {
+            runtime.click_button(catalog, &request.instance_id, revision)
+        })
     })
 }
 
@@ -3087,11 +3214,90 @@ fn preview_session_presentation_complete_command(
         .parse()
         .map_err(|_| validation_command_error("无效的 update 编号"))?;
     with_preview_session(state, &request.session_id, |session| {
-        session
+        run_preview_command(session, |runtime, catalog| {
+            runtime.presentation_complete(catalog, update_id, request.outcome)
+        })
+    })
+}
+
+/// Titles and blocks: the window state a request can change.  Timer countdowns
+/// change every tick and are deliberately not part of it.
+fn shared_window_state(
+    snapshot: &vectspace_core::model::RuntimeSnapshot,
+) -> (WindowTitles, Vec<vectspace_core::interaction::AdvanceBlock>) {
+    (
+        snapshot.interaction.titles.clone(),
+        snapshot.interaction.blocks.clone(),
+    )
+}
+
+/// Advance the preview's Scene timers by the time since the previous tick.
+///
+/// The elapsed time is measured here on a monotonic clock (and capped), never
+/// reported by the WebView, so a throttled or hidden preview cannot fire
+/// timers in a burst.  Only the previewed window's own requests are applied;
+/// everything aimed at the other window is reported in `notes`.
+#[tauri::command]
+fn preview_session_tick(
+    request: PreviewSessionTickRequest,
+    state: State<'_, EditorState>,
+) -> Result<PreviewSessionTickResult, WireCommandError> {
+    preview_session_tick_command(request, &state, Instant::now())
+}
+
+fn preview_session_tick_command(
+    request: PreviewSessionTickRequest,
+    state: &EditorState,
+    now: Instant,
+) -> Result<PreviewSessionTickResult, WireCommandError> {
+    with_preview_session(state, &request.session_id, |session| {
+        let elapsed = now
+            .saturating_duration_since(session.last_tick)
+            .min(PREVIEW_MAX_TICK);
+        session.last_tick = now;
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        let backup = session.runtime.clone();
+        let shared_before = shared_window_state(session.runtime.snapshot());
+        let mut notes = Vec::new();
+        let (mut updates, diagnostics) = session
             .runtime
-            .presentation_complete(&session.catalog, update_id, request.outcome)
-            .map(Into::into)
-            .map_err(runtime_command_error)
+            .tick_timers(&session.catalog, elapsed_ms);
+        let settled = session.runtime.settle_local_requests(
+            &session.catalog,
+            session.local,
+            &mut notes,
+        );
+        match settled {
+            Ok(story) => updates.extend(story),
+            Err(error) => {
+                session.runtime = backup;
+                return Err(runtime_command_error(error));
+            }
+        }
+        // A request applied to this window (title, block) changed shared state
+        // after the effect update's snapshot was taken: publish it once.
+        let current = shared_window_state(session.runtime.snapshot());
+        let last_is_current = updates
+            .last()
+            .is_some_and(|update| shared_window_state(&update.snapshot) == current);
+        if !last_is_current && current != shared_before {
+            match session.runtime.refresh_update(&session.catalog) {
+                Ok(refresh) => updates.push(refresh),
+                Err(error) => {
+                    session.runtime = backup;
+                    return Err(runtime_command_error(error));
+                }
+            }
+        }
+        for update in &mut updates {
+            strip_open_window_cues(update, &mut notes);
+        }
+        session.push_notes(notes);
+        Ok(PreviewSessionTickResult {
+            updates: updates.into_iter().map(Into::into).collect(),
+            notes: std::mem::take(&mut session.notes),
+            diagnostics,
+        })
     })
 }
 
@@ -4797,6 +5003,8 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
             }
         }
     }
+    // Effect-only targets are reachable but not flow sources.
+    let mut effect_reachable = BTreeSet::new();
     while let Some((scene_id, node_id)) = queue.pop_front() {
         if !reachable.insert((scene_id.clone(), node_id.clone())) {
             continue;
@@ -4815,11 +5023,18 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
                 queue.push_back((window_scene.id.clone(), window_scene.entry.clone()));
             }
         }
+        // A timer's effect node runs on its own; its successors do not follow.
+        if let Some(effect) = effect_references(node) {
+            if scene.nodes.contains_key(effect) {
+                effect_reachable.insert((scene_id.clone(), effect.to_owned()));
+            }
+        }
     }
 
     for (scene_id, scene) in &catalog.scenes {
         for node_id in scene.nodes.keys() {
-            if !reachable.contains(&(scene_id.clone(), node_id.clone())) {
+            let key = (scene_id.clone(), node_id.clone());
+            if !reachable.contains(&key) && !effect_reachable.contains(&key) {
                 diagnostics.push(EditorDiagnostic {
                     severity: DiagnosticSeverity::Warning,
                     code: "unreachable_node".to_owned(),
@@ -4909,7 +5124,12 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::UiMotionPlay { next, .. }
         | SceneNode::ButtonCreate { next, .. }
         | SceneNode::ButtonUpdate { next, .. }
-        | SceneNode::ButtonRemove { next, .. } => vec![local(next)],
+        | SceneNode::ButtonRemove { next, .. }
+        | SceneNode::WindowTitle { next, .. }
+        | SceneNode::WindowControl { next, .. }
+        // A timer's effect target is a reference (see `effect_references`),
+        // not a flow successor: only `next` continues the story.
+        | SceneNode::Timer { next, .. } => vec![local(next)],
         SceneNode::Timeline { next, .. } => vec![local(next)],
         // A non-blocking host request: control continues to `next` in the same
         // Scene. The named window Scene is a reference, not a flow successor.
@@ -4981,7 +5201,23 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::ButtonCreate { .. }
         | SceneNode::ButtonUpdate { .. }
         | SceneNode::ButtonRemove { .. }
+        | SceneNode::WindowTitle { .. }
+        | SceneNode::WindowControl { .. }
+        | SceneNode::Timer { .. }
         | SceneNode::OpenWindow { .. } => true,
+    }
+}
+
+/// Same-Scene nodes a node runs as an *effect* without following their `next`.
+/// They keep the target reachable but never extend the story flow.
+fn effect_references(node: &SceneNode) -> Option<&str> {
+    match node {
+        SceneNode::Timer {
+            action: vectspace_core::interaction::TimerAction::Start,
+            target: Some(target),
+            ..
+        } => Some(target.as_str()),
+        _ => None,
     }
 }
 
@@ -5222,6 +5458,7 @@ pub fn run() {
             preview_session_choose,
             preview_session_click_button,
             preview_session_presentation_complete,
+            preview_session_tick,
             preview_session_stop,
         ])
         .run(tauri::generate_context!())
@@ -6990,5 +7227,410 @@ mod tests {
         removed.assets.remove("bg.room");
         assert!(managed_deletions(root, &previous, &next).is_empty());
         assert!(managed_deletions(root, &previous, &removed).is_empty());
+    }
+
+    // -- two-window preview semantics ---------------------------------------
+
+    /// The demo project's save request with one extra Scene appended.
+    fn demo_project_with_scene(scene: serde_json::Value) -> (EditorState, serde_json::Value) {
+        demo_project_with_scenes(&[scene], serde_json::json!({}))
+    }
+
+    /// The demo project's save request with extra Scenes (and manifest
+    /// variables) appended unless the manifest already declares them.
+    fn demo_project_with_scenes(
+        scenes: &[serde_json::Value],
+        variables: serde_json::Value,
+    ) -> (EditorState, serde_json::Value) {
+        let root = demo_root().canonicalize().unwrap();
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        let fingerprint = project_fingerprint(&root, &catalog.manifest).unwrap();
+        let payload = project_payload(
+            &root,
+            &catalog,
+            EditorLayout::default(),
+            fingerprint,
+        )
+        .unwrap();
+        let state = editor_state_with_request(&serde_json::to_value(&payload).unwrap());
+        let mut project = serde_json::to_value(&payload).unwrap();
+        let object = project.as_object_mut().unwrap();
+        object.remove("root");
+        object.remove("assets");
+        object.remove("diagnostics");
+        let wire_fingerprint = object.remove("fingerprint").unwrap();
+        object.insert("expected_fingerprint".to_owned(), wire_fingerprint);
+        object.insert("import_tokens".to_owned(), serde_json::json!([]));
+        for scene in scenes {
+            let path = format!("scenes/{}.yaml", scene["id"].as_str().unwrap());
+            if object["manifest"]["scenes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|existing| existing == &serde_json::json!(path))
+            {
+                continue;
+            }
+            object["manifest"]["scenes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(path));
+            object["scenes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({ "path": path, "definition": scene }));
+        }
+        for (id, definition) in variables.as_object().unwrap() {
+            object["manifest"]["variables"]
+                .as_object_mut()
+                .unwrap()
+                .entry(id.clone())
+                .or_insert_with(|| definition.clone());
+        }
+        (state, project)
+    }
+
+    fn timer_scene(role: &str) -> serde_json::Value {
+        serde_json::json!({
+            "window_role": role,
+            "schema_version": 2,
+            "id": "tick_demo",
+            "entry": "start",
+            "nodes": {
+                "start": {
+                    "type": "window_title", "target": role,
+                    "title": "Ready", "next": "arm"
+                },
+                "arm": {
+                    "type": "timer", "id": "pulse", "action": "start",
+                    "delay_ms": 100, "interval_ms": null, "target": "rename",
+                    "next": "other"
+                },
+                "other": {
+                    "type": "window_title",
+                    "target": if role == "main" { "secondary" } else { "main" },
+                    "title": "Elsewhere", "next": "say"
+                },
+                "say": {
+                    "type": "say", "speaker": null,
+                    "text": "Title: [var=window.main.title][var=window.secondary.title]",
+                    "next": "finish"
+                },
+                "rename": {
+                    "type": "window_title", "target": role,
+                    "title": "Fired", "next": "finish"
+                },
+                "finish": { "type": "end" }
+            }
+        })
+    }
+
+    fn start_preview(
+        state: &EditorState,
+        project: &serde_json::Value,
+        mode: &str,
+        node: Option<&str>,
+    ) -> serde_json::Value {
+        start_preview_of(state, project, "tick_demo", mode, node, serde_json::json!({}))
+    }
+
+    fn start_preview_of(
+        state: &EditorState,
+        project: &serde_json::Value,
+        scene_id: &str,
+        mode: &str,
+        node: Option<&str>,
+        overrides: serde_json::Value,
+    ) -> serde_json::Value {
+        let start: PreviewSessionStartRequest = serde_json::from_value(serde_json::json!({
+            "project": project,
+            "mode": mode,
+            "scene_id": scene_id,
+            "node_id": node,
+            "choices": [],
+            "variable_overrides": overrides
+        }))
+        .unwrap();
+        serde_json::to_value(preview_session_start_command(start, state).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn preview_applies_own_window_requests_and_runs_timers_on_a_monotonic_tick() {
+        let (state, project) = demo_project_with_scene(timer_scene("main"));
+        let started = start_preview(&state, &project, "scene", None);
+        assert_eq!(started["status"], "started", "{started}");
+        let snapshot = &started["update"]["snapshot"];
+        // The title was set before the dialogue and the other window's title
+        // request was reported instead of silently applied.
+        assert_eq!(snapshot["interaction"]["titles"]["main"], "Ready");
+        assert_eq!(snapshot["interaction"]["titles"]["secondary"], "");
+        assert_eq!(snapshot["prompt"]["text"], "Title: Ready");
+        assert!(snapshot["interaction"]["timers"]["pulse"].is_object());
+        let notes = started["notes"].as_array().unwrap();
+        assert!(
+            notes.iter().any(|note| note.as_str().unwrap().contains("另一窗口")),
+            "{notes:?}"
+        );
+        let session_id = started["session_id"].as_str().unwrap().to_owned();
+        let tick = |millis: u64| {
+            let request: PreviewSessionTickRequest =
+                serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap();
+            let now = state
+                .preview
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .last_tick
+                + Duration::from_millis(millis);
+            serde_json::to_value(preview_session_tick_command(request, &state, now).unwrap())
+                .unwrap()
+        };
+
+        // Not due yet: nothing fires and the dialogue is untouched.
+        let early = tick(40);
+        assert!(early["updates"].as_array().unwrap().is_empty(), "{early}");
+
+        // Due: the effect runs beside the story (kind effect), the title
+        // changed, and the live dialogue text was re-derived without a new
+        // story occurrence.
+        let fired = tick(80);
+        let updates = fired["updates"].as_array().unwrap();
+        assert_eq!(updates[0]["kind"], "effect", "{fired}");
+        let last = updates.last().unwrap();
+        assert_eq!(last["snapshot"]["interaction"]["titles"]["main"], "Fired");
+        assert_eq!(last["snapshot"]["prompt"]["text"], "Title: Fired");
+        assert_eq!(
+            last["snapshot"]["interaction"]["prompt_instance"],
+            snapshot["interaction"]["prompt_instance"],
+        );
+        // A one-shot timer removes itself.
+        assert!(last["snapshot"]["interaction"]["timers"]["pulse"].is_null());
+
+        // A huge gap (stalled WebView) is capped and cannot burst anything.
+        let idle = tick(3_600_000);
+        assert!(idle["updates"].as_array().unwrap().is_empty());
+
+        // A command after ticks uses the latest revision and still works.
+        let revision = last["snapshot"]["revision"].as_str().unwrap().to_owned();
+        let advance: PreviewSessionAdvanceRequest = serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "expected_revision": revision,
+            "source": "manual"
+        }))
+        .unwrap();
+        let next = serde_json::to_value(
+            preview_session_advance_command(advance, &state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(next["snapshot"]["prompt"]["kind"], "end");
+        // Leaving the story keeps the previous revision stale for old clients.
+        let stale: PreviewSessionTickRequest =
+            serde_json::from_value(serde_json::json!({ "session_id": "999999" })).unwrap();
+        assert!(preview_session_tick_command(stale, &state, Instant::now()).is_err());
+    }
+
+    #[test]
+    fn secondary_scene_preview_starts_with_a_fresh_secondary_title() {
+        let (state, project) = demo_project_with_scene(timer_scene("secondary"));
+        let started = start_preview(&state, &project, "scene", None);
+        assert_eq!(started["status"], "started", "{started}");
+        // `start` renames the secondary window itself; the main-window title
+        // request is explained rather than applied.
+        let titles = &started["update"]["snapshot"]["interaction"]["titles"];
+        assert_eq!(titles["secondary"], "Ready");
+        assert_eq!(titles["main"], DEFAULT_MAIN_TITLE);
+        assert!(started["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("另一窗口")));
+    }
+
+    #[test]
+    fn static_node_preview_reconstructs_through_window_nodes_and_timers() {
+        let (state, project) = demo_project_with_scene(timer_scene("main"));
+        let started = start_preview(&state, &project, "node", Some("say"));
+        assert_eq!(started["status"], "started", "{started}");
+        assert_eq!(started["update"]["snapshot"]["prompt"]["kind"], "dialogue");
+        assert_eq!(
+            started["update"]["snapshot"]["interaction"]["titles"]["main"],
+            "Ready"
+        );
+    }
+
+    #[test]
+    fn timer_effect_targets_are_reachable_but_do_not_extend_the_flow() {
+        let root = demo_root().canonicalize().unwrap();
+        let mut catalog = ContentCatalog::from_root(root).unwrap();
+        let entry_id = catalog.manifest.entry_scene.clone();
+        let entry = catalog.scenes[&entry_id].entry.clone();
+        let scene = catalog.scenes.get_mut(&entry_id).unwrap();
+        scene.nodes.insert("effect_only".to_owned(), SceneNode::Sfx {
+            asset: "sfx.none".to_owned(),
+            volume: 1.0,
+            next: "effect_successor".to_owned(),
+        });
+        scene
+            .nodes
+            .insert("effect_successor".to_owned(), SceneNode::End);
+        scene.nodes.insert(
+            entry,
+            SceneNode::Timer {
+                id: "t".to_owned(),
+                action: vectspace_core::interaction::TimerAction::Start,
+                delay_ms: 10,
+                interval_ms: None,
+                target: Some("effect_only".to_owned()),
+                next: "after_timer".to_owned(),
+            },
+        );
+        scene.nodes.insert("after_timer".to_owned(), SceneNode::End);
+        let diagnostics = analyze_catalog(&catalog);
+        let unreachable = |node: &str| {
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unreachable_node"
+                    && diagnostic.scene_id.as_deref() == Some(entry_id.as_str())
+                    && diagnostic.node_id.as_deref() == Some(node)
+            })
+        };
+        assert!(!unreachable("effect_only"));
+        assert!(!unreachable("after_timer"));
+        // The effect node's own `next` is not run, so it stays unreachable.
+        assert!(unreachable("effect_successor"));
+    }
+
+    fn pair_demo_project() -> (EditorState, serde_json::Value) {
+        let root = demo_root().canonicalize().unwrap();
+        let load = |name: &str| {
+            serde_json::to_value(
+                read_yaml::<SceneDefinition>(&root.join("scenes").join(name)).unwrap(),
+            )
+            .unwrap()
+        };
+        demo_project_with_scenes(
+            &[
+                load("window_pair_main.yaml"),
+                load("window_pair_side.yaml"),
+            ],
+            serde_json::json!({
+                "pair_ready": {
+                    "scope": "save",
+                    "type": "boolean",
+                    "default": { "kind": "boolean", "value": false }
+                }
+            }),
+        )
+    }
+
+    fn preview_call<T: Serialize>(value: T) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    #[test]
+    fn bundled_two_window_demo_runs_in_a_single_window_preview() {
+        let (state, project) = pair_demo_project();
+
+        // The secondary half: its own title is set, the main window it blocks
+        // is explained, and the Choice option waits for pair_ready.
+        let side = start_preview_of(
+            &state,
+            &project,
+            "window_pair_side",
+            "scene",
+            None,
+            serde_json::json!({}),
+        );
+        assert_eq!(side["status"], "started", "{side}");
+        let snapshot = &side["update"]["snapshot"];
+        assert_eq!(
+            snapshot["interaction"]["titles"]["secondary"],
+            "副窗口 · 做个选择（主窗口：VECTSPACE）"
+        );
+        assert_eq!(snapshot["prompt"]["kind"], "dialogue");
+        assert!(side["notes"].as_array().unwrap().iter().any(|note| {
+            let note = note.as_str().unwrap();
+            note.contains("另一窗口") && note.contains("阻挡")
+        }));
+        let session = side["session_id"].as_str().unwrap().to_owned();
+        let revision = snapshot["revision"].as_str().unwrap().to_owned();
+        let advance: PreviewSessionAdvanceRequest = serde_json::from_value(serde_json::json!({
+            "session_id": session, "expected_revision": revision, "source": "manual"
+        }))
+        .unwrap();
+        let pick = preview_call(preview_session_advance_command(advance, &state).unwrap());
+        let open = pick["snapshot"]["prompt"]["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|choice| choice["id"] == "open")
+            .unwrap()
+            .clone();
+        assert_eq!(open["enabled"], false);
+        let ready = start_preview_of(
+            &state,
+            &project,
+            "window_pair_side",
+            "node",
+            Some("pick"),
+            serde_json::json!({ "pair_ready": { "kind": "boolean", "value": true } }),
+        );
+        let choices = ready["update"]["snapshot"]["prompt"]["choices"]
+            .as_array()
+            .unwrap();
+        assert!(choices
+            .iter()
+            .any(|choice| choice["id"] == "open" && choice["enabled"] == true));
+
+        // The main half: both timers are armed, the 3 s timer flips the
+        // variable beside the story, and window requests aimed at the other
+        // window are explained instead of applied.
+        let main = start_preview_of(
+            &state,
+            &project,
+            "window_pair_main",
+            "scene",
+            None,
+            serde_json::json!({}),
+        );
+        assert_eq!(main["status"], "started", "{main}");
+        let snapshot = &main["update"]["snapshot"];
+        assert_eq!(snapshot["interaction"]["titles"]["main"], "主窗口 · 等候副窗口");
+        let timers = snapshot["interaction"]["timers"].as_object().unwrap();
+        assert!(timers.contains_key("ready_timer") && timers.contains_key("idle_bounce"));
+        assert!(main["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("打开副窗口")));
+        // The open_window host cue never reaches the surface.
+        assert!(main["update"]["cues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|cue| cue["type"] != "open_window"));
+        let session = main["session_id"].as_str().unwrap().to_owned();
+        let tick = |millis: u64| {
+            let request: PreviewSessionTickRequest =
+                serde_json::from_value(serde_json::json!({ "session_id": session })).unwrap();
+            let now = state.preview.lock().unwrap().as_ref().unwrap().last_tick
+                + Duration::from_millis(millis);
+            preview_call(preview_session_tick_command(request, &state, now).unwrap())
+        };
+        let mut kinds = Vec::new();
+        let mut ready_seen = false;
+        for _ in 0..4 {
+            let result = tick(1_000);
+            for update in result["updates"].as_array().unwrap() {
+                kinds.push(update["kind"].as_str().unwrap().to_owned());
+                ready_seen |= update["snapshot"]["variables"]["pair_ready"]["value"] == true;
+            }
+        }
+        assert!(ready_seen, "{kinds:?}");
+        assert!(kinds.iter().any(|kind| kind == "effect"));
+        let guard = state.preview.lock().unwrap();
+        let live = guard.as_ref().unwrap().runtime.snapshot();
+        assert!(live.interaction.timers.contains_key("idle_bounce"));
+        assert!(!live.interaction.timers.contains_key("ready_timer"));
     }
 }

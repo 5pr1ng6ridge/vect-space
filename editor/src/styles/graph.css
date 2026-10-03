@@ -226,6 +226,12 @@
     stroke: rgb(242 187 104 / 70%);
   }
 
+  /* A timer's effect reference: dashed, never the main story flow. */
+  .graph-shell .story-edge-effect .react-flow__edge-path {
+    stroke: var(--accent);
+    stroke-dasharray: 6 4;
+  }
+
   .graph-shell .react-flow__edge.selected .react-flow__edge-path,
   .graph-shell .react-flow__edge:hover .react-flow__edge-path {
     stroke: var(--accent);
@@ -459,6 +465,10 @@
 
   .graph-shell .story-handle-in {
     left: -6px;
+  }
+
+  .graph-shell .story-handle-effect {
+    border-radius: 2px;
   }
 
   .graph-shell .story-handle:hover,

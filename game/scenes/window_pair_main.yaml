@@ -1,0 +1,132 @@
+schema_version: 2
+id: window_pair_main
+entry: bg
+nodes:
+  advance_side:
+    type: window_control
+    target: secondary
+    action: advance
+    id: ""
+    message: ""
+    next: say_end
+  arm_idle:
+    type: timer
+    id: idle_bounce
+    action: start
+    delay_ms: 800
+    interval_ms: 1500
+    target: idle_bounce_effect
+    next: say_wait
+  arm_ready:
+    type: timer
+    id: ready_timer
+    action: start
+    delay_ms: 3000
+    interval_ms: null
+    target: set_ready
+    next: arm_idle
+  bg:
+    type: background
+    background: bg.test_2
+    transition:
+      type: cross_fade
+    duration_ms: 300
+    easing: ease_in_out
+    await: false
+    next: show_alli
+  block_side:
+    type: window_control
+    target: secondary
+    action: block
+    id: await_main
+    message: 主窗口正在收尾动画，请稍候……
+    next: say_open
+  end:
+    type: end
+  finale:
+    type: action
+    sprite_id: alli
+    action: sprite.bounce
+    await: true
+    parameters: {}
+    next: unblock_side
+  idle_bounce_effect:
+    type: action
+    sprite_id: alli
+    action: sprite.bounce
+    await: false
+    parameters: {}
+    next: say_wait
+  open_side:
+    type: open_window
+    scene: window_pair_side
+    next: arm_ready
+  reset_ready:
+    type: set
+    variable: pair_ready
+    op: assign
+    value: false
+    next: title_main
+  say_end:
+    type: say
+    speaker: alli
+    text: 副窗口被脚本推进了一页。演示结束。
+    mode: start
+    speed_cps: null
+    next: end
+  say_open:
+    type: say
+    speaker: alli
+    text: >-
+      门开了。主窗口标题现在是「[var=window.main.title]」，是「[var=window.secondary.title]」改写的。副窗口被我拦住了，点一下继续，我来收尾。
+    mode: start
+    speed_cps: null
+    next: stop_idle
+  say_wait:
+    type: say
+    speaker: alli
+    text: 副窗口打开了，它现在叫「[var=window.secondary.title]」。它拦住了这一页，先去副窗口里选一个答案吧。
+    mode: start
+    speed_cps: null
+    next: block_side
+  set_ready:
+    type: set
+    variable: pair_ready
+    op: assign
+    value: true
+    next: say_wait
+  show_alli:
+    type: sprite
+    sprite_id: alli
+    action: show
+    character: alli
+    expression: neutral
+    x: 960.0
+    "y": 1040.0
+    scale: 0.78
+    opacity: 1.0
+    z: 10
+    duration_ms: 300
+    easing: ease_out
+    await: false
+    next: reset_ready
+  stop_idle:
+    type: timer
+    id: idle_bounce
+    action: stop
+    delay_ms: 0
+    interval_ms: null
+    target: null
+    next: finale
+  title_main:
+    type: window_title
+    target: main
+    title: 主窗口 · 等候副窗口
+    next: open_side
+  unblock_side:
+    type: window_control
+    target: secondary
+    action: unblock
+    id: await_main
+    message: ""
+    next: advance_side

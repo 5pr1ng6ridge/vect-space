@@ -1,0 +1,76 @@
+schema_version: 2
+id: window_pair_side
+# 副窗口专用 Scene，由 window_pair_main 通过“打开副窗口”启动。
+window_role: secondary
+entry: block_main
+nodes:
+  # 第一件事：拦住主窗口翻页。提示文本里的 [var=…] 会随标题变化实时刷新。
+  block_main:
+    type: window_control
+    target: main
+    action: block
+    id: side_choice
+    message: 请先在「[var=window.secondary.title]」里选一个答案。
+    next: title_side
+  title_side:
+    type: window_title
+    target: secondary
+    title: 副窗口 · 做个选择（主窗口：[var=window.main.title]）
+    next: ask
+  ask:
+    type: say
+    speaker: sat
+    text: 主窗口被我拦住了。它的计时器约 3 秒后会把“开门”准备好。
+    mode: start
+    speed_cps: null
+    next: pick
+  # “开门”在 pair_ready 为 true 之前是禁用的；主窗口的计时器改变量后，
+  # 选项会直接亮起，不需要重新进入这个节点。
+  pick:
+    type: choice
+    choices:
+    - id: open
+      label: 开门（现在主窗口标题：[var=window.main.title]）
+      next: rename_main
+      enabled_if:
+        op: eq
+        left:
+          variable: pair_ready
+        right:
+          value: true
+    - id: wait
+      label: 再等等
+      next: wait_say
+  wait_say:
+    type: say
+    speaker: sat
+    text: 好，那就再等等。
+    mode: start
+    speed_cps: null
+    next: pick
+  # 改名 → 解除 → 推进：次序就是主窗口看到的次序。
+  rename_main:
+    type: window_title
+    target: main
+    title: 主窗口 · 门已打开（由「[var=window.secondary.title]」触发）
+    next: unblock_main
+  unblock_main:
+    type: window_control
+    target: main
+    action: unblock
+    id: side_choice
+    next: advance_main
+  advance_main:
+    type: window_control
+    target: main
+    action: advance
+    next: say_done
+  say_done:
+    type: say
+    speaker: sat
+    text: 我解除了主窗口的阻挡并让它翻了一页，它现在叫「[var=window.main.title]」。接下来等主窗口推进我这一页。
+    mode: start
+    speed_cps: null
+    next: end
+  end:
+    type: end

@@ -6,6 +6,7 @@
 pub mod choice;
 pub mod content;
 pub mod image_header;
+pub mod interaction;
 pub mod model;
 pub mod runtime;
 pub mod text_template;

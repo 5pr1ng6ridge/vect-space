@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use ts_rs::TS;
+use vectspace_core::interaction::{InteractionSnapshot, UpdateKind};
 use vectspace_core::model::{
     AmbienceSnapshot as CoreAmbienceSnapshot, AudioSnapshot as CoreAudioSnapshot, BootstrapPayload,
     DialogueHistoryEntry, DialoguePageSnapshot, LongTextPageSnapshot,
@@ -368,8 +369,14 @@ impl From<RuntimeError> for WireCommandError {
 pub struct WireRuntimeSnapshot {
     pub session_id: WireU64,
     pub mode: WireSessionMode,
+    /// Host delivery sequence of the update this snapshot belongs to, or the
+    /// window's latest sequence for a plain snapshot read.  `"0"` outside the
+    /// desktop host (editor previews, fixtures).
+    pub seq: WireU64,
     pub revision: WireU64,
     pub location: StoryLocation,
+    /// Window titles, advance blocks, timers and the stable prompt occurrence.
+    pub interaction: InteractionSnapshot,
     pub variables: WireVariableMap,
     #[serde(serialize_with = "serialize_world_snapshot")]
     pub world: WorldSnapshot,
@@ -435,11 +442,58 @@ where
 pub struct WireRuntimeUpdate {
     pub session_id: WireU64,
     pub mode: WireSessionMode,
+    /// `story` replaces the presentation, `state_refresh` only re-derives the
+    /// current prompt and shared state, `effect` is a timer callback.
+    pub kind: UpdateKind,
+    /// Scene timer that produced an `effect` update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_timer: Option<String>,
+    /// Per-window, per-session committed delivery order.  `"0"` outside the
+    /// desktop host's outbox.
+    pub seq: WireU64,
     pub update_id: WireU64,
     pub snapshot: WireRuntimeSnapshot,
     #[serde(serialize_with = "serialize_cues")]
     pub cues: Vec<PresentationCue>,
     pub requires_ack: bool,
+}
+
+/// Incremental synchronisation answer.  `updates` are committed updates with
+/// `seq > after_seq` in ascending order.  `gap` means the host's bounded buffer
+/// no longer reaches `after_seq`: `updates` then holds the still-pending story
+/// update (runtime-gated cues only, if any) followed by a cue-less
+/// `state_refresh` carrying the latest state.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireSyncBatch {
+    pub session_id: WireU64,
+    pub mode: WireSessionMode,
+    pub latest_seq: WireU64,
+    pub updates: Vec<WireRuntimeUpdate>,
+    pub gap: bool,
+}
+
+/// Payload of the `vectspace://runtime-updated` event: a pure notification, it
+/// never carries update data.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireUpdateNotice {
+    pub session_id: WireU64,
+    pub latest_seq: WireU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WirePauseReason {
+    /// The main window has a save/settings/history panel open.
+    Panel,
+    /// `document.hidden` of the reporting window.
+    Hidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WirePauseAck {
+    pub ok: bool,
+    /// Whether the host's story timers are paused after this report.
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -552,8 +606,10 @@ impl WireRuntimeSnapshot {
         Self {
             session_id,
             mode,
+            seq: WireU64::from(0),
             revision: snapshot.revision.into(),
             location: snapshot.location,
+            interaction: snapshot.interaction,
             variables: snapshot
                 .variables
                 .into_iter()
@@ -580,11 +636,29 @@ impl WireRuntimeUpdate {
         Self {
             session_id: session_id.clone(),
             mode,
+            kind: update.kind,
+            effect_timer: update.effect_timer,
+            seq: WireU64::from(0),
             update_id: update.update_id.into(),
             snapshot: WireRuntimeSnapshot::with_session(update.snapshot, session_id, mode),
             cues: update.cues,
             requires_ack: update.requires_ack,
         }
+    }
+
+    /// Stamp the host delivery sequence on the update and its snapshot.
+    pub fn with_seq(mut self, seq: u64) -> Self {
+        self.seq = WireU64::from(seq);
+        self.snapshot.seq = WireU64::from(seq);
+        self
+    }
+}
+
+impl WireRuntimeSnapshot {
+    /// Stamp the window's latest delivery sequence on a plain snapshot read.
+    pub fn with_seq(mut self, seq: u64) -> Self {
+        self.seq = WireU64::from(seq);
+        self
     }
 }
 
@@ -832,6 +906,103 @@ mod tests {
         );
     }
 
+    fn interaction_test_snapshot() -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            interaction: Default::default(),
+            revision: 2,
+            location: StoryLocation {
+                scene_id: "scene".to_owned(),
+                node_id: "node".to_owned(),
+            },
+            variables: BTreeMap::new(),
+            world: WorldSnapshot::default(),
+            audio: AudioSnapshot::default(),
+            playback: PlaybackSnapshot::default(),
+            dialogue_page: None,
+            long_text_page: None,
+            prompt: PromptSnapshot::None,
+        }
+    }
+
+    #[test]
+    fn wire_update_carries_kind_sequence_interaction_and_effect_timer() {
+        use vectspace_core::interaction::{SceneTimer, UpdateKind};
+        let mut snapshot = interaction_test_snapshot();
+        snapshot.interaction.titles.secondary = "Side".to_owned();
+        snapshot.interaction.timers.insert(
+            "t".to_owned(),
+            SceneTimer {
+                target: "fx".to_owned(),
+                remaining_ms: 40,
+                interval_ms: None,
+            },
+        );
+        snapshot.interaction.prompt_instance = "9".to_owned();
+        let update = RuntimeUpdate {
+            kind: UpdateKind::Effect,
+            effect_timer: Some("t".to_owned()),
+            update_id: 5,
+            snapshot,
+            cues: Vec::new(),
+            requires_ack: false,
+        };
+        let plain = serde_json::to_value(WireRuntimeUpdate::from(update.clone())).unwrap();
+        assert_eq!(plain["kind"], "effect");
+        assert_eq!(plain["effect_timer"], "t");
+        assert_eq!(plain["seq"], "0");
+        assert_eq!(plain["snapshot"]["interaction"]["prompt_instance"], "9");
+        assert_eq!(plain["snapshot"]["interaction"]["titles"]["secondary"], "Side");
+        assert_eq!(
+            plain["snapshot"]["interaction"]["timers"]["t"]["remaining_ms"],
+            40
+        );
+
+        // The delivery sequence is a canonical decimal string on both levels, so
+        // a u64 never goes through a JavaScript number.
+        let stamped =
+            WireRuntimeUpdate::with_session(update, WireU64::from(3), WireSessionMode::Secondary)
+                .with_seq(u64::MAX);
+        let value = serde_json::to_value(stamped).unwrap();
+        assert_eq!(value["seq"], u64::MAX.to_string());
+        assert_eq!(value["snapshot"]["seq"], u64::MAX.to_string());
+
+        // Story updates omit the timer id.
+        let story = RuntimeUpdate {
+            kind: UpdateKind::Story,
+            effect_timer: None,
+            update_id: 6,
+            snapshot: interaction_test_snapshot(),
+            cues: Vec::new(),
+            requires_ack: false,
+        };
+        let value = serde_json::to_value(WireRuntimeUpdate::from(story)).unwrap();
+        assert_eq!(value["kind"], "story");
+        assert!(value.get("effect_timer").is_none());
+    }
+
+    #[test]
+    fn sync_notice_and_pause_payloads_have_the_agreed_shape() {
+        let notice = WireUpdateNotice {
+            session_id: WireU64::from(4),
+            latest_seq: WireU64::from(9),
+        };
+        assert_eq!(
+            serde_json::to_value(notice).unwrap(),
+            serde_json::json!({"session_id": "4", "latest_seq": "9"})
+        );
+        let reason: WirePauseReason = serde_json::from_str("\"panel\"").unwrap();
+        assert_eq!(reason, WirePauseReason::Panel);
+        assert_eq!(
+            serde_json::from_str::<WirePauseReason>("\"hidden\"").unwrap(),
+            WirePauseReason::Hidden
+        );
+        assert!(serde_json::from_str::<WirePauseReason>("\"focus\"").is_err());
+        assert_eq!(
+            serde_json::to_value(WirePauseAck { ok: true, paused: false }).unwrap(),
+            serde_json::json!({"ok": true, "paused": false})
+        );
+    }
+
     #[test]
     fn full_i64_range_round_trips_without_javascript_numbers() {
         for value in [i64::MIN, -1, 0, 1, i64::MAX] {
@@ -899,6 +1070,8 @@ mod tests {
         let wire = WireRuntimeSnapshot {
             session_id: WireU64::from(1),
             mode: WireSessionMode::Story,
+            seq: WireU64::from(0),
+            interaction: Default::default(),
             revision: WireU64::from(2),
             location: StoryLocation {
                 scene_id: "scene".to_owned(),
@@ -931,8 +1104,11 @@ mod tests {
         let mut ambience = AmbienceSnapshot::default();
         ambience.set(AmbienceSlot::Slot1, Some(ambience_state.clone()));
         let update = RuntimeUpdate {
+            kind: Default::default(),
+            effect_timer: None,
             update_id: 3,
             snapshot: RuntimeSnapshot {
+                interaction: Default::default(),
                 revision: 2,
                 location: StoryLocation {
                     scene_id: "scene".to_owned(),

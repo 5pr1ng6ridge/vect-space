@@ -44,6 +44,16 @@ import {
   parseMarkup,
 } from "@vectspace/text";
 import { canFastForwardPrompt } from "./engine/playback";
+import { RuntimeFeed } from "./engine/runtimeFeed";
+import { StoryPauseSync } from "./engine/storyPause";
+import { useTextOccurrence } from "./engine/textOccurrence";
+import { useLiveUpdate } from "./engine/useLiveUpdate";
+import { AdvanceBlockNotice } from "./components/AdvanceBlockNotice";
+import {
+  activeTimerIds,
+  advanceBlockMessages,
+  isAdvanceBlocked,
+} from "@vectspace/presentation-core/live-update";
 import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type {
   AdvanceSource,
@@ -120,10 +130,22 @@ export default function App(): ReactElement {
   const sessionGenerationRef = useRef(0);
   // Host identity survives clearing presentation state on title/map screens.
   const activeSessionId = useRef("0");
+  // The shared ordered receive path (notification event + sync + responses).
+  // `feedGenerationRef` is the session generation the sequencer was adopted
+  // under: while a boundary is in flight the two differ and every host update
+  // of the session being left is dropped instead of resurrecting it.
+  const feedRef = useRef<RuntimeFeed | null>(null);
+  const feedGenerationRef = useRef(-1);
+  const pauseRef = useRef<StoryPauseSync | null>(null);
+  // The feed is created once, before `applyIncoming` exists, so it reaches the
+  // latest handler through this ref.
+  const applyIncomingRef = useRef<(next: RuntimeUpdate) => void>(
+    () => undefined,
+  );
 
   const [phase, setPhase] = useState<Phase>("booting");
   const [panel, setPanel] = useState<Panel>("none");
-  const [update, setUpdate] = useState<RuntimeUpdate | null>(null);
+  const { update, effects, receive, setUpdate } = useLiveUpdate();
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [animations, setAnimations] = useState<AnimationMap>({});
   const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
@@ -166,7 +188,18 @@ export default function App(): ReactElement {
 
   useEffect(() => {
     let active = true;
-    void getInitialAppState()
+    const feed = new RuntimeFeed("main", {
+      apply: (next) => applyIncomingRef.current(next),
+      onError: (reason) => {
+        console.error("主窗口更新同步失败", reason);
+      },
+    });
+    feedRef.current = feed;
+    // The notification listener is registered before the bootstrap, so an
+    // update committed while the window is still starting is not missed.
+    void feed
+      .subscribe()
+      .then(() => getInitialAppState())
       .then(
         ({
           bootstrap,
@@ -187,6 +220,10 @@ export default function App(): ReactElement {
           activeSessionId.current = requireSessionId(
             bootstrap.update.session_id,
           );
+          feed.sequencer.adopt(activeSessionId.current, bootstrap.update.seq);
+          feedGenerationRef.current = sessionGenerationRef.current;
+          // A (re)loaded window starts with no pause reasons on the host.
+          pauseRef.current?.reset();
           setUpdate(bootstrap.update);
           setContentVersion(bootstrap.content_version);
           setDefaultFontId(bootstrap.default_font ?? null);
@@ -202,8 +239,10 @@ export default function App(): ReactElement {
       });
     return () => {
       active = false;
+      feed.dispose();
+      if (feedRef.current === feed) feedRef.current = null;
     };
-  }, []);
+  }, [setUpdate]);
 
   useEffect(() => {
     const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
@@ -251,17 +290,56 @@ export default function App(): ReactElement {
     setSaveSlots(await engineApi.listSaveSlots());
   }, []);
 
-  const applyUpdate = useCallback((next: RuntimeUpdate): void => {
-    activeSessionId.current = requireSessionId(next.session_id);
-    setUpdate(next);
-    const panelCue = next.cues.find(
-      (
-        cue,
-      ): cue is Extract<PresentationCue, { type: "button_system_action" }> =>
-        cue.type === "button_system_action",
-    );
-    if (panelCue !== undefined) setPanel(panelCue.panel);
-  }, []);
+  /**
+   * Adopts a story-boundary update (`replace`) or merges a host update of the
+   * current session by kind (`receive`): a refresh or timer effect leaves the
+   * running presentation, its pending acknowledgement and its text alone.
+   */
+  const applyUpdate = useCallback(
+    (next: RuntimeUpdate, replace = false): void => {
+      activeSessionId.current = requireSessionId(next.session_id);
+      if (replace) setUpdate(next);
+      else receive(next);
+      const panelCue = next.cues.find(
+        (
+          cue,
+        ): cue is Extract<PresentationCue, { type: "button_system_action" }> =>
+          cue.type === "button_system_action",
+      );
+      if (panelCue !== undefined) setPanel(panelCue.panel);
+    },
+    [receive, setUpdate],
+  );
+
+  /** Every update the sequencer delivers (event, sync or command response). */
+  const applyIncoming = useCallback(
+    (next: RuntimeUpdate): void => {
+      if (
+        phaseRef.current !== "playing" ||
+        feedGenerationRef.current !== sessionGenerationRef.current ||
+        next.session_id !== activeSessionId.current
+      ) {
+        return;
+      }
+      applyUpdate(next);
+    },
+    [applyUpdate],
+  );
+  useEffect(() => {
+    applyIncomingRef.current = applyIncoming;
+  }, [applyIncoming]);
+
+  /** Follows a session the host created for a boundary command. */
+  const adoptSession = useCallback(
+    (sessionId: WireU64, seq: WireU64 | undefined): void => {
+      activeSessionId.current = sessionId;
+      feedRef.current?.sequencer.adopt(sessionId, seq);
+      feedGenerationRef.current = sessionGenerationRef.current;
+      // The host clears this window's pause reasons at every session switch.
+      pauseRef.current?.reset();
+    },
+    [],
+  );
 
   /**
    * Restores the previous authoritative update after a same-session failure.
@@ -274,6 +352,8 @@ export default function App(): ReactElement {
   const restoreRetainedUpdate = useCallback(
     async (retained: RuntimeUpdate): Promise<void> => {
       setUpdate(retained);
+      // The session did not change: the feed it was following is still valid.
+      feedGenerationRef.current = sessionGenerationRef.current;
       let alignmentError: unknown;
       try {
         await sceneRef.current?.applySnapshotImmediately(retained.snapshot);
@@ -297,7 +377,7 @@ export default function App(): ReactElement {
           : new Error("Failed to restore the retained update");
       }
     },
-    [],
+    [setUpdate],
   );
 
   const runStoryCommand = useCallback(
@@ -360,8 +440,8 @@ export default function App(): ReactElement {
                 return false;
               }
             }
-            activeSessionId.current = returnedSessionId;
-            applyUpdate(next);
+            adoptSession(returnedSessionId, next.seq);
+            applyUpdate(next, true);
           }
           return current;
         }
@@ -370,7 +450,12 @@ export default function App(): ReactElement {
           sessionGenerationRef.current,
           activeSessionId.current,
         );
-        if (current) applyUpdate(next);
+        if (current) {
+          // Same ordered path as events: a response that was already delivered
+          // (or overtaken) is dropped instead of rolling the window back.
+          if (feedRef.current === null) applyUpdate(next);
+          else feedRef.current.sequencer.offer(next);
+        }
         return current;
       } catch (reason) {
         if (
@@ -379,8 +464,12 @@ export default function App(): ReactElement {
             sessionGenerationRef.current,
             activeSessionId.current,
           )
-        )
+        ) {
           setError(errorMessage(reason));
+          // A rejected (typically out-of-date) command: refresh the view from
+          // the host instead of trusting a notification that may have been lost.
+          feedRef.current?.sequencer.resync();
+        }
         return false;
       } finally {
         if (commandOwnerRef.current === token.id) {
@@ -389,7 +478,7 @@ export default function App(): ReactElement {
         }
       }
     },
-    [applyUpdate],
+    [adoptSession, applyUpdate],
   );
 
   const beginSessionTransition =
@@ -515,7 +604,7 @@ export default function App(): ReactElement {
           )
             return;
           expectedSessionId = nextSessionId;
-          activeSessionId.current = nextSessionId;
+          adoptSession(nextSessionId, "0");
           setUpdate(null);
           setReplayMode(false);
           setReplaySceneId(null);
@@ -578,7 +667,11 @@ export default function App(): ReactElement {
       if (
         snapshot === undefined ||
         (snapshot.prompt.kind !== "dialogue" &&
-          snapshot.prompt.kind !== "long_text")
+          snapshot.prompt.kind !== "long_text") ||
+        // A script block forbids turning the page (manual, auto and Ctrl
+        // alike); the host re-checks authoritatively, this only avoids a
+        // doomed request.  Choices and other buttons are not affected.
+        isAdvanceBlocked(snapshot)
       ) {
         return;
       }
@@ -722,7 +815,7 @@ export default function App(): ReactElement {
             )
           )
             return;
-          activeSessionId.current = nextSessionId;
+          adoptSession(nextSessionId, "0");
           setUpdate(null);
           setReplayMode(false);
           setReplaySceneId(null);
@@ -782,7 +875,7 @@ export default function App(): ReactElement {
           )
         )
           return;
-        activeSessionId.current = nextSessionId;
+        adoptSession(nextSessionId, "0");
         setUpdate(null);
         setPhase("title");
         phaseRef.current = "title";
@@ -954,7 +1047,7 @@ export default function App(): ReactElement {
           )
         )
           return;
-        activeSessionId.current = nextSessionId;
+        adoptSession(nextSessionId, "0");
         setChapterMap(map);
         setUpdate(null);
         setReplayMode(false);
@@ -975,7 +1068,7 @@ export default function App(): ReactElement {
             // The host is already back in story mode.  Do not leave replay
             // controls attached to an update that can no longer be acked;
             // show the existing map and let the user retry the read instead.
-            activeSessionId.current = exitedSessionId;
+            adoptSession(exitedSessionId, "0");
             setUpdate(null);
             setReplayMode(false);
             setReplaySceneId(null);
@@ -995,9 +1088,11 @@ export default function App(): ReactElement {
     })();
     replayTransitionRef.current = transition;
   }, [
+    adoptSession,
     beginSessionTransition,
     finishSessionTransition,
     restoreRetainedUpdate,
+    setUpdate,
     stopTransientPlayback,
     update,
   ]);
@@ -1061,21 +1156,14 @@ export default function App(): ReactElement {
   const longTextPage = update?.snapshot.long_text_page ?? null;
   const choice =
     update?.snapshot.prompt.kind === "choice" ? update.snapshot.prompt : null;
-  const textCueCps = useMemo(
-    () => textRevealSpeed(update, textPrompt),
-    [textPrompt, update],
-  );
-  const hasTextRevealCue =
-    update?.cues.some(
-      (cue) =>
-        (cue.type === "dialogue_reveal" || cue.type === "long_text_reveal") &&
-        cue.prompt_id === textPrompt?.prompt_id,
-    ) ?? false;
-  const cueRevealAnimation = textRevealAnimation(update, textPrompt);
-  const textInstanceKey =
-    textPrompt === null
-      ? null
-      : `${update?.update_id ?? "none"}:${textPrompt.prompt_id}`;
+  // Reveal settings and identity belong to the prompt *occurrence*: they are
+  // decided when it is first shown and survive refreshes of the same prompt.
+  const occurrence = useTextOccurrence(update, textPrompt);
+  const textCueCps = occurrence?.speedCps;
+  const hasTextRevealCue = occurrence?.hasRevealCue ?? false;
+  const cueRevealAnimation = occurrence?.animation ?? null;
+  const textInstanceKey = occurrence?.key ?? null;
+  const advanceBlocked = update !== null && isAdvanceBlocked(update.snapshot);
   const currentTextSettings = useMemo<LockedTextSettings | null>(() => {
     if (textPrompt === null) return null;
     return {
@@ -1227,6 +1315,9 @@ export default function App(): ReactElement {
       panel !== "none" ||
       busy ||
       runtimeLocked ||
+      // While blocked, auto / forced / Ctrl advance must not keep asking: they
+      // resume by themselves when the refresh that lifts the block arrives.
+      advanceBlocked ||
       textPrompt === null
     ) {
       return;
@@ -1256,6 +1347,7 @@ export default function App(): ReactElement {
     return () => window.clearTimeout(timer);
   }, [
     advance,
+    advanceBlocked,
     busy,
     completedPromptKey,
     textPrompt,
@@ -1335,6 +1427,26 @@ export default function App(): ReactElement {
     return () => window.removeEventListener("keydown", closePanel);
   }, [panel, phase]);
 
+  // The host owns the story clock.  The window only reports why it would pause
+  // it: an open save / settings / history panel, or a really hidden document.
+  // Merely focusing the other game window is neither, so it never pauses.
+  useEffect(() => {
+    pauseRef.current = new StoryPauseSync((reason, active) =>
+      engineApi.setStoryPause(activeSessionId.current, reason, active),
+    );
+    return () => {
+      pauseRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    pauseRef.current?.set("hidden", pageHidden);
+  }, [pageHidden]);
+
+  useEffect(() => {
+    pauseRef.current?.set("panel", panel !== "none" && phase === "playing");
+  }, [panel, phase]);
+
   // Opening any in-game panel is a hard input boundary.  In particular a
   // Ctrl key that was held while clicking the toolbar must not resume a
   // fast-forward as soon as the panel closes (the key-up event may have been
@@ -1364,6 +1476,10 @@ export default function App(): ReactElement {
           typingSfxActive={typingSfxActive && !fastForwardActive}
           typingSfxCps={typingSfxCps}
           update={update}
+          effects={effects}
+          activeTimers={
+            update === null ? null : activeTimerIds(update.snapshot)
+          }
           uiMotionHost={uiMotionHost}
           visible={phase === "playing"}
         />
@@ -1482,7 +1598,7 @@ export default function App(): ReactElement {
                 }
                 disabled={busy || runtimeLocked}
                 initialCps={revealCps}
-                key={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${update.snapshot.revision}`}`}
+                key={textInstanceKey ?? `retained:${update.update_id}`}
                 motionHost={uiMotionHost}
                 nameBoxSource={
                   resolveImageAsset("gui.name_box", assets, animations) ?? null
@@ -1496,7 +1612,11 @@ export default function App(): ReactElement {
                 measurementScale={viewportMetrics.scale}
                 ref={dialogueRef}
                 revealImmediately={dialogue === null || !hasTextRevealCue}
-                sessionKey={`${update.update_id}:${dialogue?.prompt_id ?? `retained:${renderedDialoguePage.page_id}`}`}
+                sessionKey={
+                  dialogue === null
+                    ? `retained:${renderedDialoguePage.page_id}`
+                    : (textInstanceKey ?? update.update_id)
+                }
                 suspended={panel !== "none" || pageHidden}
                 visible={update.snapshot.world.dialogue_ui_visible}
               />
@@ -1529,7 +1649,11 @@ export default function App(): ReactElement {
                 fontKey={defaultFontId ?? "system"}
                 ref={longTextRef}
                 revealImmediately={!hasTextRevealCue}
-                sessionKey={`${update.update_id}:${longText?.prompt_id ?? `retained:${longTextPage.active_step_index}`}`}
+                sessionKey={
+                  longText === null
+                    ? `retained:${longTextPage.document_id}:${longTextPage.active_step_index}`
+                    : (textInstanceKey ?? update.update_id)
+                }
                 suspended={panel !== "none" || pageHidden}
                 visible={longTextPage.visible !== false}
               />
@@ -1564,6 +1688,10 @@ export default function App(): ReactElement {
                 </button>
               </div>
             )}
+
+            <AdvanceBlockNotice
+              messages={advanceBlockMessages(update.snapshot)}
+            />
 
             {runtimeLocked && <div className="runtime-lock">表现同步中…</div>}
           </>
@@ -1869,40 +1997,6 @@ export function SettingsPanel({
       </section>
     </div>
   );
-}
-
-function textRevealSpeed(
-  update: RuntimeUpdate | null,
-  prompt: DialoguePrompt | LongTextPrompt | null,
-): number | null | undefined {
-  if (update === null || prompt === null) {
-    return undefined;
-  }
-  const cue = update.cues.find(
-    (candidate) =>
-      (candidate.type === "dialogue_reveal" ||
-        candidate.type === "long_text_reveal") &&
-      candidate.prompt_id === prompt.prompt_id,
-  );
-  return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
-    ? cue.speed_cps
-    : undefined;
-}
-
-function textRevealAnimation(
-  update: RuntimeUpdate | null,
-  prompt: DialoguePrompt | LongTextPrompt | null,
-): TextRevealAnimation | null {
-  if (update === null || prompt === null) return null;
-  const cue = update.cues.find(
-    (candidate) =>
-      (candidate.type === "dialogue_reveal" ||
-        candidate.type === "long_text_reveal") &&
-      candidate.prompt_id === prompt.prompt_id,
-  );
-  return cue?.type === "dialogue_reveal" || cue?.type === "long_text_reveal"
-    ? (cue.reveal_animation ?? null)
-    : null;
 }
 
 function getInitialAppState(): Promise<InitialAppState> {

@@ -11,6 +11,7 @@ import { memo, useEffect, type ReactElement } from "react";
 import { NODE_CATEGORY } from "../labels";
 import type { NodeDescription } from "../nodeSummary";
 import { nodeLabel, outputPorts, type InsertSide } from "../story";
+import { effectPorts } from "../windowInteraction";
 import type { SceneNode } from "../types";
 import { DropdownMenu, type MenuItemSpec } from "../ui/Menu";
 import { NODE_ICONS, UNKNOWN_NODE_ICON } from "../ui/nodeIcons";
@@ -37,9 +38,10 @@ export const StoryNodeCard = memo(function StoryNodeCard({
 }: NodeProps<StoryGraphNode>): ReactElement {
   const updateNodeInternals = useUpdateNodeInternals();
   const ports = outputPorts(data.node);
+  const effects = effectPorts(data.node);
   useEffect(
     () => updateNodeInternals(id),
-    [id, ports.length, updateNodeInternals],
+    [id, ports.length, effects.length, updateNodeInternals],
   );
   const Icon = NODE_ICONS[data.node.type] ?? UNKNOWN_NODE_ICON;
   const category = NODE_CATEGORY[data.node.type] ?? "flow";
@@ -138,6 +140,32 @@ export const StoryNodeCard = memo(function StoryNodeCard({
           position={Position.Right}
           type="source"
         />
+      )}
+      {effects.length > 0 && (
+        <ul className="story-node-ports story-node-effects">
+          {effects.map((port) => (
+            <li
+              className="story-port story-port-effect"
+              key={port.id}
+              title={
+                port.target === ""
+                  ? "拖出连线选择计时器到点时运行的效果节点"
+                  : `到点运行 ${port.target} 的效果（不沿它的下一节点走）`
+              }
+            >
+              <span>
+                {port.label}
+                {port.target === "" ? "（未选）" : ` → ${port.target}`}
+              </span>
+              <Handle
+                className="story-handle story-handle-out story-handle-effect"
+                id={port.id}
+                position={Position.Right}
+                type="source"
+              />
+            </li>
+          ))}
+        </ul>
       )}
       {!singleNext && ports.length > 0 && (
         <ul className="story-node-ports">

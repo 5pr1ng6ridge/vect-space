@@ -87,6 +87,23 @@ pub fn interpolate(
     Ok(output)
 }
 
+/// Window titles are plain text, not markup. Keep the same reference scanner
+/// but do not inject the renderer's escaping into a native title bar.
+pub fn interpolate_plain(
+    source: &str,
+    mut resolve: impl FnMut(&str) -> Result<ScalarValue, TemplateError>,
+) -> Result<String, TemplateError> {
+    let mut output = String::new();
+    let mut cursor = 0;
+    for reference in references(source)? {
+        output.push_str(&source[cursor..reference.range.start]);
+        output.push_str(&scalar_text(&resolve(&reference.id)?));
+        cursor = reference.range.end;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
 pub fn validate_reference_type(
     reference: &TemplateReference,
     value_type: VariableType,

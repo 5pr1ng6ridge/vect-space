@@ -20,6 +20,17 @@ import {
 } from "../story";
 import { interpolateTemplate } from "../textTemplate";
 import { isCanonicalIntegerText, scalarType } from "../scalars";
+import {
+  MAX_SCENE_TIMERS,
+  MAX_TIMER_DURATION_MS,
+  MIN_TIMER_INTERVAL_MS,
+  nonEmpty,
+  readableVariables,
+  sceneRole,
+  validTimerTargets,
+  WINDOW_ROLE_LABELS,
+  WINDOW_VARIABLE_LABELS,
+} from "../windowInteraction";
 import { assetUrl, editorApi } from "../api";
 import { defaultCurtainFill } from "../presentationDefaults";
 import { animationSourceId } from "../imageAnimation";
@@ -52,6 +63,7 @@ import type {
   EditorProject,
   PreviewChoiceDecision,
   SpriteActionEnd,
+  WindowRole,
 } from "../types";
 import { MeasuredMarkup } from "@vectspace/text-react";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
@@ -1661,7 +1673,10 @@ function renderFields(
       const targetScene = node.scene === null ? scene : undefined;
       return (
         <>
-          <Field label="目标场景" hint="留空表示当前场景">
+          <Field
+            label="目标场景"
+            hint={`留空表示当前场景；只能跳到同为${WINDOW_ROLE_LABELS[sceneRole(scene)]}专用的场景`}
+          >
             <select
               value={node.scene ?? ""}
               onChange={(event) =>
@@ -1669,18 +1684,11 @@ function renderFields(
               }
             >
               <option value="">当前场景</option>
-              {manifest.scenes.map((path) => {
-                const id =
-                  path
-                    .split("/")
-                    .at(-1)
-                    ?.replace(/\.ya?ml$/, "") ?? path;
-                return (
-                  <option key={path} value={id}>
-                    {id}
-                  </option>
-                );
-              })}
+              <SceneOptions
+                current={node.scene}
+                role={sceneRole(scene)}
+                scenes={scenes}
+              />
             </select>
           </Field>
           {targetScene !== undefined ? (
@@ -1703,7 +1711,10 @@ function renderFields(
     case "open_window": {
       return (
         <>
-          <Field hint="重复打开会在同一个副窗口中替换场景" label="副窗口场景">
+          <Field
+            hint="只列出「副窗口」用途的场景；重复打开会在同一个副窗口中替换场景"
+            label="副窗口场景"
+          >
             <select
               value={node.scene}
               onChange={(event) =>
@@ -1711,22 +1722,197 @@ function renderFields(
               }
             >
               <option value="">请选择场景</option>
-              {manifest.scenes.map((path) => {
-                const id =
-                  path
-                    .split("/")
-                    .at(-1)
-                    ?.replace(/\.ya?ml$/, "") ?? path;
-                return (
-                  <option key={path} value={id}>
-                    {id}
-                  </option>
-                );
-              })}
+              <SceneOptions
+                current={node.scene}
+                role="secondary"
+                scenes={scenes}
+              />
             </select>
           </Field>
           <p className="field-note">
-            仅主窗口的剧情运行时可以打开副窗口；副窗口没有存档、设置或历史界面。
+            仅「主窗口」用途的场景可以打开副窗口；副窗口没有存档、设置或历史界面，也不能再打开窗口。
+            目标场景的用途可在左侧场景列表中设置。
+          </p>
+          {sceneRole(scene) !== "main" && (
+            <p className="field-note field-note-warning">
+              当前场景是副窗口专用，不能包含「打开副窗口」节点。
+            </p>
+          )}
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    }
+    case "window_title":
+      return (
+        <>
+          <WindowRoleSelect
+            label="目标窗口"
+            onChange={(target) => update({ ...node, target })}
+            value={node.target}
+          />
+          <TextField
+            allowEmpty
+            label="标题"
+            onChange={(title) => update({ ...node, title })}
+            value={node.title}
+          />
+          <p className="field-note">
+            可写 [var=变量名]
+            引用变量。标题只在执行到这里时求值一次并保存，之后可用
+            [var=window.main.title] / [var=window.secondary.title]
+            读取（只读）。原生窗口标题按纯文本显示，不处理排版标记。副窗口标题在窗口关闭或被替换后恢复默认。
+          </p>
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    case "window_control":
+      return (
+        <>
+          <WindowRoleSelect
+            label="目标窗口"
+            onChange={(target) => update({ ...node, target })}
+            value={node.target}
+          />
+          <Field label="操作">
+            <select
+              value={node.action}
+              onChange={(event) => {
+                const action = event.currentTarget.value as typeof node.action;
+                update({
+                  ...node,
+                  action,
+                  id: action === "advance" ? "" : nonEmpty(node.id, "gate"),
+                  message: action === "block" ? (node.message ?? "") : "",
+                });
+              }}
+            >
+              <option value="block">阻挡翻页</option>
+              <option value="unblock">解除阻挡</option>
+              <option value="advance">推进一页（脚本）</option>
+            </select>
+          </Field>
+          {node.action !== "advance" && (
+            <TextField
+              label="阻挡 ID"
+              onChange={(id) => update({ ...node, id })}
+              value={node.id ?? ""}
+            />
+          )}
+          {node.action === "block" && (
+            <TextField
+              allowEmpty
+              label="提示文本（可选）"
+              onChange={(message) => update({ ...node, message })}
+              value={node.message ?? ""}
+            />
+          )}
+          <p className="field-note">
+            {node.action === "advance"
+              ? "推进只翻一页：不会替玩家选择选项，也不会自动解除阻挡；目标没有停在对话或长文本时什么也不会发生。需要先「解除阻挡」再推进。"
+              : "阻挡只限制翻页（手动、自动、快进和按钮的「继续」）；选项、其他按钮和计时器照常工作。同一个场景用同一个 ID 再次阻挡会覆盖旧提示；解除只会解除自己用这个 ID 创建的阻挡，场景退出时自动清除。"}
+          </p>
+          <TargetSelect
+            label="下一节点"
+            onChange={(next) => update({ ...node, next })}
+            targets={targets}
+            value={node.next}
+          />
+        </>
+      );
+    case "timer": {
+      const targetsForTimer = validTimerTargets(scene);
+      const repeating = node.interval_ms != null;
+      return (
+        <>
+          <Field label="操作">
+            <select
+              value={node.action}
+              onChange={(event) => {
+                const action = event.currentTarget.value as typeof node.action;
+                update(
+                  action === "stop"
+                    ? {
+                        ...node,
+                        action,
+                        delay_ms: 0,
+                        interval_ms: null,
+                        target: null,
+                      }
+                    : {
+                        ...node,
+                        action,
+                        delay_ms: node.delay_ms ?? 1000,
+                      },
+                );
+              }}
+            >
+              <option value="start">启动</option>
+              <option value="stop">停止</option>
+            </select>
+          </Field>
+          <TextField
+            label="计时器 ID"
+            onChange={(id) => update({ ...node, id })}
+            value={node.id}
+          />
+          {node.action === "start" && (
+            <>
+              <NumberField
+                label="首次延迟 ms"
+                max={MAX_TIMER_DURATION_MS}
+                min={0}
+                onChange={(delay_ms) => update({ ...node, delay_ms })}
+                step={50}
+                value={node.delay_ms ?? 0}
+              />
+              <BooleanField
+                label="重复触发"
+                onChange={(repeat) =>
+                  update({ ...node, interval_ms: repeat ? 1000 : null })
+                }
+                value={repeating}
+              />
+              {repeating && (
+                <NumberField
+                  label="重复间隔 ms"
+                  max={MAX_TIMER_DURATION_MS}
+                  min={MIN_TIMER_INTERVAL_MS}
+                  onChange={(interval_ms) => update({ ...node, interval_ms })}
+                  step={50}
+                  value={node.interval_ms ?? MIN_TIMER_INTERVAL_MS}
+                />
+              )}
+              <TargetSelect
+                label="触发时运行的效果节点"
+                onChange={(target) => update({ ...node, target })}
+                targets={targetsForTimer}
+                value={node.target ?? ""}
+              />
+              <p className="field-note">
+                到点只运行所选节点的效果，不会沿它的「下一节点」走，也不会改变正在等待的对话、长文本或选项。可选：设置变量、音效、窗口标题/控制，以及未开启「等待完成」的背景、立绘、立绘动作、时间线、BGM、环境声、镜头、屏幕效果、幕布、UI
+                动效。组合动画请用时间线。
+              </p>
+              {targetsForTimer.length === 0 && (
+                <p className="field-note field-note-warning">
+                  本场景还没有可被计时器运行的效果节点；请先添加一个，并保持它不要接入主线。
+                </p>
+              )}
+            </>
+          )}
+          <p className="field-note">
+            计时器不会自动结束：它会一直运行，直到被「停止」节点停止、场景退出或会话结束。请在离开等待处的后续节点里显式停止重复计时器。同
+            ID 再次启动会替换旧计时器；重复间隔至少 {MIN_TIMER_INTERVAL_MS}{" "}
+            ms，同时最多 {MAX_SCENE_TIMERS} 个。
           </p>
           <TargetSelect
             label="下一节点"
@@ -2472,7 +2658,13 @@ function ButtonActionEditor({
             >
               <option value="">本场景 · {sceneId}</option>
               {scenes
-                .filter((candidate) => candidate.id !== sceneId)
+                .filter(
+                  (candidate) =>
+                    candidate.id !== sceneId &&
+                    // A button never moves the story to the other window's Scenes.
+                    sceneRole(candidate) ===
+                      sceneRole(scenes.find((item) => item.id === sceneId)),
+                )
                 .map((candidate) => (
                   <option key={candidate.id} value={candidate.id}>
                     {candidate.id}
@@ -2833,7 +3025,7 @@ function MutationValueEditor({
   const value = node.value ?? defaultSetValue(node.variable, op, manifest);
   const variableValue =
     typeof value === "object" && value !== null ? value.variable : null;
-  const eligibleVariables = Object.entries(manifest.variables).filter(
+  const eligibleVariables = Object.entries(readableVariables(manifest)).filter(
     ([, definition]) =>
       mutationTypesCompatible(targetType, definition.type, op),
   );
@@ -2921,7 +3113,7 @@ function mutationTypesCompatible(
 function interpolatePreview(source: string, manifest: ContentManifest): string {
   try {
     return interpolateTemplate(source, (id) => {
-      const definition = manifest.variables[id];
+      const definition = readableVariables(manifest)[id];
       if (definition === undefined) throw new Error(`未知变量 ${id}`);
       return definition.default;
     });
@@ -3129,7 +3321,8 @@ function OperandEditor({
   other: ValueOperand;
   value: ValueOperand;
 }): ReactElement {
-  const variableIds = Object.keys(manifest.variables);
+  const readable = readableVariables(manifest);
+  const variableIds = Object.keys(readable);
   const expectedType = operandVariableType(other, manifest);
   return (
     <Field label={label}>
@@ -3161,8 +3354,9 @@ function OperandEditor({
             )}
             {variableIds.map((id) => (
               <option key={id} value={id}>
-                {id}（{VARIABLE_SCOPE_LABELS[manifest.variables[id].scope]} ·{" "}
-                {VARIABLE_TYPE_LABELS[manifest.variables[id].type]}）
+                {id in WINDOW_VARIABLE_LABELS
+                  ? `${id}（${WINDOW_VARIABLE_LABELS[id]} · 只读 · 文本）`
+                  : `${id}（${VARIABLE_SCOPE_LABELS[readable[id].scope]} · ${VARIABLE_TYPE_LABELS[readable[id].type]}）`}
               </option>
             ))}
           </select>
@@ -3273,7 +3467,7 @@ function operandVariableType(
   manifest: ContentManifest,
 ): VariableType | null {
   return "variable" in operand
-    ? (manifest.variables[operand.variable]?.type ?? null)
+    ? (readableVariables(manifest)[operand.variable]?.type ?? null)
     : scalarVariableType(operand.value);
 }
 
@@ -3717,6 +3911,68 @@ function OptionalNumber({
         type="number"
         value={value === null ? "" : String(value)}
       />
+    </Field>
+  );
+}
+
+/**
+ * `<option>`s for the real Scene ids (never derived from file names) that a
+ * node may point at.  A reference that no longer fits is kept visible so the
+ * author sees what is wrong instead of a silently empty select.
+ */
+function SceneOptions({
+  current,
+  role,
+  scenes,
+}: {
+  current: string | null;
+  role: WindowRole;
+  scenes: readonly SceneDefinition[];
+}): ReactElement {
+  const candidates = scenes.filter(
+    (candidate) => sceneRole(candidate) === role,
+  );
+  const stale =
+    current !== null &&
+    current !== "" &&
+    !candidates.some((candidate) => candidate.id === current);
+  return (
+    <>
+      {stale && (
+        <option value={current}>
+          {current}
+          {scenes.some((candidate) => candidate.id === current)
+            ? `（用途不符：需要${WINDOW_ROLE_LABELS[role]}专用）`
+            : "（场景不存在）"}
+        </option>
+      )}
+      {candidates.map((candidate) => (
+        <option key={candidate.id} value={candidate.id}>
+          {candidate.id}
+        </option>
+      ))}
+    </>
+  );
+}
+
+function WindowRoleSelect({
+  label,
+  onChange,
+  value,
+}: {
+  label: string;
+  onChange(value: WindowRole): void;
+  value: WindowRole;
+}): ReactElement {
+  return (
+    <Field label={label}>
+      <select
+        onChange={(event) => onChange(event.currentTarget.value as WindowRole)}
+        value={value}
+      >
+        <option value="main">{WINDOW_ROLE_LABELS.main}</option>
+        <option value="secondary">{WINDOW_ROLE_LABELS.secondary}</option>
+      </select>
     </Field>
   );
 }

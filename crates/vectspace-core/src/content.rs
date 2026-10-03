@@ -165,6 +165,12 @@ impl ContentCatalog {
                 manifest.entry_scene
             )));
         }
+        if scenes.get(&manifest.entry_scene).is_some_and(|scene| scene.window_role != crate::interaction::WindowRole::Main) {
+            return Err(ContentError::Validation("项目入口必须是主窗口 Scene".to_owned()));
+        }
+        if manifest.variables.keys().any(|id| crate::interaction::is_window_variable(id)) {
+            return Err(ContentError::Validation("窗口标题变量是保留的只读变量".to_owned()));
+        }
         validate_scenes(
             &scenes,
             &manifest.assets,
@@ -326,6 +332,12 @@ impl ContentCatalog {
                 "入口场景不存在: {}",
                 manifest.entry_scene
             )));
+        }
+        if scenes.get(&manifest.entry_scene).is_some_and(|scene| scene.window_role != crate::interaction::WindowRole::Main) {
+            return Err(ContentError::Validation("项目入口必须是主窗口 Scene".to_owned()));
+        }
+        if manifest.variables.keys().any(|id| crate::interaction::is_window_variable(id)) {
+            return Err(ContentError::Validation("窗口标题变量是保留的只读变量".to_owned()));
         }
         validate_scenes(
             &scenes,
@@ -741,6 +753,12 @@ fn validate_chapter_map(
         if !scenes.contains_key(&hotspot.scene_id) {
             return Err(ContentError::Validation(format!(
                 "章节热点 {} 引用了未知 Scene {}",
+                hotspot.id, hotspot.scene_id
+            )));
+        }
+        if scenes[&hotspot.scene_id].window_role != crate::interaction::WindowRole::Main {
+            return Err(ContentError::Validation(format!(
+                "章节热点 {} 不能引用副窗口专用 Scene {}",
                 hotspot.id, hotspot.scene_id
             )));
         }
@@ -2098,6 +2116,9 @@ fn validate_scenes(
                             "{scene_id}/{node_id} 跳转到未知场景 {destination}"
                         ))
                     })?;
+                    if destination_scene.window_role != scene.window_role {
+                        return node_error(scene_id, node_id, "不能跨主/副窗口用途跳转 Scene");
+                    }
                     if !destination_scene.nodes.contains_key(target) {
                         return node_error(scene_id, node_id, "jump 目标节点不存在");
                     }
@@ -2113,11 +2134,43 @@ fn validate_scenes(
                             &format!("open_window 指向未声明的场景 {target_scene}"),
                         );
                     }
+                    if scene.window_role != crate::interaction::WindowRole::Main
+                        || scenes[target_scene].window_role != crate::interaction::WindowRole::Secondary {
+                        return node_error(scene_id, node_id, "open_window 必须由主窗口打开副窗口专用 Scene；请设置目标 Scene 用途");
+                    }
                     // `next` continues the *current* Scene; only the named
                     // window Scene is resolved across scenes.
                     if !scene.nodes.contains_key(next) {
                         return node_error(scene_id, node_id, "open_window 的 next 节点不存在");
                     }
+                }
+                SceneNode::WindowTitle { title, next, .. } => {
+                    crate::interaction::validate_title(title).map_err(ContentError::Validation)?;
+                    validate_text_markup(title, variables, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::WindowControl { action, id, message, next, .. } => {
+                    if *action != crate::interaction::WindowControlAction::Advance {
+                        validate_identifier("block id", id)?;
+                    }
+                    validate_text_markup(message, variables, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::Timer { id, action, delay_ms, interval_ms, target, next } => {
+                    validate_identifier("timer id", id)?;
+                    validate_duration(*delay_ms, scene_id, node_id)?;
+                    if *action == crate::interaction::TimerAction::Start {
+                        if let Some(interval) = interval_ms {
+                            validate_duration(*interval, scene_id, node_id)?;
+                            if *interval < crate::interaction::MIN_TIMER_INTERVAL_MS {
+                                return node_error(scene_id, node_id, "重复计时器间隔至少为 50ms");
+                            }
+                        }
+                        if !target.as_ref().and_then(|id| scene.nodes.get(id)).is_some_and(crate::interaction::timer_target_allowed) {
+                            return node_error(scene_id, node_id, "计时器必须引用同 Scene 的非阻塞效果节点，不能引用流程或计时器节点");
+                        }
+                    }
+                    require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Wait { duration_ms, next } => {
                     validate_duration(*duration_ms, scene_id, node_id)?;
@@ -2769,6 +2822,7 @@ fn operand_type(
     match operand {
         ValueOperand::Variable(reference) => {
             validate_identifier("variable", &reference.variable)?;
+            if crate::interaction::is_window_variable(&reference.variable) { return Ok(VariableType::String); }
             variables
                 .get(&reference.variable)
                 .map(|definition| definition.value_type)
@@ -3009,6 +3063,9 @@ fn validate_button_action(
                 "{scene_id}/{node_id}: 按钮跳转到未知场景 {destination}"
             ))
         })?;
+        if scenes.get(scene_id).is_some_and(|source| source.window_role != destination_scene.window_role) {
+            return node_error(scene_id, node_id, "按钮不能跨主/副窗口用途跳转 Scene");
+        }
         if !destination_scene.nodes.contains_key(target) {
             return node_error(scene_id, node_id, "按钮 jump 目标节点不存在");
         }
@@ -3548,6 +3605,11 @@ fn validate_text_markup(
     let references = text_template::references(text)
         .map_err(|error| ContentError::Validation(format!("{scene_id}/{node_id}: {error}")))?;
     for reference in references {
+        if crate::interaction::is_window_variable(&reference.id) {
+            text_template::validate_reference_type(&reference, VariableType::String)
+                .map_err(|error| ContentError::Validation(error.to_string()))?;
+            continue;
+        }
         let definition = variables.get(&reference.id).ok_or_else(|| {
             ContentError::Validation(format!(
                 "{scene_id}/{node_id}: 插值引用了未声明变量 {}",
@@ -4980,9 +5042,17 @@ mod tests {
             .map(|path| (path.clone(), read_yaml(&root.join(path)).unwrap()))
             .collect();
         let mut scenes = catalog.scenes.clone();
+        scenes.insert("secondary_scene".to_owned(), crate::model::SceneDefinition {
+            window_role: crate::interaction::WindowRole::Secondary,
+            schema_version: 2,
+            id: "secondary_scene".to_owned(),
+            entry: "done".to_owned(),
+            nodes: BTreeMap::from([("done".to_owned(), SceneNode::End)]),
+        });
         scenes.insert(
             "window_scene".to_owned(),
             crate::model::SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "window_scene".to_owned(),
                 entry: "open".to_owned(),
@@ -4990,7 +5060,7 @@ mod tests {
                     (
                         "open".to_owned(),
                         SceneNode::OpenWindow {
-                            scene: "prologue".to_owned(),
+                            scene: "secondary_scene".to_owned(),
                             next: "done".to_owned(),
                         },
                     ),
@@ -5040,7 +5110,7 @@ mod tests {
             .get_mut("open")
             .unwrap();
         *node = SceneNode::OpenWindow {
-            scene: "prologue".to_owned(),
+            scene: "secondary_scene".to_owned(),
             next: "missing".to_owned(),
         };
         let error =

@@ -12,6 +12,7 @@ import type {
   PresentationOutcome,
   ChapterMapSnapshot,
 } from "@vectspace/presentation-core/types";
+import type { UpdateBatch } from "@vectspace/presentation-core/update-sequencer";
 import type { WireU64 } from "../../shared/generated/WireU64";
 import type { AnimationSource } from "@vectspace/presentation-core/image-animation";
 import { toCommandError } from "../../shared/commandError";
@@ -77,6 +78,18 @@ function decodeWireValue(value: unknown): unknown {
   );
 }
 
+/**
+ * Why the story clock may be paused.  `panel` is the main window's save /
+ * settings / history overlay; `hidden` is `document.hidden` (a real hide, not
+ * merely losing focus to the other game window).
+ */
+export type StoryPauseReason = "panel" | "hidden";
+
+export interface StoryPauseState {
+  ok: boolean;
+  paused: boolean;
+}
+
 export const engineApi = {
   bootstrap: () => command<BootstrapPayload>("bootstrap"),
   startNewGame: (expectedSessionId: WireU64) =>
@@ -124,6 +137,19 @@ export const engineApi = {
       expectedSessionId,
     }),
   getSnapshot: () => command<RuntimeSnapshot>("get_snapshot"),
+  /** Committed updates after `afterSeq`; the host's bounded buffer is the source. */
+  syncUpdates: (expectedSessionId: WireU64, afterSeq: WireU64) =>
+    command<UpdateBatch>("sync_updates", { expectedSessionId, afterSeq }),
+  setStoryPause: (
+    expectedSessionId: WireU64,
+    reason: StoryPauseReason,
+    active: boolean,
+  ) =>
+    command<StoryPauseState>("set_story_pause", {
+      expectedSessionId,
+      reason,
+      active,
+    }),
   getDialogueHistory: () =>
     command<DialogueHistoryEntry[]>("get_dialogue_history"),
   clearDialogueHistory: (expectedSessionId: WireU64) =>
@@ -170,6 +196,17 @@ export const engineApi = {
   // transport at all.
   secondaryBootstrap: () => command<BootstrapPayload>("secondary_bootstrap"),
   secondarySnapshot: () => command<RuntimeSnapshot>("secondary_snapshot"),
+  secondarySyncUpdates: (expectedSessionId: WireU64, afterSeq: WireU64) =>
+    command<UpdateBatch>("secondary_sync_updates", {
+      expectedSessionId,
+      afterSeq,
+    }),
+  secondarySetStoryPause: (expectedSessionId: WireU64, active: boolean) =>
+    command<StoryPauseState>("secondary_set_story_pause", {
+      expectedSessionId,
+      reason: "hidden",
+      active,
+    }),
   secondaryAdvance: (
     expectedRevision: WireU64,
     source: AdvanceSource,

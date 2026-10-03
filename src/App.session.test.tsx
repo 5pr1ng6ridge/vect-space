@@ -17,12 +17,23 @@ import type { SceneCanvasHandle } from "@vectspace/presentation-react/gameplay";
 
 const host = vi.hoisted(() => {
   const failures: Record<string, number> = {};
+  const listeners: Record<string, (event: unknown) => void> = {};
   return {
     id: 1,
     updateId: 1,
     mode: "story",
     promptId: "choice",
     calls: [] as string[],
+    /** Pause reports the window sent: `reason:active`. */
+    pauses: [] as string[],
+    /** Commit sequence of the scripted host; restarts with every session. */
+    seqCounter: 0,
+    /** Adds a second choice, as a variable changed by the other window would. */
+    extraChoice: false,
+    /** The `sync_updates` answer: a refresh of the current choice prompt. */
+    syncRefresh: false,
+    /** Notification listeners the window registered, by event name. */
+    listeners,
     /** Forced one-shot failures per command, consumed on use. */
     failures,
     /** Forced one-shot `applySnapshotImmediately` rejections. */
@@ -68,6 +79,14 @@ vi.mock("@vectspace/presentation-react/gameplay", async (importOriginal) => {
   });
   return { ...(await importOriginal<object>()), SceneCanvas };
 });
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (name: string, handler: (event: unknown) => void) => {
+    host.listeners[name] = handler;
+    return Promise.resolve(() => {
+      Reflect.deleteProperty(host.listeners, name);
+    });
+  },
+}));
 vi.mock("./components/ChapterMapPage", () => ({
   ChapterMapPage: ({ onReplay }: { onReplay(id: string): void }) => (
     <button onClick={() => onReplay("prologue")}>测试重演</button>
@@ -77,9 +96,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
   invoke: async (command: string, args: Record<string, unknown> = {}) => {
     await Promise.resolve();
-    const update = (end = false): RuntimeUpdate => ({
+    const update = (
+      end = false,
+      seq = String((host.seqCounter += 1)),
+    ): RuntimeUpdate => ({
       session_id: String(host.id),
       mode: host.mode as "story" | "replay",
+      seq,
       update_id: String(host.updateId),
       requires_ack: false,
       cues: [],
@@ -133,6 +156,20 @@ vi.mock("@tauri-apps/api/core", () => ({
                   width: 980,
                   height: 92,
                 },
+                ...(host.extraChoice
+                  ? [
+                      {
+                        id: "bonus",
+                        label: "新增选项",
+                        enabled: true,
+                        template: { kind: "fallback" as const },
+                        x: 470,
+                        y: 606,
+                        width: 980,
+                        height: 92,
+                      },
+                    ]
+                  : []),
               ],
             },
       },
@@ -146,6 +183,29 @@ vi.mock("@tauri-apps/api/core", () => ({
         default_font: null,
       };
     if (command === "resolve_assets") return resolvedChoiceAssets();
+    // Out-of-band transport: never part of a story transition.
+    if (command === "sync_updates") {
+      host.calls.push("sync_updates");
+      const refresh = host.syncRefresh
+        ? [
+            {
+              ...update(false),
+              kind: "state_refresh" as const,
+              update_id: String(host.updateId + 100),
+            },
+          ]
+        : [];
+      return {
+        session_id: String(host.id),
+        latest_seq: String(host.seqCounter),
+        updates: refresh,
+        gap: false,
+      };
+    }
+    if (command === "set_story_pause") {
+      host.pauses.push(`${String(args.reason)}:${String(args.active)}`);
+      return { ok: true, paused: args.active === true };
+    }
     if (command === "load_settings")
       return {
         master_volume: 1,
@@ -177,7 +237,11 @@ vi.mock("@tauri-apps/api/core", () => ({
       throw new Error(`forced failure: ${command}`);
     }
     if (command === "clear_dialogue_history") return;
-    if (command === "choose") return update(true);
+    if (command === "choose") {
+      // The real host gives every update its own id.
+      host.updateId++;
+      return update(true);
+    }
     if (command === "click_button") {
       host.updateId++;
       if (args.instanceId === "new_prompt") host.promptId = "choice-next";
@@ -185,6 +249,8 @@ vi.mock("@tauri-apps/api/core", () => ({
     }
     host.id++;
     host.updateId = host.id;
+    // A new session numbers its updates from the start.
+    host.seqCounter = 0;
     if (command === "start_scene_replay") host.mode = "replay";
     else host.mode = "story";
     if (command === "invalidate_session" || command === "exit_scene_replay")
@@ -285,6 +351,11 @@ beforeEach(() => {
   host.updateId = 1;
   host.promptId = "choice";
   host.calls = [];
+  host.pauses = [];
+  host.seqCounter = 0;
+  host.extraChoice = false;
+  host.syncRefresh = false;
+  host.listeners = {};
   host.failures = {};
   host.alignFailures = 0;
   host.mode = "story";
@@ -425,6 +496,55 @@ it("resets choice focus and resources when the prompt identity changes", async (
     oldImage,
   );
   expect(document.querySelectorAll(".choice-button-image")).toHaveLength(1);
+});
+
+it("shows a choice another window made available, without remounting the layer", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "开始演示" }));
+  const choiceButton = await screen.findByRole("button", { name: "结束重演" });
+  const choiceLayer = document.querySelector(".choice-layer");
+  choiceButton.focus();
+
+  // The scripted host now reports a refresh with one more option.
+  host.extraChoice = true;
+  host.syncRefresh = true;
+  const listener = host.listeners["vectspace://runtime-updated"];
+  expect(listener).toBeTypeOf("function");
+  listener?.({
+    event: "vectspace://runtime-updated",
+    payload: {
+      session_id: String(host.id),
+      latest_seq: String(host.seqCounter + 1),
+    },
+  });
+
+  expect(await screen.findByRole("button", { name: "新增选项" })).toBeDefined();
+  expect(document.querySelector(".choice-layer")).toBe(choiceLayer);
+  expect(screen.getByRole("button", { name: "结束重演" })).toBe(choiceButton);
+  expect(document.activeElement).toBe(choiceButton);
+  expect(host.calls.filter((call) => call === "sync_updates")).toHaveLength(1);
+  // It is a refresh, not a story transition: no curtain, no new session.
+  expect(
+    host.calls.filter((call) => call === "applySessionSnapshot"),
+  ).toHaveLength(1);
+});
+
+it("reports an open panel to the host and clears it on close", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "开始演示" }));
+  await screen.findByRole("button", { name: "结束重演" });
+  expect(host.pauses).toEqual([]);
+
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  await waitFor(() => expect(host.pauses).toEqual(["panel:true"]));
+  fireEvent.click(
+    screen.getAllByRole("button", { name: "关闭" })[0] as Element,
+  );
+  await waitFor(() =>
+    expect(host.pauses).toEqual(["panel:true", "panel:false"]),
+  );
+  // A story transition does not leave a stale report behind.
+  expect(screen.queryByText(/bad session/)).toBeNull();
 });
 
 /** Title screen, story session, then the chapter map ready for a replay. */

@@ -25,6 +25,7 @@ import type {
   DialoguePageSnapshot,
   LongTextPageSnapshot,
   PlaybackSnapshot,
+  RuntimeSnapshot,
   RuntimeUpdate,
   Settings,
 } from "@vectspace/presentation-core/types";
@@ -50,15 +51,22 @@ import {
   previewAssetsToUrls,
 } from "../api";
 import { projectRequest } from "../story";
+import { sceneRole, WINDOW_ROLE_LABELS } from "../windowInteraction";
 import type {
   EditorProject,
   PreviewChoiceDecision,
   PreviewSessionStartResult,
+  PreviewSessionTickResult,
   StoryLocation,
 } from "../types";
 
 const DESIGN_WIDTH = 1920;
 const DESIGN_HEIGHT = 1080;
+
+/** How often the preview asks the host to advance its Scene timers. */
+const TIMER_POLL_MS = 100;
+/** Effect updates kept for the canvas; older ones were consumed long ago. */
+const MAX_KEPT_EFFECTS = 64;
 
 /**
  * Editor gameplay preview is deliberately silent: the controller reuses the
@@ -163,7 +171,18 @@ export function GameplayPreview({
   const [status, setStatus] = useState<Status>("idle");
   const [notice, setNotice] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  /**
+   * The *story* update: it owns the presentation, the acknowledgement and the
+   * text components' identity.  Timer effects and live state refreshes never
+   * replace it (that would cancel the running presentation).
+   */
   const [update, setUpdate] = useState<RuntimeUpdate | null>(null);
+  /** Latest snapshot from any update: variables, prompt text, titles, blocks. */
+  const [live, setLive] = useState<RuntimeSnapshot | null>(null);
+  /** Timer effect updates since the story update, for the canvas. */
+  const [effects, setEffects] = useState<RuntimeUpdate[]>([]);
+  /** Single-window limitations reported by the host. */
+  const [windowNotes, setWindowNotes] = useState<string[]>([]);
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [animations, setAnimations] = useState<AnimationMap>({});
   const [needsChoice, setNeedsChoice] = useState<NeedsChoiceState | null>(null);
@@ -182,6 +201,14 @@ export function GameplayPreview({
   const sessionRef = useRef<string | null>(null);
   const busyRef = useRef(false);
   const updateIdRef = useRef<string | null>(null);
+  const liveRef = useRef<RuntimeSnapshot | null>(null);
+  // The host-driven tick must not restart because the parent re-rendered with
+  // a fresh error callback.
+  const onErrorRef = useRef(onError);
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+  const tickRef = useRef<Promise<void> | null>(null);
   const ackedRef = useRef<Set<string>>(new Set());
   const canvasHandleRef = useRef<SceneCanvasHandle | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -199,6 +226,38 @@ export function GameplayPreview({
       },
     [project, previewKey],
   );
+  const localRole = sceneRole(
+    project.scenes.find((file) => file.definition.id === sceneId)?.definition,
+  );
+
+  /**
+   * Install the snapshot of any update as the live state.  Commands read the
+   * revision from here, so a timer effect that bumped it never makes the next
+   * click stale.
+   */
+  const publishLive = useCallback((snapshot: RuntimeSnapshot): void => {
+    liveRef.current = snapshot;
+    setLive(snapshot);
+  }, []);
+
+  /** Take a story update: it replaces the presentation and its identity. */
+  const applyStory = useCallback(
+    (next: RuntimeUpdate): void => {
+      updateIdRef.current = next.update_id;
+      setUpdate(next);
+      setEffects([]);
+      publishLive(next.snapshot);
+    },
+    [publishLive],
+  );
+
+  const addNotes = useCallback((notes: readonly string[] | undefined): void => {
+    if (notes === undefined || notes.length === 0) return;
+    setWindowNotes((current) => {
+      const added = notes.filter((note) => !current.includes(note));
+      return added.length === 0 ? current : [...current, ...added];
+    });
+  }, []);
 
   // Register the project's font under the shared gameplay family so the preview
   // measures and reveals text with the same metrics the game uses.  The asset
@@ -290,6 +349,10 @@ export function GameplayPreview({
     cancelPresentation();
     setSessionId(null);
     setUpdate(null);
+    liveRef.current = null;
+    setLive(null);
+    setEffects([]);
+    setWindowNotes([]);
     setNeedsChoice(null);
     setUnreachable(null);
     setRevealCompleteKey(null);
@@ -324,6 +387,7 @@ export function GameplayPreview({
       setUnreachable(null);
       setNeedsChoice(null);
       setRevealCompleteKey(null);
+      setWindowNotes([]);
       ackedRef.current.clear();
       // Replace the previous session atomically: stop its runtime, cancel its
       // presentation and drop the world it was showing.  The displayed
@@ -336,6 +400,9 @@ export function GameplayPreview({
       cancelPresentation();
       setSessionId(null);
       setUpdate(null);
+      liveRef.current = null;
+      setLive(null);
+      setEffects([]);
       setAssets({});
       setAnimations({});
       if (previous !== null) void editorApi.previewSessionStop(previous);
@@ -376,8 +443,8 @@ export function GameplayPreview({
         setSessionId(result.session_id);
         setAssets(previewAssetsToUrls(result.assets));
         setAnimations(previewAssetsToAnimations(result.assets));
-        updateIdRef.current = result.update.update_id;
-        setUpdate(result.update);
+        applyStory(result.update);
+        addNotes(result.notes);
         setStatus("playing");
       } catch (reason) {
         if (generation === generationRef.current) {
@@ -389,6 +456,8 @@ export function GameplayPreview({
       }
     },
     [
+      addNotes,
+      applyStory,
       cancelPresentation,
       importTokens,
       nodeId,
@@ -420,48 +489,126 @@ export function GameplayPreview({
   }, [autoStart, start]);
 
   const runCommand = useCallback(
-    async (command: (session: string) => Promise<RuntimeUpdate>) => {
+    async (
+      command: (session: string, revision: string) => Promise<RuntimeUpdate>,
+    ) => {
       const session = sessionRef.current;
       if (session === null || busyRef.current || update === null) return;
       const generation = generationRef.current;
       busyRef.current = true;
       setBusy(true);
       try {
-        const next = await command(session);
+        // A timer tick may be in flight and bump the revision: let it land so
+        // the command is issued against the latest state, never a stale one.
+        await tickRef.current;
+        const revision = liveRef.current?.revision;
+        if (
+          generation !== generationRef.current ||
+          sessionRef.current !== session ||
+          revision === undefined
+        )
+          return;
+        const next = await command(session, revision);
         if (
           generation !== generationRef.current ||
           sessionRef.current !== session
         )
           return;
-        updateIdRef.current = next.update_id;
-        setUpdate(next);
+        applyStory(next);
       } catch (reason) {
         if (generation === generationRef.current) onError(errorMessage(reason));
       } finally {
         release(generation);
       }
     },
-    [onError, release, update],
+    [applyStory, onError, release, update],
   );
+
+  /**
+   * Fold one tick's updates into the preview, in order.  Effects go to the
+   * canvas beside the story; a refresh only re-derives the live snapshot; a
+   * story update (a local script advance) replaces the presentation.
+   */
+  const applyTick = useCallback(
+    (result: PreviewSessionTickResult): void => {
+      for (const next of result.updates) {
+        if (next.kind === "effect") {
+          publishLive(next.snapshot);
+          setEffects((current) => [...current, next].slice(-MAX_KEPT_EFFECTS));
+        } else if (next.kind === "state_refresh") {
+          publishLive(next.snapshot);
+        } else {
+          applyStory(next);
+        }
+      }
+      addNotes(result.notes);
+      for (const diagnostic of result.diagnostics)
+        onErrorRef.current(diagnostic);
+    },
+    [addNotes, applyStory, publishLive],
+  );
+
+  const hasTimers =
+    live?.interaction?.timers !== undefined &&
+    Object.keys(live.interaction.timers).length > 0;
+
+  // Scene timers are owned by the host: the preview only asks it to advance
+  // them, and stops asking when nothing is running or the session is gone.
+  useEffect(() => {
+    if (status !== "playing" || sessionId === null || !hasTimers)
+      return undefined;
+    const generation = generationRef.current;
+    const handle = window.setInterval(() => {
+      if (
+        busyRef.current ||
+        tickRef.current !== null ||
+        generation !== generationRef.current ||
+        sessionRef.current !== sessionId
+      )
+        return;
+      const pending = editorApi
+        .previewSessionTick(sessionId)
+        .then((result) => {
+          if (
+            generation === generationRef.current &&
+            sessionRef.current === sessionId
+          )
+            applyTick(result);
+        })
+        .catch((reason: unknown) => {
+          if (generation === generationRef.current)
+            onErrorRef.current(errorMessage(reason));
+        })
+        .finally(() => {
+          if (tickRef.current === pending) tickRef.current = null;
+        });
+      tickRef.current = pending;
+    }, TIMER_POLL_MS);
+    return () => window.clearInterval(handle);
+  }, [applyTick, hasTimers, sessionId, status]);
+
+  const blocks = live?.interaction?.blocks ?? [];
+  const blocked = blocks.length > 0;
 
   const advanceWith = useCallback(
     (source: "manual" | "auto" | "forced_auto"): void => {
-      const snapshot = update?.snapshot;
-      if (snapshot === undefined || update?.requires_ack === true) return;
-      void runCommand((session) =>
+      // A script block refuses every way of turning the page, and the preview
+      // never sends a request the runtime is going to reject.
+      if (update === null || update.requires_ack || blocked) return;
+      void runCommand((session, revision) =>
         editorApi.previewSessionAdvance({
           session_id: session,
-          expected_revision: snapshot.revision,
+          expected_revision: revision,
           source,
         }),
       );
     },
-    [runCommand, update],
+    [blocked, runCommand, update],
   );
 
   const advance = useCallback((): void => {
-    const snapshot = update?.snapshot;
-    if (snapshot === undefined) return;
+    const snapshot = live ?? update?.snapshot;
+    if (snapshot === undefined || snapshot === null) return;
     // Gated presentation: never issue an invalid advance.  Skip it when the
     // runtime allows, otherwise stay locked until it settles.
     if (update?.requires_ack === true) {
@@ -483,7 +630,7 @@ export function GameplayPreview({
       return;
     }
     advanceWith("manual");
-  }, [advanceWith, update]);
+  }, [advanceWith, live, update]);
 
   // Space / Enter advance like in the game (never while typing or when a
   // focused button would activate itself).
@@ -502,12 +649,11 @@ export function GameplayPreview({
 
   const choose = useCallback(
     (choiceId: string): void => {
-      const snapshot = update?.snapshot;
-      if (snapshot === undefined || update?.requires_ack === true) return;
-      void runCommand((session) =>
+      if (update === null || update.requires_ack) return;
+      void runCommand((session, revision) =>
         editorApi.previewSessionChoose({
           session_id: session,
-          expected_revision: snapshot.revision,
+          expected_revision: revision,
           choice_id: choiceId,
         }),
       );
@@ -517,12 +663,11 @@ export function GameplayPreview({
 
   const clickButton = useCallback(
     (instanceId: string): void => {
-      const snapshot = update?.snapshot;
-      if (snapshot === undefined || update?.requires_ack === true) return;
-      void runCommand((session) =>
+      if (update === null || update.requires_ack) return;
+      void runCommand((session, revision) =>
         editorApi.previewSessionClickButton({
           session_id: session,
-          expected_revision: snapshot.revision,
+          expected_revision: revision,
           instance_id: instanceId,
         }),
       );
@@ -558,8 +703,7 @@ export function GameplayPreview({
             sessionRef.current !== session
           )
             return;
-          updateIdRef.current = next.update_id;
-          setUpdate(next);
+          applyStory(next);
         })
         .catch((reason: unknown) => {
           if (generation === generationRef.current) {
@@ -568,7 +712,7 @@ export function GameplayPreview({
           }
         });
     },
-    [onError],
+    [applyStory, onError],
   );
 
   const pickBranch = useCallback(
@@ -605,7 +749,9 @@ export function GameplayPreview({
     void start("reset_node", []);
   }, [nodeId, start]);
 
-  const snapshot = update?.snapshot ?? null;
+  // Prompt text, variables and buttons follow the live snapshot; everything
+  // that identifies the presentation keeps following the story update.
+  const snapshot = live ?? update?.snapshot ?? null;
   const dialogue =
     snapshot !== null && snapshot.prompt.kind === "dialogue"
       ? snapshot.prompt
@@ -679,6 +825,8 @@ export function GameplayPreview({
   ]);
 
   const stopEnabled = status === "starting" || status === "playing";
+  const activeTimerIds = Object.keys(live?.interaction?.timers ?? {}).sort();
+  const windowTitle = live?.interaction?.titles?.[localRole] ?? null;
   // Session-scoped keys reset reveal/pagination/scroll when a new session
   // starts at the same node (a fresh runtime reuses node ids).
   const scope = sessionId ?? "none";
@@ -749,7 +897,7 @@ export function GameplayPreview({
         </div>
         <span className="gameplay-preview-status">
           {status === "playing"
-            ? `运行中 · ${snapshot?.location.scene_id ?? ""} / ${snapshot?.location.node_id ?? ""}${forcedAuto ? " · 强制自动" : ""}`
+            ? `运行中 · ${snapshot?.location.scene_id ?? ""} / ${snapshot?.location.node_id ?? ""}${forcedAuto ? " · 强制自动" : ""}${windowTitle === null ? "" : ` · ${WINDOW_ROLE_LABELS[localRole]}标题：${windowTitle}`}${activeTimerIds.length === 0 ? "" : ` · 计时器 ${activeTimerIds.join("、")}`}`
             : status === "starting"
               ? "启动中…"
               : status === "stopped"
@@ -759,6 +907,23 @@ export function GameplayPreview({
       </header>
 
       {notice !== null && <p className="gameplay-preview-notice">{notice}</p>}
+      {status === "playing" &&
+        blocks.map((block) => (
+          <p
+            className="gameplay-preview-notice gameplay-preview-block"
+            key={`${block.source_scene}/${block.id}`}
+            role="status"
+          >
+            翻页已被阻挡（{block.id}）
+            {block.message === "" ? "" : `：${block.message}`}
+            ——选项和按钮仍可用，需要执行「解除阻挡」后才能继续。
+          </p>
+        ))}
+      {windowNotes.map((note) => (
+        <p className="gameplay-preview-notice" key={note} role="note">
+          {note}
+        </p>
+      ))}
       {gameplayFont.error !== null && (
         <p className="gameplay-preview-notice">
           游戏字体加载失败，已回退系统字体：{gameplayFont.error}
@@ -821,6 +986,10 @@ export function GameplayPreview({
               typingSfxCps={PREVIEW_SETTINGS.text_speed_cps}
               uiMotionHost={uiMotionHost}
               update={status === "playing" ? update : null}
+              effects={effects}
+              activeTimers={
+                live?.interaction?.timers === undefined ? null : activeTimerIds
+              }
               visible={status === "playing"}
             />
             {snapshot !== null && status === "playing" && (

@@ -11,6 +11,10 @@ import {
   setPortTarget,
   uniqueNodeId,
 } from "../story";
+import {
+  effectReferences,
+  setEffectReferenceTarget,
+} from "../windowInteraction";
 import type {
   ButtonFile,
   ContentManifest,
@@ -151,6 +155,14 @@ export function placeGraphSelection(
       const copiedTarget = nodeIds.get(port.target);
       if (copiedTarget !== undefined)
         node = setPortTarget(node, port.id, copiedTarget);
+    }
+    // Timer effect targets follow the copied effect node when it is part of
+    // the selection; otherwise a duplicate keeps pointing at the original
+    // (same Scene) and a paste has already cleared it.
+    for (const reference of effectReferences(source)) {
+      const copiedTarget = nodeIds.get(reference.target);
+      if (copiedTarget !== undefined)
+        node = setEffectReferenceTarget(node, reference.id, copiedTarget);
     }
     nodes[nextId] = node;
   }

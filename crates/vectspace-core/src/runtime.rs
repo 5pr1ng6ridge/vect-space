@@ -25,6 +25,14 @@ use crate::{
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
 use thiserror::Error;
+use crate::interaction::{
+    AdvanceBlock, SceneTimer, TimerAction, UpdateKind, WindowControlAction,
+    WindowRequest, WindowRole, WindowTitles, MAX_SCENE_TIMERS, MIN_TIMER_INTERVAL_MS,
+    timer_target_allowed, validate_title,
+};
+
+mod interaction;
+mod local_preview;
 
 const MAX_IMMEDIATE_NODES: usize = 10_000;
 /// Same bound the profile layer enforces on the persisted dialogue ledger, so a
@@ -97,6 +105,11 @@ pub enum RuntimeError {
 #[derive(Debug, Clone)]
 pub struct RuntimeEngine {
     snapshot: RuntimeSnapshot,
+    window_variables: VariableMap,
+    initial_window_titles: Option<WindowTitles>,
+    window_requests: Vec<WindowRequest>,
+    host_boundary: bool,
+    last_fired_timer: Option<String>,
     profile_variables: VariableMap,
     read_dialogues: std::collections::BTreeSet<String>,
     seen_presentations: std::collections::BTreeSet<String>,
@@ -158,6 +171,11 @@ impl RuntimeEngine {
         validate_profile_variables(content, &profile.variables)?;
         let snapshot = initial_snapshot(content)?;
         Ok(Self {
+            window_variables: snapshot.interaction.titles.variables(),
+            initial_window_titles: None,
+            window_requests: Vec::new(),
+            host_boundary: false,
+            last_fired_timer: None,
             snapshot,
             profile_variables: profile.variables,
             read_dialogues: profile.read_dialogues,
@@ -375,6 +393,16 @@ impl RuntimeEngine {
                     trace.push(self.snapshot.location.clone());
                     last_trace.clone_from(&trace);
                 }
+                if self.host_boundary {
+                    // Reconstruction only needs this window's flow; requests
+                    // for the other window cannot change it.
+                    let local = content
+                        .scene(&self.snapshot.location.scene_id)
+                        .map_err(|error| RuntimeError::Content(error.to_string()))?
+                        .window_role;
+                    update = self.settle_local_host(content, local, update, &mut Vec::new())?;
+                    continue;
+                }
                 if self.snapshot.location == *target
                     && matches!(self.snapshot.prompt, PromptSnapshot::None)
                     && !update.requires_ack
@@ -559,6 +587,7 @@ impl RuntimeEngine {
     ) -> Result<RuntimeUpdate, RuntimeError> {
         let previous_revision = self.snapshot.revision;
         self.snapshot = initial_snapshot(content)?;
+        self.reset_window_context();
         self.snapshot
             .variables
             .append(&mut self.initial_save_overrides);
@@ -589,6 +618,7 @@ impl RuntimeEngine {
             .clone();
         let previous_revision = self.snapshot.revision;
         self.snapshot = initial_snapshot(content)?;
+        self.reset_window_context();
         self.snapshot
             .variables
             .append(&mut self.initial_save_overrides);
@@ -634,6 +664,7 @@ impl RuntimeEngine {
         }
         let previous_revision = self.snapshot.revision;
         self.snapshot = initial_snapshot(content)?;
+        self.reset_window_context();
         self.snapshot
             .variables
             .append(&mut self.initial_save_overrides);
@@ -672,6 +703,9 @@ impl RuntimeEngine {
         source: AdvanceSource,
     ) -> Result<RuntimeUpdate, RuntimeError> {
         self.ensure_interactive(expected_revision)?;
+        if !self.snapshot.interaction.blocks.is_empty() {
+            return Err(RuntimeError::AdvanceNotAllowed);
+        }
         self.validate_advance_source(source)?;
         let cues = match self.snapshot.prompt.clone() {
             PromptSnapshot::Dialogue { prompt_id, .. } => {
@@ -772,6 +806,7 @@ impl RuntimeEngine {
             let text = page.steps[page_index].text.clone();
             self.snapshot.long_text_page = Some(page);
             let next_prompt_id = format!("{document_id}/{}", step.id);
+            self.mark_prompt_source(&scene_id, &node_id);
             self.append_history(next_prompt_id.clone(), None, None, None, None, text.clone());
             self.snapshot.prompt = PromptSnapshot::LongText {
                 prompt_id: next_prompt_id.clone(),
@@ -804,6 +839,7 @@ impl RuntimeEngine {
         expected_revision: u64,
     ) -> Result<RuntimeUpdate, RuntimeError> {
         self.ensure_interactive(expected_revision)?;
+        self.refresh_prompt(content)?;
         let choices = match &self.snapshot.prompt {
             PromptSnapshot::Choice { choices, .. } => choices,
             _ => return Err(RuntimeError::ChoiceNotAllowed),
@@ -858,6 +894,12 @@ impl RuntimeEngine {
         if !button.visible || !button.enabled {
             return Err(RuntimeError::UnknownButton(instance_id.to_owned()));
         }
+        if matches!(button.action.next, Some(ButtonPostAction::Advance)) {
+            if !self.snapshot.interaction.blocks.is_empty() {
+                return Err(RuntimeError::AdvanceNotAllowed);
+            }
+            self.validate_advance_source(AdvanceSource::Manual)?;
+        }
         for set in &button.action.sets {
             let definition = content
                 .manifest
@@ -889,6 +931,7 @@ impl RuntimeEngine {
             Some(ButtonPostAction::Jump { scene, target }) => {
                 let previous_scene = self.snapshot.location.scene_id.clone();
                 let destination_scene = scene.unwrap_or(previous_scene.clone());
+                self.validate_scene_transfer(content, &destination_scene, &target)?;
                 let crosses_scene = destination_scene != previous_scene;
                 self.snapshot.location.scene_id = destination_scene;
                 self.snapshot.location.node_id = target;
@@ -913,13 +956,14 @@ impl RuntimeEngine {
                 Ok(self.finish_update(cues, true))
             }
             Some(ButtonPostAction::OpenPanel { panel }) => {
+                self.refresh_prompt(content)?;
                 let cue = self.cue(
                     CueGate::None,
                     PresentationCueKind::ButtonSystemAction { panel },
                 );
                 Ok(self.finish_update(vec![cue], true))
             }
-            None => Ok(self.finish_update(Vec::new(), true)),
+            None => self.refresh_update(content),
         }
     }
 
@@ -1114,6 +1158,13 @@ impl RuntimeEngine {
             _ => {}
         }
         snapshot.revision = self.snapshot.revision.saturating_add(1);
+        if snapshot.interaction.prompt_instance.is_empty() {
+            snapshot.interaction.prompt_instance = self.next_update_id.to_string();
+        }
+        self.initial_window_titles = None;
+        self.window_variables = snapshot.interaction.titles.variables();
+        self.window_requests.clear();
+        self.host_boundary = false;
         self.snapshot = snapshot;
         self.started = true;
         self.pending_runtime_update = None;
@@ -1129,6 +1180,9 @@ impl RuntimeEngine {
         if let Some(pending) = &self.pending_runtime_update {
             return Err(RuntimeError::PresentationPending(pending.update_id));
         }
+        if self.host_boundary {
+            return Err(RuntimeError::AdvanceNotAllowed);
+        }
         if self.snapshot.revision != expected_revision {
             return Err(RuntimeError::StaleRevision {
                 expected: expected_revision,
@@ -1139,10 +1193,11 @@ impl RuntimeEngine {
     }
 
     fn validate_advance_source(&self, source: AdvanceSource) -> Result<(), RuntimeError> {
+        if source == AdvanceSource::Script { return Ok(()); }
         let allowed = match self.snapshot.playback.auto {
             PlaybackAutoMode::Forced => source == AdvanceSource::ForcedAuto,
             PlaybackAutoMode::Normal => match source {
-                AdvanceSource::Manual | AdvanceSource::Auto => true,
+                AdvanceSource::Manual | AdvanceSource::Auto | AdvanceSource::Script => true,
                 AdvanceSource::FastForward => {
                     self.snapshot.playback.ctrl_fast_forward == CtrlFastForwardMode::Allow
                 }
@@ -1176,1092 +1231,1101 @@ impl RuntimeEngine {
                 RuntimeError::Content(format!("节点不存在: {scene_id}/{node_id}"))
             })?;
 
-            match node {
-                SceneNode::Background {
-                    background,
-                    transition,
-                    duration_ms,
-                    easing,
-                    await_completion,
-                    next,
-                } => {
-                    self.snapshot.world.background.clone_from(&background);
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::BackgroundTransition {
-                            background,
-                            transition,
-                            duration_ms,
-                            easing,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
+            if matches!(node, SceneNode::Say { .. } | SceneNode::LongText { .. } | SceneNode::Choice { .. }) {
+                self.mark_prompt_source(&scene_id, &node_id);
+            }
+            if self.execute_node(content, &scene_id, &node_id, node, &mut cues, false)? {
+                return Ok(cues);
+            }
+        }
+        Err(RuntimeError::ImmediateLoop)
+    }
+
+    fn execute_node(
+        &mut self,
+        content: &ContentCatalog,
+        scene_id: &str,
+        node_id: &str,
+        node: SceneNode,
+        cues: &mut Vec<PresentationCue>,
+        effect_only: bool,
+    ) -> Result<bool, RuntimeError> {
+        match node {
+            SceneNode::Background {
+                background,
+                transition,
+                duration_ms,
+                easing,
+                await_completion,
+                next,
+            } => {
+                self.snapshot.world.background.clone_from(&background);
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::BackgroundTransition {
+                        background,
+                        transition,
+                        duration_ms,
+                        easing,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
                 }
-                SceneNode::Sprite {
-                    sprite_id,
-                    action,
-                    asset,
-                    character,
-                    expression,
-                    flip_x,
-                    crossfade_ms,
-                    x,
-                    y,
-                    scale,
-                    opacity,
-                    z,
-                    duration_ms,
-                    easing,
-                    await_completion,
-                    next,
-                } => {
-                    let from = self.snapshot.world.sprites.get(&sprite_id).cloned();
-                    let to = match action {
-                        SpriteAction::Show => {
-                            let (
-                                resolved_asset,
-                                offset_x,
-                                offset_y,
-                                expression_scale,
-                                anchor_x,
-                                anchor_y,
-                            ) = resolve_character_asset(
-                                content,
-                                character.as_deref(),
-                                expression.as_deref(),
-                                asset,
-                                &scene_id,
-                                &node_id,
-                            )?;
-                            Some(SpriteSnapshot {
-                                asset: resolved_asset.ok_or_else(|| {
-                                    RuntimeError::Content(format!(
-                                        "{scene_id}/{node_id}: show 缺少 asset 或有效表情"
-                                    ))
-                                })?,
-                                x: x.unwrap_or(960.0) + offset_x,
-                                y: y.unwrap_or(1080.0) + offset_y,
-                                scale: scale.unwrap_or(1.0) * expression_scale,
-                                scale_x: 1.0,
-                                scale_y: 1.0,
-                                rotation_deg: 0.0,
-                                flip_x: flip_x.unwrap_or(false),
-                                anchor_x,
-                                anchor_y,
-                                opacity: opacity.unwrap_or(1.0),
-                                z: z.unwrap_or(0),
-                            })
-                        }
-                        SpriteAction::Move => {
-                            let mut target = from.clone().ok_or_else(|| {
+            }
+            SceneNode::Sprite {
+                sprite_id,
+                action,
+                asset,
+                character,
+                expression,
+                flip_x,
+                crossfade_ms,
+                x,
+                y,
+                scale,
+                opacity,
+                z,
+                duration_ms,
+                easing,
+                await_completion,
+                next,
+            } => {
+                let from = self.snapshot.world.sprites.get(&sprite_id).cloned();
+                let to = match action {
+                    SpriteAction::Show => {
+                        let (
+                            resolved_asset,
+                            offset_x,
+                            offset_y,
+                            expression_scale,
+                            anchor_x,
+                            anchor_y,
+                        ) = resolve_character_asset(
+                            content,
+                            character.as_deref(),
+                            expression.as_deref(),
+                            asset,
+                            scene_id,
+                            node_id,
+                        )?;
+                        Some(SpriteSnapshot {
+                            asset: resolved_asset.ok_or_else(|| {
                                 RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: 无法移动不存在的立绘 {sprite_id}"
+                                    "{scene_id}/{node_id}: show 缺少 asset 或有效表情"
                                 ))
+                            })?,
+                            x: x.unwrap_or(960.0) + offset_x,
+                            y: y.unwrap_or(1080.0) + offset_y,
+                            scale: scale.unwrap_or(1.0) * expression_scale,
+                            scale_x: 1.0,
+                            scale_y: 1.0,
+                            rotation_deg: 0.0,
+                            flip_x: flip_x.unwrap_or(false),
+                            anchor_x,
+                            anchor_y,
+                            opacity: opacity.unwrap_or(1.0),
+                            z: z.unwrap_or(0),
+                        })
+                    }
+                    SpriteAction::Move => {
+                        let mut target = from.clone().ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 无法移动不存在的立绘 {sprite_id}"
+                            ))
+                        })?;
+                        let (
+                            resolved_asset,
+                            offset_x,
+                            offset_y,
+                            expression_scale,
+                            anchor_x,
+                            anchor_y,
+                        ) = resolve_character_asset(
+                            content,
+                            character.as_deref(),
+                            expression.as_deref(),
+                            asset,
+                            scene_id,
+                            node_id,
+                        )?;
+                        if let Some(value) = resolved_asset {
+                            target.asset = value;
+                        }
+                        if let Some(value) = x {
+                            target.x = value + offset_x;
+                        }
+                        if let Some(value) = y {
+                            target.y = value + offset_y;
+                        }
+                        if let Some(value) = scale {
+                            target.scale = value * expression_scale;
+                        }
+                        if character.is_some() || expression.is_some() {
+                            target.anchor_x = anchor_x;
+                            target.anchor_y = anchor_y;
+                        }
+                        if let Some(value) = opacity {
+                            target.opacity = value;
+                        }
+                        if let Some(value) = z {
+                            target.z = value;
+                        }
+                        if let Some(value) = flip_x {
+                            target.flip_x = value;
+                        }
+                        Some(target)
+                    }
+                    SpriteAction::Hide => None,
+                };
+                if let Some(target) = &to {
+                    self.snapshot
+                        .world
+                        .sprites
+                        .insert(sprite_id.clone(), target.clone());
+                } else {
+                    self.snapshot.world.sprites.remove(&sprite_id);
+                }
+                let crossfade_ms = crossfade_ms.or_else(|| {
+                    if !(character.is_some() || expression.is_some()) {
+                        return None;
+                    }
+                    match (from.as_ref(), to.as_ref()) {
+                        (Some(previous), Some(next)) if previous.asset != next.asset => {
+                            Some(150)
+                        }
+                        _ => None,
+                    }
+                });
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::SpriteTween {
+                        sprite_id,
+                        from,
+                        to,
+                        duration_ms,
+                        easing,
+                        crossfade_ms,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
+                }
+            }
+            SceneNode::Clear {
+                duration_ms,
+                easing,
+                await_completion,
+                next,
+            } => {
+                self.clear_scene_visual_state();
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::ClearScene {
+                        duration_ms,
+                        easing,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
+                }
+            }
+            SceneNode::Say {
+                speaker,
+                text,
+                mode,
+                page_id,
+                speed_cps,
+                reveal_animation,
+                next,
+            } => {
+                let prompt_id = format!("{scene_id}/{node_id}");
+                let text = self.interpolate_text(content, &text)?;
+                let (speaker_id, speaker, name_color, text_color) = match speaker {
+                    None => (None, None, None, None),
+                    Some(source) => match content.manifest.characters.get(&source) {
+                        Some(character) => (
+                            Some(source),
+                            Some(character.display_name.clone()),
+                            character.name_color.clone(),
+                            character.text_color.clone(),
+                        ),
+                        None => (None, Some(source), None, None),
+                    },
+                };
+                let page = match mode {
+                    DialogueMode::Start => DialoguePageSnapshot {
+                        page_id: page_id.unwrap_or_else(|| prompt_id.clone()),
+                        speaker_id: speaker_id.clone(),
+                        speaker: speaker.clone(),
+                        name_color: name_color.clone(),
+                        text_color: text_color.clone(),
+                        segments: vec![text.clone()],
+                    },
+                    DialogueMode::Append => {
+                        let expected_page_id = page_id.ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: append 对话缺少 page_id"
+                            ))
+                        })?;
+                        let mut page =
+                            self.snapshot.dialogue_page.clone().ok_or_else(|| {
+                                RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 没有可接续的对话页 {expected_page_id}"
+                            ))
                             })?;
-                            let (
-                                resolved_asset,
-                                offset_x,
-                                offset_y,
-                                expression_scale,
-                                anchor_x,
-                                anchor_y,
-                            ) = resolve_character_asset(
-                                content,
-                                character.as_deref(),
-                                expression.as_deref(),
-                                asset,
-                                &scene_id,
-                                &node_id,
-                            )?;
-                            if let Some(value) = resolved_asset {
-                                target.asset = value;
-                            }
-                            if let Some(value) = x {
-                                target.x = value + offset_x;
-                            }
-                            if let Some(value) = y {
-                                target.y = value + offset_y;
-                            }
-                            if let Some(value) = scale {
-                                target.scale = value * expression_scale;
-                            }
-                            if character.is_some() || expression.is_some() {
-                                target.anchor_x = anchor_x;
-                                target.anchor_y = anchor_y;
-                            }
-                            if let Some(value) = opacity {
-                                target.opacity = value;
-                            }
-                            if let Some(value) = z {
-                                target.z = value;
-                            }
-                            if let Some(value) = flip_x {
-                                target.flip_x = value;
-                            }
-                            Some(target)
+                        if page.page_id != expected_page_id {
+                            return Err(RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 当前对话页是 {}，不能接续 {expected_page_id}",
+                                page.page_id
+                            )));
                         }
-                        SpriteAction::Hide => None,
-                    };
-                    if let Some(target) = &to {
-                        self.snapshot
-                            .world
-                            .sprites
-                            .insert(sprite_id.clone(), target.clone());
-                    } else {
-                        self.snapshot.world.sprites.remove(&sprite_id);
-                    }
-                    let crossfade_ms = crossfade_ms.or_else(|| {
-                        if !(character.is_some() || expression.is_some()) {
-                            return None;
+                        if page.speaker_id != speaker_id
+                            || page.speaker != speaker
+                            || page.name_color != name_color
+                            || page.text_color != text_color
+                        {
+                            return Err(RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 接续对话的说话人与样式必须和页面起始段一致"
+                            )));
                         }
-                        match (from.as_ref(), to.as_ref()) {
-                            (Some(previous), Some(next)) if previous.asset != next.asset => {
-                                Some(150)
-                            }
-                            _ => None,
-                        }
-                    });
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::SpriteTween {
-                            sprite_id,
-                            from,
-                            to,
-                            duration_ms,
-                            easing,
-                            crossfade_ms,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
+                        page.segments.push(text.clone());
+                        page
                     }
-                }
-                SceneNode::Clear {
-                    duration_ms,
-                    easing,
-                    await_completion,
-                    next,
-                } => {
-                    self.clear_scene_visual_state();
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::ClearScene {
-                            duration_ms,
-                            easing,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::Say {
+                };
+                self.snapshot.dialogue_page = Some(page);
+                if !effect_only { self.snapshot.location.node_id = next; }
+                self.append_history(
+                    prompt_id.clone(),
+                    speaker_id.clone(),
+                    speaker.clone(),
+                    name_color.clone(),
+                    text_color.clone(),
+                    text.clone(),
+                );
+                self.snapshot.prompt = PromptSnapshot::Dialogue {
+                    prompt_id: prompt_id.clone(),
+                    speaker_id,
                     speaker,
-                    text,
-                    mode,
-                    page_id,
-                    speed_cps,
-                    reveal_animation,
-                    next,
-                } => {
-                    let prompt_id = format!("{scene_id}/{node_id}");
-                    let text = self.interpolate_text(content, &text)?;
-                    let (speaker_id, speaker, name_color, text_color) = match speaker {
-                        None => (None, None, None, None),
-                        Some(source) => match content.manifest.characters.get(&source) {
-                            Some(character) => (
-                                Some(source),
-                                Some(character.display_name.clone()),
-                                character.name_color.clone(),
-                                character.text_color.clone(),
-                            ),
-                            None => (None, Some(source), None, None),
-                        },
-                    };
-                    let page = match mode {
-                        DialogueMode::Start => DialoguePageSnapshot {
-                            page_id: page_id.unwrap_or_else(|| prompt_id.clone()),
-                            speaker_id: speaker_id.clone(),
-                            speaker: speaker.clone(),
-                            name_color: name_color.clone(),
-                            text_color: text_color.clone(),
-                            segments: vec![text.clone()],
-                        },
-                        DialogueMode::Append => {
-                            let expected_page_id = page_id.ok_or_else(|| {
-                                RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: append 对话缺少 page_id"
-                                ))
-                            })?;
-                            let mut page =
-                                self.snapshot.dialogue_page.clone().ok_or_else(|| {
-                                    RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: 没有可接续的对话页 {expected_page_id}"
-                                ))
-                                })?;
-                            if page.page_id != expected_page_id {
-                                return Err(RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: 当前对话页是 {}，不能接续 {expected_page_id}",
-                                    page.page_id
-                                )));
-                            }
-                            if page.speaker_id != speaker_id
-                                || page.speaker != speaker
-                                || page.name_color != name_color
-                                || page.text_color != text_color
-                            {
-                                return Err(RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: 接续对话的说话人与样式必须和页面起始段一致"
-                                )));
-                            }
-                            page.segments.push(text.clone());
-                            page
-                        }
-                    };
-                    self.snapshot.dialogue_page = Some(page);
-                    self.snapshot.location.node_id = next;
-                    self.append_history(
-                        prompt_id.clone(),
-                        speaker_id.clone(),
-                        speaker.clone(),
-                        name_color.clone(),
-                        text_color.clone(),
-                        text.clone(),
-                    );
-                    self.snapshot.prompt = PromptSnapshot::Dialogue {
-                        prompt_id: prompt_id.clone(),
-                        speaker_id,
-                        speaker,
-                        name_color,
-                        text_color,
-                        text,
-                        is_read: self.read_dialogues.contains(&prompt_id),
-                    };
-                    cues.push(self.cue(
-                        CueGate::PlayerAdvance,
-                        PresentationCueKind::DialogueReveal {
-                            prompt_id,
-                            speed_cps,
-                            reveal_animation,
-                        },
-                    ));
-                    return Ok(cues);
-                }
-                SceneNode::LongText {
-                    document,
-                    mode,
-                    on_exit: _,
-                    paper,
-                    pagination,
-                    font_size,
+                    name_color,
                     text_color,
-                    layout,
-                    steps,
-                    speed_cps,
-                    reveal_animation,
-                    ..
-                } => {
-                    let step = steps.first().ok_or_else(|| {
-                        RuntimeError::Content(format!(
-                            "{scene_id}/{node_id}: 长文本没有可显示的步骤"
-                        ))
-                    })?;
-                    let document_id =
-                        long_text_document_id(&scene_id, &node_id, document.as_deref());
-                    let mut page = match mode {
-                        LongTextMode::Start => {
-                            if step.page_break_before {
-                                return Err(RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: 长文本第一步骤不能在前方强制分页"
-                                )));
-                            }
-                            let text = self.interpolate_text(content, &step.text)?;
-                            let mut page = LongTextPageSnapshot {
-                                document_id: document_id.clone(),
-                                visible: true,
-                                paper,
-                                pagination: pagination.unwrap_or_default(),
-                                font_size: font_size
-                                    .unwrap_or(crate::model::LONG_TEXT_FONT_SIZE_DEFAULT),
-                                text_color: text_color.unwrap_or_else(|| {
-                                    crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()
-                                }),
-                                layout: layout.unwrap_or_default(),
-                                steps: Vec::new(),
-                                active_step_index: 0,
-                            };
-                            page.steps.push(LongTextStepSnapshot {
-                                step_id: step.id.clone(),
-                                text,
-                                page_break_before: step.page_break_before,
-                            });
-                            page
+                    text,
+                    is_read: self.read_dialogues.contains(&prompt_id),
+                };
+                cues.push(self.cue(
+                    CueGate::PlayerAdvance,
+                    PresentationCueKind::DialogueReveal {
+                        prompt_id,
+                        speed_cps,
+                        reveal_animation,
+                    },
+                ));
+                return Ok(true);
+            }
+            SceneNode::LongText {
+                document,
+                mode,
+                on_exit: _,
+                paper,
+                pagination,
+                font_size,
+                text_color,
+                layout,
+                steps,
+                speed_cps,
+                reveal_animation,
+                ..
+            } => {
+                let step = steps.first().ok_or_else(|| {
+                    RuntimeError::Content(format!(
+                        "{scene_id}/{node_id}: 长文本没有可显示的步骤"
+                    ))
+                })?;
+                let document_id =
+                    long_text_document_id(scene_id, node_id, document.as_deref());
+                let mut page = match mode {
+                    LongTextMode::Start => {
+                        if step.page_break_before {
+                            return Err(RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 长文本第一步骤不能在前方强制分页"
+                            )));
                         }
-                        LongTextMode::Continue => {
-                            if paper.is_some()
-                                || pagination.is_some()
-                                || font_size.is_some()
-                                || text_color.is_some()
-                                || layout.is_some()
-                            {
-                                return Err(RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: continue 长文本不能重复定义纸张、分页、字号、颜色或布局"
-                                )));
-                            }
-                            let mut page =
-                                self.snapshot.long_text_page.clone().ok_or_else(|| {
-                                    RuntimeError::Content(format!(
-                                        "{scene_id}/{node_id}: 没有可接续的长文本 {document_id}"
-                                    ))
-                                })?;
-                            if page.document_id != document_id {
-                                return Err(RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: 当前文稿是 {}，不能接续 {document_id}",
-                                    page.document_id
-                                )));
-                            }
-                            page.visible = true;
-                            page
-                        }
-                    };
-                    let page_index = if let Some(index) = page
-                        .steps
-                        .iter()
-                        .position(|candidate| candidate.step_id == step.id)
-                    {
-                        index
-                    } else {
                         let text = self.interpolate_text(content, &step.text)?;
+                        let mut page = LongTextPageSnapshot {
+                            document_id: document_id.clone(),
+                            visible: true,
+                            paper,
+                            pagination: pagination.unwrap_or_default(),
+                            font_size: font_size
+                                .unwrap_or(crate::model::LONG_TEXT_FONT_SIZE_DEFAULT),
+                            text_color: text_color.unwrap_or_else(|| {
+                                crate::model::LONG_TEXT_COLOR_DEFAULT.to_owned()
+                            }),
+                            layout: layout.unwrap_or_default(),
+                            steps: Vec::new(),
+                            active_step_index: 0,
+                        };
                         page.steps.push(LongTextStepSnapshot {
                             step_id: step.id.clone(),
                             text,
                             page_break_before: step.page_break_before,
                         });
-                        page.steps.len() - 1
-                    };
-                    validate_long_text_document_size(&page, &scene_id, &node_id)?;
-                    page.active_step_index = page_index as u32;
-                    let text = page.steps[page_index].text.clone();
-                    self.snapshot.dialogue_page = None;
-                    self.snapshot.long_text_page = Some(page);
-                    let prompt_id = format!("{document_id}/{}", step.id);
-                    self.append_history(prompt_id.clone(), None, None, None, None, text.clone());
-                    self.snapshot.prompt = PromptSnapshot::LongText {
-                        prompt_id: prompt_id.clone(),
-                        document_id,
+                        page
+                    }
+                    LongTextMode::Continue => {
+                        if paper.is_some()
+                            || pagination.is_some()
+                            || font_size.is_some()
+                            || text_color.is_some()
+                            || layout.is_some()
+                        {
+                            return Err(RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: continue 长文本不能重复定义纸张、分页、字号、颜色或布局"
+                            )));
+                        }
+                        let mut page =
+                            self.snapshot.long_text_page.clone().ok_or_else(|| {
+                                RuntimeError::Content(format!(
+                                    "{scene_id}/{node_id}: 没有可接续的长文本 {document_id}"
+                                ))
+                            })?;
+                        if page.document_id != document_id {
+                            return Err(RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: 当前文稿是 {}，不能接续 {document_id}",
+                                page.document_id
+                            )));
+                        }
+                        page.visible = true;
+                        page
+                    }
+                };
+                let page_index = if let Some(index) = page
+                    .steps
+                    .iter()
+                    .position(|candidate| candidate.step_id == step.id)
+                {
+                    index
+                } else {
+                    let text = self.interpolate_text(content, &step.text)?;
+                    page.steps.push(LongTextStepSnapshot {
                         step_id: step.id.clone(),
-                        step_index: 0,
                         text,
-                        is_read: self.read_dialogues.contains(&prompt_id),
-                    };
-                    cues.push(self.cue(
-                        CueGate::PlayerAdvance,
-                        PresentationCueKind::LongTextReveal {
-                            prompt_id,
-                            speed_cps,
-                            reveal_animation,
-                        },
-                    ));
-                    return Ok(cues);
+                        page_break_before: step.page_break_before,
+                    });
+                    page.steps.len() - 1
+                };
+                validate_long_text_document_size(&page, scene_id, node_id)?;
+                page.active_step_index = page_index as u32;
+                let text = page.steps[page_index].text.clone();
+                self.snapshot.dialogue_page = None;
+                self.snapshot.long_text_page = Some(page);
+                let prompt_id = format!("{document_id}/{}", step.id);
+                self.append_history(prompt_id.clone(), None, None, None, None, text.clone());
+                self.snapshot.prompt = PromptSnapshot::LongText {
+                    prompt_id: prompt_id.clone(),
+                    document_id,
+                    step_id: step.id.clone(),
+                    step_index: 0,
+                    text,
+                    is_read: self.read_dialogues.contains(&prompt_id),
+                };
+                cues.push(self.cue(
+                    CueGate::PlayerAdvance,
+                    PresentationCueKind::LongTextReveal {
+                        prompt_id,
+                        speed_cps,
+                        reveal_animation,
+                    },
+                ));
+                return Ok(true);
+            }
+            SceneNode::LongTextControl {
+                document,
+                action,
+                next,
+            } => {
+                let current = self.snapshot.long_text_page.as_mut().ok_or_else(|| {
+                    RuntimeError::Content(format!(
+                        "{scene_id}/{node_id}: 没有可控制的长文本 {document}"
+                    ))
+                })?;
+                let expected = long_text_document_id(scene_id, node_id, Some(&document));
+                if current.document_id != expected {
+                    return Err(RuntimeError::Content(format!(
+                        "{scene_id}/{node_id}: 当前文稿是 {}，不能控制 {expected}",
+                        current.document_id
+                    )));
                 }
-                SceneNode::LongTextControl {
-                    document,
-                    action,
-                    next,
-                } => {
-                    let current = self.snapshot.long_text_page.as_mut().ok_or_else(|| {
+                match action {
+                    LongTextControlAction::Show => current.visible = true,
+                    LongTextControlAction::Hide => current.visible = false,
+                    LongTextControlAction::Close => self.snapshot.long_text_page = None,
+                }
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::Choice { presentation, choices } => {
+                self.snapshot.dialogue_page = None;
+                self.snapshot.prompt = self.choice_prompt(content, scene_id, node_id, presentation.as_ref(), &choices)?;
+                return Ok(true);
+            }
+            SceneNode::Set {
+                variable,
+                op,
+                value,
+                next,
+            } => {
+                let definition =
+                    content.manifest.variables.get(&variable).ok_or_else(|| {
                         RuntimeError::Content(format!(
-                            "{scene_id}/{node_id}: 没有可控制的长文本 {document}"
+                            "{scene_id}/{node_id}: 未声明变量 {variable}"
                         ))
                     })?;
-                    let expected = long_text_document_id(&scene_id, &node_id, Some(&document));
-                    if current.document_id != expected {
-                        return Err(RuntimeError::Content(format!(
-                            "{scene_id}/{node_id}: 当前文稿是 {}，不能控制 {expected}",
-                            current.document_id
-                        )));
-                    }
-                    match action {
-                        LongTextControlAction::Show => current.visible = true,
-                        LongTextControlAction::Hide => current.visible = false,
-                        LongTextControlAction::Close => self.snapshot.long_text_page = None,
-                    }
-                    self.snapshot.location.node_id = next;
-                }
-                SceneNode::Choice {
-                    presentation,
-                    choices,
-                } => {
-                    let prompt_id = format!("{scene_id}/{node_id}");
-                    // Filtering and interpolation always run before layout, so
-                    // hidden options neither consume a flow slot nor leak
-                    // variables into the resolved layout.
-                    let mut drafts = Vec::new();
-                    for choice in choices {
-                        let visible = match &choice.visible_if {
-                            Some(condition) => self.evaluate_condition(content, condition)?,
-                            None => true,
-                        };
-                        if !visible {
-                            continue;
-                        }
-                        let enabled = match &choice.enabled_if {
-                            Some(condition) => self.evaluate_condition(content, condition)?,
-                            None => true,
-                        };
-                        drafts.push(ChoiceItemDraft {
-                            id: choice.id.clone(),
-                            label: self.interpolate_text(content, &choice.label)?,
-                            enabled,
-                            template: choice.template.clone(),
-                            icon: choice.icon.clone(),
-                        });
-                    }
-                    if !drafts.iter().any(|choice| choice.enabled) {
-                        return Err(RuntimeError::Content(format!(
-                            "{scene_id}/{node_id}: 没有任何可见且可用的选项"
-                        )));
-                    }
-                    let (choices, layout, diagnostics) = resolve_choice_items(
-                        content,
-                        &scene_id,
-                        &node_id,
-                        presentation.as_ref(),
-                        &drafts,
-                    );
-                    self.snapshot.dialogue_page = None;
-                    self.snapshot.prompt = PromptSnapshot::Choice {
-                        prompt_id,
-                        layout,
-                        diagnostics,
-                        choices,
-                    };
-                    return Ok(cues);
-                }
-                SceneNode::Set {
-                    variable,
-                    op,
-                    value,
-                    next,
-                } => {
-                    let definition =
-                        content.manifest.variables.get(&variable).ok_or_else(|| {
-                            RuntimeError::Content(format!(
-                                "{scene_id}/{node_id}: 未声明变量 {variable}"
-                            ))
+                let current = self.variable_value(content, &variable)?.clone();
+                let operand = value
+                    .as_ref()
+                    .map(|value| self.resolve_mutation_value(content, value))
+                    .transpose()?;
+                let value =
+                    apply_variable_operation(op, definition.value_type, current, operand)
+                        .map_err(|message| {
+                            RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
                         })?;
-                    let current = self.variable_value(content, &variable)?.clone();
-                    let operand = value
-                        .as_ref()
-                        .map(|value| self.resolve_mutation_value(content, value))
-                        .transpose()?;
-                    let value =
-                        apply_variable_operation(op, definition.value_type, current, operand)
-                            .map_err(|message| {
-                                RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
-                            })?;
-                    match definition.scope {
-                        VariableScope::Save => {
-                            self.snapshot.variables.insert(variable, value);
-                        }
-                        VariableScope::Profile => {
-                            self.profile_variables.insert(variable, value);
-                        }
+                match definition.scope {
+                    VariableScope::Save => {
+                        self.snapshot.variables.insert(variable, value);
                     }
-                    self.snapshot.location.node_id = next;
+                    VariableScope::Profile => {
+                        self.profile_variables.insert(variable, value);
+                    }
                 }
-                SceneNode::Condition {
-                    condition,
-                    then,
-                    otherwise,
-                } => {
-                    self.snapshot.location.node_id =
-                        if self.evaluate_condition(content, &condition)? {
-                            then
-                        } else {
-                            otherwise
-                        };
-                }
-                SceneNode::Playback {
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::Condition {
+                condition,
+                then,
+                otherwise,
+            } => {
+                self.snapshot.location.node_id =
+                    if self.evaluate_condition(content, &condition)? {
+                        then
+                    } else {
+                        otherwise
+                    };
+            }
+            SceneNode::Playback {
+                auto,
+                ctrl_fast_forward,
+                next,
+            } => {
+                self.snapshot.playback = PlaybackSnapshot {
                     auto,
                     ctrl_fast_forward,
-                    next,
-                } => {
-                    self.snapshot.playback = PlaybackSnapshot {
-                        auto,
-                        ctrl_fast_forward,
-                    };
-                    self.snapshot.location.node_id = next;
-                }
-                SceneNode::Action {
-                    sprite_id,
-                    action,
-                    duration_ms,
-                    await_completion,
-                    parameters,
-                    end,
-                    next,
-                } => {
-                    let base = self
-                        .snapshot
-                        .world
-                        .sprites
-                        .get(&sprite_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            RuntimeError::Content(format!(
-                                "{scene_id}/{node_id}: 动作引用了不存在的立绘实例 {sprite_id}"
-                            ))
-                        })?;
-                    let definition = content.actions.get(&action).ok_or_else(|| {
+                };
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::Action {
+                sprite_id,
+                action,
+                duration_ms,
+                await_completion,
+                parameters,
+                end,
+                next,
+            } => {
+                let base = self
+                    .snapshot
+                    .world
+                    .sprites
+                    .get(&sprite_id)
+                    .cloned()
+                    .ok_or_else(|| {
                         RuntimeError::Content(format!(
-                            "{scene_id}/{node_id}: 未知立绘动作 {action}"
+                            "{scene_id}/{node_id}: 动作引用了不存在的立绘实例 {sprite_id}"
                         ))
                     })?;
-                    let duration = duration_ms.unwrap_or(definition.duration_ms);
-                    let tracks = expand_sprite_action(
-                        &sprite_id,
-                        definition,
-                        &base,
-                        duration,
-                        end.unwrap_or(definition.end),
-                        &parameters,
-                    )
-                    .map_err(|message| {
-                        RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
-                    })?;
-                    apply_timeline_final_state(&mut self.snapshot, &tracks).map_err(|message| {
-                        RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
-                    })?;
-                    self.snapshot.location.node_id = next;
+                let definition = content.actions.get(&action).ok_or_else(|| {
+                    RuntimeError::Content(format!(
+                        "{scene_id}/{node_id}: 未知立绘动作 {action}"
+                    ))
+                })?;
+                let duration = duration_ms.unwrap_or(definition.duration_ms);
+                let tracks = expand_sprite_action(
+                    &sprite_id,
+                    definition,
+                    &base,
+                    duration,
+                    end.unwrap_or(definition.end),
+                    &parameters,
+                )
+                .map_err(|message| {
+                    RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
+                })?;
+                apply_timeline_final_state(&mut self.snapshot, &tracks).map_err(|message| {
+                    RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
+                })?;
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::Timeline {
+                        presentation_id: format!("action/{scene_id}/{node_id}/{action}"),
+                        duration_ms: duration,
+                        skippable: false,
+                        is_seen: false,
+                        button_bases: Default::default(),
+                        tracks,
+                        events: Vec::new(),
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
+                }
+            }
+            SceneNode::Jump { scene, target } => {
+                self.validate_scene_transfer(content, scene.as_deref().unwrap_or(scene_id), &target)?;
+                let crosses_scene = scene
+                    .as_ref()
+                    .is_some_and(|destination| destination != scene_id);
+                if let Some(destination) = scene {
+                    self.snapshot.location.scene_id = destination;
+                }
+                self.snapshot.location.node_id = target;
+                // A scene is a visual ownership boundary. Establish an
+                // explicit presentation boundary before evaluating the
+                // destination so stale views cannot blend into its first
+                // background or sprite cue.
+                if crosses_scene {
+                    self.completed_scenes.insert(scene_id.to_owned());
+                    cues.extend(self.leave_scene(content)?);
                     cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::Timeline {
-                            presentation_id: format!("action/{scene_id}/{node_id}/{action}"),
-                            duration_ms: duration,
-                            skippable: false,
-                            is_seen: false,
-                            button_bases: Default::default(),
-                            tracks,
-                            events: Vec::new(),
+                        CueGate::Runtime,
+                        PresentationCueKind::ClearScene {
+                            duration_ms: 0,
+                            easing: crate::model::Easing::Linear,
                         },
                     ));
-                    if await_completion {
-                        return Ok(cues);
+                    return Ok(true);
+                }
+            }
+            SceneNode::OpenWindow { scene, next } => {
+                // Never blocking: the runtime only records the request and
+                // continues to `next`.  The desktop host decides whether to
+                // act on it (the main story runtime, and the replay it is
+                // running, but never the secondary engine) and strips the cue
+                // before the update reaches any WebView.
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(
+                    self.cue(CueGate::None, PresentationCueKind::OpenWindow { scene }),
+                );
+            }
+            SceneNode::WindowTitle { target, title, next } => {
+                let title = text_template::interpolate_plain(&title, |id| {
+                    self.variable_value(content, id).cloned()
+                        .map_err(|error| text_template::TemplateError(error.to_string()))
+                }).map_err(|error| RuntimeError::Content(error.to_string()))?;
+                validate_title(&title).map_err(RuntimeError::Content)?;
+                self.window_requests.push(WindowRequest::Title { target, title });
+                if !effect_only { self.snapshot.location.node_id = next; self.host_boundary = true; }
+                return Ok(true);
+            }
+            SceneNode::WindowControl { target, action, id, message, next } => {
+                self.window_requests.push(WindowRequest::Control { target, action, id, message });
+                if !effect_only { self.snapshot.location.node_id = next; self.host_boundary = true; }
+                return Ok(true);
+            }
+            SceneNode::Timer { id, action, delay_ms, interval_ms, target, next } => {
+                match action {
+                    TimerAction::Stop => { self.snapshot.interaction.timers.remove(&id); }
+                    TimerAction::Start => {
+                        if id.is_empty() || interval_ms.is_some_and(|value| value < MIN_TIMER_INTERVAL_MS)
+                            || (!self.snapshot.interaction.timers.contains_key(&id)
+                                && self.snapshot.interaction.timers.len() >= MAX_SCENE_TIMERS) {
+                            return Err(RuntimeError::Content("计时器 ID、间隔或数量无效".to_owned()));
+                        }
+                        let target = target.ok_or_else(|| RuntimeError::Content("计时器缺少目标".to_owned()))?;
+                        let target_node = content.scene(scene_id).ok().and_then(|scene| scene.nodes.get(&target));
+                        if !target_node.is_some_and(timer_target_allowed) {
+                            return Err(RuntimeError::Content("计时器必须引用同场景的非阻塞效果节点".to_owned()));
+                        }
+                        self.snapshot.interaction.timers.insert(id, SceneTimer { target, remaining_ms: delay_ms, interval_ms });
                     }
                 }
-                SceneNode::Jump { scene, target } => {
-                    let crosses_scene = scene
-                        .as_ref()
-                        .is_some_and(|destination| destination != &scene_id);
-                    if let Some(destination) = scene {
-                        self.snapshot.location.scene_id = destination;
-                    }
-                    self.snapshot.location.node_id = target;
-                    // A scene is a visual ownership boundary. Establish an
-                    // explicit presentation boundary before evaluating the
-                    // destination so stale views cannot blend into its first
-                    // background or sprite cue.
-                    if crosses_scene {
-                        self.completed_scenes.insert(scene_id.clone());
-                        cues.extend(self.leave_scene(content)?);
-                        cues.push(self.cue(
-                            CueGate::Runtime,
-                            PresentationCueKind::ClearScene {
-                                duration_ms: 0,
-                                easing: crate::model::Easing::Linear,
-                            },
-                        ));
-                        return Ok(cues);
-                    }
+                self.snapshot.location.node_id = next;
+            }
+            SceneNode::Wait { duration_ms, next } => {
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(
+                    self.cue(CueGate::Runtime, PresentationCueKind::Delay { duration_ms }),
+                );
+                return Ok(true);
+            }
+            SceneNode::Bgm {
+                action,
+                asset,
+                volume,
+                start_ms,
+                loop_start_ms,
+                loop_end_ms,
+                duration_ms,
+                await_completion,
+                next,
+            } => {
+                let from = self.snapshot.audio.bgm.clone();
+                let to = match action {
+                    AudioAction::Start => Some(LoopingAudioSnapshot {
+                        asset: asset.ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: BGM start 缺少 asset"
+                            ))
+                        })?,
+                        volume,
+                        start_ms,
+                        loop_start_ms,
+                        loop_end_ms,
+                    }),
+                    AudioAction::Stop => None,
+                };
+                self.snapshot.audio.bgm.clone_from(&to);
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::BgmTransition {
+                        from,
+                        to,
+                        duration_ms,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
                 }
-                SceneNode::OpenWindow { scene, next } => {
-                    // Never blocking: the runtime only records the request and
-                    // continues to `next`.  The desktop host decides whether to
-                    // act on it (the main story runtime, and the replay it is
-                    // running, but never the secondary engine) and strips the cue
-                    // before the update reaches any WebView.
-                    self.snapshot.location.node_id = next;
-                    cues.push(
-                        self.cue(CueGate::None, PresentationCueKind::OpenWindow { scene }),
-                    );
+            }
+            SceneNode::Ambience {
+                slot,
+                action,
+                asset,
+                volume,
+                start_ms,
+                loop_start_ms,
+                loop_end_ms,
+                duration_ms,
+                await_completion,
+                next,
+            } => {
+                let from = self.snapshot.audio.ambience.get(slot).cloned();
+                let to = match action {
+                    AudioAction::Start => Some(LoopingAudioSnapshot {
+                        asset: asset.ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: ambience start 缺少 asset"
+                            ))
+                        })?,
+                        volume,
+                        start_ms,
+                        loop_start_ms,
+                        loop_end_ms,
+                    }),
+                    AudioAction::Stop => None,
+                };
+                self.snapshot.audio.ambience.set(slot, to.clone());
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::AmbienceTransition {
+                        slot,
+                        from,
+                        to,
+                        duration_ms,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
                 }
-                SceneNode::Wait { duration_ms, next } => {
-                    self.snapshot.location.node_id = next;
-                    cues.push(
-                        self.cue(CueGate::Runtime, PresentationCueKind::Delay { duration_ms }),
-                    );
-                    return Ok(cues);
-                }
-                SceneNode::Bgm {
-                    action,
-                    asset,
-                    volume,
-                    start_ms,
-                    loop_start_ms,
-                    loop_end_ms,
-                    duration_ms,
-                    await_completion,
-                    next,
-                } => {
-                    let from = self.snapshot.audio.bgm.clone();
-                    let to = match action {
-                        AudioAction::Start => Some(LoopingAudioSnapshot {
-                            asset: asset.ok_or_else(|| {
-                                RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: BGM start 缺少 asset"
-                                ))
-                            })?,
-                            volume,
-                            start_ms,
-                            loop_start_ms,
-                            loop_end_ms,
-                        }),
-                        AudioAction::Stop => None,
-                    };
-                    self.snapshot.audio.bgm.clone_from(&to);
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::BgmTransition {
-                            from,
-                            to,
-                            duration_ms,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::Ambience {
-                    slot,
-                    action,
-                    asset,
-                    volume,
-                    start_ms,
-                    loop_start_ms,
-                    loop_end_ms,
-                    duration_ms,
-                    await_completion,
-                    next,
-                } => {
-                    let from = self.snapshot.audio.ambience.get(slot).cloned();
-                    let to = match action {
-                        AudioAction::Start => Some(LoopingAudioSnapshot {
-                            asset: asset.ok_or_else(|| {
-                                RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: ambience start 缺少 asset"
-                                ))
-                            })?,
-                            volume,
-                            start_ms,
-                            loop_start_ms,
-                            loop_end_ms,
-                        }),
-                        AudioAction::Stop => None,
-                    };
-                    self.snapshot.audio.ambience.set(slot, to.clone());
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::AmbienceTransition {
-                            slot,
-                            from,
-                            to,
-                            duration_ms,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::Sfx {
-                    asset,
-                    volume,
-                    next,
-                } => {
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        CueGate::None,
-                        PresentationCueKind::PlaySfx { asset, volume },
-                    ));
-                }
-                SceneNode::Camera {
+            }
+            SceneNode::Sfx {
+                asset,
+                volume,
+                next,
+            } => {
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    CueGate::None,
+                    PresentationCueKind::PlaySfx { asset, volume },
+                ));
+            }
+            SceneNode::Camera {
+                x,
+                y,
+                zoom,
+                duration_ms,
+                easing,
+                await_completion,
+                next,
+            } => {
+                let from = self.snapshot.world.camera.clone();
+                let to = CameraSnapshot {
                     x,
                     y,
                     zoom,
-                    duration_ms,
-                    easing,
-                    await_completion,
-                    next,
-                } => {
-                    let from = self.snapshot.world.camera.clone();
-                    let to = CameraSnapshot {
-                        x,
-                        y,
-                        zoom,
-                        rotation_deg: from.rotation_deg,
-                    };
-                    self.snapshot.world.camera.clone_from(&to);
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::CameraTween {
-                            from,
-                            to,
-                            duration_ms,
-                            easing,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::ScreenEffect {
-                    effect,
-                    duration_ms,
-                    await_completion,
-                    next,
-                } => {
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::ScreenEffect {
-                            effect,
-                            duration_ms,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::Curtain {
-                    action,
-                    fill,
-                    transition,
-                    duration_ms,
-                    easing,
-                    await_completion,
-                    next,
-                } => {
-                    self.snapshot.location.node_id = next;
-                    let applied_fill = match action {
-                        CurtainAction::Cover => {
-                            let fill = fill.clone().ok_or_else(|| {
-                                RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: curtain cover 缺少 fill"
-                                ))
-                            })?;
-                            self.snapshot.world.curtain = CurtainSnapshot {
-                                covered: true,
-                                fill: Some(fill.clone()),
-                            };
-                            Some(fill)
-                        }
-                        CurtainAction::Reveal => {
-                            // Re-revealing an already revealed curtain is a safe
-                            // no-op: it must never emit a cue the host would wait
-                            // on, which is what would deadlock an `await` node.
-                            if !self.snapshot.world.curtain.covered {
-                                continue;
-                            }
-                            let previous = self.snapshot.world.curtain.fill.clone();
-                            self.snapshot.world.curtain = CurtainSnapshot::default();
-                            previous
-                        }
-                    };
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::CurtainTransition {
-                            action,
-                            fill: applied_fill,
-                            transition,
-                            duration_ms,
-                            easing,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::DialogueUi {
-                    visible,
-                    motion,
-                    duration_ms,
-                    await_completion,
-                    next,
-                } => {
-                    self.snapshot.world.dialogue_ui_visible = visible;
-                    self.snapshot.location.node_id = next;
-                    let preset = resolve_dialogue_motion(
-                        content,
-                        &self.snapshot,
-                        visible,
-                        motion.as_deref(),
-                    )?;
-                    if let Some(preset) = preset {
-                        let cue_duration = duration_ms.unwrap_or(preset.duration_ms);
-                        cues.push(self.cue(
-                            gate(await_completion),
-                            PresentationCueKind::DialogueUiTransition {
-                                visible,
-                                duration_ms: cue_duration,
-                                motion: Some(preset),
-                            },
-                        ));
-                        if await_completion {
-                            return Ok(cues);
-                        }
-                    }
-                }
-                SceneNode::UiMotionSet { slot, motion, next } => {
-                    match slot {
-                        UiMotionSlot::DialogueShow => {
-                            self.snapshot.world.ui_motion_bindings.dialogue_show = motion;
-                        }
-                        UiMotionSlot::DialogueHide => {
-                            self.snapshot.world.ui_motion_bindings.dialogue_hide = motion;
-                        }
-                    }
-                    self.snapshot.location.node_id = next;
-                }
-                SceneNode::UiMotionPlay {
-                    motion,
-                    duration_ms,
-                    await_completion,
-                    next,
-                } => {
-                    let preset =
-                        content.ui_motions.get(&motion).cloned().ok_or_else(|| {
-                            RuntimeError::Content(format!("未知 UI 动效 {motion}"))
-                        })?;
-                    let cue_duration = duration_ms.unwrap_or(preset.duration_ms);
-                    self.snapshot.location.node_id = next;
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::UiMotion {
-                            duration_ms: cue_duration,
-                            motion: preset,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::ButtonCreate {
-                    instance_id,
-                    template,
-                    x,
-                    y,
-                    width,
-                    height,
-                    rotation_deg,
-                    scale_x,
-                    scale_y,
-                    opacity,
-                    z,
-                    visible,
-                    enabled,
-                    action,
-                    next,
-                } => {
-                    let definition = content
-                        .buttons
-                        .get(&template)
-                        .ok_or_else(|| RuntimeError::Content(format!("未知按钮模板 {template}")))?;
-                    if self.snapshot.world.buttons.contains_key(&instance_id) {
-                        return Err(RuntimeError::Content(format!(
-                            "按钮实例 ID 重复: {instance_id}"
-                        )));
-                    }
-                    self.snapshot.world.buttons.insert(
-                        instance_id.clone(),
-                        make_button_snapshot(
-                            instance_id,
-                            &template,
-                            definition,
-                            x,
-                            y,
-                            width,
-                            height,
-                            rotation_deg,
-                            scale_x,
-                            scale_y,
-                            opacity,
-                            z,
-                            visible,
-                            enabled,
-                            action,
-                        ),
-                    );
-                    self.snapshot.location.node_id = next;
-                }
-                SceneNode::ButtonUpdate {
-                    instance_id,
-                    template,
-                    x,
-                    y,
-                    width,
-                    height,
-                    rotation_deg,
-                    scale_x,
-                    scale_y,
-                    opacity,
-                    z,
-                    visible,
-                    enabled,
-                    action,
-                    next,
-                } => {
-                    let current = self
-                        .snapshot
-                        .world
-                        .buttons
-                        .get_mut(&instance_id)
-                        .ok_or_else(|| {
-                            RuntimeError::Content(format!(
-                                "按钮实例不存在，无法更新: {instance_id}"
-                            ))
-                        })?;
-                    if let Some(template) = template {
-                        let definition = content.buttons.get(&template).ok_or_else(|| {
-                            RuntimeError::Content(format!("未知按钮模板 {template}"))
-                        })?;
-                        current.template = template;
-                        current.asset_mode = definition.asset_mode;
-                        current.fit = definition.fit;
-                        current.normal = definition.normal.clone();
-                        current.hover = definition.hover.clone();
-                        current.pressed = definition.pressed.clone();
-                        current.animations = definition.animations.clone();
-                    }
-                    if let Some(value) = x {
-                        current.x = value;
-                    }
-                    if let Some(value) = y {
-                        current.y = value;
-                    }
-                    if let Some(value) = width {
-                        current.width = value;
-                    }
-                    if let Some(value) = height {
-                        current.height = value;
-                    }
-                    if let Some(value) = rotation_deg {
-                        current.rotation_deg = value;
-                    }
-                    if let Some(value) = scale_x {
-                        current.scale_x = value;
-                    }
-                    if let Some(value) = scale_y {
-                        current.scale_y = value;
-                    }
-                    if let Some(value) = opacity {
-                        current.opacity = value;
-                    }
-                    if let Some(value) = z {
-                        current.z = value;
-                    }
-                    if let Some(value) = visible {
-                        current.visible = value;
-                    }
-                    if let Some(value) = enabled {
-                        current.enabled = value;
-                    }
-                    if let Some(value) = action {
-                        current.action = value;
-                    }
-                    self.snapshot.location.node_id = next;
-                }
-                SceneNode::ButtonRemove { instance_id, next } => {
-                    self.snapshot
-                        .world
-                        .buttons
-                        .remove(&instance_id)
-                        .ok_or_else(|| {
-                            RuntimeError::Content(format!(
-                                "按钮实例不存在，无法移除: {instance_id}"
-                            ))
-                        })?;
-                    self.snapshot.location.node_id = next;
-                }
-                SceneNode::Timeline {
-                    duration_ms,
-                    await_completion,
-                    skippable,
-                    tracks,
-                    events,
-                    next,
-                } => {
-                    let button_bases = self
-                        .snapshot
-                        .world
-                        .buttons
-                        .iter()
-                        .filter(|(id, _)| {
-                            tracks.iter().any(|track| {
-                                matches!(
-                                    track,
-                                    TimelineTrack::Button { instance_id, .. }
-                                        if instance_id == *id
-                                )
-                            })
-                        })
-                        .map(|(id, button)| {
-                            (
-                                id.clone(),
-                                crate::model::ButtonTimelineBase {
-                                    x: button.x,
-                                    y: button.y,
-                                    width: button.width,
-                                    height: button.height,
-                                    rotation_deg: button.rotation_deg,
-                                    scale_x: button.scale_x,
-                                    scale_y: button.scale_y,
-                                    opacity: button.opacity,
-                                    z: button.z,
-                                },
-                            )
-                        })
-                        .collect();
-                    apply_timeline_final_state(&mut self.snapshot, &tracks).map_err(|message| {
-                        RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
-                    })?;
-                    self.snapshot.location.node_id = next;
-                    let presentation_id = format!("{scene_id}/{node_id}");
-                    let is_seen = self.seen_presentations.contains(&presentation_id);
-                    cues.push(self.cue(
-                        gate(await_completion),
-                        PresentationCueKind::Timeline {
-                            presentation_id,
-                            duration_ms,
-                            skippable,
-                            is_seen,
-                            button_bases,
-                            tracks,
-                            events,
-                        },
-                    ));
-                    if await_completion {
-                        return Ok(cues);
-                    }
-                }
-                SceneNode::End => {
-                    self.completed_scenes.insert(scene_id.clone());
-                    self.snapshot.dialogue_page = None;
-                    self.snapshot.long_text_page = None;
-                    self.snapshot.prompt = PromptSnapshot::End {
-                        prompt_id: format!("{scene_id}/{node_id}"),
-                    };
-                    return Ok(cues);
+                    rotation_deg: from.rotation_deg,
+                };
+                self.snapshot.world.camera.clone_from(&to);
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::CameraTween {
+                        from,
+                        to,
+                        duration_ms,
+                        easing,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
                 }
             }
+            SceneNode::ScreenEffect {
+                effect,
+                duration_ms,
+                await_completion,
+                next,
+            } => {
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::ScreenEffect {
+                        effect,
+                        duration_ms,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
+                }
+            }
+            SceneNode::Curtain {
+                action,
+                fill,
+                transition,
+                duration_ms,
+                easing,
+                await_completion,
+                next,
+            } => {
+                if !effect_only { self.snapshot.location.node_id = next; }
+                let applied_fill = match action {
+                    CurtainAction::Cover => {
+                        let fill = fill.clone().ok_or_else(|| {
+                            RuntimeError::Content(format!(
+                                "{scene_id}/{node_id}: curtain cover 缺少 fill"
+                            ))
+                        })?;
+                        self.snapshot.world.curtain = CurtainSnapshot {
+                            covered: true,
+                            fill: Some(fill.clone()),
+                        };
+                        Some(fill)
+                    }
+                    CurtainAction::Reveal => {
+                        // Re-revealing an already revealed curtain is a safe
+                        // no-op: it must never emit a cue the host would wait
+                        // on, which is what would deadlock an `await` node.
+                        if !self.snapshot.world.curtain.covered {
+                            return Ok(false);
+                        }
+                        let previous = self.snapshot.world.curtain.fill.clone();
+                        self.snapshot.world.curtain = CurtainSnapshot::default();
+                        previous
+                    }
+                };
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::CurtainTransition {
+                        action,
+                        fill: applied_fill,
+                        transition,
+                        duration_ms,
+                        easing,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
+                }
+            }
+            SceneNode::DialogueUi {
+                visible,
+                motion,
+                duration_ms,
+                await_completion,
+                next,
+            } => {
+                self.snapshot.world.dialogue_ui_visible = visible;
+                if !effect_only { self.snapshot.location.node_id = next; }
+                let preset = resolve_dialogue_motion(
+                    content,
+                    &self.snapshot,
+                    visible,
+                    motion.as_deref(),
+                )?;
+                if let Some(preset) = preset {
+                    let cue_duration = duration_ms.unwrap_or(preset.duration_ms);
+                    cues.push(self.cue(
+                        gate(await_completion),
+                        PresentationCueKind::DialogueUiTransition {
+                            visible,
+                            duration_ms: cue_duration,
+                            motion: Some(preset),
+                        },
+                    ));
+                    if await_completion {
+                        return Ok(true);
+                    }
+                }
+            }
+            SceneNode::UiMotionSet { slot, motion, next } => {
+                match slot {
+                    UiMotionSlot::DialogueShow => {
+                        self.snapshot.world.ui_motion_bindings.dialogue_show = motion;
+                    }
+                    UiMotionSlot::DialogueHide => {
+                        self.snapshot.world.ui_motion_bindings.dialogue_hide = motion;
+                    }
+                }
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::UiMotionPlay {
+                motion,
+                duration_ms,
+                await_completion,
+                next,
+            } => {
+                let preset =
+                    content.ui_motions.get(&motion).cloned().ok_or_else(|| {
+                        RuntimeError::Content(format!("未知 UI 动效 {motion}"))
+                    })?;
+                let cue_duration = duration_ms.unwrap_or(preset.duration_ms);
+                if !effect_only { self.snapshot.location.node_id = next; }
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::UiMotion {
+                        duration_ms: cue_duration,
+                        motion: preset,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
+                }
+            }
+            SceneNode::ButtonCreate {
+                instance_id,
+                template,
+                x,
+                y,
+                width,
+                height,
+                rotation_deg,
+                scale_x,
+                scale_y,
+                opacity,
+                z,
+                visible,
+                enabled,
+                action,
+                next,
+            } => {
+                let definition = content
+                    .buttons
+                    .get(&template)
+                    .ok_or_else(|| RuntimeError::Content(format!("未知按钮模板 {template}")))?;
+                if self.snapshot.world.buttons.contains_key(&instance_id) {
+                    return Err(RuntimeError::Content(format!(
+                        "按钮实例 ID 重复: {instance_id}"
+                    )));
+                }
+                self.snapshot.world.buttons.insert(
+                    instance_id.clone(),
+                    make_button_snapshot(
+                        instance_id,
+                        &template,
+                        definition,
+                        x,
+                        y,
+                        width,
+                        height,
+                        rotation_deg,
+                        scale_x,
+                        scale_y,
+                        opacity,
+                        z,
+                        visible,
+                        enabled,
+                        action,
+                    ),
+                );
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::ButtonUpdate {
+                instance_id,
+                template,
+                x,
+                y,
+                width,
+                height,
+                rotation_deg,
+                scale_x,
+                scale_y,
+                opacity,
+                z,
+                visible,
+                enabled,
+                action,
+                next,
+            } => {
+                let current = self
+                    .snapshot
+                    .world
+                    .buttons
+                    .get_mut(&instance_id)
+                    .ok_or_else(|| {
+                        RuntimeError::Content(format!(
+                            "按钮实例不存在，无法更新: {instance_id}"
+                        ))
+                    })?;
+                if let Some(template) = template {
+                    let definition = content.buttons.get(&template).ok_or_else(|| {
+                        RuntimeError::Content(format!("未知按钮模板 {template}"))
+                    })?;
+                    current.template = template;
+                    current.asset_mode = definition.asset_mode;
+                    current.fit = definition.fit;
+                    current.normal = definition.normal.clone();
+                    current.hover = definition.hover.clone();
+                    current.pressed = definition.pressed.clone();
+                    current.animations = definition.animations.clone();
+                }
+                if let Some(value) = x {
+                    current.x = value;
+                }
+                if let Some(value) = y {
+                    current.y = value;
+                }
+                if let Some(value) = width {
+                    current.width = value;
+                }
+                if let Some(value) = height {
+                    current.height = value;
+                }
+                if let Some(value) = rotation_deg {
+                    current.rotation_deg = value;
+                }
+                if let Some(value) = scale_x {
+                    current.scale_x = value;
+                }
+                if let Some(value) = scale_y {
+                    current.scale_y = value;
+                }
+                if let Some(value) = opacity {
+                    current.opacity = value;
+                }
+                if let Some(value) = z {
+                    current.z = value;
+                }
+                if let Some(value) = visible {
+                    current.visible = value;
+                }
+                if let Some(value) = enabled {
+                    current.enabled = value;
+                }
+                if let Some(value) = action {
+                    current.action = value;
+                }
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::ButtonRemove { instance_id, next } => {
+                self.snapshot
+                    .world
+                    .buttons
+                    .remove(&instance_id)
+                    .ok_or_else(|| {
+                        RuntimeError::Content(format!(
+                            "按钮实例不存在，无法移除: {instance_id}"
+                        ))
+                    })?;
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::Timeline {
+                duration_ms,
+                await_completion,
+                skippable,
+                tracks,
+                events,
+                next,
+            } => {
+                let button_bases = self
+                    .snapshot
+                    .world
+                    .buttons
+                    .iter()
+                    .filter(|(id, _)| {
+                        tracks.iter().any(|track| {
+                            matches!(
+                                track,
+                                TimelineTrack::Button { instance_id, .. }
+                                    if instance_id == *id
+                            )
+                        })
+                    })
+                    .map(|(id, button)| {
+                        (
+                            id.clone(),
+                            crate::model::ButtonTimelineBase {
+                                x: button.x,
+                                y: button.y,
+                                width: button.width,
+                                height: button.height,
+                                rotation_deg: button.rotation_deg,
+                                scale_x: button.scale_x,
+                                scale_y: button.scale_y,
+                                opacity: button.opacity,
+                                z: button.z,
+                            },
+                        )
+                    })
+                    .collect();
+                apply_timeline_final_state(&mut self.snapshot, &tracks).map_err(|message| {
+                    RuntimeError::Content(format!("{scene_id}/{node_id}: {message}"))
+                })?;
+                if !effect_only { self.snapshot.location.node_id = next; }
+                let presentation_id = format!("{scene_id}/{node_id}");
+                let is_seen = self.seen_presentations.contains(&presentation_id);
+                cues.push(self.cue(
+                    gate(await_completion),
+                    PresentationCueKind::Timeline {
+                        presentation_id,
+                        duration_ms,
+                        skippable,
+                        is_seen,
+                        button_bases,
+                        tracks,
+                        events,
+                    },
+                ));
+                if await_completion {
+                    return Ok(true);
+                }
+            }
+            SceneNode::End => {
+                self.snapshot.interaction.timers.clear();
+                self.completed_scenes.insert(scene_id.to_owned());
+                self.snapshot.dialogue_page = None;
+                self.snapshot.long_text_page = None;
+                self.snapshot.prompt = PromptSnapshot::End {
+                    prompt_id: format!("{scene_id}/{node_id}"),
+                };
+                return Ok(true);
+            }
         }
-        Err(RuntimeError::ImmediateLoop)
+        Ok(false)
     }
 
     fn evaluate_condition(
@@ -2351,6 +2415,7 @@ impl RuntimeEngine {
         content: &'a ContentCatalog,
         id: &str,
     ) -> Result<&'a ScalarValue, RuntimeError> {
+        if let Some(value) = self.window_variables.get(id) { return Ok(value); }
         let definition = content
             .manifest
             .variables
@@ -2459,6 +2524,9 @@ impl RuntimeEngine {
             .iter()
             .map(|(slot, state)| (slot, state.clone()))
             .collect();
+        self.snapshot.interaction.timers.clear();
+        self.snapshot.interaction.blocks.clear();
+        self.snapshot.interaction.prompt_source = None;
         if !self.shared_save_variables {
             self.snapshot.variables = defaults_for_scope(content, VariableScope::Save)?;
         }
@@ -2511,6 +2579,8 @@ impl RuntimeEngine {
             });
         }
         RuntimeUpdate {
+            kind: UpdateKind::Story,
+            effect_timer: None,
             update_id,
             snapshot: self.snapshot.clone(),
             cues,
@@ -2705,7 +2775,10 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::ButtonUpdate { next, .. }
         | SceneNode::ButtonRemove { next, .. }
         | SceneNode::Timeline { next, .. }
-        | SceneNode::OpenWindow { next, .. } => Some(local(next)),
+        | SceneNode::OpenWindow { next, .. }
+        | SceneNode::WindowTitle { next, .. }
+        | SceneNode::WindowControl { next, .. }
+        | SceneNode::Timer { next, .. } => Some(local(next)),
         SceneNode::Jump { scene, target } => Some(StoryLocation {
             scene_id: scene.clone().unwrap_or_else(|| scene_id.to_owned()),
             node_id: target.clone(),
@@ -3295,6 +3368,7 @@ fn initial_snapshot(content: &ContentCatalog) -> Result<RuntimeSnapshot, Runtime
         .scene(&content.manifest.entry_scene)
         .map_err(|error| RuntimeError::Content(error.to_string()))?;
     Ok(RuntimeSnapshot {
+        interaction: Default::default(),
         revision: 0,
         location: StoryLocation {
             scene_id: scene.id.clone(),
@@ -4011,7 +4085,7 @@ fn validate_snapshot(
     // A crafted save must not keep a choice prompt alive at a node that is
     // not a choice; the prompt is re-resolved from content first, so this also
     // rejects a stale save whose choice node was rewritten.
-    if let PromptSnapshot::Choice { choices, .. } = &snapshot.prompt {
+    if let PromptSnapshot::Choice { .. } = &snapshot.prompt {
         if !matches!(
             scene.nodes.get(&snapshot.location.node_id),
             Some(SceneNode::Choice { .. })
@@ -4020,20 +4094,8 @@ fn validate_snapshot(
                 "选择提示的位置不是 choice 节点".to_owned(),
             ));
         }
-        // Ghost ids have already been dropped and the current content defines
-        // at least one enabled option before a prompt is ever produced, so an
-        // empty or fully disabled loaded prompt can only come from a crafted or
-        // unrecoverable save: it would deadlock the player.
-        if choices.is_empty() {
-            return Err(RuntimeError::InvalidSnapshot(
-                "选择提示没有任何选项".to_owned(),
-            ));
-        }
-        if !choices.iter().any(|choice| choice.enabled) {
-            return Err(RuntimeError::InvalidSnapshot(
-                "选择提示没有任何可用选项".to_owned(),
-            ));
-        }
+        // An empty or all-disabled filtered choice is a valid waiting state:
+        // another window or a timer may still unlock an option.
     }
     if let PromptSnapshot::LongText {
         step_index,
@@ -4053,6 +4115,8 @@ fn validate_snapshot(
             }
         }
     }
+    // After the prompt/location checks so their more specific errors win.
+    interaction::validate_interaction_snapshot(content, snapshot)?;
     let mut referenced_assets = Vec::new();
     if let Some(background) = &snapshot.world.background {
         referenced_assets.push(background.clone());
@@ -4199,6 +4263,7 @@ mod tests {
         content.scenes.insert(
             "ambience_scene".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "ambience_scene".to_owned(),
                 entry: ["start", "start_1", "await_ambience"]
@@ -4399,6 +4464,7 @@ mod tests {
         content.scenes.insert(
             "destination".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "destination".to_owned(),
                 entry: "end".to_owned(),
@@ -4972,6 +5038,7 @@ mod tests {
         content.scenes.insert(
             "button_destination".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "button_destination".to_owned(),
                 entry: "done".to_owned(),
@@ -5387,6 +5454,7 @@ mod tests {
         content.scenes.insert(
             "destination".to_owned(),
             crate::model::SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "destination".to_owned(),
                 entry: "end".to_owned(),
@@ -5581,6 +5649,7 @@ mod tests {
         content.scenes.insert(
             "preview_boundary".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "preview_boundary".to_owned(),
                 entry: "leave".to_owned(),
@@ -5663,6 +5732,7 @@ mod tests {
         content.scenes.insert(
             "preview_live".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "preview_live".to_owned(),
                 entry: entry.to_owned(),
@@ -7493,7 +7563,7 @@ mod tests {
     }
 
     #[test]
-    fn a_choice_without_any_enabled_visible_option_is_an_error() {
+    fn a_choice_without_any_enabled_visible_option_is_a_waiting_prompt() {
         let mut content = catalog();
         let scene = content.scenes.get_mut("prologue").unwrap();
         let SceneNode::Choice { choices, .. } = scene.nodes.get_mut("route_choice").unwrap() else {
@@ -7509,8 +7579,13 @@ mod tests {
         }
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         runtime.snapshot.location.node_id = "route_choice".to_owned();
-        let error = runtime.run_until_boundary(&content).unwrap_err();
-        assert!(error.to_string().contains("没有任何可见且可用的选项"));
+        assert!(runtime.run_until_boundary(&content).unwrap().is_empty());
+        let PromptSnapshot::Choice { choices, .. } = &runtime.snapshot.prompt else {
+            panic!("expected waiting choice")
+        };
+        assert!(!choices.is_empty());
+        assert!(choices.iter().all(|choice| !choice.enabled));
+        validate_snapshot(&content, &runtime.snapshot).unwrap();
     }
 
     #[test]
@@ -7663,6 +7738,7 @@ mod tests {
         content.scenes.insert(
             "window_scene".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "window_scene".to_owned(),
                 entry: "open".to_owned(),
@@ -7700,6 +7776,7 @@ mod tests {
         content.scenes.insert(
             "origin".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "origin".to_owned(),
                 entry: "line".to_owned(),
@@ -7729,6 +7806,7 @@ mod tests {
         content.scenes.insert(
             "destination".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "destination".to_owned(),
                 entry: "end".to_owned(),
@@ -7746,6 +7824,7 @@ mod tests {
         content.scenes.insert(
             "origin".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "origin".to_owned(),
                 entry: "set".to_owned(),
@@ -7772,6 +7851,7 @@ mod tests {
         content.scenes.insert(
             "destination".to_owned(),
             SceneDefinition {
+                window_role: Default::default(),
                 schema_version: 2,
                 id: "destination".to_owned(),
                 entry: "end".to_owned(),

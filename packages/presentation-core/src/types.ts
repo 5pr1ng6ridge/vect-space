@@ -443,11 +443,51 @@ export interface EndPrompt {
 export type PromptSnapshot =
   EmptyPrompt | DialoguePrompt | LongTextPrompt | ChoicePrompt | EndPrompt;
 
+export type WindowRole = "main" | "secondary";
+
+/** One script-owned reason the window currently refuses to turn the page. */
+export interface AdvanceBlock {
+  id: string;
+  source: WindowRole;
+  source_scene: string;
+  /** Already interpolated by the runtime; empty means "blocked, no hint". */
+  message: string;
+  /** Authoring template the runtime re-interpolates; display `message` only. */
+  message_template?: string | null;
+}
+
+export interface SceneTimerSnapshot {
+  target: string;
+  remaining_ms: number;
+  interval_ms: number | null;
+}
+
+/**
+ * Scene-owned interaction state published with every snapshot.  Absent from
+ * old editor fixtures and pre-interaction saves, so every reader must treat the
+ * whole object (and each field) as optional.
+ */
+export interface InteractionSnapshot {
+  titles?: { main: string; secondary: string };
+  blocks?: AdvanceBlock[];
+  timers?: Record<string, SceneTimerSnapshot>;
+  /**
+   * Identity of the prompt occurrence on screen.  It changes only when a new
+   * Say / long-text step / Choice is really entered - never on a state refresh
+   * and never with `update_id`.  Empty/absent means "derive it from update_id".
+   */
+  prompt_instance?: string;
+  prompt_source?: StoryLocation | null;
+}
+
+export type RuntimeUpdateKind = "story" | "state_refresh" | "effect";
+
 export interface RuntimeSnapshot {
   /** Host session generation; absent only in old editor fixtures. */
   session_id?: WireU64;
   mode?: SessionMode;
   revision: WireU64;
+  interaction?: InteractionSnapshot;
   location: StoryLocation;
   /** Runtime variables are decoded to the editor/game domain at the IPC
    * boundary.  Keeping them as tagged wire objects here would make a
@@ -636,6 +676,19 @@ export interface RuntimeUpdate {
   /** Host session generation; absent only in old editor fixtures. */
   session_id?: WireU64;
   mode?: SessionMode;
+  /**
+   * `story` replaces the presentation (the default, also for old fixtures),
+   * `state_refresh` only re-derives the live snapshot and `effect` runs timer
+   * cues beside the story without cancelling it.
+   */
+  kind?: RuntimeUpdateKind;
+  /** Timer that produced an `effect` update; absent otherwise/old hosts. */
+  effect_timer?: string | null;
+  /**
+   * Per window and session commit sequence assigned by the desktop host.  It
+   * is a wire u64: compare it as a BigInt, never as a Number.
+   */
+  seq?: WireU64;
   update_id: WireU64;
   snapshot: RuntimeSnapshot;
   cues: PresentationCue[];

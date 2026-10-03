@@ -19,6 +19,9 @@
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "window_role": {
+      "$ref": "#/$defs/WindowRole"
     }
   },
   "additionalProperties": false,
@@ -1390,6 +1393,111 @@
           "required": [
             "type",
             "scene",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "next": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/WindowRole"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "window_title"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target",
+            "title",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/WindowControlAction"
+            },
+            "id": {
+              "type": "string",
+              "default": ""
+            },
+            "message": {
+              "type": "string",
+              "default": ""
+            },
+            "next": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/WindowRole"
+            },
+            "type": {
+              "type": "string",
+              "const": "window_control"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target",
+            "action",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/TimerAction"
+            },
+            "delay_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 0,
+              "minimum": 0
+            },
+            "id": {
+              "type": "string"
+            },
+            "interval_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "default": null,
+              "minimum": 0
+            },
+            "next": {
+              "type": "string"
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "timer"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "action",
             "next"
           ]
         },
@@ -2943,6 +3051,13 @@
         }
       ]
     },
+    "TimerAction": {
+      "type": "string",
+      "enum": [
+        "start",
+        "stop"
+      ]
+    },
     "TransitionDirection": {
       "description": "One of the four edge directions shared by `wipe` and `push` transitions.",
       "type": "string",
@@ -3000,6 +3115,21 @@
         "contain",
         "cover",
         "stretch"
+      ]
+    },
+    "WindowControlAction": {
+      "type": "string",
+      "enum": [
+        "block",
+        "unblock",
+        "advance"
+      ]
+    },
+    "WindowRole": {
+      "type": "string",
+      "enum": [
+        "main",
+        "secondary"
       ]
     }
   }

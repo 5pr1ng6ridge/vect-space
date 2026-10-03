@@ -12,6 +12,7 @@ import {
   SPRITE_ACTION_LABELS,
 } from "./labels";
 import { summarizeScreenEffect, summarizeTransitionSpec } from "./story";
+import { nonEmpty, WINDOW_ROLE_LABELS } from "./windowInteraction";
 import type {
   ConditionExpression,
   ContentManifest,
@@ -130,6 +131,21 @@ export function describeNode(
       );
     case "open_window":
       return plain(`打开副窗口 · ${node.scene}`);
+    case "window_title":
+      return plain(
+        `${WINDOW_ROLE_LABELS[node.target]}标题 → ${node.title === "" ? "（空）" : node.title}`,
+      );
+    case "window_control":
+      return plain(
+        node.action === "advance"
+          ? `推进${WINDOW_ROLE_LABELS[node.target]}一页`
+          : `${node.action === "block" ? "阻挡" : "解除"}${WINDOW_ROLE_LABELS[node.target]}翻页 · ${nonEmpty(node.id, "（未命名）")}`,
+      );
+    case "timer":
+      if (node.action === "stop") return plain(`停止计时器 ${node.id}`);
+      return plain(
+        `启动 ${node.id}：${node.delay_ms ?? 0} ms 后${node.interval_ms == null ? "触发一次" : `，每 ${node.interval_ms} ms 重复`} → ${nonEmpty(node.target, "（未选效果）")}`,
+      );
     case "background":
       return plain(
         node.background === null

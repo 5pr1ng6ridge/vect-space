@@ -875,6 +875,8 @@ impl AmbienceSnapshot {
 pub struct SceneDefinition {
     pub schema_version: u32,
     pub id: String,
+    #[serde(default, skip_serializing_if = "crate::interaction::WindowRole::is_main")]
+    pub window_role: crate::interaction::WindowRole,
     pub entry: String,
     pub nodes: BTreeMap<String, SceneNode>,
 }
@@ -1033,6 +1035,31 @@ pub enum SceneNode {
     /// itself can never open or re-point a window.
     OpenWindow {
         scene: String,
+        next: String,
+    },
+    WindowTitle {
+        target: crate::interaction::WindowRole,
+        title: String,
+        next: String,
+    },
+    WindowControl {
+        target: crate::interaction::WindowRole,
+        action: crate::interaction::WindowControlAction,
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        message: String,
+        next: String,
+    },
+    Timer {
+        id: String,
+        action: crate::interaction::TimerAction,
+        #[serde(default)]
+        delay_ms: u64,
+        #[serde(default)]
+        interval_ms: Option<u64>,
+        #[serde(default)]
+        target: Option<String>,
         next: String,
     },
     Wait {
@@ -2265,6 +2292,8 @@ pub enum TimelineEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSnapshot {
+    #[serde(default)]
+    pub interaction: crate::interaction::InteractionSnapshot,
     pub revision: u64,
     pub location: StoryLocation,
     pub variables: VariableMap,
@@ -2355,6 +2384,7 @@ pub struct PlaybackSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AdvanceSource {
+    Script,
     Manual,
     Auto,
     FastForward,
@@ -2618,6 +2648,12 @@ pub struct ChoiceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeUpdate {
+    #[serde(default)]
+    pub kind: crate::interaction::UpdateKind,
+    /// Scene timer that produced an `effect` update, so a stopped repeating
+    /// timer can cancel its own in-flight presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_timer: Option<String>,
     pub update_id: u64,
     pub snapshot: RuntimeSnapshot,
     pub cues: Vec<PresentationCue>,

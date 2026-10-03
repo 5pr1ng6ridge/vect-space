@@ -1232,3 +1232,207 @@ describe("PresentationController session curtain", () => {
     controller.destroy();
   });
 });
+
+describe("PresentationController timer effects", () => {
+  const ambience = (asset: string) => ({
+    asset,
+    volume: 1,
+    start_ms: 0,
+    loop_start_ms: null,
+    loop_end_ms: null,
+  });
+
+  function effectUpdate(
+    updateId: string,
+    cameraX: number,
+    asset: string,
+    slot: AmbienceSlot = "slot_1",
+  ): RuntimeUpdate {
+    return {
+      session_id: "1",
+      mode: "story",
+      kind: "effect",
+      update_id: updateId,
+      snapshot: snapshot(cameraX),
+      requires_ack: false,
+      cues: [
+        {
+          cue_id: "1",
+          gate: "none",
+          type: "ambience_transition",
+          slot,
+          from: null,
+          to: ambience(asset),
+          duration_ms: 10,
+        },
+      ],
+    };
+  }
+
+  function storyWithDelay(updateId: string, cameraX = 0): RuntimeUpdate {
+    return {
+      session_id: "1",
+      mode: "story",
+      update_id: updateId,
+      snapshot: snapshot(cameraX),
+      requires_ack: false,
+      cues: [{ cue_id: "1", gate: "none", type: "delay", duration_ms: 100 }],
+    };
+  }
+
+  /** Holds every ambience transition until the test resolves it. */
+  function holdAmbience(): {
+    resolve(index: number): void;
+    started: string[];
+  } {
+    const resolvers: (() => void)[] = [];
+    const started: string[] = [];
+    vi.spyOn(AudioManager.prototype, "transitionAmbience").mockImplementation(
+      async (slot, target, durationMs): Promise<void> => {
+        if (durationMs === 0) return;
+        started.push(`${slot}:${target?.asset ?? "stop"}`);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+      },
+    );
+    return { resolve: (index) => resolvers[index]?.(), started };
+  }
+
+  function committedCameras(): number[] {
+    const cameras: number[] = [];
+    const original = SceneSurface.prototype.applyWorld;
+    vi.spyOn(SceneSurface.prototype, "applyWorld").mockImplementation(function (
+      this: SceneSurface,
+      preparation,
+    ) {
+      if (preparation !== null) {
+        cameras.push(preparation.world.camera.x);
+      }
+      return original.call(this, preparation);
+    });
+    return cameras;
+  }
+
+  it("runs an effect beside the story without cancelling or replacing it", async () => {
+    const harness = createHost();
+    const { controller, pump } = harness;
+    await controller.init();
+    const held = holdAmbience();
+    const story = controller.present(storyWithDelay("story"), ASSETS);
+    await settle();
+    expect(controller.isPresentationCurrent("story")).toBe(true);
+
+    const effect = controller.runEffect(
+      effectUpdate("effect", 7, "ambience.one"),
+      ASSETS,
+    );
+    await settle();
+    expect(held.started).toEqual(["slot_1:ambience.one"]);
+    // The story keeps its identity and promise while the effect is running.
+    expect(controller.isPresentationCurrent("story")).toBe(true);
+    held.resolve(0);
+    expect(await effect).toBe("completed");
+    expect(controller.isPresentationCurrent("story")).toBe(true);
+
+    for (let frame = 0; frame < 20; frame += 1) pump.step(16);
+    expect(await story).toBe("completed");
+    controller.destroy();
+  });
+
+  it("lets the last finisher align the newest snapshot instead of a stale one", async () => {
+    const harness = createHost();
+    const { controller, pump } = harness;
+    await controller.init();
+    const held = holdAmbience();
+    const cameras = committedCameras();
+    const story = controller.present(storyWithDelay("story", 0), ASSETS);
+    await settle();
+    const effect = controller.runEffect(
+      effectUpdate("effect", 7, "ambience.one"),
+      ASSETS,
+    );
+    await settle();
+    held.resolve(0);
+    expect(await effect).toBe("completed");
+    // The story is still presenting, so the effect must not commit a world
+    // (that would silence the story's running cue).
+    expect(cameras).toEqual([]);
+
+    for (let frame = 0; frame < 20; frame += 1) pump.step(16);
+    expect(await story).toBe("completed");
+    // The story then aligns to the newest snapshot, which includes the effect.
+    expect(cameras).toEqual([7]);
+    controller.destroy();
+  });
+
+  it("supersedes an older effect on the same resource without a stale reconcile", async () => {
+    const harness = createHost();
+    const { controller } = harness;
+    await controller.init();
+    const held = holdAmbience();
+    const cameras = committedCameras();
+    const first = controller.runEffect(
+      effectUpdate("effect-1", 1, "ambience.one"),
+      ASSETS,
+    );
+    await settle();
+    const second = controller.runEffect(
+      effectUpdate("effect-2", 2, "ambience.two"),
+      ASSETS,
+    );
+    await settle();
+    // The superseded effect settles as failed and never reconciles.
+    held.resolve(0);
+    held.resolve(1);
+    expect(await first).toBe("failed");
+    expect(await second).toBe("completed");
+    expect(cameras).toEqual([2]);
+    controller.destroy();
+  });
+
+  it("keeps effects on different resources running together", async () => {
+    const harness = createHost();
+    const { controller } = harness;
+    await controller.init();
+    const held = holdAmbience();
+    const cameras = committedCameras();
+    const first = controller.runEffect(
+      effectUpdate("effect-1", 1, "ambience.one", "slot_1"),
+      ASSETS,
+    );
+    await settle();
+    const second = controller.runEffect(
+      effectUpdate("effect-2", 2, "ambience.two", "slot_2"),
+      ASSETS,
+    );
+    await settle();
+    expect(held.started).toEqual([
+      "slot_1:ambience.one",
+      "slot_2:ambience.two",
+    ]);
+    held.resolve(0);
+    expect(await first).toBe("completed");
+    // Only the last one to finish commits the world, with the newest snapshot.
+    expect(cameras).toEqual([]);
+    held.resolve(1);
+    expect(await second).toBe("completed");
+    expect(cameras).toEqual([2]);
+    controller.destroy();
+  });
+
+  it("cancels in-flight effects when a story update takes over", async () => {
+    const harness = createHost();
+    const { controller } = harness;
+    await controller.init();
+    const held = holdAmbience();
+    const effect = controller.runEffect(
+      effectUpdate("effect", 3, "ambience.one"),
+      ASSETS,
+    );
+    await settle();
+    const next = controller.present(stateUpdate("story-2", 9), ASSETS);
+    held.resolve(0);
+    expect(await effect).toBe("failed");
+    expect(await next).toBe("completed");
+    controller.destroy();
+  });
+});

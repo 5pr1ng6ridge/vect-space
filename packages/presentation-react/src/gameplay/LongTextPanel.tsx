@@ -256,6 +256,7 @@ export const LongTextPanel = forwardRef<
     firstStepId: page.steps[0]?.step_id ?? "",
     firstText: page.steps[0]?.text ?? "",
     stepCount: page.steps.length,
+    stepRows: page.steps.map(stepRow),
     stepSignature: pageStepSignature,
     layoutSignature: pageLayoutSignature,
     activeStepIndex: page.active_step_index,
@@ -654,6 +655,7 @@ export const LongTextPanel = forwardRef<
       firstStepId: page.steps[0]?.step_id ?? "",
       firstText: page.steps[0]?.text ?? "",
       stepCount: page.steps.length,
+      stepRows: page.steps.map(stepRow),
       stepSignature: pageStepSignature,
       layoutSignature: pageLayoutSignature,
       activeStepIndex: page.active_step_index,
@@ -668,16 +670,36 @@ export const LongTextPanel = forwardRef<
           .map((step) => [step.step_id, step.text, step.page_break_before]),
       ) === previous.stepSignature;
     pageShapeRef.current = next;
+    // The runtime re-interpolates the *active* step when a variable it reads
+    // changes.  That is a refresh of the same reading position, not a new or
+    // replaced document: the scroll position and the pages already entered must
+    // survive it.  It is recognised by an unchanged instance whose rows differ
+    // only in the active step's text.
+    const activeTextRefreshed =
+      previous.instanceKey === next.instanceKey &&
+      previous.documentId === next.documentId &&
+      previous.layoutSignature === next.layoutSignature &&
+      previous.stepSignature !== next.stepSignature &&
+      next.stepCount === previous.stepCount &&
+      next.activeStepIndex === previous.activeStepIndex &&
+      next.stepRows.every(
+        (row, index) =>
+          index === next.activeStepIndex ||
+          sameStepRow(row, previous.stepRows[index]),
+      );
     const replaced =
       previous.documentId !== next.documentId ||
       previous.firstStepId !== next.firstStepId ||
-      previous.firstText !== next.firstText ||
+      (previous.firstText !== next.firstText &&
+        !(activeTextRefreshed && next.activeStepIndex === 0)) ||
       next.stepCount < previous.stepCount ||
       // Visibility changes preserve the retained document's scroll and pages.
       (next.activeStepIndex === 0 && previous.activeStepIndex > 0);
     const appearanceChanged =
       previous.layoutSignature !== next.layoutSignature ||
-      (previous.stepSignature !== next.stepSignature && !appendedOnly) ||
+      (previous.stepSignature !== next.stepSignature &&
+        !appendedOnly &&
+        !activeTextRefreshed) ||
       replaced;
     if (appearanceChanged) {
       setAppearanceGeneration((current) => current + 1);
@@ -1189,4 +1211,23 @@ function sameTextLayoutSnapshot(
       Math.abs(line.right - candidate.right) <= 0.25
     );
   });
+}
+
+type StepRow = readonly [string, string, boolean];
+
+function stepRow(step: {
+  step_id: string;
+  text: string;
+  page_break_before: boolean;
+}): StepRow {
+  return [step.step_id, step.text, step.page_break_before];
+}
+
+function sameStepRow(left: StepRow, right: StepRow | undefined): boolean {
+  return (
+    right !== undefined &&
+    left[0] === right[0] &&
+    left[1] === right[1] &&
+    left[2] === right[2]
+  );
 }

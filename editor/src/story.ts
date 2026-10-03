@@ -19,6 +19,7 @@ import type {
   TransitionDirection,
   TimelineNode,
   TimelinePreviewSettings,
+  WindowRole,
 } from "./types";
 import { scalarText } from "./scalars";
 import {
@@ -33,6 +34,13 @@ import {
   renameTemplateVariable,
 } from "./textTemplate";
 import { renameNodeInGroups } from "./components/graphGroups";
+import {
+  EFFECT_HANDLE,
+  effectReferences,
+  setEffectReferenceTarget,
+  WINDOW_ROLE_LABELS,
+  WINDOW_TITLE_VARIABLES,
+} from "./windowInteraction";
 
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
@@ -45,6 +53,9 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "set", label: "设置变量", group: "逻辑" },
   { type: "jump", label: "跳转", group: "逻辑" },
   { type: "open_window", label: "打开副窗口", group: "逻辑" },
+  { type: "window_title", label: "设置窗口标题", group: "逻辑" },
+  { type: "window_control", label: "窗口控制", group: "逻辑" },
+  { type: "timer", label: "计时器", group: "流程" },
   { type: "background", label: "背景", group: "画面" },
   { type: "curtain", label: "幕布", group: "画面" },
   { type: "sprite", label: "立绘", group: "画面" },
@@ -136,6 +147,9 @@ export function setPortTarget(
   if (node.type === "jump" && handle === "jump") {
     return { ...node, scene: null, target };
   }
+  if (handle === EFFECT_HANDLE) {
+    return setEffectReferenceTarget(node, handle, target);
+  }
   if (node.type === "choice" && handle.startsWith("choice:")) {
     const choiceId = handle.slice("choice:".length);
     return {
@@ -190,6 +204,12 @@ export function summarizeNode(node: SceneNode): string {
       return `${node.scene ?? "本场景"} / ${node.target}`;
     case "open_window":
       return `副窗口 · ${node.scene}`;
+    case "window_title":
+      return `${WINDOW_ROLE_LABELS[node.target]}标题 · ${node.title}`;
+    case "window_control":
+      return summarizeWindowControl(node);
+    case "timer":
+      return summarizeTimer(node);
     case "background":
       return node.background ?? "清除背景";
     case "curtain": {
@@ -235,6 +255,28 @@ export function summarizeNode(node: SceneNode): string {
     case "end":
       return "剧情终点";
   }
+}
+
+function summarizeWindowControl(
+  node: Extract<SceneNode, { type: "window_control" }>,
+): string {
+  const window = WINDOW_ROLE_LABELS[node.target];
+  switch (node.action) {
+    case "block":
+      return `阻挡${window}翻页 · ${node.id ?? ""}`;
+    case "unblock":
+      return `解除${window}阻挡 · ${node.id ?? ""}`;
+    case "advance":
+      return `推进${window}一页`;
+  }
+}
+
+function summarizeTimer(node: Extract<SceneNode, { type: "timer" }>): string {
+  if (node.action === "stop") return `停止计时器 ${node.id}`;
+  const delay = node.delay_ms ?? 0;
+  const repeat =
+    node.interval_ms == null ? "单次" : `每 ${node.interval_ms} ms`;
+  return `启动 ${node.id} · ${delay} ms 后 · ${repeat} → ${node.target ?? "（未选目标）"}`;
 }
 
 /** `#RRGGBB` or `#RRGGBBAA`, matching the Rust loader's accepted colors. */
@@ -436,6 +478,27 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
       return { type, scene: null, target: fallback };
     case "open_window":
       return { type, scene: "", next: fallback };
+    case "window_title":
+      return { type, target: "main", title: "新标题", next: fallback };
+    case "window_control":
+      return {
+        type,
+        target: "secondary",
+        action: "block",
+        id: "gate",
+        message: "",
+        next: fallback,
+      };
+    case "timer":
+      return {
+        type,
+        id: "timer_1",
+        action: "start",
+        delay_ms: 1000,
+        interval_ms: null,
+        target: null,
+        next: fallback,
+      };
     case "wait":
       return { type, duration_ms: 500, next: fallback };
     case "bgm":
@@ -918,7 +981,10 @@ export function preparePastedNode(
   buttons: readonly ButtonFile[] = [],
 ): SceneNode {
   const node = structuredClone(source);
-  const variables = new Set(Object.keys(manifest.variables));
+  // Variables a template or condition operand may read (the read-only window
+  // title variables are always available); `set` still writes manifest ones.
+  const writableVariables = new Set(Object.keys(manifest.variables));
+  const variables = new Set([...writableVariables, ...WINDOW_TITLE_VARIABLES]);
   const hasAsset = (id: string | null | undefined, kind: string): boolean =>
     id != null && manifest.assets[id]?.kind === kind;
   const hasButton = (id: string | null | undefined): boolean =>
@@ -1008,7 +1074,7 @@ export function preparePastedNode(
       }
       break;
     case "set":
-      if (!variables.has(node.variable)) node.variable = "";
+      if (!writableVariables.has(node.variable)) node.variable = "";
       if (
         typeof node.value === "object" &&
         node.value !== null &&
@@ -1028,6 +1094,19 @@ export function preparePastedNode(
       break;
     case "open_window":
       node.scene = "";
+      break;
+    case "window_title":
+      node.title = removeUnknownTemplateVariables(node.title, variables);
+      break;
+    case "window_control":
+      if (node.message !== undefined && node.message !== "") {
+        node.message = removeUnknownTemplateVariables(node.message, variables);
+      }
+      break;
+    case "timer":
+      // The effect target is a node of the *source* Scene; like flow edges it
+      // never crosses the clipboard boundary on its own.
+      if (node.target != null) node.target = null;
       break;
     case "bgm":
       if (node.asset !== null && !hasAsset(node.asset, "bgm"))
@@ -1306,6 +1385,12 @@ export function renameVariable(
       if (node.type === "say") {
         node.text = renameTemplateVariable(node.text, previousId, nextId);
       }
+      if (node.type === "window_title") {
+        node.title = renameTemplateVariable(node.title, previousId, nextId);
+      }
+      if (node.type === "window_control" && node.message !== undefined) {
+        node.message = renameTemplateVariable(node.message, previousId, nextId);
+      }
       if (node.type === "condition") {
         node.condition = mapConditionVariables(
           node.condition,
@@ -1373,6 +1458,12 @@ export function countVariableReferences(
       }
       if (node.type === "say") {
         count += countTemplateVariable(node.text, variableId);
+      }
+      if (node.type === "window_title") {
+        count += countTemplateVariable(node.title, variableId);
+      }
+      if (node.type === "window_control" && node.message !== undefined) {
+        count += countTemplateVariable(node.message, variableId);
       }
       if (node.type === "condition") {
         count += countConditionReferences(node.condition, variableId);
@@ -1584,6 +1675,12 @@ export function renameNode(
             changed = setPortTarget(changed, port.id, nextId);
           }
         }
+        // Timer effect targets are references, not flow edges.
+        for (const reference of effectReferences(changed)) {
+          if (reference.target === previousId) {
+            changed = setEffectReferenceTarget(changed, reference.id, nextId);
+          }
+        }
       }
       if (
         changed.type === "jump" &&
@@ -1755,16 +1852,42 @@ export function projectRequest(
   };
 }
 
-export function newSceneFile(id: string): EditorSceneFile {
+export function newSceneFile(
+  id: string,
+  windowRole: WindowRole = "main",
+): EditorSceneFile {
   return {
     path: `scenes/${id}.yaml`,
     definition: {
+      // `main` is the file default and stays implicit.
+      ...(windowRole === "main" ? {} : { window_role: windowRole }),
       schema_version: 2,
       id,
       entry: "start",
       nodes: { start: { type: "end" } },
     },
   };
+}
+
+/**
+ * Change which window a Scene is written for.  Existing references are not
+ * rewritten (that would guess intent); the live diagnostics list every
+ * `open_window` / `jump` / entry that no longer fits.
+ */
+export function setSceneWindowRole(
+  project: EditorProject,
+  sceneId: string,
+  role: WindowRole,
+): EditorProject {
+  const file = findScene(project, sceneId);
+  if (file === undefined || (file.definition.window_role ?? "main") === role)
+    return project;
+  const updated = cloneProject(project);
+  const scene = findScene(updated, sceneId);
+  if (scene === undefined) return project;
+  if (role === "main") Reflect.deleteProperty(scene.definition, "window_role");
+  else scene.definition.window_role = role;
+  return updated;
 }
 
 export function ensureSceneLayout(layout: EditorLayout, sceneId: string) {

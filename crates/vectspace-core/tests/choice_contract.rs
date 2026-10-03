@@ -948,7 +948,7 @@ nodes:
 }
 
 #[test]
-fn empty_visible_choices_keep_the_existing_content_error() {
+fn empty_visible_choices_are_a_waiting_prompt() {
     let catalog = fixture_catalog();
     let content = catalog_with_scene(
         &catalog,
@@ -985,10 +985,14 @@ nodes:
         ),
     );
     let mut runtime = RuntimeEngine::new(&content).expect("engine");
-    let error = runtime
+    // Another window or a timer may still make an option visible.
+    let update = runtime
         .start_scene_preview(&content, "empty_choice")
-        .expect_err("an empty visible choice list must stay an error");
-    assert!(error.to_string().contains("没有任何可见且可用的选项"));
+        .expect("an empty visible choice list is a waiting prompt");
+    let PromptSnapshot::Choice { choices, .. } = update.snapshot.prompt else {
+        panic!("expected a waiting choice prompt");
+    };
+    assert!(choices.is_empty());
 }
 
 #[test]
@@ -1223,7 +1227,7 @@ fn loading_a_choice_prompt_with_duplicate_surviving_ids_is_rejected() {
 }
 
 #[test]
-fn loading_an_empty_choice_prompt_is_rejected() {
+fn loading_an_empty_choice_prompt_keeps_a_waiting_prompt() {
     let catalog = fixture_catalog();
     let content = catalog_with_scene(&catalog, legacy_choice_scene());
     let mut runtime = RuntimeEngine::new(&content).expect("engine");
@@ -1231,21 +1235,24 @@ fn loading_an_empty_choice_prompt_is_rejected() {
         .start_scene_preview(&content, "legacy_choice")
         .expect("scene preview");
 
-    // Every saved id is a ghost: the load must fail instead of installing a
-    // prompt the player can never answer.
+    // A filtered-out choice set is a legal waiting state; the host
+    // re-evaluates the conditions once both windows are restored.
     let mut emptied = serde_json::to_value(&update.snapshot).expect("snapshot to value");
     emptied["prompt"]["choices"] = serde_json::json!([]);
     let emptied: RuntimeSnapshot =
         serde_json::from_value(emptied).expect("snapshot must deserialize");
 
-    let error = runtime
+    let loaded = runtime
         .load_snapshot(&content, emptied)
-        .expect_err("an empty loaded choice prompt must be rejected");
-    assert!(error.to_string().contains("没有任何选项"), "{error}");
+        .expect("an empty loaded choice prompt is a waiting prompt");
+    let PromptSnapshot::Choice { choices, .. } = loaded.snapshot.prompt else {
+        panic!("expected a waiting choice prompt");
+    };
+    assert!(choices.is_empty());
 }
 
 #[test]
-fn loading_an_all_disabled_choice_prompt_is_rejected() {
+fn loading_an_all_disabled_choice_prompt_keeps_a_waiting_prompt() {
     let catalog = fixture_catalog();
     let content = catalog_with_scene(&catalog, legacy_choice_scene());
     let mut runtime = RuntimeEngine::new(&content).expect("engine");
@@ -1263,10 +1270,13 @@ fn loading_an_all_disabled_choice_prompt_is_rejected() {
     let disabled: RuntimeSnapshot =
         serde_json::from_value(disabled).expect("snapshot must deserialize");
 
-    let error = runtime
+    let loaded = runtime
         .load_snapshot(&content, disabled)
-        .expect_err("an all-disabled loaded choice prompt must be rejected");
-    assert!(error.to_string().contains("没有任何可用选项"), "{error}");
+        .expect("an all-disabled loaded choice prompt is a waiting prompt");
+    let PromptSnapshot::Choice { choices, .. } = loaded.snapshot.prompt else {
+        panic!("expected a waiting choice prompt");
+    };
+    assert!(!choices.is_empty() && choices.iter().all(|choice| !choice.enabled));
 }
 
 #[test]

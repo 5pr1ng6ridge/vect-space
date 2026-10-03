@@ -1,5 +1,6 @@
 schema_version: 2
 id: shader_parity
+window_role: secondary
 entry: stage
 # 开发夹具：为 `npm run parity:check` 提供真实 WebGL 的着色器像素断言目标。
 #

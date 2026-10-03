@@ -60,6 +60,7 @@ import {
   renameNode,
   renameSpriteAction,
   renameScene,
+  setSceneWindowRole,
   renameVariable,
   rewriteLongTextDocumentReferences,
   setPortTarget,
@@ -75,8 +76,10 @@ import type {
   NodeType,
   SceneNode,
   SpriteSnapshot,
+  WindowRole,
 } from "./types";
 import { validateLive } from "./validation";
+import { WINDOW_ROLE_LABELS } from "./windowInteraction";
 import { ActivityBar } from "./shell/ActivityBar";
 import { StatusBar } from "./shell/StatusBar";
 import { TopBar } from "./shell/TopBar";
@@ -1581,7 +1584,7 @@ function EditorApp(): ReactElement {
     setNotice(`已粘贴为 ${id}；流程连接已清空。`);
   };
 
-  const addScene = (id: string): boolean => {
+  const addScene = (id: string, role: WindowRole = "main"): boolean => {
     const currentProject = editorStateRef.current.project ?? project;
     const reason = idUnavailableReason("scene", id, currentProject);
     if (reason !== null) {
@@ -1589,7 +1592,7 @@ function EditorApp(): ReactElement {
       return false;
     }
     commit((draft) => {
-      const file = newSceneFile(id);
+      const file = newSceneFile(id, role);
       draft.scenes.push(file);
       draft.manifest.scenes.push(file.path);
       ensureSceneLayout(draft.layout, id).nodes.start = { x: 120, y: 120 };
@@ -2143,7 +2146,11 @@ function EditorApp(): ReactElement {
                 .catch((reason: unknown) => reportCommandError(reason));
             }}
             redoAvailable={future.length > 0}
-            sceneIds={project.scenes.map((file) => file.definition.id)}
+            // A chapter map is a way into the main story: secondary-window
+            // Scenes can never be a hotspot target.
+            sceneIds={project.scenes
+              .filter((file) => file.definition.window_role !== "secondary")
+              .map((file) => file.definition.id)}
             selectionId={mapSelectionId}
             undoAvailable={past.length > 0}
           />
@@ -2400,6 +2407,43 @@ function EditorApp(): ReactElement {
               diagnostics={diagnostics}
               onAddScene={addScene}
               onDeleteScene={deleteScene}
+              onSetSceneRole={(sceneId, role) => {
+                const currentProject =
+                  editorStateRef.current.project ?? project;
+                if (
+                  role === "secondary" &&
+                  currentProject.manifest.entry_scene === sceneId
+                ) {
+                  setError(
+                    "项目入口场景必须是主窗口专用；请先在项目设置中更换入口。",
+                  );
+                  return;
+                }
+                if (
+                  role === "secondary" &&
+                  currentProject.chapter_map?.definition.hotspots.some(
+                    (hotspot) => hotspot.scene_id === sceneId,
+                  ) === true
+                ) {
+                  setError(
+                    "章节地图仍有热点指向这个场景；副窗口专用场景不能作为地图入口，请先移除热点。",
+                  );
+                  return;
+                }
+                commit(
+                  (draft) =>
+                    setSceneWindowRole(
+                      currentPlainProject(draft),
+                      sceneId,
+                      role,
+                    ),
+                  true,
+                  "设置场景用途",
+                );
+                setNotice(
+                  `已将场景 ${sceneId} 设为${WINDOW_ROLE_LABELS[role]}专用；引用它的「打开副窗口」和跳转请在问题面板中检查。`,
+                );
+              }}
               onImportAssets={importAssets}
               pendingAssetIds={pendingAssetIds}
               reservedAssetPaths={reservedReplacementPaths}

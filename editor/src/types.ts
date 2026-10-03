@@ -110,7 +110,8 @@ export interface ButtonClickAction {
   sets: ButtonSetAction[];
   next?: ButtonPostAction | null;
 }
-export type AdvanceSource = "manual" | "auto" | "fast_forward" | "forced_auto";
+export type AdvanceSource =
+  "manual" | "auto" | "fast_forward" | "forced_auto" | "script";
 export type NodeType = SceneNode["type"];
 
 export interface VariableDefinition {
@@ -465,6 +466,50 @@ export interface OpenWindowNode extends NextNode {
   scene: string;
 }
 
+/** Which native window a Scene is written for.  Missing means `main`. */
+export type WindowRole = "main" | "secondary";
+
+/**
+ * Set the native title of an existing window.  The title is evaluated once and
+ * stored; `[var=window.main.title]` / `[var=window.secondary.title]` read it.
+ */
+export interface WindowTitleNode extends NextNode {
+  type: "window_title";
+  target: WindowRole;
+  title: string;
+}
+
+export type WindowControlAction = "block" | "unblock" | "advance";
+
+/**
+ * Block, unblock or script-advance the page turning of a window.  A block is
+ * owned by the Scene that created it and is released by an `unblock` with the
+ * same id, or automatically when that Scene exits.
+ */
+export interface WindowControlNode extends NextNode {
+  type: "window_control";
+  target: WindowRole;
+  action: WindowControlAction;
+  id?: string;
+  message?: string;
+}
+
+export type TimerAction = "start" | "stop";
+
+/**
+ * Scene timer.  `target` names an effect node of the same Scene that runs
+ * (without following its own `next`) when the timer fires; the timer's own
+ * `next` is the story continuation.
+ */
+export interface TimerNode extends NextNode {
+  type: "timer";
+  id: string;
+  action: TimerAction;
+  delay_ms?: number;
+  interval_ms?: number | null;
+  target?: string | null;
+}
+
 export interface WaitNode extends NextNode {
   type: "wait";
   duration_ms: number;
@@ -634,6 +679,9 @@ export type SceneNode =
   | ActionNode
   | JumpNode
   | OpenWindowNode
+  | WindowTitleNode
+  | WindowControlNode
+  | TimerNode
   | WaitNode
   | BgmNode
   | AmbienceNode
@@ -650,6 +698,8 @@ export type SceneNode =
   | EndNode;
 
 export interface SceneDefinition {
+  /** Window this Scene is written for; absent means `main`. */
+  window_role?: WindowRole;
   schema_version: number;
   id: string;
   entry: string;
@@ -888,12 +938,23 @@ export type PreviewSessionStartResult =
       session_id: string;
       update: RuntimeUpdate;
       assets: PreviewResolvedAsset[];
+      /** What a single-window preview could not do; absent in old fixtures. */
+      notes?: string[];
     }
   | {
       status: "unreachable";
       message: string;
       trace: StoryLocation[];
     };
+
+/** Answer of one preview timer tick (see `preview_session_tick`). */
+export interface PreviewSessionTickResult {
+  /** `effect` updates, then story/refresh updates, in presentation order. */
+  updates: RuntimeUpdate[];
+  notes: string[];
+  /** Timers the runtime stopped because their effect failed. */
+  diagnostics: string[];
+}
 
 export interface ImportedAsset {
   id: string;
