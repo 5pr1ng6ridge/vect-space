@@ -18,7 +18,17 @@ impl RuntimeEngine {
     ) -> Result<RuntimeUpdate, RuntimeError> {
         for _ in 0..MAX_LOCAL_HOST_STEPS {
             if !self.host_boundary {
-                return Ok(update);
+                // Window geometry/layer requests need no boundary but must
+                // still be reported now, not at some later boundary.
+                if self.window_requests.is_empty() {
+                    return Ok(update);
+                }
+                if let Some(mut advanced) = self.apply_local_requests(content, local, notes)? {
+                    update.cues.append(&mut advanced.cues);
+                    advanced.cues = std::mem::take(&mut update.cues);
+                    update = advanced;
+                }
+                continue;
             }
             // The source runtime is mid-story here, so a self advance is
             // reported by `apply_local_requests` rather than applied.
@@ -72,6 +82,14 @@ impl RuntimeEngine {
                 }
                 WindowRequest::Control { target, action, id, message } if target == local => {
                     self.control_block(local, &scene_id, action, &id, &message);
+                }
+                // Moving or restacking the editor's own window would be wrong
+                // for either target.
+                WindowRequest::Geometry { .. } => {
+                    notes.push("预览不会移动或缩放真实窗口：窗口位置/大小未应用，请在桌面运行验证".to_owned());
+                }
+                WindowRequest::Layer { .. } => {
+                    notes.push("预览不会改变真实窗口层级：窗口层级未应用，请在桌面运行验证".to_owned());
                 }
                 WindowRequest::Title { .. } => {
                     notes.push("预览是单窗口：另一窗口的标题修改未应用，请在桌面双窗口运行验证".to_owned());

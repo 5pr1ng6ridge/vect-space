@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global Buffer, WebSocket, console, fetch, process, setTimeout */
 // Drive the real VECTSPACE Tauri game (main + secondary window) on Windows
 // through WebView2's Chrome DevTools Protocol. No dependencies: Node >= 22
 // (global fetch/WebSocket).
@@ -9,7 +10,14 @@
 // %TEMP%\vectspace-run\.
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,7 +31,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function pages() {
   const response = await fetch(`http://127.0.0.1:${PORT}/json`).catch(() => {
-    throw new Error(`app not running (nothing on CDP port ${PORT}); run "launch" first`);
+    throw new Error(
+      `app not running (nothing on CDP port ${PORT}); run "launch" first`,
+    );
   });
   return (await response.json()).filter(
     (target) => target.type === "page" && target.url.includes("localhost:1420"),
@@ -49,7 +59,9 @@ async function connect(target) {
     new Promise((resolve, reject) => {
       const current = ++id;
       pending.set(current, (message) =>
-        message.error ? reject(new Error(JSON.stringify(message.error))) : resolve(message.result),
+        message.error
+          ? reject(new Error(JSON.stringify(message.error)))
+          : resolve(message.result),
       );
       socket.send(JSON.stringify({ id: current, method, params }));
     });
@@ -59,7 +71,10 @@ async function connect(target) {
       awaitPromise: true,
       returnByValue: true,
     });
-    if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
+    if (exceptionDetails)
+      throw new Error(
+        exceptionDetails.exception?.description ?? exceptionDetails.text,
+      );
     return result.value;
   };
   return { send, evaluate, close: () => socket.close() };
@@ -70,7 +85,9 @@ async function windowSession(which) {
   for (const target of await pages()) {
     const session = await connect(target);
     const label = await session
-      .evaluate("window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? ''")
+      .evaluate(
+        "window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? ''",
+      )
       .catch(() => "");
     if ((label || "main") === which) return session;
     session.close();
@@ -80,7 +97,10 @@ async function windowSession(which) {
 
 async function withWindow(which, action) {
   const session = await windowSession(which);
-  if (!session) throw new Error(`no "${which}" window (is the app running? is a secondary open?)`);
+  if (!session)
+    throw new Error(
+      `no "${which}" window (is the app running? is a secondary open?)`,
+    );
   try {
     return await action(session);
   } finally {
@@ -114,7 +134,11 @@ const clickButtonByText = (text) => `(() => {
 
 async function pressKey(session, key) {
   for (const type of ["keyDown", "keyUp"]) {
-    await session.send("Input.dispatchKeyEvent", { type, key, code: key === " " ? "Space" : key });
+    await session.send("Input.dispatchKeyEvent", {
+      type,
+      key,
+      code: key === " " ? "Space" : key,
+    });
   }
 }
 
@@ -131,34 +155,48 @@ async function waitFor(predicate, timeoutMs, label) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-function nativeTitles() {
+// Visible game windows, topmost-first (EnumWindows walks the z-order), as
+// "title\tleft,top,width,height\ttopmost" with the raw physical window rect
+// (Windows 10/11 include an invisible resize border of a few px in it).
+function nativeWindows() {
   // Delegate (script block) output is dropped, so collect into a list.
   const script = `
 Add-Type @"
 using System; using System.Text; using System.Runtime.InteropServices;
 public static class VsWin {
   public delegate bool P(IntPtr h, IntPtr l);
+  [StructLayout(LayoutKind.Sequential)] public struct R { public int L, T, Ri, B; }
   [DllImport("user32.dll")] public static extern bool EnumWindows(P p, IntPtr l);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out R r);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 "@
+# Otherwise Windows hands this process DPI-virtualized (scaled-down) rects.
+[void][VsWin]::SetProcessDPIAware()
 $ids = @(Get-Process vectspace -ErrorAction SilentlyContinue | ForEach-Object Id)
 $found = New-Object System.Collections.Generic.List[string]
-[void][VsWin]::EnumWindows({ param($h,$l) $p=[uint32]0; [void][VsWin]::GetWindowThreadProcessId($h,[ref]$p); if ($ids -contains [int]$p -and [VsWin]::IsWindowVisible($h)) { $s = New-Object Text.StringBuilder 512; [void][VsWin]::GetWindowText($h,$s,512); if ($s.Length) { $found.Add($s.ToString()) } }; return $true }, [IntPtr]::Zero)
+[void][VsWin]::EnumWindows({ param($h,$l) $p=[uint32]0; [void][VsWin]::GetWindowThreadProcessId($h,[ref]$p); if ($ids -contains [int]$p -and [VsWin]::IsWindowVisible($h)) { $s = New-Object Text.StringBuilder 512; [void][VsWin]::GetWindowText($h,$s,512); if ($s.Length) { $r = New-Object VsWin+R; [void][VsWin]::GetWindowRect($h,[ref]$r); $top = ([VsWin]::GetWindowLong($h,-20) -band 8) -ne 0; $found.Add($s.ToString() + "\`t" + $r.L + "," + $r.T + "," + ($r.Ri-$r.L) + "," + ($r.B-$r.T) + "\`t" + $(if ($top) { "topmost" } else { "normal" })) } }; return $true }, [IntPtr]::Zero)
 $found
 `;
-  return execFileSync("pwsh", ["-NoProfile", "-Command", script], { encoding: "utf8" })
+  return execFileSync("pwsh", ["-NoProfile", "-Command", script], {
+    encoding: "utf8",
+  })
     .split(/\r?\n/)
     .filter(Boolean);
 }
+
+const nativeTitles = () => nativeWindows().map((line) => line.split("\t")[0]);
 
 const usage = `commands:
   launch                         start \`npm run tauri dev\` with CDP on :${PORT}; waits for the title screen
   stop                           kill the app and dev server (process tree + ports 1420/${PORT})
   state [main|secondary]         screen, dialogue, block hint, choices, buttons (both windows by default)
   titles                         native window titles (Win32)
+  windows                        native title, rect (physical x,y,w,h) and topmost flag, front-most first
   replay <hotspotId>             title screen -> 章节地图 -> hotspot (e.g. window_pair)
   button <win> <text>            click the button whose trimmed text equals <text> (e.g. 标题, 设置, 关闭)
   choose <win> <choiceId>        click a choice option by id
@@ -172,7 +210,9 @@ const [command, ...args] = process.argv.slice(2);
 // A failed top-level await surfaces as an uncaught exception in ESM.
 for (const event of ["uncaughtException", "unhandledRejection"]) {
   process.on(event, (error) => {
-    console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `error: ${error instanceof Error ? error.message : String(error)}`,
+    );
     process.exit(1);
   });
 }
@@ -180,7 +220,9 @@ for (const event of ["uncaughtException", "unhandledRejection"]) {
 switch (command) {
   case "launch": {
     if (existsSync(PID_FILE)) {
-      console.log(`note: ${PID_FILE} exists; run "stop" first if an old app is still up`);
+      console.log(
+        `note: ${PID_FILE} exists; run "stop" first if an old app is still up`,
+      );
     }
     const log = openSync(LOG, "w");
     const child = spawn("npm run tauri dev", {
@@ -199,13 +241,16 @@ switch (command) {
     try {
       await waitFor(
         async () =>
-          (await withWindow("main", (session) => session.evaluate(STATE_JS))).screen === "title",
+          (await withWindow("main", (session) => session.evaluate(STATE_JS)))
+            .screen === "title",
         15 * 60_000,
         "the title screen",
       );
     } catch (error) {
       console.error(String(error));
-      console.error(readFileSync(LOG, "utf8").split(/\r?\n/).slice(-20).join("\n"));
+      console.error(
+        readFileSync(LOG, "utf8").split(/\r?\n/).slice(-20).join("\n"),
+      );
       process.exit(1);
     }
     console.log("ready: main window is on the title screen");
@@ -215,7 +260,9 @@ switch (command) {
     if (existsSync(PID_FILE)) {
       const pid = readFileSync(PID_FILE, "utf8").trim();
       try {
-        execFileSync("taskkill", ["/PID", pid, "/T", "/F"], { stdio: "ignore" });
+        execFileSync("taskkill", ["/PID", pid, "/T", "/F"], {
+          stdio: "ignore",
+        });
       } catch {
         // already gone
       }
@@ -256,18 +303,28 @@ switch (command) {
   case "titles":
     for (const title of nativeTitles()) console.log(title);
     break;
+  case "windows":
+    for (const line of nativeWindows()) console.log(line);
+    break;
   case "replay": {
     const [hotspot] = args;
     await withWindow("main", async (session) => {
       const { screen } = await session.evaluate(STATE_JS);
-      if (screen === "title") await session.evaluate(clickButtonByText("章节地图"));
-      else if (screen !== "chapter-map") throw new Error(`main is on "${screen}"; go back to the title first`);
+      if (screen === "title")
+        await session.evaluate(clickButtonByText("章节地图"));
+      else if (screen !== "chapter-map")
+        throw new Error(`main is on "${screen}"; go back to the title first`);
       await waitFor(
-        () => session.evaluate(`!!document.querySelector('[data-hotspot-id=${JSON.stringify(hotspot)}]')`),
+        () =>
+          session.evaluate(
+            `!!document.querySelector('[data-hotspot-id=${JSON.stringify(hotspot)}]')`,
+          ),
         10_000,
         `hotspot ${hotspot}`,
       );
-      await session.evaluate(`document.querySelector('[data-hotspot-id=${JSON.stringify(hotspot)}]').click()`);
+      await session.evaluate(
+        `document.querySelector('[data-hotspot-id=${JSON.stringify(hotspot)}]').click()`,
+      );
       await waitFor(
         async () => (await session.evaluate(STATE_JS)).screen === "game",
         15_000,
@@ -279,7 +336,11 @@ switch (command) {
   }
   case "button": {
     const [which, text] = args;
-    console.log(await withWindow(which, (session) => session.evaluate(clickButtonByText(text))));
+    console.log(
+      await withWindow(which, (session) =>
+        session.evaluate(clickButtonByText(text)),
+      ),
+    );
     break;
   }
   case "choose": {
@@ -303,7 +364,9 @@ switch (command) {
   }
   case "shot": {
     const [which, file = join(RUN_DIR, `${which}.png`)] = args;
-    const { data } = await withWindow(which, (session) => session.send("Page.captureScreenshot", { format: "png" }));
+    const { data } = await withWindow(which, (session) =>
+      session.send("Page.captureScreenshot", { format: "png" }),
+    );
     writeFileSync(file, Buffer.from(data, "base64"));
     console.log(file);
     break;
@@ -323,12 +386,20 @@ switch (command) {
       }
       return result;
     });
-    console.log(`${new Set(hashes).size} distinct of ${count}: ${hashes.join(" ")}`);
+    console.log(
+      `${new Set(hashes).size} distinct of ${count}: ${hashes.join(" ")}`,
+    );
     break;
   }
   case "eval": {
     const [which, ...rest] = args;
-    console.log(JSON.stringify(await withWindow(which, (session) => session.evaluate(rest.join(" "))), null, 2));
+    console.log(
+      JSON.stringify(
+        await withWindow(which, (session) => session.evaluate(rest.join(" "))),
+        null,
+        2,
+      ),
+    );
     break;
   }
   default:

@@ -1835,6 +1835,37 @@ impl RuntimeEngine {
                 if !effect_only { self.snapshot.location.node_id = next; self.host_boundary = true; }
                 return Ok(true);
             }
+            // Native window changes are host work that nothing later in the
+            // story reads, so unlike titles they need no host boundary: the
+            // host drains the request after this step, in node order.
+            SceneNode::WindowGeometry {
+                target,
+                position,
+                size,
+                duration_ms,
+                easing,
+                await_completion,
+                next,
+            } => {
+                self.window_requests.push(WindowRequest::Geometry {
+                    target,
+                    position,
+                    size,
+                    duration_ms,
+                    easing,
+                });
+                if !effect_only { self.snapshot.location.node_id = next; }
+                if await_completion && duration_ms > 0 {
+                    cues.push(
+                        self.cue(CueGate::Runtime, PresentationCueKind::Delay { duration_ms }),
+                    );
+                    return Ok(true);
+                }
+            }
+            SceneNode::WindowLayer { target, action, next } => {
+                self.window_requests.push(WindowRequest::Layer { target, action });
+                if !effect_only { self.snapshot.location.node_id = next; }
+            }
             SceneNode::Timer { id, action, delay_ms, interval_ms, target, next } => {
                 match action {
                     TimerAction::Stop => { self.snapshot.interaction.timers.remove(&id); }
@@ -2778,6 +2809,8 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
         | SceneNode::OpenWindow { next, .. }
         | SceneNode::WindowTitle { next, .. }
         | SceneNode::WindowControl { next, .. }
+        | SceneNode::WindowGeometry { next, .. }
+        | SceneNode::WindowLayer { next, .. }
         | SceneNode::Timer { next, .. } => Some(local(next)),
         SceneNode::Jump { scene, target } => Some(StoryLocation {
             scene_id: scene.clone().unwrap_or_else(|| scene_id.to_owned()),

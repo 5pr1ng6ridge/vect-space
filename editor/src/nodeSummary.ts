@@ -13,6 +13,7 @@ import {
 } from "./labels";
 import { summarizeScreenEffect, summarizeTransitionSpec } from "./story";
 import { nonEmpty, WINDOW_ROLE_LABELS } from "./windowInteraction";
+import { describeWindowGeometry, describeWindowLayer } from "./windowLayout";
 import type {
   ConditionExpression,
   ContentManifest,
@@ -141,6 +142,10 @@ export function describeNode(
           ? `推进${WINDOW_ROLE_LABELS[node.target]}一页`
           : `${node.action === "block" ? "阻挡" : "解除"}${WINDOW_ROLE_LABELS[node.target]}翻页 · ${nonEmpty(node.id, "（未命名）")}`,
       );
+    case "window_geometry":
+      return plain(describeWindowGeometry(node));
+    case "window_layer":
+      return plain(describeWindowLayer(node));
     case "timer":
       if (node.action === "stop") return plain(`停止计时器 ${node.id}`);
       return plain(

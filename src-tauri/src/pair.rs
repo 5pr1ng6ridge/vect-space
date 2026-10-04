@@ -9,18 +9,26 @@
 //! derived state (current choices, interpolated text, blocks) is re-derived.
 //! Only when the whole pair is consistent — and the profile write and the native
 //! window work have succeeded — is it committed and published.
+//!
+//! `window_geometry` / `window_layer` requests are validated here (their target
+//! windows must exist, in node order, so a request for a window that is not open
+//! fails the whole transaction like a title does) and recorded on the pair as
+//! [`WindowEffect`]s.  They are *applied* only by the native stage after the
+//! commit (see `window_fx.rs`), so a rolled-back pair never moves a window.
 
 use std::collections::VecDeque;
 use std::ops::Deref;
 
 use vectspace_core::{
     interaction::{
-        WindowControlAction, WindowRequest, WindowRole, WindowTitles, DEFAULT_SECONDARY_TITLE,
+        WindowControlAction, WindowReference, WindowRequest, WindowRole, WindowTitles,
+        DEFAULT_SECONDARY_TITLE,
     },
     model::{AdvanceSource, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate},
     runtime::RuntimeEngine,
 };
 
+use super::window_fx::WindowEffect;
 use super::*;
 
 /// Bound for one transaction's chain of host-control steps.  Reaching it means
@@ -50,6 +58,9 @@ pub(crate) struct Committed {
     pub produced: Vec<Produced>,
     pub own: Option<usize>,
     pub diagnostics: Vec<String>,
+    /// Native window effects (geometry, layers) in node order.  They are applied
+    /// by the native stage of the transaction, never before the commit.
+    pub effects: Vec<WindowEffect>,
 }
 
 impl Committed {
@@ -60,6 +71,7 @@ impl Committed {
             produced,
             own,
             diagnostics: std::mem::take(&mut pair.diagnostics),
+            effects: std::mem::take(&mut pair.window_effects),
         }
     }
 }
@@ -103,6 +115,9 @@ pub(crate) struct Pair {
     pub keep_owner: bool,
     pub produced: Vec<Produced>,
     pub diagnostics: Vec<String>,
+    /// Validated native window effects of this candidate, in node order.  Part
+    /// of the candidate, so a rolled-back pair carries none of them.
+    pub window_effects: Vec<WindowEffect>,
     pending_open: Option<String>,
     queue: VecDeque<QueuedRequest>,
     baseline_main: RuntimeSnapshot,
@@ -134,6 +149,7 @@ impl Pair {
             keep_owner: false,
             produced: Vec::new(),
             diagnostics: Vec::new(),
+            window_effects: Vec::new(),
             pending_open: None,
             queue: VecDeque::new(),
             baseline_main,
@@ -359,6 +375,10 @@ impl Pair {
         self.produced
             .retain(|item| item.role != WindowRole::Secondary);
         self.queue.retain(|item| item.role != WindowRole::Secondary);
+        // Effects aimed at the window that is going away (or being replaced)
+        // belong to it: the story that sent them no longer has that window.
+        self.window_effects
+            .retain(|effect| effect.target() != WindowRole::Secondary);
     }
 
     /// Remove every advance block placed by `source`, wherever it sits.
@@ -560,6 +580,44 @@ impl EngineState {
                         }
                     }
                 }
+            }
+            WindowRequest::Geometry {
+                target,
+                position,
+                size,
+                duration_ms,
+                easing,
+            } => {
+                if pair.runtime(target).is_none() {
+                    return Err(missing_window(target, &scene, "window_geometry"));
+                }
+                // A placement relative to the other window needs that window
+                // too, or the node would silently turn into something else.
+                if position
+                    .is_some_and(|placement| placement.relative_to == WindowReference::Window)
+                {
+                    let other = match target {
+                        WindowRole::Main => WindowRole::Secondary,
+                        WindowRole::Secondary => WindowRole::Main,
+                    };
+                    if pair.runtime(other).is_none() {
+                        return Err(missing_window(other, &scene, "window_geometry"));
+                    }
+                }
+                pair.window_effects.push(WindowEffect::Geometry {
+                    target,
+                    position,
+                    size,
+                    duration_ms,
+                    easing,
+                });
+            }
+            WindowRequest::Layer { target, action } => {
+                if pair.runtime(target).is_none() {
+                    return Err(missing_window(target, &scene, "window_layer"));
+                }
+                pair.window_effects
+                    .push(WindowEffect::Layer { target, action });
             }
         }
         Ok(())

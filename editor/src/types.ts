@@ -494,6 +494,59 @@ export interface WindowControlNode extends NextNode {
   message?: string;
 }
 
+/** What a window placement is measured against. */
+export type WindowReference = "work_area" | "window" | "current";
+
+/**
+ * Puts the window's anchor point (fractions of its frame) on a point of the
+ * reference rect (fractions of that rect), plus a logical-pixel offset.
+ * Missing `relative_to` means `work_area`; missing offsets mean 0.
+ */
+export interface WindowPlacement {
+  relative_to?: WindowReference;
+  x: number;
+  y: number;
+  anchor_x: number;
+  anchor_y: number;
+  offset_x?: number;
+  offset_y?: number;
+}
+
+export type WindowSizeUnit = "logical" | "work_area";
+
+/** Missing `unit` means `logical` (client-area logical pixels). */
+export interface WindowSize {
+  unit?: WindowSizeUnit;
+  width: number;
+  height: number;
+}
+
+/**
+ * Move and/or resize a game window, optionally animated.  At least one of
+ * `position` and `size` is required.  The window never leaves the monitor and
+ * keeps its minimum size; it is skipped while fullscreen or maximized.
+ */
+export interface WindowGeometryNode extends NextNode {
+  type: "window_geometry";
+  target: WindowRole;
+  position?: WindowPlacement | null;
+  size?: WindowSize | null;
+  /** 0 snaps instantly. */
+  duration_ms: number;
+  easing: Easing;
+  /** Wait for the animation (only meaningful when `duration_ms` > 0). */
+  await: boolean;
+}
+
+export type WindowLayerAction = "raise" | "focus" | "top" | "bottom" | "normal";
+
+/** Restack a window.  `raise` does not take keyboard focus, `focus` does. */
+export interface WindowLayerNode extends NextNode {
+  type: "window_layer";
+  target: WindowRole;
+  action: WindowLayerAction;
+}
+
 export type TimerAction = "start" | "stop";
 
 /**
@@ -681,6 +734,8 @@ export type SceneNode =
   | OpenWindowNode
   | WindowTitleNode
   | WindowControlNode
+  | WindowGeometryNode
+  | WindowLayerNode
   | TimerNode
   | WaitNode
   | BgmNode

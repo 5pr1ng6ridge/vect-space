@@ -530,3 +530,188 @@ describe("summaries", () => {
     ).toContain("主窗口标题");
   });
 });
+
+describe("window layout nodes", () => {
+  const geometry = (patch: Record<string, unknown> = {}): SceneNode =>
+    ({
+      ...(defaultNode("window_geometry", "finish") as object),
+      ...patch,
+    }) as unknown as SceneNode;
+  const layer = (patch: Record<string, unknown> = {}): SceneNode =>
+    ({
+      ...(defaultNode("window_layer", "finish") as object),
+      ...patch,
+    }) as unknown as SceneNode;
+
+  /** The pair project with a timer pointed at `target`, a chain through `chain`. */
+  function withLayout(nodes: Record<string, SceneNode>): EditorProject {
+    const project = pairProject();
+    const main = scene(project, "main");
+    Object.assign(main.nodes, nodes);
+    return project;
+  }
+
+  it("are timer targets only when they never wait", () => {
+    expect(timerTargetAllowed(layer())).toBe(true);
+    expect(timerTargetAllowed(layer({ action: "top" }))).toBe(true);
+    expect(timerTargetAllowed(geometry())).toBe(true);
+    expect(timerTargetAllowed(geometry({ await: true }))).toBe(false);
+    expect(timerTargetProblem(geometry({ await: true }))).toMatch(/等待完成/);
+    expect(timerTargetProblem(geometry())).toBeNull();
+    expect(timerTargetProblem(layer())).toBeNull();
+  });
+
+  it("list a drifting geometry and a layer node as timer targets", () => {
+    const project = withLayout({
+      drift: geometry({
+        position: {
+          relative_to: "current",
+          x: 0,
+          y: 0,
+          anchor_x: 0,
+          anchor_y: 0,
+          offset_x: 8,
+          offset_y: 0,
+        },
+        duration_ms: 120,
+      }),
+      pin: layer({ action: "top" }),
+      waits: geometry({ await: true }),
+    });
+    expect(validTimerTargets(scene(project, "main"))).toEqual([
+      "drift",
+      "flash",
+      "pin",
+    ]);
+    const arm = scene(project, "main").nodes.arm;
+    for (const target of ["drift", "pin"]) {
+      scene(project, "main").nodes.arm = { ...arm, target } as SceneNode;
+      expect(codes(project), target).not.toContain("invalid_timer_target");
+    }
+    scene(project, "main").nodes.arm = { ...arm, target: "waits" } as SceneNode;
+    expect(codes(project)).toContain("invalid_timer_target");
+  });
+
+  it("accept the default nodes and reject out-of-range geometry", () => {
+    const ok = withLayout({ move: geometry(), raise: layer() });
+    expect(codes(ok).filter((code) => /window|duration/.test(code))).toEqual(
+      [],
+    );
+
+    const cases: [string, Record<string, unknown>][] = [
+      ["no position or size", { position: null, size: null }],
+      [
+        "anchor out of range",
+        {
+          position: {
+            relative_to: "window",
+            x: 1,
+            y: 0.5,
+            anchor_x: 1.5,
+            anchor_y: 0.5,
+          },
+        },
+      ],
+      [
+        "tiny logical size",
+        { size: { unit: "logical", width: 0, height: 10 } },
+      ],
+      [
+        "work area size over 1",
+        { size: { unit: "work_area", width: 1.2, height: 0.5 } },
+      ],
+    ];
+    for (const [label, patch] of cases) {
+      const project = withLayout({ move: geometry(patch) });
+      expect(codes(project), label).toContain("invalid_window_geometry");
+    }
+    expect(
+      codes(withLayout({ move: geometry({ duration_ms: 70_000 }) })),
+    ).toContain("invalid_duration");
+    expect(
+      codes(withLayout({ move: geometry({ duration_ms: 12.5 }) })),
+    ).toContain("invalid_duration");
+  });
+
+  it("reject an unknown window or layer action", () => {
+    expect(
+      codes(withLayout({ move: geometry({ target: "third" }) })),
+    ).toContain("invalid_window_target");
+    expect(codes(withLayout({ raise: layer({ target: "third" }) }))).toContain(
+      "invalid_window_target",
+    );
+    expect(codes(withLayout({ raise: layer({ action: "sink" }) }))).toContain(
+      "invalid_window_layer_action",
+    );
+  });
+
+  it("report a missing next node through the ordinary flow check", () => {
+    expect(
+      codes(withLayout({ move: geometry({ next: "nowhere" }) })),
+    ).toContain("missing_target_node");
+    expect(codes(withLayout({ raise: layer({ next: "nowhere" }) }))).toContain(
+      "missing_target_node",
+    );
+  });
+
+  it("make their successors reachable like any flow node", () => {
+    const project = withLayout({
+      move: geometry({ next: "raise" }),
+      raise: layer({ next: "tail" }),
+      tail: { type: "end" },
+    });
+    scene(project, "main").nodes.open = {
+      type: "open_window",
+      scene: "side",
+      next: "move",
+    };
+    const unreachable = validateLive(project)
+      .filter((diagnostic) => diagnostic.code === "unreachable_node")
+      .map((diagnostic) => diagnostic.node_id);
+    expect(unreachable).not.toContain("move");
+    expect(unreachable).not.toContain("raise");
+    expect(unreachable).not.toContain("tail");
+  });
+
+  it("follow node renames and deletions with their next port", () => {
+    const project = withLayout({
+      move: geometry({ next: "finish" }),
+      raise: layer({ next: "move" }),
+    });
+    const renamed = renameNode(project, "main", "move", "dock");
+    expect(scene(renamed, "main").nodes.raise).toMatchObject({ next: "dock" });
+    deleteNodes(project, "main", ["move"], "finish");
+    expect(scene(project, "main").nodes.raise).toMatchObject({
+      next: "finish",
+    });
+  });
+
+  it("paste unchanged: they hold no variable, asset or node references", () => {
+    const project = pairProject();
+    const node = geometry({ size: { width: 960, height: 540 } });
+    expect(preparePastedNode(node, project.manifest)).toMatchObject({
+      type: "window_geometry",
+      position: { relative_to: "window", offset_x: 16 },
+      size: { width: 960, height: 540 },
+      duration_ms: 600,
+    });
+    expect(
+      preparePastedNode(layer({ action: "bottom" }), project.manifest),
+    ).toMatchObject({
+      type: "window_layer",
+      action: "bottom",
+    });
+  });
+
+  it("round-trip through insertNode with their default fields", () => {
+    for (const type of ["window_geometry", "window_layer"] as const) {
+      const result = insertNode(pairProject(), "main", "flash", "left", type);
+      expect(result.ok, type).toBe(true);
+      if (!result.ok) continue;
+      expect(scene(result.project, "main").nodes[result.nodeId]).toMatchObject({
+        type,
+        next: "flash",
+      });
+    }
+  });
+});

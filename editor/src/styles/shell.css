@@ -5,6 +5,7 @@
     --status-height: 26px;
     --activity-width: 48px;
     --asset-detail-width: 0px;
+    --panel-rail-width: 12px;
     position: relative;
     display: grid;
     width: 100%;
@@ -28,9 +29,10 @@
     --asset-detail-width: 320px;
   }
 
+  /* A collapsed side panel leaves a thin rail (its resize handle) behind. */
   .app-shell.left-hidden {
     grid-template-columns:
-      var(--activity-width) 0 minmax(0, 1fr)
+      var(--activity-width) var(--panel-rail-width) minmax(0, 1fr)
       var(--right-panel-width);
   }
 
@@ -38,17 +40,17 @@
     grid-template-columns:
       var(--activity-width)
       calc(var(--left-panel-width) + var(--asset-detail-width))
-      minmax(0, 1fr) 0;
+      minmax(0, 1fr) var(--panel-rail-width);
   }
 
   .app-shell.left-hidden.right-hidden {
-    grid-template-columns: var(--activity-width) 0 minmax(0, 1fr) 0;
+    grid-template-columns:
+      var(--activity-width) var(--panel-rail-width) minmax(0, 1fr)
+      var(--panel-rail-width);
   }
 
   .app-shell.left-hidden > .left-panels,
-  .app-shell.left-hidden > .resize-handle-left,
-  .app-shell.right-hidden > .inspector,
-  .app-shell.right-hidden > .resize-handle-right {
+  .app-shell.right-hidden > .inspector {
     display: none;
   }
 
@@ -286,6 +288,59 @@
 
   .app-shell > .resize-handle-right {
     right: calc(var(--right-panel-width) - 3px);
+  }
+
+  /* Collapsed: the handle becomes a visible, grabbable rail on the edge. */
+  .app-shell > .resize-handle.is-collapsed {
+    width: var(--panel-rail-width);
+    background: var(--surface-panel);
+    opacity: 1;
+  }
+
+  .app-shell > .resize-handle-left.is-collapsed {
+    left: var(--activity-width);
+    border-right: 1px solid var(--border-default);
+  }
+
+  .app-shell > .resize-handle-right.is-collapsed {
+    right: 0;
+    border-left: 1px solid var(--border-default);
+  }
+
+  .resize-handle.is-collapsed::before {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 4px;
+    height: 40px;
+    border-radius: var(--radius-full);
+    background: var(--border-strong);
+    content: "";
+    transform: translate(-50%, -50%);
+    transition: background 120ms ease;
+  }
+
+  .app-shell > .resize-handle.is-collapsed:hover,
+  .app-shell > .resize-handle.is-collapsed:focus-visible,
+  .panel-resizing .app-shell > .resize-handle.is-collapsed {
+    background: var(--accent-muted);
+  }
+
+  .resize-handle.is-collapsed:hover::before,
+  .resize-handle.is-collapsed:focus-visible::before,
+  .panel-resizing .resize-handle.is-collapsed::before {
+    background: var(--accent);
+  }
+
+  .resize-handle.is-collapsed:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+
+  /* While a panel is being dragged the cursor and selection stay put even
+     when the pointer outruns the handle. */
+  body.panel-resizing {
+    cursor: ew-resize;
+    user-select: none;
   }
 
   /* ---------------------------------------------------------- Status bar */

@@ -30,6 +30,7 @@ node $d stop
 | `stop` | kills the launched process tree, any `vectspace.exe`, and listeners on 1420/9333; safe to run twice |
 | `state [main\|secondary]` | `screen` (`title`/`chapter-map`/`game`/`booting`), dialogue text, block hint, choices (`[disabled]` marked), other buttons |
 | `titles` | Win32 window titles of the `vectspace` process (the DOM `document.title` never changes) |
+| `windows` | title, raw physical rect `x,y,w,h` and `topmost`/`normal` per window, front-most first — verifies `window_geometry` / `window_layer` |
 | `replay <hotspotId>` | from the title or chapter map, enters a chapter-map replay (`data-hotspot-id`) |
 | `button <win> <text>` | clicks the button whose trimmed text is exactly `<text>` (`标题`, `设置`, `关闭`, `章节地图`, …) |
 | `choose <win> <choiceId>` | clicks a choice by id; fails if it is disabled |
@@ -71,6 +72,9 @@ npm run parity:check                                  # real-WebGL shader/presen
 ## Gotchas
 
 - **Both WebViews report the same URL** (`http://localhost:1420/`) and title (`VECTSPACE`). Identify them by `window.__TAURI_INTERNALS__.metadata.currentWindow.label`; the driver does this for every command.
+- **Window rects need a DPI-aware reader.** A DPI-unaware process gets scaled-down rects at 200 % (1293×756 instead of 2586×1511); `windows` calls `SetProcessDPIAware` first. Raw rects include an invisible ~11px (at 200 %) resize border, so a window flush with the screen's left edge reports `x = -11`.
+- **The demo's window moves:** `replay window_pair` puts main at the work area's left edge (960×540 logical, awaited 600 ms), then docks the secondary (480×270) to its right; on a 1280-logical-wide screen the secondary is clamped onto the right edge and overlaps main a little. Choosing `open` raises main above the secondary; the ending sets main `topmost` then normal; leaving the replay restores main's original rect.
+- **The editor is a separate Tauri app on port 1421** — if the user already runs it, `npm --prefix editor run tauri dev` fails with `Port 1421 is already in use`; don't kill their session.
 - **Native titles are not in the DOM.** Window-title nodes call the host's `set_title`; only `titles` (Win32 `EnumWindows`) sees them.
 - **A WebView reload does not reset the host.** `location.reload()` shows the title screen while the host still runs the old replay and secondary window; the next `replay` then fails. Use `stop` + `launch`.
 - **Rust edits restart the app by themselves** (`tauri dev` rebuilds, new `vectspace.exe` PID, back at the title screen); frontend edits hot-reload through Vite.

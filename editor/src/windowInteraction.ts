@@ -73,6 +73,7 @@ export function timerTargetAllowed(node: SceneNode): boolean {
     case "sfx":
     case "window_title":
     case "window_control":
+    case "window_layer":
       return true;
     case "background":
     case "sprite":
@@ -84,6 +85,7 @@ export function timerTargetAllowed(node: SceneNode): boolean {
     case "screen_effect":
     case "curtain":
     case "ui_motion_play":
+    case "window_geometry":
       return !node.await;
     default:
       return false;

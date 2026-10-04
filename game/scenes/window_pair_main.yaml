@@ -8,7 +8,7 @@ nodes:
     action: advance
     id: ""
     message: ""
-    next: say_end
+    next: top_main
   arm_idle:
     type: timer
     id: idle_bounce
@@ -16,7 +16,7 @@ nodes:
     delay_ms: 800
     interval_ms: 1500
     target: idle_bounce_effect
-    next: say_wait
+    next: layout_main
   arm_ready:
     type: timer
     id: ready_timer
@@ -41,6 +41,25 @@ nodes:
     id: await_main
     message: 主窗口正在收尾动画，请稍候……
     next: say_open
+  dock_side:
+    type: window_geometry
+    target: secondary
+    position:
+      relative_to: window
+      x: 1.0
+      "y": 0.5
+      anchor_x: 0.0
+      anchor_y: 0.5
+      offset_x: 16.0
+      offset_y: 0.0
+    size:
+      unit: logical
+      width: 480.0
+      height: 270.0
+    duration_ms: 600
+    easing: ease_in_out
+    await: false
+    next: say_wait
   end:
     type: end
   finale:
@@ -57,6 +76,30 @@ nodes:
     await: false
     parameters: {}
     next: say_wait
+  layout_main:
+    type: window_geometry
+    target: main
+    position:
+      relative_to: work_area
+      x: 0.0
+      "y": 0.5
+      anchor_x: 0.0
+      anchor_y: 0.5
+      offset_x: 0.0
+      offset_y: 0.0
+    size:
+      unit: logical
+      width: 960.0
+      height: 540.0
+    duration_ms: 600
+    easing: ease_in_out
+    await: true
+    next: dock_side
+  normal_main:
+    type: window_layer
+    target: main
+    action: normal
+    next: end
   open_side:
     type: open_window
     scene: window_pair_side
@@ -70,10 +113,10 @@ nodes:
   say_end:
     type: say
     speaker: alli
-    text: 副窗口被脚本推进了一页。演示结束。
+    text: 副窗口被脚本推进了一页。我刚把自己置顶，盖在其他应用上方；点一下我就恢复普通层级，演示结束。
     mode: start
     speed_cps: null
-    next: end
+    next: normal_main
   say_open:
     type: say
     speaker: alli
@@ -123,6 +166,11 @@ nodes:
     target: main
     title: 主窗口 · 等候副窗口
     next: open_side
+  top_main:
+    type: window_layer
+    target: main
+    action: top
+    next: say_end
   unblock_side:
     type: window_control
     target: secondary

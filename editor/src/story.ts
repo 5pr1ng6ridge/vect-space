@@ -41,6 +41,12 @@ import {
   WINDOW_ROLE_LABELS,
   WINDOW_TITLE_VARIABLES,
 } from "./windowInteraction";
+import {
+  DEFAULT_WINDOW_MOVE_MS,
+  defaultPlacementFor,
+  describeWindowGeometry,
+  describeWindowLayer,
+} from "./windowLayout";
 
 export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
@@ -55,6 +61,8 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "open_window", label: "打开副窗口", group: "逻辑" },
   { type: "window_title", label: "设置窗口标题", group: "逻辑" },
   { type: "window_control", label: "窗口控制", group: "逻辑" },
+  { type: "window_geometry", label: "窗口位置/大小", group: "逻辑" },
+  { type: "window_layer", label: "窗口层级", group: "逻辑" },
   { type: "timer", label: "计时器", group: "流程" },
   { type: "background", label: "背景", group: "画面" },
   { type: "curtain", label: "幕布", group: "画面" },
@@ -208,6 +216,10 @@ export function summarizeNode(node: SceneNode): string {
       return `${WINDOW_ROLE_LABELS[node.target]}标题 · ${node.title}`;
     case "window_control":
       return summarizeWindowControl(node);
+    case "window_geometry":
+      return describeWindowGeometry(node);
+    case "window_layer":
+      return describeWindowLayer(node);
     case "timer":
       return summarizeTimer(node);
     case "background":
@@ -489,6 +501,20 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         message: "",
         next: fallback,
       };
+    case "window_geometry":
+      // Dock the secondary window beside the main one: legal wherever it is
+      // added, and visibly does something without further editing.
+      return {
+        type,
+        target: "secondary",
+        position: defaultPlacementFor("secondary"),
+        duration_ms: DEFAULT_WINDOW_MOVE_MS,
+        easing: "ease_in_out",
+        await: false,
+        next: fallback,
+      };
+    case "window_layer":
+      return { type, target: "main", action: "raise", next: fallback };
     case "timer":
       return {
         type,

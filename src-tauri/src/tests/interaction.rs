@@ -13,11 +13,11 @@ use vectspace_core::{
     },
 };
 
-fn say(text: &str, next: &str) -> SceneNode {
+pub(super) fn say(text: &str, next: &str) -> SceneNode {
     replay_say(text, next)
 }
 
-fn scene(
+pub(super) fn scene(
     role: WindowRole,
     id: &str,
     entry: &str,
@@ -35,14 +35,14 @@ fn scene(
     }
 }
 
-fn open_side(next: &str) -> SceneNode {
+pub(super) fn open_side(next: &str) -> SceneNode {
     SceneNode::OpenWindow {
         scene: "ambience_lab".to_owned(),
         next: next.to_owned(),
     }
 }
 
-fn set_score(op: VariableOperation, value: i64, next: &str) -> SceneNode {
+pub(super) fn set_score(op: VariableOperation, value: i64, next: &str) -> SceneNode {
     SceneNode::Set {
         variable: "score".to_owned(),
         op,
@@ -51,7 +51,7 @@ fn set_score(op: VariableOperation, value: i64, next: &str) -> SceneNode {
     }
 }
 
-fn title(target: WindowRole, text: &str, next: &str) -> SceneNode {
+pub(super) fn title(target: WindowRole, text: &str, next: &str) -> SceneNode {
     SceneNode::WindowTitle {
         target,
         title: text.to_owned(),
@@ -75,7 +75,7 @@ fn control(target: WindowRole, action: WindowControlAction, id: &str, next: &str
 
 /// Replace the entry Scene (`prologue`, Main) and the secondary Scene
 /// (`ambience_lab`) with the given nodes.
-fn content_with(
+pub(super) fn content_with(
     main: (&str, Vec<(&str, SceneNode)>),
     side: (&str, Vec<(&str, SceneNode)>),
 ) -> ContentCatalog {
@@ -91,7 +91,7 @@ fn content_with(
     content
 }
 
-fn state_with(
+pub(super) fn state_with(
     content: ContentCatalog,
 ) -> (tempfile::TempDir, Arc<RecordingWindowOps>, EngineState) {
     let directory = tempdir().unwrap();
@@ -101,7 +101,7 @@ fn state_with(
 }
 
 /// What the `start_new_game` command does.
-fn start_game(state: &EngineState) -> WireRuntimeUpdate {
+pub(super) fn start_game(state: &EngineState) -> WireRuntimeUpdate {
     let _gate = state.session_gate().unwrap();
     state.set_title_screen(false);
     let committed = state
@@ -111,7 +111,7 @@ fn start_game(state: &EngineState) -> WireRuntimeUpdate {
     state.deliver(committed, WindowRole::Main).unwrap()
 }
 
-fn main_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireCommandError> {
+pub(super) fn main_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireCommandError> {
     let revision = state.runtime().unwrap().snapshot().revision;
     let session = WireU64::from(state.current_session_id());
     state.transact_active_runtime(Some(&session), |runtime| {
@@ -119,7 +119,7 @@ fn main_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireCommandErr
     })
 }
 
-fn secondary_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireCommandError> {
+pub(super) fn secondary_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireCommandError> {
     let _gate = state.session_gate().unwrap();
     let token = state.secondary().unwrap().as_ref().unwrap().token;
     let (committed, _) = state.transact_secondary(Some(&WireU64::from(token)), |runtime| {
@@ -129,7 +129,7 @@ fn secondary_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireComma
     state.deliver(committed, WindowRole::Secondary)
 }
 
-fn dialogue_text(prompt: &PromptSnapshot) -> String {
+pub(super) fn dialogue_text(prompt: &PromptSnapshot) -> String {
     match prompt {
         PromptSnapshot::Dialogue { text, .. } | PromptSnapshot::LongText { text, .. } => {
             text.clone()
@@ -138,7 +138,7 @@ fn dialogue_text(prompt: &PromptSnapshot) -> String {
     }
 }
 
-fn secondary_snapshot(state: &EngineState) -> vectspace_core::model::RuntimeSnapshot {
+pub(super) fn secondary_snapshot(state: &EngineState) -> vectspace_core::model::RuntimeSnapshot {
     state
         .secondary()
         .unwrap()
@@ -149,7 +149,7 @@ fn secondary_snapshot(state: &EngineState) -> vectspace_core::model::RuntimeSnap
         .clone()
 }
 
-fn main_snapshot(state: &EngineState) -> vectspace_core::model::RuntimeSnapshot {
+pub(super) fn main_snapshot(state: &EngineState) -> vectspace_core::model::RuntimeSnapshot {
     state.runtime().unwrap().snapshot().clone()
 }
 

@@ -11,6 +11,7 @@ import {
   WINDOW_ROLE_LABELS,
   windowTitleProblem,
 } from "./windowInteraction";
+import { WINDOW_LAYER_ACTIONS, windowGeometryProblem } from "./windowLayout";
 import { isIntegerScalar, scalarType } from "./scalars";
 import {
   IMAGE_ANIMATION_MAX_DECODED_BYTES,
@@ -2051,6 +2052,27 @@ function validateNode(
       if (problem !== null)
         issue("invalid_block_message", problem.replace("窗口标题", "阻挡提示"));
       validateTextTemplate(project, message, issue);
+      break;
+    }
+    case "window_geometry": {
+      if (node.target !== "main" && node.target !== "secondary") {
+        issue("invalid_window_target", "目标窗口必须是主窗口或副窗口");
+      }
+      const problem = windowGeometryProblem(node);
+      if (problem !== null) issue("invalid_window_geometry", problem);
+      checkDuration(node.duration_ms);
+      break;
+    }
+    case "window_layer": {
+      if (node.target !== "main" && node.target !== "secondary") {
+        issue("invalid_window_target", "目标窗口必须是主窗口或副窗口");
+      }
+      if (!WINDOW_LAYER_ACTIONS.includes(node.action)) {
+        issue(
+          "invalid_window_layer_action",
+          "窗口层级操作必须是提到最前、聚焦、置顶、置底或恢复普通",
+        );
+      }
       break;
     }
     case "timer": {

@@ -2,6 +2,7 @@ mod pair;
 mod save;
 mod sync;
 mod timers;
+mod window_fx;
 
 use std::{
     path::PathBuf,
@@ -15,6 +16,7 @@ use std::{
 use pair::{Authority, Committed, Pair};
 use save::{LoadedSlot, ProfileManager, SaveError, SaveManager, SecondaryState, SlotDocument};
 use sync::{Outboxes, PauseState};
+use window_fx::{MonitorInfo, WindowFx, WindowMetrics};
 use tauri::{path::BaseDirectory, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use vectspace_core::{
     content::ContentCatalog,
@@ -77,6 +79,9 @@ struct EngineState {
     native_titles: Mutex<NativeTitles>,
     /// Wakes the timer scheduler thread; `None` when no scheduler runs (tests).
     timer_wake: Mutex<Option<mpsc::Sender<()>>>,
+    /// Native window effects: animations, layers and the main window's
+    /// restore record (see `window_fx.rs`).
+    fx: WindowFx,
 }
 
 /// What the native windows currently show.  `None` means unknown, which forces
@@ -114,6 +119,7 @@ impl EngineState {
                 secondary: None,
             }),
             timer_wake: Mutex::new(None),
+            fx: WindowFx::default(),
         }
     }
 }
@@ -215,6 +221,21 @@ trait NativeWindowOps: Send + Sync {
     fn report_diagnostic(&self, message: &str) {
         eprintln!("{message}");
     }
+    /// Read the native geometry and state of a live window, in physical pixels.
+    /// Window effects only; a failure is a diagnostic, never a rollback.
+    fn window_metrics(&self, role: WindowRole) -> Result<WindowMetrics, WireCommandError>;
+    /// The work area and scale of every monitor.
+    fn monitors(&self) -> Result<Vec<MonitorInfo>, WireCommandError>;
+    /// Move the window's outer frame (physical pixels).
+    fn set_window_position(&self, role: WindowRole, x: i32, y: i32)
+        -> Result<(), WireCommandError>;
+    /// Resize the window's **client** area (physical pixels).
+    fn set_window_size(&self, role: WindowRole, width: i32, height: i32)
+        -> Result<(), WireCommandError>;
+    fn set_always_on_top(&self, role: WindowRole, on: bool) -> Result<(), WireCommandError>;
+    fn set_always_on_bottom(&self, role: WindowRole, on: bool) -> Result<(), WireCommandError>;
+    /// Restore the window if it is minimized and take keyboard focus.
+    fn focus_window(&self, role: WindowRole) -> Result<(), WireCommandError>;
 }
 
 /// Production implementation over the real Tauri window APIs.
@@ -376,6 +397,58 @@ impl NativeWindowOps for TauriWindowOps {
     fn report_diagnostic(&self, message: &str) {
         eprintln!("{message}");
         let _ = self.app.emit_to(MAIN_WINDOW_LABEL, HOST_DIAGNOSTIC_EVENT, message);
+    }
+
+    fn window_metrics(&self, role: WindowRole) -> Result<WindowMetrics, WireCommandError> {
+        self.read_window_metrics(role)
+    }
+
+    fn monitors(&self) -> Result<Vec<MonitorInfo>, WireCommandError> {
+        self.read_monitors()
+    }
+
+    fn set_window_position(
+        &self,
+        role: WindowRole,
+        x: i32,
+        y: i32,
+    ) -> Result<(), WireCommandError> {
+        self.native_window(role)?
+            .set_position(tauri::PhysicalPosition::new(x, y))
+            .map_err(|error| window_fx::native_failure("无法移动窗口", error))
+    }
+
+    fn set_window_size(
+        &self,
+        role: WindowRole,
+        width: i32,
+        height: i32,
+    ) -> Result<(), WireCommandError> {
+        self.native_window(role)?
+            .set_size(tauri::PhysicalSize::new(width.max(1) as u32, height.max(1) as u32))
+            .map_err(|error| window_fx::native_failure("无法调整窗口大小", error))
+    }
+
+    fn set_always_on_top(&self, role: WindowRole, on: bool) -> Result<(), WireCommandError> {
+        self.native_window(role)?
+            .set_always_on_top(on)
+            .map_err(|error| window_fx::native_failure("无法设置窗口置顶", error))
+    }
+
+    fn set_always_on_bottom(&self, role: WindowRole, on: bool) -> Result<(), WireCommandError> {
+        self.native_window(role)?
+            .set_always_on_bottom(on)
+            .map_err(|error| window_fx::native_failure("无法设置窗口置底", error))
+    }
+
+    fn focus_window(&self, role: WindowRole) -> Result<(), WireCommandError> {
+        let window = self.native_window(role)?;
+        window
+            .unminimize()
+            .map_err(|error| window_fx::native_failure("无法还原窗口", error))?;
+        window
+            .set_focus()
+            .map_err(|error| window_fx::native_failure("无法聚焦窗口", error))
     }
 }
 
@@ -716,7 +789,7 @@ impl EngineState {
     /// whole transition back if the native window or its title cannot be made to
     /// match the new state.
     fn finish_transition(&self, transition: MainTransition) -> Result<Committed, WireCommandError> {
-        if let Err(error) = self.apply_native_plan(&transition.plan) {
+        if let Err(error) = self.apply_native_plan(&transition.plan, &transition.committed.effects) {
             // Every rollback action is attempted, and every failure is reported:
             // a cleanup failure must never hide the fact that memory and the
             // profile were restored, and the caller must never be told only half
@@ -728,14 +801,23 @@ impl EngineState {
     }
 
     /// The native half of every transition: the window plan, the best-effort
-    /// reconciliation of a window the runtime never created, and the native
-    /// titles.  The native step only enqueues its work (see [`TauriWindowOps`]),
-    /// so the reconciliation is where a missing window or an orphaned one is
-    /// corrected.
-    fn apply_native_plan(&self, plan: &SecondaryPlan) -> Result<(), WireCommandError> {
+    /// reconciliation of a window the runtime never created, the native titles
+    /// and — only once all of those succeeded, so a rolled-back transition never
+    /// leaves one behind — the window effects (geometry, layers) the story asked
+    /// for.  The native step only enqueues its work (see [`TauriWindowOps`]), so
+    /// the reconciliation is where a missing window or an orphaned one is
+    /// corrected.  An effect that fails natively is a diagnostic, not a failure
+    /// of the transition.
+    fn apply_native_plan(
+        &self,
+        plan: &SecondaryPlan,
+        effects: &[window_fx::WindowEffect],
+    ) -> Result<(), WireCommandError> {
         self.apply_secondary_plan(plan.clone())?;
         self.reconcile_secondary_window(plan);
-        self.sync_native_titles()
+        self.sync_native_titles()?;
+        self.apply_window_effects(effects);
+        Ok(())
     }
 
     /// Perform the staged native work.  Called with every runtime mutex released:
@@ -750,16 +832,20 @@ impl EngineState {
                 // A shown window starts from the default title (a surviving
                 // window is reset by the seam).
                 self.note_native_secondary_title(Some(DEFAULT_SECONDARY_TITLE));
+                // ... and from the normal layer, with no animation running.
+                self.reset_secondary_window_fx();
                 Ok(())
             }
             SecondaryPlan::Hide => self.hide_native_secondary(),
         }
     }
 
-    /// Destroy the native secondary window; whatever title it showed is gone.
+    /// Destroy the native secondary window; whatever title it showed is gone,
+    /// and so is whatever the host tracked about its geometry and layer.
     fn hide_native_secondary(&self) -> Result<(), WireCommandError> {
         self.windows.hide_secondary()?;
         self.forget_native_secondary_title();
+        self.fx.forget_window(WindowRole::Secondary);
         Ok(())
     }
 
@@ -1061,7 +1147,7 @@ impl EngineState {
         &self,
         transition: ReplayTransition,
     ) -> Result<Committed, WireCommandError> {
-        if let Err(error) = self.apply_native_plan(&transition.plan) {
+        if let Err(error) = self.apply_native_plan(&transition.plan, &transition.committed.effects) {
             let cleanup_failures = self.rollback_replay_state(
                 transition.previous_replay.clone(),
                 &transition.previous_secondary,
@@ -1427,7 +1513,7 @@ impl EngineState {
             SecondaryBaseline::Untouched
         };
         drop(secondary);
-        if let Err(error) = self.apply_native_plan(&plan) {
+        if let Err(error) = self.apply_native_plan(&plan, &committed.effects) {
             let mut cleanup_failures =
                 self.rollback_replay_state(previous_replay, &previous_secondary, &plan);
             if let Some(story) = previous_story {
@@ -1476,7 +1562,32 @@ impl EngineState {
         if let Err(error) = self.sync_native_titles() {
             eprintln!("退出重演后恢复窗口标题失败: {}", error.message);
         }
+        // The replay may have moved, resized or re-layered the main window; it
+        // goes back to what it was before the story touched it.
+        self.restore_main_window();
         Ok(())
+    }
+
+    /// Leave the story for the title screen (the session gate and the session
+    /// check are the caller's).  Returns the new session generation.
+    fn leave_story_for_title(&self) -> Result<u64, WireCommandError> {
+        // Returning to the title is an ownership boundary: the title screen shows
+        // no secondary window and must not leave one running behind it.  The
+        // window is destroyed before the session generation is bumped, so a
+        // failed destroy leaves the story session exactly as it was.
+        self.close_secondary()?;
+        let next = self.bump_session_id()?;
+        // The title screen has no running story: timers stand still and the
+        // native titles go back to the default.  A cosmetic title failure must
+        // not strand the player on a story they left.
+        self.set_title_screen(true);
+        if let Err(error) = self.sync_native_titles() {
+            eprintln!("返回标题后恢复窗口标题失败: {}", error.message);
+        }
+        // The title is not part of the story: the main window gets back the
+        // position, size and layer it had before the story changed them.
+        self.restore_main_window();
+        Ok(next)
     }
 
     /// Tear the secondary slot down outside a story transaction (returning to
@@ -1868,7 +1979,10 @@ fn ensure_secondary_window(
     )
     .title(DEFAULT_SECONDARY_TITLE)
     .inner_size(960.0, 540.0)
-    .min_inner_size(480.0, 270.0)
+    .min_inner_size(
+        window_fx::SECONDARY_MIN_CLIENT.0,
+        window_fx::SECONDARY_MIN_CLIENT.1,
+    )
     .build()
     .map_err(|error| {
         WireCommandError::new(
@@ -2238,20 +2352,7 @@ async fn invalidate_session(
     require_main(&window)?;
     let _gate = state.session_gate()?;
     state.check_session(expected_session_id.as_ref())?;
-    // Returning to the title is an ownership boundary: the title screen shows no
-    // secondary window and must not leave one running behind it.  The window is
-    // destroyed before the session generation is bumped, so a failed destroy
-    // leaves the story session exactly as it was.
-    state.close_secondary()?;
-    let next = state.bump_session_id()?;
-    // The title screen has no running story: timers stand still and the native
-    // titles go back to the default.  A cosmetic title failure must not strand
-    // the player on a story they left.
-    state.set_title_screen(true);
-    if let Err(error) = state.sync_native_titles() {
-        eprintln!("返回标题后恢复窗口标题失败: {}", error.message);
-    }
-    Ok(next.into())
+    Ok(state.leave_story_for_title()?.into())
 }
 
 /// Incremental, ordered update synchronisation for the main window.  Events only
@@ -2644,12 +2745,27 @@ pub fn run() {
             if let Ok(mut slot) = app.state::<EngineState>().timer_wake.lock() {
                 *slot = Some(wake);
             }
+            // Window animations tick on their own host thread, independent of
+            // the story timers and of the story's pause state.
+            let fx_wake = window_fx::spawn_fx_scheduler(app.handle().clone());
+            app.state::<EngineState>().fx.set_wake(fx_wake);
             Ok(())
         })
         // The secondary window may only be destroyed by a host transition. A
         // user/native close request is always prevented so the secondary cannot
         // be closed out from under the story that owns it.
         .on_window_event(|window, event| {
+            // A destroyed window takes its animation and layer with it.  Only
+            // the short state lock is taken: this runs on the event loop, which
+            // a thread waiting on a native call must never end up blocking.
+            if let tauri::WindowEvent::Destroyed = event {
+                if let (Some(role), Some(state)) = (
+                    role_for_label(window.label()),
+                    window.app_handle().try_state::<EngineState>(),
+                ) {
+                    state.fx.forget_window(role);
+                }
+            }
             if window.label() != SECONDARY_WINDOW_LABEL {
                 // Closing the main window must not leave the prevented secondary
                 // behind. The same host destruction path is used so the close
@@ -2755,6 +2871,87 @@ mod tests {
         content
     }
 
+    /// A native geometry or layer call made on behalf of a window effect.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum NativeCall {
+        Position(WindowRole, i32, i32),
+        Size(WindowRole, i32, i32),
+        AlwaysOnTop(WindowRole, bool),
+        AlwaysOnBottom(WindowRole, bool),
+        Focus(WindowRole),
+    }
+
+    /// One fake native window.  Its frame is 16x40 physical pixels thicker than
+    /// its client area, like a framed window.
+    #[derive(Debug, Clone, Copy)]
+    struct FakeWindow {
+        position: (i32, i32),
+        client: (i32, i32),
+        border: (i32, i32),
+        insets: window_fx::Insets,
+        scale: f64,
+        fullscreen: bool,
+        maximized: bool,
+        minimized: bool,
+    }
+
+    impl FakeWindow {
+        fn at(x: i32, y: i32, width: i32, height: i32) -> Self {
+            Self {
+                position: (x, y),
+                client: (width, height),
+                border: (16, 40),
+                insets: window_fx::Insets::default(),
+                scale: 1.0,
+                fullscreen: false,
+                maximized: false,
+                minimized: false,
+            }
+        }
+
+        fn outer(&self) -> window_fx::Rect {
+            window_fx::Rect::new(
+                self.position.0,
+                self.position.1,
+                self.client.0 + self.border.0,
+                self.client.1 + self.border.1,
+            )
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeDesktop {
+        main: FakeWindow,
+        secondary: FakeWindow,
+        monitors: Vec<MonitorInfo>,
+    }
+
+    impl FakeDesktop {
+        fn secondary_default() -> FakeWindow {
+            FakeWindow::at(300, 200, 960, 540)
+        }
+
+        fn window(&mut self, role: WindowRole) -> &mut FakeWindow {
+            match role {
+                WindowRole::Main => &mut self.main,
+                WindowRole::Secondary => &mut self.secondary,
+            }
+        }
+    }
+
+    impl Default for FakeDesktop {
+        fn default() -> Self {
+            Self {
+                main: FakeWindow::at(100, 100, 1280, 720),
+                secondary: Self::secondary_default(),
+                monitors: vec![MonitorInfo {
+                    work_area: window_fx::Rect::new(0, 0, 1920, 1040),
+                    scale: 1.0,
+                }],
+            }
+        }
+    }
+
     /// An injectable native seam: the window-failure paths must be reachable in
     /// host tests without a real WebView.
     #[derive(Default)]
@@ -2804,9 +3001,72 @@ mod tests {
         notices: Mutex<Vec<(WindowRole, String)>>,
         /// Diagnostics that had no command to fail.
         diagnostics: Mutex<Vec<String>>,
+        /// The fake desktop the window effects read and write.
+        desktop: Mutex<FakeDesktop>,
+        /// Every native geometry / layer call, in order.
+        calls: Mutex<Vec<NativeCall>>,
+        /// Reading or changing window geometry and layers fails.
+        fail_window_effects: AtomicBool,
     }
 
     impl RecordingWindowOps {
+        /// A freshly created native secondary window starts with the default
+        /// geometry and no layer flags.
+        fn recreate_secondary_fake(&self) {
+            self.desktop.lock().unwrap().secondary = FakeDesktop::secondary_default();
+        }
+
+        fn fake_window(&self, role: WindowRole) -> FakeWindow {
+            *self.desktop.lock().unwrap().window(role)
+        }
+
+        /// Outer position and client size of a fake window.
+        fn frame_of(&self, role: WindowRole) -> ((i32, i32), (i32, i32)) {
+            let window = self.fake_window(role);
+            (window.position, window.client)
+        }
+
+        fn edit_window(&self, role: WindowRole, edit: impl FnOnce(&mut FakeWindow)) {
+            edit(self.desktop.lock().unwrap().window(role));
+        }
+
+        fn set_monitors(&self, monitors: Vec<MonitorInfo>) {
+            self.desktop.lock().unwrap().monitors = monitors;
+        }
+
+        fn native_calls(&self) -> Vec<NativeCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn clear_native_calls(&self) {
+            self.calls.lock().unwrap().clear();
+        }
+
+        fn effect_diagnostics(&self) -> Vec<String> {
+            self.diagnostics.lock().unwrap().clone()
+        }
+
+        /// A window effect can only reach a live native window.
+        fn live_window(&self, role: WindowRole) -> Result<(), WireCommandError> {
+            if self.fail_window_effects.load(Ordering::Acquire) {
+                return Err(WireCommandError::new(
+                    WireCommandErrorCode::Internal,
+                    "测试: 窗口原生调用失败",
+                ));
+            }
+            if role == WindowRole::Secondary && !self.window_alive.load(Ordering::Acquire) {
+                return Err(WireCommandError::new(
+                    WireCommandErrorCode::Internal,
+                    "测试: 窗口 secondary 不存在",
+                ));
+            }
+            Ok(())
+        }
+
+        fn record(&self, call: NativeCall) {
+            self.calls.lock().unwrap().push(call);
+        }
+
         /// The title a window was last given.
         fn last_title(&self, role: WindowRole) -> Option<String> {
             self.titles
@@ -2877,6 +3137,97 @@ mod tests {
             self.diagnostics.lock().unwrap().push(message.to_owned());
         }
 
+        fn window_metrics(&self, role: WindowRole) -> Result<WindowMetrics, WireCommandError> {
+            self.live_window(role)?;
+            let mut desktop = self.desktop.lock().unwrap();
+            let window = *desktop.window(role);
+            let outer = window.outer();
+            let center = (
+                f64::from(outer.x) + f64::from(outer.w) / 2.0,
+                f64::from(outer.y) + f64::from(outer.h) / 2.0,
+            );
+            let monitor = desktop
+                .monitors
+                .iter()
+                .find(|monitor| {
+                    let area = monitor.work_area;
+                    center.0 >= f64::from(area.x)
+                        && center.0 < f64::from(area.x + area.w)
+                        && center.1 >= f64::from(area.y)
+                        && center.1 < f64::from(area.y + area.h)
+                })
+                .or_else(|| desktop.monitors.first())
+                .copied()
+                .expect("a fake monitor exists");
+            Ok(WindowMetrics {
+                outer,
+                client: window.client,
+                insets: window.insets,
+                scale: window.scale,
+                monitor,
+                fullscreen: window.fullscreen,
+                maximized: window.maximized,
+                minimized: window.minimized,
+            })
+        }
+
+        fn monitors(&self) -> Result<Vec<MonitorInfo>, WireCommandError> {
+            if self.fail_window_effects.load(Ordering::Acquire) {
+                return Err(WireCommandError::new(
+                    WireCommandErrorCode::Internal,
+                    "测试: 无法列出显示器",
+                ));
+            }
+            Ok(self.desktop.lock().unwrap().monitors.clone())
+        }
+
+        fn set_window_position(
+            &self,
+            role: WindowRole,
+            x: i32,
+            y: i32,
+        ) -> Result<(), WireCommandError> {
+            self.live_window(role)?;
+            self.record(NativeCall::Position(role, x, y));
+            self.edit_window(role, |window| window.position = (x, y));
+            Ok(())
+        }
+
+        fn set_window_size(
+            &self,
+            role: WindowRole,
+            width: i32,
+            height: i32,
+        ) -> Result<(), WireCommandError> {
+            self.live_window(role)?;
+            self.record(NativeCall::Size(role, width, height));
+            self.edit_window(role, |window| window.client = (width, height));
+            Ok(())
+        }
+
+        fn set_always_on_top(&self, role: WindowRole, on: bool) -> Result<(), WireCommandError> {
+            self.live_window(role)?;
+            self.record(NativeCall::AlwaysOnTop(role, on));
+            Ok(())
+        }
+
+        fn set_always_on_bottom(
+            &self,
+            role: WindowRole,
+            on: bool,
+        ) -> Result<(), WireCommandError> {
+            self.live_window(role)?;
+            self.record(NativeCall::AlwaysOnBottom(role, on));
+            Ok(())
+        }
+
+        fn focus_window(&self, role: WindowRole) -> Result<(), WireCommandError> {
+            self.live_window(role)?;
+            self.record(NativeCall::Focus(role));
+            self.edit_window(role, |window| window.minimized = false);
+            Ok(())
+        }
+
         fn show_secondary(&self, replaced: bool) -> Result<(), WireCommandError> {
             self.show_calls.fetch_add(1, Ordering::AcqRel);
             if replaced {
@@ -2910,6 +3261,7 @@ mod tests {
                 }
                 NativeShowAction::Create => {
                     self.create_calls.fetch_add(1, Ordering::AcqRel);
+                    self.recreate_secondary_fake();
                 }
                 NativeShowAction::Reuse => {
                     self.reused_calls.fetch_add(1, Ordering::AcqRel);
@@ -2959,6 +3311,7 @@ mod tests {
                 return self.hide_secondary().map(|()| true);
             }
             self.create_calls.fetch_add(1, Ordering::AcqRel);
+            self.recreate_secondary_fake();
             self.window_alive.store(true, Ordering::Release);
             Ok(true)
         }
@@ -5226,4 +5579,5 @@ mod tests {
     }
 
     mod interaction;
+    mod window_effects;
 }

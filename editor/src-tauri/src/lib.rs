@@ -5127,6 +5127,8 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         | SceneNode::ButtonRemove { next, .. }
         | SceneNode::WindowTitle { next, .. }
         | SceneNode::WindowControl { next, .. }
+        | SceneNode::WindowGeometry { next, .. }
+        | SceneNode::WindowLayer { next, .. }
         // A timer's effect target is a reference (see `effect_references`),
         // not a flow successor: only `next` continues the story.
         | SceneNode::Timer { next, .. } => vec![local(next)],
@@ -5190,6 +5192,13 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::Timeline {
             await_completion, ..
         } => !await_completion,
+        // Only a real wait holds the story back: an unawaited or zero-length
+        // move passes straight through.
+        SceneNode::WindowGeometry {
+            await_completion,
+            duration_ms,
+            ..
+        } => !(*await_completion && *duration_ms > 0),
         SceneNode::Set { .. }
         | SceneNode::Condition { .. }
         | SceneNode::Playback { .. }
@@ -5203,6 +5212,7 @@ fn is_immediate(node: &SceneNode) -> bool {
         | SceneNode::ButtonRemove { .. }
         | SceneNode::WindowTitle { .. }
         | SceneNode::WindowControl { .. }
+        | SceneNode::WindowLayer { .. }
         | SceneNode::Timer { .. }
         | SceneNode::OpenWindow { .. } => true,
     }
@@ -7500,6 +7510,180 @@ mod tests {
         assert!(unreachable("effect_successor"));
     }
 
+    fn layout_scene() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "id": "layout_demo",
+            "entry": "move",
+            "nodes": {
+                "move": {
+                    "type": "window_geometry", "target": "secondary",
+                    "position": {
+                        "relative_to": "window", "x": 1, "y": 0.5,
+                        "anchor_x": 0, "anchor_y": 0.5, "offset_x": 16
+                    },
+                    "duration_ms": 600, "easing": "ease_in_out", "await": false,
+                    "next": "raise"
+                },
+                "raise": {
+                    "type": "window_layer", "target": "main",
+                    "action": "raise", "next": "arm"
+                },
+                "arm": {
+                    "type": "timer", "id": "pin", "action": "start",
+                    "delay_ms": 100, "interval_ms": null, "target": "pin_layer",
+                    "next": "say"
+                },
+                "pin_layer": {
+                    "type": "window_layer", "target": "main",
+                    "action": "top", "next": "finish"
+                },
+                "say": {
+                    "type": "say", "speaker": null,
+                    "text": "Waiting", "next": "finish"
+                },
+                "finish": { "type": "end" }
+            }
+        })
+    }
+
+    #[test]
+    fn preview_explains_window_layout_requests_without_moving_the_editor() {
+        let (state, project) = demo_project_with_scene(layout_scene());
+        let started = start_preview_of(
+            &state,
+            &project,
+            "layout_demo",
+            "scene",
+            None,
+            serde_json::json!({}),
+        );
+        assert_eq!(started["status"], "started", "{started}");
+        // Neither request holds the story: it runs straight on to the line.
+        assert_eq!(started["update"]["snapshot"]["prompt"]["kind"], "dialogue");
+        assert_eq!(started["update"]["requires_ack"], false);
+        let notes: Vec<&str> = started["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|note| note.as_str().unwrap())
+            .collect();
+        assert!(notes.iter().any(|note| note.contains("预览不会移动或缩放真实窗口")), "{notes:?}");
+        assert!(notes.iter().any(|note| note.contains("预览不会改变真实窗口层级")), "{notes:?}");
+
+        // A timer firing a layer node is explained the same way, never applied.
+        let session = started["session_id"].as_str().unwrap().to_owned();
+        let request: PreviewSessionTickRequest =
+            serde_json::from_value(serde_json::json!({ "session_id": session })).unwrap();
+        let now = state.preview.lock().unwrap().as_ref().unwrap().last_tick
+            + Duration::from_millis(150);
+        let tick =
+            preview_call(preview_session_tick_command(request, &state, now).unwrap());
+        assert!(
+            tick["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|note| note.as_str().unwrap().contains("预览不会改变真实窗口层级")),
+            "{tick}"
+        );
+        assert!(tick["diagnostics"].as_array().unwrap().is_empty(), "{tick}");
+        let guard = state.preview.lock().unwrap();
+        let session = guard.as_ref().unwrap();
+        assert!(session.runtime.snapshot().interaction.timers.is_empty());
+    }
+
+    #[test]
+    fn window_layout_nodes_are_flow_nodes_for_reachability_and_cycles() {
+        use vectspace_core::interaction::{
+            WindowLayerAction, WindowPlacement, WindowReference, WindowRole,
+        };
+        use vectspace_core::model::Easing;
+
+        fn analysed(entry: &str, nodes: BTreeMap<String, SceneNode>) -> Vec<EditorDiagnostic> {
+            let root = demo_root().canonicalize().unwrap();
+            let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+            let mut scenes = catalog.scenes.clone();
+            let scene = scenes.get_mut("prologue").unwrap();
+            scene.entry = entry.to_owned();
+            scene.nodes = nodes;
+            let ui_motions = catalog
+                .manifest
+                .ui_motions
+                .iter()
+                .map(|path| {
+                    (
+                        path.clone(),
+                        read_yaml(&root.join(path)).expect("demo UI motion should load"),
+                    )
+                })
+                .collect();
+            let candidate = ContentCatalog::from_documents(
+                root,
+                catalog.manifest.clone(),
+                scenes,
+                ui_motions,
+            )
+            .unwrap();
+            analyze_catalog(&candidate)
+        }
+        let geometry = |duration_ms: u64, await_completion: bool| SceneNode::WindowGeometry {
+            target: WindowRole::Secondary,
+            position: Some(WindowPlacement {
+                relative_to: WindowReference::Window,
+                x: 1.0,
+                y: 0.5,
+                anchor_x: 0.0,
+                anchor_y: 0.5,
+                offset_x: 16.0,
+                offset_y: 0.0,
+            }),
+            size: None,
+            duration_ms,
+            easing: Easing::EaseInOut,
+            await_completion,
+            next: "raise".to_owned(),
+        };
+        let layer = |next: &str| SceneNode::WindowLayer {
+            target: WindowRole::Main,
+            action: WindowLayerAction::Raise,
+            next: next.to_owned(),
+        };
+        let flagged = |diagnostics: &[EditorDiagnostic], code: &str| {
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.scene_id.as_deref() == Some("prologue") && diagnostic.code == code
+            })
+        };
+
+        // move -> raise -> tail: both new nodes hand control on to `next`.
+        let chain = analysed(
+            "move",
+            BTreeMap::from([
+                ("move".to_owned(), geometry(600, false)),
+                ("raise".to_owned(), layer("tail")),
+                ("tail".to_owned(), SceneNode::End),
+            ]),
+        );
+        assert!(!flagged(&chain, "unreachable_node"), "{chain:?}");
+        assert!(!flagged(&chain, "immediate_cycle"), "{chain:?}");
+
+        // A loop made only of window requests never yields to the player.
+        let looping = |geometry: SceneNode| {
+            analysed(
+                "move",
+                BTreeMap::from([
+                    ("move".to_owned(), geometry),
+                    ("raise".to_owned(), layer("move")),
+                ]),
+            )
+        };
+        assert!(flagged(&looping(geometry(600, false)), "immediate_cycle"));
+        // An awaited zero-length move does not wait either...
+        assert!(flagged(&looping(geometry(0, true)), "immediate_cycle"));
+        // ...but a timed awaited one holds the story back, so it is no busy loop.
+        assert!(!flagged(&looping(geometry(600, true)), "immediate_cycle"));
+    }
+
     fn pair_demo_project() -> (EditorState, serde_json::Value) {
         let root = demo_root().canonicalize().unwrap();
         let load = |name: &str| {
@@ -7609,7 +7793,30 @@ mod tests {
             .unwrap()
             .iter()
             .all(|cue| cue["type"] != "open_window"));
+        // Moving the main window is awaited, so the story holds on a 600 ms
+        // delay (the timers were armed before it); the single-window preview
+        // says it cannot move the real window instead of pretending to.
+        assert_eq!(main["update"]["requires_ack"], true);
+        assert!(main["update"]["cues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|cue| cue["type"] == "delay" && cue["duration_ms"] == 600));
+        assert!(main["notes"].as_array().unwrap().iter().any(|note| {
+            note.as_str().unwrap().contains("预览不会移动或缩放真实窗口")
+        }));
         let session = main["session_id"].as_str().unwrap().to_owned();
+        // Once the delay has played the unawaited docking move passes straight
+        // through to the waiting line.
+        let ack: PreviewSessionAckRequest = serde_json::from_value(serde_json::json!({
+            "session_id": session,
+            "update_id": main["update"]["update_id"],
+            "outcome": "completed",
+        }))
+        .unwrap();
+        let after_move =
+            preview_call(preview_session_presentation_complete_command(ack, &state).unwrap());
+        assert_eq!(after_move["snapshot"]["prompt"]["kind"], "dialogue", "{after_move}");
         let tick = |millis: u64| {
             let request: PreviewSessionTickRequest =
                 serde_json::from_value(serde_json::json!({ "session_id": session })).unwrap();

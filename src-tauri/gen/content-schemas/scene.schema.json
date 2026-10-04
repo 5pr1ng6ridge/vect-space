@@ -1502,6 +1502,89 @@
           ]
         },
         {
+          "description": "Move and/or resize a game window, optionally animated.",
+          "type": "object",
+          "properties": {
+            "await": {
+              "type": "boolean",
+              "default": false
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 0,
+              "minimum": 0
+            },
+            "easing": {
+              "$ref": "#/$defs/Easing",
+              "default": "ease_in_out"
+            },
+            "next": {
+              "type": "string"
+            },
+            "position": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WindowPlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "size": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WindowSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "target": {
+              "$ref": "#/$defs/WindowRole"
+            },
+            "type": {
+              "type": "string",
+              "const": "window_geometry"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/WindowLayerAction"
+            },
+            "next": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/WindowRole"
+            },
+            "type": {
+              "type": "string",
+              "const": "window_layer"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target",
+            "action",
+            "next"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "duration_ms": {
@@ -3125,11 +3208,140 @@
         "advance"
       ]
     },
+    "WindowLayerAction": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "normal"
+          ]
+        },
+        {
+          "description": "Above the other windows, without taking keyboard focus.",
+          "type": "string",
+          "const": "raise"
+        },
+        {
+          "description": "Activate the window and take keyboard focus.",
+          "type": "string",
+          "const": "focus"
+        },
+        {
+          "description": "Always above other applications until `normal`.",
+          "type": "string",
+          "const": "top"
+        },
+        {
+          "description": "Always below other applications until `normal`.",
+          "type": "string",
+          "const": "bottom"
+        }
+      ]
+    },
+    "WindowPlacement": {
+      "description": "Puts the window's anchor point (fractions of the window frame) on a point\nof the reference rect (fractions of that rect), plus an offset in logical\npixels.  `x: 1, y: 0.5, anchor_x: 0, anchor_y: 0.5, offset_x: 16` with the\nother window as reference docks the target to its right with a 16px gap.",
+      "type": "object",
+      "properties": {
+        "anchor_x": {
+          "type": "number",
+          "format": "float"
+        },
+        "anchor_y": {
+          "type": "number",
+          "format": "float"
+        },
+        "offset_x": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_y": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "relative_to": {
+          "$ref": "#/$defs/WindowReference",
+          "default": "work_area"
+        },
+        "x": {
+          "type": "number",
+          "format": "float"
+        },
+        "y": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "anchor_x",
+        "anchor_y"
+      ]
+    },
+    "WindowReference": {
+      "description": "What a [`WindowPlacement`] is measured against.",
+      "oneOf": [
+        {
+          "description": "The work area (screen minus taskbar) of the target window's monitor.",
+          "type": "string",
+          "const": "work_area"
+        },
+        {
+          "description": "The other game window's frame.",
+          "type": "string",
+          "const": "window"
+        },
+        {
+          "description": "The target window's own current frame (a relative nudge).",
+          "type": "string",
+          "const": "current"
+        }
+      ]
+    },
     "WindowRole": {
       "type": "string",
       "enum": [
         "main",
         "secondary"
+      ]
+    },
+    "WindowSize": {
+      "type": "object",
+      "properties": {
+        "height": {
+          "type": "number",
+          "format": "float"
+        },
+        "unit": {
+          "$ref": "#/$defs/WindowSizeUnit",
+          "default": "logical"
+        },
+        "width": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "WindowSizeUnit": {
+      "oneOf": [
+        {
+          "description": "Client-area size in logical pixels.",
+          "type": "string",
+          "const": "logical"
+        },
+        {
+          "description": "Fractions of the monitor work area, frame included.",
+          "type": "string",
+          "const": "work_area"
+        }
       ]
     }
   }

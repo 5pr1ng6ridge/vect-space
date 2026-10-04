@@ -48,11 +48,16 @@ nodes:
     mode: start
     speed_cps: null
     next: pick
-  # 改名 → 解除 → 推进：次序就是主窗口看到的次序。
+  # 改名 → 提到最前（不抢焦点）→ 解除 → 推进：次序就是主窗口看到的次序。
   rename_main:
     type: window_title
     target: main
     title: 主窗口 · 门已打开（由「[var=window.secondary.title]」触发）
+    next: raise_main
+  raise_main:
+    type: window_layer
+    target: main
+    action: raise
     next: unblock_main
   unblock_main:
     type: window_control

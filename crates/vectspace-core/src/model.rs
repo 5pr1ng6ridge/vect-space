@@ -1062,6 +1062,26 @@ pub enum SceneNode {
         target: Option<String>,
         next: String,
     },
+    /// Move and/or resize a game window, optionally animated.
+    WindowGeometry {
+        target: crate::interaction::WindowRole,
+        #[serde(default)]
+        position: Option<crate::interaction::WindowPlacement>,
+        #[serde(default)]
+        size: Option<crate::interaction::WindowSize>,
+        #[serde(default)]
+        duration_ms: u64,
+        #[serde(default)]
+        easing: Easing,
+        #[serde(default, rename = "await")]
+        await_completion: bool,
+        next: String,
+    },
+    WindowLayer {
+        target: crate::interaction::WindowRole,
+        action: crate::interaction::WindowLayerAction,
+        next: String,
+    },
     Wait {
         duration_ms: u64,
         next: String,
@@ -1655,6 +1675,21 @@ pub enum Easing {
     EaseOut,
     #[default]
     EaseInOut,
+}
+
+impl Easing {
+    /// Progress at `t` in `0..=1`, with the same quadratic curves as the
+    /// timeline presets.
+    pub fn sample(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::EaseIn => t * t,
+            Self::EaseOut => 1.0 - (1.0 - t).powi(2),
+            Self::EaseInOut if t < 0.5 => 2.0 * t * t,
+            Self::EaseInOut => 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0,
+        }
+    }
 }
 
 /// Defaults of the parameterised screen effect shared by `screen_effect` nodes

@@ -2156,6 +2156,17 @@ fn validate_scenes(
                     validate_text_markup(message, variables, scene_id, node_id)?;
                     require_node(scene, next, scene_id, node_id)?;
                 }
+                SceneNode::WindowGeometry { position, size, duration_ms, next, .. } => {
+                    crate::interaction::validate_window_geometry(position.as_ref(), size.as_ref())
+                        .map_err(|message| {
+                            ContentError::Validation(format!("{scene_id}/{node_id}: {message}"))
+                        })?;
+                    validate_duration(*duration_ms, scene_id, node_id)?;
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::WindowLayer { next, .. } => {
+                    require_node(scene, next, scene_id, node_id)?;
+                }
                 SceneNode::Timer { id, action, delay_ms, interval_ms, target, next } => {
                     validate_identifier("timer id", id)?;
                     validate_duration(*delay_ms, scene_id, node_id)?;

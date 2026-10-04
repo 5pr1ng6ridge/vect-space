@@ -11,7 +11,6 @@ import {
   useState,
   Suspense,
   type CSSProperties,
-  type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from "react";
 import { editorApi } from "./api";
@@ -81,6 +80,17 @@ import type {
 import { validateLive } from "./validation";
 import { WINDOW_ROLE_LABELS } from "./windowInteraction";
 import { ActivityBar } from "./shell/ActivityBar";
+import { PanelResizeHandle } from "./shell/PanelResizeHandle";
+import {
+  clampPanelSize,
+  PANEL_CLICK_SLOP,
+  resolvePanelDrag,
+  stepPanel,
+  type PanelAxis,
+  type PanelDrag,
+  type PanelLayout,
+  type PanelSizes,
+} from "./shell/panelSizing";
 import { StatusBar } from "./shell/StatusBar";
 import { TopBar } from "./shell/TopBar";
 import { WelcomeScreen } from "./shell/WelcomeScreen";
@@ -136,8 +146,6 @@ import {
   type EditorMutation,
 } from "./editorHistory";
 
-type ResizeAxis = "left" | "right";
-
 function currentPlainProject(draft: EditorProject): EditorProject {
   // Rename helpers intentionally return a complete project.  When they are
   // used from an Immer recipe, unwrap the proxy first so their defensive
@@ -188,18 +196,6 @@ function WorkspaceFallback(): ReactElement {
   return <main className="workspace-loading">正在载入工作区…</main>;
 }
 
-interface PanelSizes {
-  left: number;
-  right: number;
-}
-
-interface ResizeState {
-  axis: ResizeAxis;
-  startX: number;
-  startY: number;
-  initial: number;
-}
-
 type NodeClipboard =
   | {
       kind: "node";
@@ -232,57 +228,6 @@ function loadPanelSizes(): PanelSizes {
   } catch {
     return DEFAULT_PANEL_SIZES;
   }
-}
-
-function clampPanelSize(axis: ResizeAxis, value: number): number {
-  const bounds: Record<ResizeAxis, [number, number]> = {
-    left: [220, 480],
-    right: [300, 560],
-  };
-  const [minimum, maximum] = bounds[axis];
-  return Math.round(Math.min(maximum, Math.max(minimum, value)));
-}
-
-function ResizeHandle({
-  axis,
-  onStart,
-  onStep,
-}: {
-  axis: ResizeAxis;
-  onStart(axis: ResizeAxis, startX: number, startY: number): void;
-  onStep(axis: ResizeAxis, delta: number): void;
-}): ReactElement {
-  const label = axis === "left" ? "调整左侧栏宽度" : "调整右侧栏宽度";
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
-    const step = event.shiftKey ? 32 : 12;
-    let delta: number | null = null;
-    if (axis === "left") {
-      if (event.key === "ArrowRight") delta = step;
-      if (event.key === "ArrowLeft") delta = -step;
-    } else {
-      if (event.key === "ArrowLeft") delta = step;
-      if (event.key === "ArrowRight") delta = -step;
-    }
-    if (delta === null) return;
-    event.preventDefault();
-    onStep(axis, delta);
-  };
-
-  return (
-    <div
-      aria-label={label}
-      aria-orientation="vertical"
-      className={`resize-handle resize-handle-${axis}`}
-      onKeyDown={handleKeyDown}
-      onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => {
-        if (event.button !== 0) return;
-        event.preventDefault();
-        onStart(axis, event.clientX, event.clientY);
-      }}
-      role="separator"
-      tabIndex={0}
-    />
-  );
 }
 
 /** The editor, with its app-wide feedback providers. */
@@ -384,7 +329,7 @@ function EditorApp(): ReactElement {
       // Preferences are best-effort; a blocked storage keeps the defaults.
     }
   }, [panelSizes]);
-  const [resizeState, setResizeState] = useState<ResizeState | null>(null);
+  const [resizeState, setResizeState] = useState<PanelDrag | null>(null);
   const nodeClipboardRef = useRef<NodeClipboard | null>(null);
   const projectRef = useRef<EditorProject | null>(null);
   const editorStateRef = useRef(editorState);
@@ -470,51 +415,87 @@ function EditorApp(): ReactElement {
     return valid;
   }, [flushEditorEdits, setError]);
 
-  const resizeBy = (axis: ResizeAxis, delta: number): void => {
-    setPanelSizes((current) => ({
-      ...current,
-      [axis]: clampPanelSize(axis, current[axis] + delta),
-    }));
+  // Collapsing a panel only flips its visibility; the remembered width in
+  // `panelSizes` is what a later click or key press reopens it at.
+  const applyPanelLayout = useCallback(
+    (axis: PanelAxis, layout: PanelLayout): void => {
+      (axis === "left" ? setLeftPanelVisible : setRightPanelVisible)(
+        layout.visible,
+      );
+      setPanelSizes((current) =>
+        current[axis] === layout.size
+          ? current
+          : { ...current, [axis]: layout.size },
+      );
+    },
+    [],
+  );
+
+  const panelLayout = (axis: PanelAxis): PanelLayout => ({
+    size: panelSizes[axis],
+    visible: axis === "left" ? leftPanelVisible : rightPanelVisible,
+  });
+
+  const resizeBy = (
+    axis: PanelAxis,
+    delta: number,
+    repeated: boolean,
+  ): void => {
+    applyPanelLayout(
+      axis,
+      stepPanel(axis, panelLayout(axis), delta, !repeated),
+    );
   };
 
-  const startResize = (
-    axis: ResizeAxis,
-    startX: number,
-    startY: number,
-  ): void => {
+  const expandPanel = (axis: PanelAxis): void => {
+    applyPanelLayout(axis, { ...panelLayout(axis), visible: true });
+  };
+
+  const startResize = (axis: PanelAxis, startX: number): void => {
+    const { size, visible } = panelLayout(axis);
     setResizeState({
       axis,
       startX,
-      startY,
-      initial: panelSizes[axis],
+      origin: visible ? size : 0,
+      remembered: size,
+      startedCollapsed: !visible,
     });
   };
 
   useEffect(() => {
     if (resizeState === null) return;
+    // A press on the collapsed rail that never travels is a click.
+    let travelled = false;
     const handlePointerMove = (event: globalThis.PointerEvent): void => {
-      const delta = event.clientX - resizeState.startX;
-      const signedDelta = resizeState.axis === "right" ? -delta : delta;
-      setPanelSizes((current) => ({
-        ...current,
-        [resizeState.axis]: clampPanelSize(
-          resizeState.axis,
-          resizeState.initial + signedDelta,
-        ),
-      }));
+      if (Math.abs(event.clientX - resizeState.startX) > PANEL_CLICK_SLOP) {
+        travelled = true;
+      }
+      applyPanelLayout(
+        resizeState.axis,
+        resolvePanelDrag(resizeState, event.clientX),
+      );
     };
-    const stopResize = (): void => setResizeState(null);
+    const handlePointerUp = (): void => {
+      if (resizeState.startedCollapsed && !travelled) {
+        applyPanelLayout(resizeState.axis, {
+          size: resizeState.remembered,
+          visible: true,
+        });
+      }
+      setResizeState(null);
+    };
+    const handlePointerCancel = (): void => setResizeState(null);
     window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", stopResize);
-    window.addEventListener("pointercancel", stopResize);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerCancel);
     document.body.classList.add("panel-resizing");
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", stopResize);
-      window.removeEventListener("pointercancel", stopResize);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerCancel);
       document.body.classList.remove("panel-resizing");
     };
-  }, [resizeState]);
+  }, [applyPanelLayout, resizeState]);
 
   const diagnostics = useMemo(
     () => (project === null ? [] : validateLive(project)),
@@ -2701,7 +2682,14 @@ function EditorApp(): ReactElement {
               id="asset-detail-column"
             />
           </div>
-          <ResizeHandle axis="left" onStart={startResize} onStep={resizeBy} />
+          <PanelResizeHandle
+            axis="left"
+            collapsed={!leftPanelVisible}
+            onExpand={expandPanel}
+            onStart={startResize}
+            onStep={resizeBy}
+            size={panelSizes.left}
+          />
 
           <section className="workspace">
             <div className="workspace-header">
@@ -2972,7 +2960,14 @@ function EditorApp(): ReactElement {
               scene={activeScene}
             />
           )}
-          <ResizeHandle axis="right" onStart={startResize} onStep={resizeBy} />
+          <PanelResizeHandle
+            axis="right"
+            collapsed={!rightPanelVisible}
+            onExpand={expandPanel}
+            onStart={startResize}
+            onStep={resizeBy}
+            size={panelSizes.right}
+          />
           <StatusBar
             errorCount={errorCount}
             onShowProblems={() => {

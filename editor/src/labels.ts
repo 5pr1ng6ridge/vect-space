@@ -12,6 +12,7 @@ import type {
   TimelineEasing,
   VariableScope,
   VariableType,
+  WindowLayerAction,
 } from "./types";
 
 export const ASSET_KIND_LABELS: Record<AssetKind, string> = {
@@ -87,6 +88,27 @@ export const CHANNEL_UNITS: Record<string, string> = {
 export function channelLabel(channel: string): string {
   return CHANNEL_LABELS[channel] ?? channel;
 }
+
+/** Short names of a `window_layer` action (summaries, graph cards). */
+export const WINDOW_LAYER_ACTION_LABELS: Record<WindowLayerAction, string> = {
+  raise: "提到最前",
+  focus: "聚焦",
+  top: "置顶",
+  bottom: "置底",
+  normal: "恢复普通层级",
+};
+
+/** Longer names of the same actions for the inspector dropdown. */
+export const WINDOW_LAYER_ACTION_OPTION_LABELS: Record<
+  WindowLayerAction,
+  string
+> = {
+  raise: "提到最前（不抢焦点）",
+  focus: "聚焦（抢焦点）",
+  top: "置顶（始终在其他窗口上方）",
+  bottom: "置底（始终在其他窗口下方）",
+  normal: "恢复普通层级",
+};
 
 export const AMBIENCE_SLOT_LABELS: Record<AmbienceSlot, string> = {
   slot_1: "环境声 1",
@@ -171,6 +193,8 @@ export const NODE_CATEGORY: Record<NodeType, NodeCategory> = {
   open_window: "logic",
   window_title: "logic",
   window_control: "logic",
+  window_geometry: "logic",
+  window_layer: "logic",
   timer: "flow",
   playback: "flow",
   wait: "flow",
