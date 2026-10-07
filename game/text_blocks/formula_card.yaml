@@ -1,0 +1,17 @@
+schema_version: 2
+id: text.formula_card
+content: |-
+  v/s = Vect OR Space
+  $$e^{i\pi} + 1 = 0$$你说得对但是vivid/stasis是一款以困难紧凑的按键输入为主题的地图。
+  如果你认为按键操作太过密集紧凑，你完全可以重新绑定按键。对于一些特定的配置，我甚至强烈建议你这么做。
+  所有工字钢在设计上都是越晚越好。
+  通关并不需要用到心脏攻击，如果你知道心脏攻击是什么的话。
+width: 800
+height: 560
+font_size: 30.0
+line_height: 1.45
+color: "#F4F8FF"
+align: center
+vertical_align: center
+padding: 24.0
+background: "#10203AC0"

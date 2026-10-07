@@ -25,6 +25,8 @@ import {
 } from "@vectspace/presentation-react/gameplay";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
+import { resolveTextBlocks, type TextBlockMap } from "@vectspace/presentation-core/text-block";
+import type { ParticleMap } from "@vectspace/presentation-core/particles";
 import { ChoiceLayer } from "@vectspace/presentation-react/choice";
 import { ChapterMapPage } from "./components/ChapterMapPage";
 import {
@@ -148,6 +150,8 @@ export default function App(): ReactElement {
   const { update, effects, receive, setUpdate } = useLiveUpdate();
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [animations, setAnimations] = useState<AnimationMap>({});
+  const [textBlocks, setTextBlocks] = useState<TextBlockMap>({});
+  const [particles, setParticles] = useState<ParticleMap>({});
   const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
   const [fontLoadErrorUrl, setFontLoadErrorUrl] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -213,6 +217,8 @@ export default function App(): ReactElement {
           }
           setAssets(assets);
           setAnimations(animations);
+          setTextBlocks(resolveTextBlocks(bootstrap.text_blocks ?? {}, assets, bootstrap.default_font));
+          setParticles(bootstrap.particles ?? {});
           setSettings(loadedSettings);
           setDraftSettings(loadedSettings);
           setSaveSlots(slots);
@@ -1465,6 +1471,8 @@ export default function App(): ReactElement {
       <section className="game-viewport" style={viewportStyle}>
         <SceneCanvas
           animations={animations}
+          textBlocks={textBlocks}
+          particles={particles}
           assets={assets}
           onDiagnostic={setError}
           onSettled={handlePresentationSettled}

@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { firstVisibleAssetId } from "../assetLibrary";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import { DeferredInput } from "./Fields";
+import { SpriteSourceFields } from "./SpriteSourceFields";
 import { AMBIENCE_SLOT_LABELS, FIT_LABELS } from "../labels";
 import { defaultFlashEffect } from "../presentationDefaults";
 import { timelineTrackIdentity } from "../timeline";
@@ -19,6 +20,7 @@ import type {
   TimelineKeyframe,
   TimelineNode,
   TimelineTrack,
+  TextBlockFile,
 } from "../types";
 
 export type TimelineSelection = TimelineSurfaceSelection;
@@ -32,6 +34,7 @@ const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
 ];
 
 const TIMELINE_CHANNELS: Record<TimelineTrack["type"], string[]> = {
+  emitter: ["x", "y", "scale", "rotation_deg", "opacity", "z"],
   sprite: [
     "x",
     "y",
@@ -85,6 +88,7 @@ const DEFAULTS: Record<string, number> = {
 export function TimelineEditor({
   node,
   assets,
+  textBlocks = [],
   onChange,
   hidePreview = false,
   hideTransport = false,
@@ -98,6 +102,7 @@ export function TimelineEditor({
 }: {
   node: TimelineNode;
   assets: EditorAsset[];
+  textBlocks?: readonly TextBlockFile[];
   onChange(node: TimelineNode): void;
   /** Omit the timeline properties / keyframe inspector pane. */
   hidePreview?: boolean;
@@ -206,9 +211,11 @@ export function TimelineEditor({
                 instance_id: `button_${node.tracks.length + 1}`,
                 channels: {},
               }
-            : trackType === "ambience"
-              ? { type: "ambience", slot: ambienceSlot, channels: {} }
-              : { type: trackType, channels: {} };
+            : trackType === "emitter"
+              ? { type: "emitter", emitter_id: `emitter_${node.tracks.length + 1}`, remove_at_end: false, channels: {} }
+              : trackType === "ambience"
+                ? { type: "ambience", slot: ambienceSlot, channels: {} }
+                : { type: trackType, channels: {} };
     onChange({ ...node, tracks: [...node.tracks, track] });
   };
 
@@ -313,7 +320,8 @@ export function TimelineEditor({
                 setChannelName(firstItem(CHANNELS[value]) ?? "x");
               }}
             >
-              <option value="sprite">立绘轨</option>
+              <option value="sprite">Sprite 轨</option>
+              <option value="emitter">发射器整体轨</option>
               <option value="camera">镜头轨</option>
               <option value="video">视频轨</option>
               <option value="bgm">BGM 音量轨</option>
@@ -371,6 +379,24 @@ export function TimelineEditor({
         }
         renderTrackConfig={(track) => {
           const data = track.data;
+          if (data.type === "emitter") {
+            return (
+              <div className="timeline-track-config">
+                <label>
+                  发射器实例 ID（必须已启动）
+                  <input value={data.emitter_id} onChange={(event) =>
+                    updateTrackData(track, { ...data, emitter_id: event.currentTarget.value })
+                  } />
+                </label>
+                <label>
+                  <input type="checkbox" checked={data.remove_at_end} onChange={(event) =>
+                    updateTrackData(track, { ...data, remove_at_end: event.currentTarget.checked })
+                  } />
+                  结束后移除
+                </label>
+              </div>
+            );
+          }
           if (data.type === "sprite") {
             return (
               <div className="timeline-track-config">
@@ -525,20 +551,20 @@ export function TimelineEditor({
         renderTrackExtra={(track) => {
           const data = track.data;
           if (data.type !== "sprite" && data.type !== "video") return null;
+          if (data.type === "sprite") return (
+            <>
+              <SpriteSourceFields assets={assets} textBlocks={textBlocks} value={data}
+                onChange={(patch) => updateTrackData(track, { ...data, ...patch })} />
+              {data.source === undefined && <AssetChooser allowEmpty assets={assets} emptyLabel="继承进入时素材" kind="sprite"
+                label="轨道立绘素材" value={data.asset ?? null} onChange={(asset) => updateTrackData(track, { ...data, asset })} />}
+            </>
+          );
           return (
             <AssetChooser
-              allowEmpty={data.type === "sprite"}
               assets={assets}
-              emptyLabel="继承进入时素材"
-              kind={data.type}
-              label={`轨道${data.type === "sprite" ? "立绘" : "视频"}素材`}
-              onChange={(asset) => {
-                if (data.type === "sprite") {
-                  updateTrackData(track, { ...data, asset });
-                } else {
-                  updateTrackData(track, { ...data, asset: asset ?? "" });
-                }
-              }}
+              kind="video"
+              label="轨道视频素材"
+              onChange={(asset) => updateTrackData(track, { ...data, asset: asset ?? "" })}
               value={data.asset ?? null}
             />
           );
@@ -582,7 +608,8 @@ function surfaceDocumentToNode(
 }
 
 const TRACK_TYPE_LABELS: Record<TimelineTrack["type"], string> = {
-  sprite: "立绘",
+  sprite: "Sprite",
+  emitter: "发射器",
   button: "按钮",
   camera: "镜头",
   video: "视频",
@@ -591,7 +618,8 @@ const TRACK_TYPE_LABELS: Record<TimelineTrack["type"], string> = {
 };
 
 function trackLabel(track: TimelineTrack): string {
-  if (track.type === "sprite") return `立绘 ${track.sprite_id}`;
+  if (track.type === "sprite") return `Sprite ${track.sprite_id}`;
+  if (track.type === "emitter") return `发射器 ${track.emitter_id}`;
   if (track.type === "button") return `按钮 ${track.instance_id}`;
   if (track.type === "ambience") return AMBIENCE_SLOT_LABELS[track.slot];
   return TRACK_TYPE_LABELS[track.type];

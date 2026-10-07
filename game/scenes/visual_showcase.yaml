@@ -1,0 +1,230 @@
+schema_version: 2
+id: visual_showcase
+entry: room
+nodes:
+  alli_show:
+    type: sprite
+    sprite_id: alli
+    action: show
+    character: alli
+    expression: neutral
+    x: 560.0
+    "y": 1040.0
+    scale: 0.78
+    opacity: 1.0
+    z: 10
+    duration_ms: 300
+    easing: ease_out
+    await: true
+    next: item_show
+  badge_show:
+    type: sprite
+    sprite_id: badge
+    action: show
+    source:
+      type: image
+      asset: gui.button_pulse
+    sprite_kind: ui
+    space: screen
+    x: 260.0
+    "y": 130.0
+    scale: 1.5
+    opacity: 1.0
+    z: 0
+    duration_ms: 200
+    easing: ease_out
+    await: false
+    next: formula_show
+  burst_note:
+    type: say
+    speaker: alli
+    text: 雪花发射器只能整体移动和淡出；刚才的火花是单次爆发，读档不会重放。
+    mode: start
+    speed_cps: null
+    next: snow_stop
+  camera_pan:
+    type: camera
+    x: 60.0
+    "y": 0.0
+    zoom: 1.08
+    duration_ms: 600
+    easing: ease_in_out
+    await: true
+    next: drift
+  clear:
+    type: clear
+    duration_ms: 500
+    easing: ease_in_out
+    await: true
+    next: end
+  drift:
+    type: timeline
+    duration_ms: 2400
+    await: true
+    skippable: true
+    tracks:
+    - type: emitter
+      emitter_id: snow
+      remove_at_end: false
+      channels:
+        opacity:
+        - at_ms: 0
+          value: inherit
+          easing: linear
+        - at_ms: 2400
+          value: 0.6
+          easing: linear
+        x:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 2400
+          value: 1260.0
+          easing: linear
+    - type: sprite
+      sprite_id: formula
+      asset: null
+      remove_at_end: false
+      channels:
+        rotation_deg:
+        - at_ms: 0
+          value: inherit
+          easing: ease_in_out
+        - at_ms: 1200
+          value: 4.0
+          easing: ease_in_out
+        - at_ms: 2400
+          value: -2.0
+          easing: linear
+    events: []
+    next: sparkle
+  end:
+    type: end
+  formula_bounce:
+    type: action
+    sprite_id: formula
+    action: sprite.bounce
+    await: true
+    parameters: {}
+    next: shared_action
+  formula_show:
+    type: sprite
+    sprite_id: formula
+    action: show
+    source:
+      type: text
+      text_block: text.formula_card
+    sprite_kind: text
+    rotation_deg: -2.0
+    x: 1180.0
+    "y": 330.0
+    scale: 1.0
+    opacity: 1.0
+    z: 15
+    duration_ms: 400
+    easing: ease_out
+    await: true
+    next: intro
+  intro:
+    type: say
+    speaker: alli
+    text: 雪碧图？！
+    mode: start
+    speed_cps: null
+    next: item_bounce
+  item_bounce:
+    type: action
+    sprite_id: prop
+    action: sprite.bounce
+    await: true
+    parameters: {}
+    next: formula_bounce
+  item_show:
+    type: sprite
+    sprite_id: prop
+    action: show
+    source:
+      type: image
+      asset: sprite.omo
+    sprite_kind: item
+    layout:
+      width: 220.0
+      height: 220.0
+      fit: contain
+    x: 1480.0
+    "y": 760.0
+    scale: 1.0
+    opacity: 1.0
+    z: 12
+    duration_ms: 300
+    easing: ease_out
+    await: true
+    next: badge_show
+  room:
+    type: background
+    background: bg.test_1
+    transition:
+      type: cross_fade
+    duration_ms: 350
+    easing: ease_in_out
+    await: true
+    next: snow_start
+  shared_action:
+    type: say
+    speaker: alli
+    text: 同一个 Sprite 动作可以作用于物品和文本块；镜头移动时，屏幕 UI 保持不动。
+    mode: start
+    speed_cps: null
+    next: camera_pan
+  snow_start:
+    type: particle
+    emitter_id: snow
+    action: start
+    particle: particle_v
+    seed: 42
+    space: world
+    x: 960.0
+    "y": -40.0
+    scale: 1.0
+    rotation_deg: 0.0
+    opacity: 1.0
+    z: 20
+    next: snow_start_copy
+  snow_start_copy:
+    type: particle
+    emitter_id: snow_2
+    action: start
+    particle: particle_v_copy
+    space: world
+    x: 960.0
+    "y": -40.0
+    scale: 1.0
+    rotation_deg: 0.0
+    opacity: 1.0
+    z: 20
+    next: alli_show
+  snow_stop:
+    type: particle
+    emitter_id: snow
+    action: stop
+    space: world
+    x: 0.0
+    "y": 0.0
+    scale: 1.0
+    rotation_deg: 0.0
+    opacity: 1.0
+    z: 0
+    next: clear
+  sparkle:
+    type: particle
+    emitter_id: spark
+    action: burst
+    particle: particle.sparkle_burst
+    space: world
+    x: 1480.0
+    "y": 700.0
+    scale: 1.0
+    rotation_deg: 0.0
+    opacity: 1.0
+    z: 30
+    next: burst_note

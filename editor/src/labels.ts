@@ -203,6 +203,7 @@ export const NODE_CATEGORY: Record<NodeType, NodeCategory> = {
   background: "visual",
   curtain: "visual",
   sprite: "visual",
+  particle: "visual",
   clear: "visual",
   camera: "visual",
   screen_effect: "visual",

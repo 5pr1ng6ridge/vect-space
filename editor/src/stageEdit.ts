@@ -118,6 +118,7 @@ export function spritePositionOffset(
   node: SpriteNode,
   manifest?: ContentManifest,
 ): StagePoint {
+  if (node.source !== undefined) return { x: 0, y: 0 };
   const characterId = node.character ?? null;
   if (characterId === null || characterId === "") return { x: 0, y: 0 };
   const character = manifest?.characters[characterId];

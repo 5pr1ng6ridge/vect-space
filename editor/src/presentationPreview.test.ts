@@ -272,8 +272,13 @@ describe("static world previews", () => {
     const frame = sceneFrameFromWorld(world, {
       spriteSize: () => ({ width: 200, height: 400 }),
     });
-    expect(frame.objects).toHaveLength(1);
-    expect(frame.objects[0]).toMatchObject({
+    // The legacy background is a canonical Sprite for rendering, but stays
+    // outside stage gestures.
+    expect(frame.objects.map((object) => object.id).sort()).toEqual([
+      "__background__",
+      "lumi",
+    ]);
+    expect(frame.objects.find((object) => object.id === "lumi")).toMatchObject({
       id: "lumi",
       kind: "sprite",
       x: 1000,

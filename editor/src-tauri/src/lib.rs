@@ -34,6 +34,7 @@ use vectspace_core::{
         PreviewChoiceDecision as CorePreviewChoiceDecision, PreviewRunResult, RuntimeEngine,
     },
 };
+use vectspace_core::visual::{ParticleDefinition, SpriteSource, TextBlockDefinition};
 use vectspace_protocol::{
     variable_map_from_wire, WireAssetDiagnostic, WireAssetInspection, WireAssetKind,
     WireAssetMetadata, WireAssetReuseCandidate, WireCommandError, WireCommandErrorCode,
@@ -256,6 +257,10 @@ struct EditorProject {
     buttons: Vec<EditorButtonFile>,
     animations: Vec<EditorAnimationFile>,
     actions: Vec<EditorActionFile>,
+    #[serde(default)]
+    text_blocks: Vec<EditorTextBlockFile>,
+    #[serde(default)]
+    particles: Vec<EditorParticleFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     assets: Vec<EditorAsset>,
@@ -272,6 +277,8 @@ struct EditorProjectView<'a> {
     buttons: &'a [EditorButtonFile],
     animations: &'a [EditorAnimationFile],
     actions: &'a [EditorActionFile],
+    text_blocks: &'a [EditorTextBlockFile],
+    particles: &'a [EditorParticleFile],
     chapter_map: &'a Option<EditorChapterMapFile>,
     layout: &'a EditorLayout,
     assets: &'a [EditorAsset],
@@ -292,6 +299,8 @@ impl Serialize for EditorProject {
             buttons: &self.buttons,
             animations: &self.animations,
             actions: &self.actions,
+            text_blocks: &self.text_blocks,
+            particles: &self.particles,
             chapter_map: &self.chapter_map,
             layout: &self.layout,
             assets: &self.assets,
@@ -313,6 +322,16 @@ struct SaveProjectResult {
     warnings: Vec<EditorDiagnostic>,
     transaction_id: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditorVisualFile<T> {
+    path: String,
+    definition: T,
+}
+
+type EditorTextBlockFile = EditorVisualFile<TextBlockDefinition>;
+type EditorParticleFile = EditorVisualFile<ParticleDefinition>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -740,6 +759,10 @@ enum BuildNodePreviewResult {
         trace: Vec<StoryLocation>,
         #[serde(default)]
         resolved_texts: BTreeMap<String, String>,
+        assets: Vec<ResolvedAsset>,
+        text_blocks: BTreeMap<String, TextBlockDefinition>,
+        particles: BTreeMap<String, ParticleDefinition>,
+        font_versions: BTreeMap<String, String>,
     },
     Unreachable {
         message: String,
@@ -774,6 +797,11 @@ struct SceneLayout {
     viewport: Option<EditorViewport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     groups: Vec<SceneGroup>,
+    /// Editor-only: fixed text block ids filed under this scene before any
+    /// Sprite uses them.  Never reaches the runtime registry or text YAML; an
+    /// empty list is omitted so an old layout stays byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    text_block_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -799,6 +827,8 @@ struct SaveProjectRequest {
     buttons: Vec<EditorButtonFile>,
     animations: Vec<EditorAnimationFile>,
     actions: Vec<EditorActionFile>,
+    text_blocks: Vec<EditorTextBlockFile>,
+    particles: Vec<EditorParticleFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     expected_fingerprint: String,
@@ -817,6 +847,10 @@ struct SaveProjectRequestRaw {
     animations: Vec<EditorAnimationFile>,
     #[serde(default)]
     actions: Vec<EditorActionFile>,
+    #[serde(default)]
+    text_blocks: Vec<EditorTextBlockFile>,
+    #[serde(default)]
+    particles: Vec<EditorParticleFile>,
     chapter_map: Option<EditorChapterMapFile>,
     layout: EditorLayout,
     expected_fingerprint: String,
@@ -840,6 +874,8 @@ impl<'de> Deserialize<'de> for SaveProjectRequest {
             buttons: raw.buttons,
             animations: raw.animations,
             actions: raw.actions,
+            text_blocks: raw.text_blocks,
+            particles: raw.particles,
             chapter_map: raw.chapter_map,
             layout: raw.layout,
             expected_fingerprint: raw.expected_fingerprint,
@@ -1465,7 +1501,7 @@ fn save_project_command(
             .map_err(validation_command_error)?;
         let actions = validate_action_file_set(&request.manifest, &request.actions)
             .map_err(validation_command_error)?;
-        let candidate = ContentCatalog::from_documents_with_all_documents(
+        let candidate = ContentCatalog::from_documents_with_visuals(
             session.root.clone(),
             request.manifest.clone(),
             scenes,
@@ -1478,6 +1514,8 @@ fn save_project_command(
             Some(buttons),
             Some(animations),
             Some(actions),
+            Some(validate_visual_file_set(&request.manifest.text_blocks, &request.text_blocks).map_err(validation_command_error)?),
+            Some(validate_visual_file_set(&request.manifest.particles, &request.particles).map_err(validation_command_error)?),
         )
         .map_err(validation_command_error)?;
 
@@ -1691,9 +1729,9 @@ fn validate_project_command(
         .map_err(validation_command_error)?;
     let actions = validate_action_file_set(&request.manifest, &request.actions)
         .map_err(validation_command_error)?;
-    let candidate = ContentCatalog::from_documents_with_all_documents(
+    let candidate = ContentCatalog::from_documents_with_visuals(
         session.root.clone(),
-        request.manifest,
+        request.manifest.clone(),
         scenes,
         ui_motions,
         request
@@ -1704,6 +1742,8 @@ fn validate_project_command(
         Some(buttons),
         Some(animations),
         Some(actions),
+        Some(validate_visual_file_set(&request.manifest.text_blocks, &request.text_blocks).map_err(validation_command_error)?),
+        Some(validate_visual_file_set(&request.manifest.particles, &request.particles).map_err(validation_command_error)?),
     )
     .map_err(validation_command_error)?;
     Ok(analyze_catalog(&candidate))
@@ -2774,6 +2814,10 @@ fn build_node_preview_command(
                 update: update.into(),
                 trace,
                 resolved_texts,
+                assets: catalog.resolve_assets(&catalog.asset_ids()).map_err(validation_command_error)?,
+                text_blocks: catalog.text_blocks.clone(),
+                particles: catalog.particles.clone(),
+                font_versions: visual_font_versions(&catalog).map_err(validation_command_error)?,
             })
         }
         Ok(PreviewRunResult::Unreachable { message, trace }) => {
@@ -2790,6 +2834,17 @@ fn build_node_preview_command(
 /// request (staged imports included).  `build_node_preview` and the live
 /// gameplay session share this exact validation path so a preview can never run
 /// against a different world than the one the editor is editing.
+fn visual_font_versions(catalog: &ContentCatalog) -> Result<BTreeMap<String, String>, String> {
+    let ids = catalog.manifest.assets.iter()
+        .filter(|(_, asset)| asset.kind == AssetKind::Font)
+        .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    catalog.resolve_assets(&ids).map_err(display_error)?.into_iter()
+        .map(|asset| {
+            let version = hash_file_streaming(Path::new(&asset.absolute_path)).map_err(display_error)?;
+            Ok((asset.id, version))
+        }).collect()
+}
+
 fn build_preview_catalog(
     state: &EditorState,
     session: &ProjectSession,
@@ -2807,7 +2862,7 @@ fn build_preview_catalog(
         .map_err(validation_command_error)?;
     let actions = validate_action_file_set(&project.manifest, &project.actions)
         .map_err(validation_command_error)?;
-    ContentCatalog::from_documents_with_all_documents(
+    ContentCatalog::from_documents_with_visuals(
         session.root.clone(),
         project.manifest.clone(),
         scenes,
@@ -2817,6 +2872,8 @@ fn build_preview_catalog(
         Some(buttons),
         Some(animations),
         Some(actions),
+        Some(validate_visual_file_set(&project.manifest.text_blocks, &project.text_blocks).map_err(validation_command_error)?),
+        Some(validate_visual_file_set(&project.manifest.particles, &project.particles).map_err(validation_command_error)?),
     )
     .map_err(validation_command_error)
 }
@@ -2866,6 +2923,9 @@ enum PreviewSessionStartResult {
         session_id: WireU64,
         update: WireRuntimeUpdate,
         assets: Vec<ResolvedAsset>,
+        text_blocks: BTreeMap<String, TextBlockDefinition>,
+        particles: BTreeMap<String, ParticleDefinition>,
+        font_versions: BTreeMap<String, String>,
         /// Things a single-window preview could not do (see `LivePreviewSession::notes`).
         notes: Vec<String>,
     },
@@ -3105,6 +3165,9 @@ fn preview_session_start_command(
     let assets = catalog
         .resolve_assets(&catalog.asset_ids())
         .map_err(validation_command_error)?;
+    let text_blocks = catalog.text_blocks.clone();
+    let particles = catalog.particles.clone();
+    let font_versions = visual_font_versions(&catalog).map_err(validation_command_error)?;
     let mut guard = state
         .preview
         .lock()
@@ -3124,6 +3187,9 @@ fn preview_session_start_command(
         session_id: WireU64::from(session_id),
         update: update.into(),
         assets,
+        text_blocks,
+        particles,
+        font_versions,
         notes,
     })
 }
@@ -3433,6 +3499,8 @@ fn project_payload(
         buttons,
         animations,
         actions,
+        text_blocks: read_visual_files(root, &catalog.manifest.text_blocks)?,
+        particles: read_visual_files(root, &catalog.manifest.particles)?,
         chapter_map,
         layout,
         assets,
@@ -3490,6 +3558,8 @@ fn project_payload_from_request(
         buttons: request.buttons.clone(),
         animations: request.animations.clone(),
         actions: request.actions.clone(),
+        text_blocks: request.text_blocks.clone(),
+        particles: request.particles.clone(),
         chapter_map: request.chapter_map.clone(),
         layout,
         assets,
@@ -3665,6 +3735,24 @@ fn validate_action_file_set(
     Ok(actions)
 }
 
+fn read_visual_files<T: DeserializeOwned>(root: &Path, paths: &[String]) -> Result<Vec<EditorVisualFile<T>>, String> {
+    paths.iter().map(|path| Ok(EditorVisualFile {
+        path: path.clone(), definition: read_yaml(&root.join(path))?,
+    })).collect()
+}
+
+fn validate_visual_file_set<T: Clone>(paths: &[String], files: &[EditorVisualFile<T>]) -> Result<BTreeMap<String, T>, String> {
+    let declared = paths.iter().collect::<BTreeSet<_>>();
+    let provided = files.iter().map(|file| &file.path).collect::<BTreeSet<_>>();
+    if paths.len() != files.len() || declared.len() != paths.len() || provided.len() != files.len() || declared != provided {
+        return Err("视觉文档路径与 manifest 不一致或重复".to_owned());
+    }
+    files.iter().map(|file| {
+        safe_relative_path(&file.path)?;
+        Ok((file.path.clone(), file.definition.clone()))
+    }).collect()
+}
+
 fn serialize_project(
     root: &Path,
     request: &SaveProjectRequest,
@@ -3675,6 +3763,8 @@ fn serialize_project(
             + request.buttons.len()
             + request.animations.len()
             + request.actions.len()
+            + request.text_blocks.len()
+            + request.particles.len()
             + 4,
     );
     writes.push((root.join("manifest.yaml"), yaml_bytes(&request.manifest)?));
@@ -3701,6 +3791,14 @@ fn serialize_project(
         safe_relative_path(&action.path)?;
         writes.push((root.join(&action.path), yaml_bytes(&action.definition)?));
     }
+    for file in &request.text_blocks {
+        safe_relative_path(&file.path)?;
+        writes.push((root.join(&file.path), yaml_bytes(&file.definition)?));
+    }
+    for file in &request.particles {
+        safe_relative_path(&file.path)?;
+        writes.push((root.join(&file.path), yaml_bytes(&file.definition)?));
+    }
     if let Some(map) = &request.chapter_map {
         safe_relative_path(&map.path)?;
         writes.push((root.join(&map.path), yaml_bytes(&map.definition)?));
@@ -3720,6 +3818,8 @@ fn managed_deletions(
     previous_paths.extend(previous.buttons.iter().cloned());
     previous_paths.extend(previous.animations.iter().cloned());
     previous_paths.extend(previous.actions.iter().cloned());
+    previous_paths.extend(previous.text_blocks.iter().cloned());
+    previous_paths.extend(previous.particles.iter().cloned());
     if let Some(path) = &previous.chapter_map {
         previous_paths.push(path.clone());
     }
@@ -3728,6 +3828,8 @@ fn managed_deletions(
     next_paths.extend(next.buttons.iter().cloned());
     next_paths.extend(next.animations.iter().cloned());
     next_paths.extend(next.actions.iter().cloned());
+    next_paths.extend(next.text_blocks.iter().cloned());
+    next_paths.extend(next.particles.iter().cloned());
     if let Some(path) = &next.chapter_map {
         next_paths.push(path.clone());
     }
@@ -3790,6 +3892,12 @@ fn document_models(
             serde_json::to_value(definition).map_err(display_error)?,
         );
     }
+    for file in read_visual_files::<TextBlockDefinition>(root, &manifest.text_blocks)? {
+        models.insert(file.path.replace('\\', "/"), serde_json::to_value(file.definition).map_err(display_error)?);
+    }
+    for file in read_visual_files::<ParticleDefinition>(root, &manifest.particles)? {
+        models.insert(file.path.replace('\\', "/"), serde_json::to_value(file.definition).map_err(display_error)?);
+    }
     if let Some(path) = &manifest.chapter_map {
         let definition: ChapterMapDefinition = read_yaml(&root.join(path))?;
         models.insert(
@@ -3841,6 +3949,12 @@ fn document_models_from_request(
             file.path.replace('\\', "/"),
             serde_json::to_value(&file.definition).map_err(display_error)?,
         );
+    }
+    for file in &request.text_blocks {
+        models.insert(file.path.replace('\\', "/"), serde_json::to_value(&file.definition).map_err(display_error)?);
+    }
+    for file in &request.particles {
+        models.insert(file.path.replace('\\', "/"), serde_json::to_value(&file.definition).map_err(display_error)?);
     }
     if let Some(file) = &request.chapter_map {
         models.insert(
@@ -3904,6 +4018,12 @@ fn retain_changed_model_writes(
                             .find(|file| file.path.replace('\\', "/") == key)
                             .map(|file| serde_json::to_value(&file.definition))
                     })
+                    .or_else(|| request.text_blocks.iter()
+                        .find(|file| file.path.replace('\\', "/") == key)
+                        .map(|file| serde_json::to_value(&file.definition)))
+                    .or_else(|| request.particles.iter()
+                        .find(|file| file.path.replace('\\', "/") == key)
+                        .map(|file| serde_json::to_value(&file.definition)))
                     .or_else(|| {
                         request
                             .chapter_map
@@ -4877,6 +4997,8 @@ fn project_fingerprint_with_hashes(
             + manifest.buttons.len()
             + manifest.animations.len()
             + manifest.actions.len()
+            + manifest.text_blocks.len()
+            + manifest.particles.len()
             + 3,
     );
     paths.push(root.join("manifest.yaml"));
@@ -4892,7 +5014,7 @@ fn project_fingerprint_with_hashes(
     for path in &manifest.animations {
         paths.push(root.join(path));
     }
-    for path in &manifest.actions {
+    for path in manifest.actions.iter().chain(&manifest.text_blocks).chain(&manifest.particles) {
         paths.push(root.join(path));
     }
     if let Some(path) = &manifest.chapter_map {
@@ -5066,6 +5188,10 @@ fn analyze_catalog(catalog: &ContentCatalog) -> Vec<EditorDiagnostic> {
             referenced_assets.insert(asset.clone());
         }
     }
+    for text in catalog.text_blocks.values() {
+        if let Some(font) = &text.font { referenced_assets.insert(font.clone()); }
+    }
+    for particle in catalog.particles.values() { referenced_assets.insert(particle.image.clone()); }
     for implicit in ["gui.dialogue_box", "gui.name_box", "sfx.typing"] {
         if catalog.manifest.assets.contains_key(implicit) {
             referenced_assets.insert(implicit.to_owned());
@@ -5105,6 +5231,7 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
     match node {
         SceneNode::Background { next, .. }
         | SceneNode::Sprite { next, .. }
+        | SceneNode::Particle { next, .. }
         | SceneNode::Clear { next, .. }
         | SceneNode::Say { next, .. }
         | SceneNode::LongText { next, .. }
@@ -5200,6 +5327,7 @@ fn is_immediate(node: &SceneNode) -> bool {
             ..
         } => !(*await_completion && *duration_ms > 0),
         SceneNode::Set { .. }
+        | SceneNode::Particle { .. }
         | SceneNode::Condition { .. }
         | SceneNode::Playback { .. }
         | SceneNode::Action { .. }
@@ -5302,6 +5430,9 @@ fn collect_manifest_assets(manifest: &ContentManifest, output: &mut BTreeSet<Str
 
 fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
     match node {
+        SceneNode::Sprite { source: Some(SpriteSource::Image { asset }), .. } => {
+            output.insert(asset.clone());
+        }
         SceneNode::Background {
             background: Some(id),
             ..
@@ -5343,15 +5474,15 @@ fn collect_node_assets(node: &SceneNode, output: &mut BTreeSet<String>) {
         SceneNode::Timeline { tracks, events, .. } => {
             for track in tracks {
                 match track {
-                    TimelineTrack::Sprite {
-                        asset: Some(asset), ..
-                    } => {
-                        output.insert(asset.clone());
+                    TimelineTrack::Sprite { asset, source, .. } => {
+                        if let Some(asset) = source.as_ref().and_then(SpriteSource::image_asset).or(asset.as_deref()) {
+                            output.insert(asset.to_owned());
+                        }
                     }
                     TimelineTrack::Video { asset, .. } => {
                         output.insert(asset.clone());
                     }
-                    TimelineTrack::Sprite { asset: None, .. }
+                    TimelineTrack::Emitter { .. }
                     | TimelineTrack::Camera { .. }
                     | TimelineTrack::Button { .. }
                     | TimelineTrack::Bgm { .. }
@@ -6311,6 +6442,8 @@ mod tests {
             ui_motion_defaults: Default::default(),
             animations: Vec::new(),
             actions: Vec::new(),
+            text_blocks: Vec::new(),
+            particles: Vec::new(),
             chapter_map: None,
         };
         let mut assets = BTreeSet::new();
@@ -6415,6 +6548,8 @@ mod tests {
             ui_motion_defaults: Default::default(),
             animations: Vec::new(),
             actions: Vec::new(),
+            text_blocks: Vec::new(),
+            particles: Vec::new(),
             chapter_map: None,
         }
     }
@@ -6669,6 +6804,51 @@ mod tests {
             read_layout(&root.join("missing")).unwrap().version,
             EditorLayout::default().version
         );
+    }
+
+    #[test]
+    fn scene_text_block_ids_are_optional_ordered_and_omitted_when_empty() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join(".vectspace")).unwrap();
+        // A layout written before the field existed still loads and stays
+        // minimal when it is written back untouched.
+        fs::write(
+            root.join(LAYOUT_RELATIVE_PATH),
+            br#"{"version":1,"scenes":{"main":{"nodes":{},"viewport":null}}}"#,
+        )
+        .unwrap();
+        let old = read_layout(root).unwrap();
+        assert!(old.scenes["main"].text_block_ids.is_empty());
+        let untouched = serde_json::to_string(&old).unwrap();
+        assert!(!untouched.contains("text_block_ids"), "{untouched}");
+
+        // New ids keep their order through serialize -> file -> read_layout,
+        // next to the fields that already shared the scene entry.
+        let mut pinned = old.clone();
+        let scene = pinned.scenes.get_mut("main").unwrap();
+        scene.text_block_ids = vec!["intro.title".to_owned(), "label".to_owned()];
+        scene.groups = vec![nested_group("group-0", vec![node_ref("a"), node_ref("b")])];
+        let text = serde_json::to_string(&pinned).unwrap();
+        assert!(
+            text.contains(r#""text_block_ids":["intro.title","label"]"#),
+            "{text}"
+        );
+        fs::write(root.join(LAYOUT_RELATIVE_PATH), text).unwrap();
+        let reopened = read_layout(root).unwrap();
+        assert_eq!(
+            reopened.scenes["main"].text_block_ids,
+            ["intro.title", "label"]
+        );
+        assert_eq!(reopened.scenes["main"].groups.len(), 1);
+
+        // The scene entry stays strict: only the documented field is new.
+        fs::write(
+            root.join(LAYOUT_RELATIVE_PATH),
+            br#"{"version":1,"scenes":{"main":{"nodes":{},"viewport":null,"text_blocks":[]}}}"#,
+        )
+        .unwrap();
+        assert!(read_layout(root).is_err());
     }
 
     fn nested_group(id: &str, children: Vec<GroupChildRef>) -> SceneGroup {
@@ -7018,11 +7198,303 @@ mod tests {
             buttons: Vec::new(),
             animations: Vec::new(),
             actions: Vec::new(),
+            text_blocks: Vec::new(),
+            particles: Vec::new(),
             chapter_map: None,
             layout: EditorLayout::default(),
             expected_fingerprint: session.fingerprint.clone(),
             import_tokens: vec!["import-1".to_owned()],
         }
+    }
+
+    fn visual_save_request(
+        root: &Path,
+        manifest: ContentManifest,
+        text_blocks: Vec<EditorTextBlockFile>,
+        particles: Vec<EditorParticleFile>,
+    ) -> SaveProjectRequest {
+        SaveProjectRequest {
+            manifest,
+            scenes: vec![EditorSceneFile {
+                path: "scenes/main.yaml".to_owned(),
+                definition: read_yaml(&root.join("scenes/main.yaml")).unwrap(),
+            }],
+            ui_motions: Vec::new(),
+            buttons: Vec::new(),
+            animations: Vec::new(),
+            actions: Vec::new(),
+            text_blocks,
+            particles,
+            chapter_map: None,
+            layout: EditorLayout::default(),
+            expected_fingerprint: String::new(),
+            import_tokens: Vec::new(),
+        }
+    }
+
+    /// Mirrors `save_project_command`'s draft validation with the shared loader.
+    fn validate_visual_draft(
+        root: &Path,
+        request: &SaveProjectRequest,
+    ) -> Result<ContentCatalog, String> {
+        ContentCatalog::from_documents_with_visuals(
+            root.to_path_buf(),
+            request.manifest.clone(),
+            validate_scene_file_set(&request.manifest, &request.scenes)?,
+            validate_ui_motion_file_set(&request.manifest, &request.ui_motions)?,
+            None,
+            &BTreeMap::new(),
+            Some(validate_button_file_set(&request.manifest, &request.buttons)?),
+            Some(validate_animation_file_set(&request.manifest, &request.animations)?),
+            Some(validate_action_file_set(&request.manifest, &request.actions)?),
+            Some(validate_visual_file_set(&request.manifest.text_blocks, &request.text_blocks)?),
+            Some(validate_visual_file_set(&request.manifest.particles, &request.particles)?),
+        )
+        .map_err(display_error)
+    }
+
+    fn visual_file<T>(path: &str, definition: T) -> EditorVisualFile<T> {
+        EditorVisualFile { path: path.to_owned(), definition }
+    }
+
+    fn visual_fixture(root: &Path) -> (ProjectSession, ContentManifest, TextBlockDefinition, ParticleDefinition) {
+        seed_asset_project(root);
+        write_test_png(&root.join("assets/gui/dot.png"), 8, 8);
+        write_test_png(&root.join("assets/gui/huge.png"), 600, 8);
+        let session = asset_session(root);
+        let mut manifest = session.catalog.manifest.clone();
+        manifest.assets.insert(
+            "dot".to_owned(),
+            serde_json::from_value(serde_json::json!({ "kind": "gui", "path": "gui/dot.png" })).unwrap(),
+        );
+        manifest.assets.insert(
+            "huge".to_owned(),
+            serde_json::from_value(serde_json::json!({ "kind": "gui", "path": "gui/huge.png" })).unwrap(),
+        );
+        manifest.text_blocks = vec!["visuals/texts/label.yaml".to_owned()];
+        manifest.particles = vec!["visuals/particles/snow.yaml".to_owned()];
+        let text = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "id": "label", "content": "中文 $x^2$", "width": 400, "height": 100,
+            "font_size": 24, "line_height": 1.3, "padding": 8, "color": "#FFFFFF",
+            "align": "left", "vertical_align": "top", "font": null, "background": null,
+        }))
+        .unwrap();
+        let particle = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "id": "snow", "image": "dot",
+            "area": { "type": "rectangle", "width": 400, "height": 100 },
+            "rate": 40, "burst_count": 20, "max_particles": 200,
+            "lifetime_ms": { "min": 1500, "max": 3000 },
+            "velocity_x": { "min": -20, "max": 20 }, "velocity_y": { "min": 30, "max": 80 },
+            "gravity_x": 0, "gravity_y": 10, "size": { "min": 0.5, "max": 1 },
+            "rotation_deg": { "min": 0, "max": 360 }, "angular_velocity_deg": { "min": -30, "max": 30 },
+            "alpha_start": 1, "alpha_end": 0, "blend": "normal", "seed": 17,
+        }))
+        .unwrap();
+        (session, manifest, text, particle)
+    }
+
+    #[test]
+    fn visual_documents_round_trip_through_the_atomic_save_pipeline() {
+        let directory = tempdir().unwrap();
+        let (session, manifest, text, particle) = visual_fixture(directory.path());
+        let root = session.root.clone();
+        let request = visual_save_request(
+            &root,
+            manifest.clone(),
+            vec![visual_file("visuals/texts/label.yaml", text.clone())],
+            vec![visual_file("visuals/particles/snow.yaml", particle.clone())],
+        );
+        let candidate = validate_visual_draft(&root, &request).unwrap();
+        assert!(candidate.text_blocks.contains_key("label"));
+        assert!(candidate.particles.contains_key("snow"));
+
+        // The first save publishes both documents with the manifest in one journal.
+        let writes = retain_changed_model_writes(
+            &root,
+            &request,
+            serialize_project(&root, &request).unwrap(),
+            &session.document_models,
+        )
+        .unwrap();
+        for path in ["visuals/texts/label.yaml", "visuals/particles/snow.yaml", "manifest.yaml"] {
+            assert!(writes.iter().any(|(target, _)| target == &root.join(path)), "{path}");
+        }
+        let deletes = managed_deletions(&root, &session.catalog.manifest, &request.manifest);
+        assert!(deletes.is_empty());
+        let before = project_fingerprint(&root, &session.catalog.manifest).unwrap();
+        atomic_write_batch_with_deletes(&root, &writes, &deletes).unwrap();
+        let reloaded = ContentCatalog::from_root(root.clone()).unwrap();
+        assert_eq!(reloaded.particles["snow"], particle);
+        assert_eq!(reloaded.text_blocks["label"].content, text.content);
+        let saved = project_fingerprint(&root, &reloaded.manifest).unwrap();
+        assert_ne!(before, saved);
+
+        // A definition edit rewrites exactly that document.
+        let baseline = document_models(&root, &reloaded.manifest, &EditorLayout::default()).unwrap();
+        let mut edited_text = text.clone();
+        edited_text.content = "改动后的文本".to_owned();
+        let edited = visual_save_request(
+            &root,
+            reloaded.manifest.clone(),
+            vec![visual_file("visuals/texts/label.yaml", edited_text)],
+            vec![visual_file("visuals/particles/snow.yaml", particle.clone())],
+        );
+        let changed = retain_changed_model_writes(
+            &root,
+            &edited,
+            serialize_project(&root, &edited).unwrap(),
+            &baseline,
+        )
+        .unwrap();
+        assert_eq!(
+            changed.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(),
+            vec![root.join("visuals/texts/label.yaml")]
+        );
+
+        // Removing a definition deletes its managed file in the same transaction.
+        let mut without_particle = reloaded.manifest.clone();
+        without_particle.particles.clear();
+        assert_eq!(
+            managed_deletions(&root, &reloaded.manifest, &without_particle),
+            vec![root.join("visuals/particles/snow.yaml")]
+        );
+
+        // An external edit to a visual document makes the session stale.
+        fs::write(root.join("visuals/texts/label.yaml"), b"schema_version: 2\nid: label\ncontent: external\nwidth: 10\nheight: 10\n").unwrap();
+        assert_ne!(project_fingerprint(&root, &reloaded.manifest).unwrap(), saved);
+    }
+
+    #[test]
+    fn unused_scene_text_pins_persist_through_the_atomic_save_and_reopen() {
+        let directory = tempdir().unwrap();
+        let (session, manifest, text, particle) = visual_fixture(directory.path());
+        let root = session.root.clone();
+        let layout_path = root.join(LAYOUT_RELATIVE_PATH);
+        let request_with = |manifest: ContentManifest,
+                            texts: Vec<EditorTextBlockFile>,
+                            pins: &[&str]| {
+            let mut request = visual_save_request(
+                &root,
+                manifest,
+                texts,
+                vec![visual_file("visuals/particles/snow.yaml", particle.clone())],
+            );
+            request
+                .layout
+                .scenes
+                .entry("main".to_owned())
+                .or_default()
+                .text_block_ids = pins.iter().map(|pin| (*pin).to_owned()).collect();
+            request
+        };
+
+        // `label` is defined but no Sprite uses it yet: only the layout files
+        // it under the scene, and the first save publishes that pin.
+        let request = request_with(
+            manifest.clone(),
+            vec![visual_file("visuals/texts/label.yaml", text.clone())],
+            &["label"],
+        );
+        validate_visual_draft(&root, &request).unwrap();
+        let writes = retain_changed_model_writes(
+            &root,
+            &request,
+            serialize_project(&root, &request).unwrap(),
+            &session.document_models,
+        )
+        .unwrap();
+        let layout_write = writes
+            .iter()
+            .find(|(target, _)| target == &layout_path)
+            .expect("layout is published with the new text");
+        assert!(String::from_utf8_lossy(&layout_write.1).contains("text_block_ids"));
+        atomic_write_batch_with_deletes(&root, &writes, &[]).unwrap();
+
+        // Reopen: the pin is back and the text document carries no scene data.
+        let reopened = read_layout(&root).unwrap();
+        assert_eq!(reopened.scenes["main"].text_block_ids, ["label"]);
+        let catalog = ContentCatalog::from_root(root.clone()).unwrap();
+        assert!(catalog.text_blocks.contains_key("label"));
+        let text_yaml = fs::read_to_string(root.join("visuals/texts/label.yaml")).unwrap();
+        assert!(!text_yaml.contains("text_block_ids"), "{text_yaml}");
+
+        // Saving the reopened document again rewrites nothing...
+        let baseline = document_models(&root, &catalog.manifest, &reopened).unwrap();
+        let mut again = request_with(
+            catalog.manifest.clone(),
+            vec![visual_file("visuals/texts/label.yaml", text.clone())],
+            &["label"],
+        );
+        again.layout = reopened.clone();
+        let unchanged = retain_changed_model_writes(
+            &root,
+            &again,
+            serialize_project(&root, &again).unwrap(),
+            &baseline,
+        )
+        .unwrap();
+        assert!(unchanged.is_empty(), "{unchanged:?}");
+
+        // ...and moving only the pin rewrites only the layout file.
+        let moved = request_with(
+            catalog.manifest.clone(),
+            vec![visual_file("visuals/texts/label.yaml", text.clone())],
+            &["label", "label_2"],
+        );
+        let changed = retain_changed_model_writes(
+            &root,
+            &moved,
+            serialize_project(&root, &moved).unwrap(),
+            &baseline,
+        )
+        .unwrap();
+        assert_eq!(
+            changed.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(),
+            vec![layout_path.clone()]
+        );
+
+        // Deleting the text removes its file and its pin in one transaction.
+        let mut without_text = catalog.manifest.clone();
+        without_text.text_blocks.clear();
+        let removed = request_with(without_text.clone(), Vec::new(), &[]);
+        let removal_writes = retain_changed_model_writes(
+            &root,
+            &removed,
+            serialize_project(&root, &removed).unwrap(),
+            &baseline,
+        )
+        .unwrap();
+        let removal_deletes = managed_deletions(&root, &catalog.manifest, &without_text);
+        assert_eq!(removal_deletes, vec![root.join("visuals/texts/label.yaml")]);
+        atomic_write_batch_with_deletes(&root, &removal_writes, &removal_deletes).unwrap();
+        assert!(read_layout(&root).unwrap().scenes["main"].text_block_ids.is_empty());
+        assert!(!fs::read_to_string(&layout_path).unwrap().contains("text_block_ids"));
+        assert!(!root.join("visuals/texts/label.yaml").exists());
+    }
+
+    #[test]
+    fn visual_draft_validation_rejects_mismatched_sets_and_invalid_definitions() {
+        let directory = tempdir().unwrap();
+        let (session, manifest, text, particle) = visual_fixture(directory.path());
+        let root = session.root.clone();
+
+        let mismatched = visual_save_request(&root, manifest.clone(), vec![visual_file("visuals/texts/other.yaml", text.clone())], vec![visual_file("visuals/particles/snow.yaml", particle.clone())]);
+        assert!(validate_visual_draft(&root, &mismatched).unwrap_err().contains("manifest"));
+
+        let mut huge = particle.clone();
+        huge.image = "huge".to_owned();
+        let oversized = visual_save_request(&root, manifest.clone(), vec![visual_file("visuals/texts/label.yaml", text.clone())], vec![visual_file("visuals/particles/snow.yaml", huge)]);
+        assert!(validate_visual_draft(&root, &oversized).unwrap_err().contains("512"));
+
+        let mut colliding = particle.clone();
+        colliding.id = "dot".to_owned();
+        let collision = visual_save_request(&root, manifest.clone(), vec![visual_file("visuals/texts/label.yaml", text.clone())], vec![visual_file("visuals/particles/snow.yaml", colliding)]);
+        assert!(validate_visual_draft(&root, &collision).unwrap_err().contains("冲突"));
+
+        let mut wrong_font = text;
+        wrong_font.font = Some("dot".to_owned());
+        let font = visual_save_request(&root, manifest, vec![visual_file("visuals/texts/label.yaml", wrong_font)], vec![visual_file("visuals/particles/snow.yaml", particle)]);
+        assert!(validate_visual_draft(&root, &font).unwrap_err().contains("字体"));
     }
 
     fn replacement_staged_import(root: &Path, old_path: &str) -> StagedImport {

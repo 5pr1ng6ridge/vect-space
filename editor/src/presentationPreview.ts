@@ -19,6 +19,7 @@ import type {
 import type { CurtainSnapshot } from "@vectspace/presentation-core/types";
 
 import { outputPorts } from "./story";
+import { normalizeVisualWorld, spritePreset, LEGACY_BACKGROUND_ID } from "@vectspace/presentation-core/visual";
 import type {
   BackgroundNode,
   CurtainNode,
@@ -194,13 +195,28 @@ export function sceneFrameFromWorld(
     {
       duration_ms: 0,
       tracks: [],
-      sprites: world.sprites,
+      sprites: normalizeVisualWorld(world).sprites,
+      emitters: world.emitters,
       camera: world.camera,
       bgm_volume: 1,
     },
     0,
     geometry,
   );
+}
+
+export function withPreviewBackground<T extends SceneWorldSnapshot>(
+  world: T,
+  background: string | null,
+): Omit<T, "background"> {
+  const normalized = normalizeVisualWorld(world);
+  const sprites: SceneWorldSnapshot["sprites"] = Object.fromEntries(
+    Object.entries(normalized.sprites).filter(
+      ([id]) => id !== LEGACY_BACKGROUND_ID,
+    ),
+  );
+  if (background !== null) sprites[LEGACY_BACKGROUND_ID] = spritePreset("background", { type: "image", asset: background });
+  return { ...normalized, sprites };
 }
 
 /** The world a screen effect shakes/flashes over. */

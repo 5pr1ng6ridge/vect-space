@@ -64,6 +64,13 @@
     "entry_scene": {
       "type": "string"
     },
+    "particles": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "scenes": {
       "type": "array",
       "items": {
@@ -74,6 +81,13 @@
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "text_blocks": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
     },
     "ui_motion_defaults": {
       "$ref": "#/$defs/UiMotionBindings",

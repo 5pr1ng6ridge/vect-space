@@ -51,6 +51,7 @@ import {
   previewAssetsToUrls,
 } from "../api";
 import { projectRequest } from "../story";
+import { buildEditorVisualResources, EMPTY_EDITOR_VISUALS, type EditorVisualResources } from "../visualResources";
 import { sceneRole, WINDOW_ROLE_LABELS } from "../windowInteraction";
 import type {
   EditorProject,
@@ -185,6 +186,7 @@ export function GameplayPreview({
   const [windowNotes, setWindowNotes] = useState<string[]>([]);
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [animations, setAnimations] = useState<AnimationMap>({});
+  const [visuals, setVisuals] = useState<EditorVisualResources>(EMPTY_EDITOR_VISUALS);
   const [needsChoice, setNeedsChoice] = useState<NeedsChoiceState | null>(null);
   const [unreachable, setUnreachable] = useState<string | null>(null);
   const [branchDecisions, setBranchDecisions] = useState<
@@ -405,6 +407,7 @@ export function GameplayPreview({
       setEffects([]);
       setAssets({});
       setAnimations({});
+      setVisuals(EMPTY_EDITOR_VISUALS);
       if (previous !== null) void editorApi.previewSessionStop(previous);
       setStatus("starting");
       try {
@@ -439,15 +442,23 @@ export function GameplayPreview({
           setStatus("idle");
           return;
         }
+        // Own the returned token before resolving resources: a frontend failure
+        // must still stop the runtime the host just installed.
         sessionRef.current = result.session_id;
+        const resolvedUrls = previewAssetsToUrls(result.assets);
+        const visualResources = buildEditorVisualResources(project, resolvedUrls, result);
         setSessionId(result.session_id);
-        setAssets(previewAssetsToUrls(result.assets));
+        setVisuals(visualResources);
+        setAssets(resolvedUrls);
         setAnimations(previewAssetsToAnimations(result.assets));
         applyStory(result.update);
         addNotes(result.notes);
         setStatus("playing");
       } catch (reason) {
         if (generation === generationRef.current) {
+          const failedSession = sessionRef.current;
+          sessionRef.current = null;
+          if (failedSession !== null) void editorApi.previewSessionStop(failedSession);
           setStatus("idle");
           onError(errorMessage(reason));
         }
@@ -975,6 +986,8 @@ export function GameplayPreview({
             <SceneCanvas
               animations={animations}
               assets={assets}
+              textBlocks={visuals.textBlocks}
+              particles={visuals.particles}
               onDiagnostic={onError}
               onSettled={handleSettled}
               paused={status !== "playing"}

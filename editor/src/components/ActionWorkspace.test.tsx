@@ -186,7 +186,7 @@ describe("ActionWorkspace", () => {
       expect(screen.getByLabelText("动作预览播放头")).not.toBeDisabled();
     });
     const characterLayer =
-      harness.kit.applications[0]?.stage.children[0]?.children[1];
+      harness.kit.applications[0]?.stage.children[0];
     expect(characterLayer?.children).toHaveLength(1);
     expect(characterLayer?.children[0]?.position.y).toBe(1080);
 

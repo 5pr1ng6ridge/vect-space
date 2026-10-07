@@ -6,11 +6,12 @@ import type { SidebarTab } from "./ProjectSidebar";
  * that file keeps exporting components only (react-refresh).
  */
 
-/** The five collapsible sections of the project tab, in render order. */
+/** The collapsible sections of the project tab, in render order. */
 export const PROJECT_SECTION_IDS = [
   "ui-motion",
   "button-template",
   "sprite-action",
+  "particle",
   "character",
   "variable",
 ] as const;
@@ -25,6 +26,7 @@ export function createProjectSectionState(): ProjectSectionOpenState {
     "ui-motion": true,
     "button-template": true,
     "sprite-action": true,
+    particle: true,
     character: true,
     variable: true,
   };

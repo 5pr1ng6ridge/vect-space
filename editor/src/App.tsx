@@ -31,6 +31,7 @@ import {
   activeImportTokens as collectActiveImportTokens,
   activePendingAssetIds as collectActivePendingAssetIds,
   applyStagedAsset,
+  firstVisibleAssetId,
   registerPendingImports,
   type PendingAssetImport,
 } from "./assetLibrary";
@@ -55,6 +56,7 @@ import {
   nodeLabel,
   preparePastedNode,
   projectRequest,
+  remapCopiedEmitterInstances,
   renameCharacter,
   renameNode,
   renameSpriteAction,
@@ -128,6 +130,20 @@ import {
   uiMotionReferenceCount,
 } from "./app/libraryCommands";
 import {
+  addVisualDocument,
+  duplicateVisualFile,
+  findVisualFile,
+  newParticleFile,
+  newTextBlockFile,
+  removeVisualDocument,
+  renameVisualDocument,
+  textBlockSceneIds,
+  updateVisualDefinition,
+  visualReferences,
+  VISUAL_KIND_LABELS,
+  type VisualKind,
+} from "./app/visualLibrary";
+import {
   deleteNodes as deleteNodesMutation,
   planChainDeletion,
   planNodeDeletion,
@@ -136,6 +152,7 @@ import {
   routeShowsNode,
   routeShowsScene,
   STORY_ROUTE,
+  visualReturnScene,
   type EditorRoute,
 } from "./app/routes";
 import { isComposing, isTextEntryTarget } from "./ui/keyboard";
@@ -183,6 +200,12 @@ const ButtonWorkspace = lazy(() =>
 const ActionWorkspace = lazy(() =>
   import("./components/ActionWorkspace").then((module) => ({
     default: module.ActionWorkspace,
+  })),
+);
+
+const VisualWorkspace = lazy(() =>
+  import("./components/VisualWorkspace").then((module) => ({
+    default: module.VisualWorkspace,
   })),
 );
 
@@ -283,6 +306,7 @@ function EditorApp(): ReactElement {
   const uiMotionTarget = route.kind === "uiMotion" ? route.id : null;
   const actionTarget = route.kind === "action" ? route.id : null;
   const buttonTarget = route.kind === "button" ? route.id : null;
+  const visualTarget = route.kind === "visual" ? route : null;
   const mapWorkspace = route.kind === "map";
   const [uiMotionDialog, setUiMotionDialog] = useState<string | null>(null);
   const [buttonDialog, setButtonDialog] = useState<string | null>(null);
@@ -1138,7 +1162,11 @@ function EditorApp(): ReactElement {
             file.definition.entry ||
             Object.keys(file.definition.nodes)[0] ||
             insertedId;
-          file.definition.nodes[insertedId] = defaultNode(type, fallback);
+          file.definition.nodes[insertedId] = defaultNode(
+            type,
+            fallback,
+            base.scenes.map((scene) => scene.definition),
+          );
           ensureSceneLayout(base.layout, activeSceneId).nodes[insertedId] = {
             x: Math.round(position.x / 16) * 16,
             y: Math.round(position.y / 16) * 16,
@@ -1425,12 +1453,16 @@ function EditorApp(): ReactElement {
     if (currentScene === undefined) return;
     const source = currentScene.nodes[nodeId];
     if (source === undefined) return;
-    const duplicate = structuredClone(source);
     const id = uniqueNodeId(currentScene, `${nodeId}_copy`);
     commit((draft) => {
       const file = findScene(draft, activeSceneId);
       if (file === undefined || file.definition.nodes[nodeId] === undefined)
         return;
+      const duplicate = structuredClone(source);
+      remapCopiedEmitterInstances(
+        [duplicate],
+        draft.scenes.map((scene) => scene.definition),
+      );
       file.definition.nodes[id] = duplicate;
       const sceneLayout = ensureSceneLayout(draft.layout, activeSceneId);
       const origin = sceneLayout.nodes[nodeId] ?? { x: 0, y: 0 };
@@ -1461,6 +1493,7 @@ function EditorApp(): ReactElement {
       "duplicate",
       currentProject.manifest,
       currentProject.buttons ?? [],
+      currentProject.scenes.map((file) => file.definition),
     );
     commit((draft) => {
       const file = findScene(draft, activeSceneId);
@@ -1534,6 +1567,7 @@ function EditorApp(): ReactElement {
         "paste",
         currentProject.manifest,
         currentProject.buttons ?? [],
+        currentProject.scenes.map((file) => file.definition),
       );
       commit((draft) => {
         const file = findScene(draft, activeSceneId);
@@ -1553,12 +1587,17 @@ function EditorApp(): ReactElement {
     commit((draft) => {
       const file = findScene(draft, activeSceneId);
       if (file === undefined) return;
-      file.definition.nodes[id] = preparePastedNode(
+      const node = preparePastedNode(
         clipboard.node,
         draft.manifest,
         clipboard.sourceCharacterId,
         draft.buttons ?? [],
       );
+      remapCopiedEmitterInstances(
+        [node],
+        draft.scenes.map((scene) => scene.definition),
+      );
+      file.definition.nodes[id] = node;
       ensureSceneLayout(draft.layout, activeSceneId).nodes[id] = snapped;
     });
     setSelectedNodeId(id);
@@ -1975,6 +2014,104 @@ function EditorApp(): ReactElement {
     setNotice(`已复制立绘动作 ${id} → ${file.definition.id}。`);
   };
 
+  const createVisual = (
+    kind: VisualKind,
+    rawId: string,
+    sceneId?: string,
+  ): boolean => {
+    const id = rawId.trim();
+    const currentProject = editorStateRef.current.project ?? project;
+    const reason = idUnavailableReason(kind, id, currentProject);
+    if (reason !== null) {
+      setError(reason);
+      return false;
+    }
+    const file =
+      kind === "textBlock"
+        ? newTextBlockFile(id)
+        : newParticleFile(
+            id,
+            firstVisibleAssetId(currentProject.assets, currentProject.layout, [
+              "gui",
+              "sprite",
+            ]) ?? "",
+          );
+    // The pin is part of the same commit, so one undo removes both the new
+    // definition and its place in the scene's group.
+    commit((draft) =>
+      addVisualDocument(draft, kind, file, {
+        sceneIds: sceneId === undefined ? [] : [sceneId],
+      }),
+    );
+    setRoute({
+      kind: "visual",
+      visual: kind,
+      id,
+      ...(kind === "textBlock" && sceneId !== undefined ? { sceneId } : {}),
+    });
+    return true;
+  };
+
+  const renameVisual = (
+    kind: VisualKind,
+    previousId: string,
+    rawId: string,
+  ): boolean => {
+    const nextId = rawId.trim();
+    const currentProject = editorStateRef.current.project ?? project;
+    const reason = idUnavailableReason(kind, nextId, currentProject, {
+      previous: previousId,
+    });
+    if (reason !== null) {
+      setError(reason);
+      return false;
+    }
+    commit((draft) => renameVisualDocument(draft, kind, previousId, nextId));
+    if (visualTarget?.visual === kind && visualTarget.id === previousId)
+      setRoute({ ...visualTarget, id: nextId });
+    setNotice(
+      kind === "particle"
+        ? `已重命名粒子效果 ${previousId} → ${nextId}；引用它的旧存档发射器需要重新开始该场景。`
+        : `已重命名固定文本块 ${previousId} → ${nextId}。`,
+    );
+    return true;
+  };
+
+  const duplicateVisual = (kind: VisualKind, id: string): void => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const file = duplicateVisualFile(
+      currentProject,
+      kind,
+      id,
+      (candidate) => idUnavailableReason(kind, candidate, currentProject) !== null,
+    );
+    if (file === null) return;
+    // A copy is filed wherever its source is listed, so it appears next to it.
+    const sceneIds =
+      kind === "textBlock" ? textBlockSceneIds(currentProject, id) : [];
+    commit((draft) => addVisualDocument(draft, kind, file, { sceneIds }));
+    setNotice(`已复制${VISUAL_KIND_LABELS[kind]} ${id} → ${file.definition.id}。`);
+  };
+
+  const deleteVisual = (kind: VisualKind, id: string): void => {
+    const currentProject = editorStateRef.current.project ?? project;
+    const references = visualReferences(currentProject, kind, id);
+    if (references.length > 0) {
+      setError(
+        `${VISUAL_KIND_LABELS[kind]} ${id} 仍被 ${references.length} 处引用${formatReferenceList(references)}，不能删除。`,
+      );
+      return;
+    }
+    if (findVisualFile(currentProject, kind, id) === undefined) return;
+    commitUndoable(
+      (draft) => removeVisualDocument(draft, kind, id),
+      `移除${VISUAL_KIND_LABELS[kind]}`,
+      `已移除${VISUAL_KIND_LABELS[kind]} ${id}。`,
+    );
+    if (visualTarget?.visual === kind && visualTarget.id === id)
+      setRoute(STORY_ROUTE);
+  };
+
   const duplicateButtonTemplate = (id: string): void => {
     const currentProject = editorStateRef.current.project ?? project;
     const file = duplicateButtonFile(currentProject, id);
@@ -2210,6 +2347,57 @@ function EditorApp(): ReactElement {
                 .catch((reason: unknown) => reportCommandError(reason));
             }}
             path={actionFile.path}
+          />
+        </Suspense>
+      </>
+    );
+  }
+
+  const visualFile =
+    visualTarget === null
+      ? undefined
+      : findVisualFile(project, visualTarget.visual, visualTarget.id);
+  if (visualTarget !== null && visualFile !== undefined) {
+    workspace = (
+      <>
+        <Suspense fallback={<WorkspaceFallback />}>
+          <VisualWorkspace
+            animationMap={animationMap}
+            dirty={dirty}
+            file={visualFile}
+            key={`${visualTarget.visual}/${visualTarget.id}`}
+            kind={visualTarget.visual}
+            onBack={() => {
+              if (!flushBeforeNavigation()) return;
+              // A text opened from a scene's group returns to that scene.
+              const origin = visualReturnScene(
+                visualTarget,
+                project.scenes.map((file) => file.definition.id),
+                activeSceneId,
+              );
+              if (origin !== null) {
+                setActiveSceneId(origin);
+                setSelectedNodeId(null);
+              }
+              setRoute(STORY_ROUTE);
+            }}
+            onChange={(definition) =>
+              commit((draft) =>
+                updateVisualDefinition(
+                  draft,
+                  visualTarget.visual,
+                  visualTarget.id,
+                  definition,
+                ),
+              )
+            }
+            onRedo={redo}
+            onSave={() => void saveProject()}
+            onUndo={undo}
+            onValidate={validateWholeProject}
+            project={project}
+            redoAvailable={future.length > 0}
+            undoAvailable={past.length > 0}
           />
         </Suspense>
       </>
@@ -2651,6 +2839,22 @@ function EditorApp(): ReactElement {
                 if (!flushBeforeNavigation()) return;
                 setRoute({ kind: "action", id });
               }}
+              visualLibrary={{
+                onCreate: (kind, id, sceneId) =>
+                  flushBeforeNavigation() && createVisual(kind, id, sceneId),
+                onRename: renameVisual,
+                onDuplicate: duplicateVisual,
+                onDelete: deleteVisual,
+                onEdit: (kind, id, sceneId) => {
+                  if (!flushBeforeNavigation()) return;
+                  setRoute({
+                    kind: "visual",
+                    visual: kind,
+                    id,
+                    ...(sceneId === undefined ? {} : { sceneId }),
+                  });
+                },
+              }}
               onSelectScene={(sceneId) => {
                 if (!flushBeforeNavigation()) return;
                 setActiveSceneId(sceneId);
@@ -2666,10 +2870,10 @@ function EditorApp(): ReactElement {
                 }))
               }
               sidebarItemOpen={sidebarItemOpen}
-              onToggleSidebarItem={(key) =>
+              onToggleSidebarItem={(key, defaultOpen = true) =>
                 setSidebarItemOpen((current) => ({
                   ...current,
-                  [key]: !(current[key] ?? true),
+                  [key]: !(current[key] ?? defaultOpen),
                 }))
               }
               project={project}

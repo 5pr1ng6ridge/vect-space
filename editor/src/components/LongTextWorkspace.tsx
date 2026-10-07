@@ -20,6 +20,9 @@ import {
 import { WorkspaceHeader } from "../shell/WorkspaceHeader";
 import { Button } from "../ui/Button";
 import { projectRequest } from "../story";
+import { withPreviewBackground } from "../presentationPreview";
+import { previewAssetsToUrls } from "../api";
+import { buildEditorVisualResources, EMPTY_EDITOR_VISUALS, type EditorVisualResources } from "../visualResources";
 import {
   selectGameplayFont,
   useGameplayFont,
@@ -148,6 +151,8 @@ export function LongTextWorkspace({
     null,
   );
   const [sceneUpdate, setSceneUpdate] = useState<RuntimeUpdate | null>(null);
+  const [visuals, setVisuals] = useState<EditorVisualResources>(EMPTY_EDITOR_VISUALS);
+  const [resolvedSceneUrls, setResolvedSceneUrls] = useState<Record<string, string> | null>(null);
   const sceneUrls = useMemo(
     () =>
       Object.fromEntries(
@@ -203,17 +208,15 @@ export function LongTextWorkspace({
             ...sceneUpdate,
             snapshot: {
               ...sceneUpdate.snapshot,
-              world: {
-                ...sceneUpdate.snapshot.world,
-                background: backgroundId,
-              },
+              world: backgroundChoice === "__current__" ? sceneUpdate.snapshot.world
+                : withPreviewBackground(sceneUpdate.snapshot.world, backgroundId),
             },
             // This is an authoring still, not a second runtime presentation. Drawing
             // only the resolved snapshot keeps inherited scene objects without
             // replaying sounds or transitions when an author changes the background.
             cues: [],
           },
-    [sceneUpdate, backgroundId],
+    [sceneUpdate, backgroundId, backgroundChoice],
   );
   const backgroundAsset =
     backgroundId === null ? undefined : assetsById.get(backgroundId);
@@ -429,8 +432,23 @@ export function LongTextWorkspace({
           `已捕获真实进入状态（${result.trace.length} 个边界）`,
         );
         setPreviewUnavailable(false);
+        // Hosts that predate resolved preview assets fall back to the draft's
+        // registered files (`project` is already this effect's dependency).
+        const urls =
+          result.assets === undefined
+            ? Object.fromEntries(
+                project.assets.map((asset) => [
+                  asset.id,
+                  assetUrl(asset.absolute_path),
+                ]),
+              )
+            : previewAssetsToUrls(result.assets);
+        setVisuals(buildEditorVisualResources(project, urls, result));
+        setResolvedSceneUrls(urls);
         setSceneUpdate(result.update);
-        setPreviewBackgroundId(result.update.snapshot.world.background);
+        const world = result.update.snapshot.world;
+        const source = world.sprites.__background__?.source;
+        setPreviewBackgroundId(source?.type === "image" ? source.asset : world.background ?? null);
       } catch (error: unknown) {
         if (generation !== previewRequestGeneration.current) return;
         setPreviewContextError(
@@ -876,7 +894,9 @@ export function LongTextWorkspace({
                 <>
                   <SceneCanvas
                     animations={animationMap}
-                    assets={sceneUrls}
+                    assets={resolvedSceneUrls ?? sceneUrls}
+                    textBlocks={visuals.textBlocks}
+                    particles={visuals.particles}
                     key={backgroundChoice}
                     onDiagnostic={setPreviewContextError}
                     onSettled={() => undefined}

@@ -40,6 +40,9 @@ use crate::model::{
 };
 use crate::text_template::{self, MAX_VARIABLE_STRING_BYTES};
 
+mod visuals;
+use crate::visual::{ParticleDefinition, SpriteSource, TextBlockDefinition};
+
 const CONTENT_SCHEMA_VERSION: u32 = 2;
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 256;
@@ -88,6 +91,8 @@ pub struct ContentCatalog {
     pub animations: BTreeMap<String, ImageAnimationDefinition>,
     /// Validated reusable sprite actions, keyed by action id.
     pub actions: BTreeMap<String, SpriteActionDefinition>,
+    pub text_blocks: BTreeMap<String, TextBlockDefinition>,
+    pub particles: BTreeMap<String, ParticleDefinition>,
     /// Geometry measured once while the catalog was built.  The shared image
     /// resolver needs a stable layout size per animation so switching frames
     /// can never move or resize an object, and re-probing headers on every
@@ -133,6 +138,9 @@ impl ContentCatalog {
         )?;
         let actions = load_actions(&root, &manifest.actions)?;
         validate_action_namespace(&actions, &manifest.assets, &animations)?;
+        let text_blocks = visuals::documents(&root, &manifest.text_blocks, None, |value: &TextBlockDefinition| &value.id)?;
+        let particles = visuals::documents(&root, &manifest.particles, None, |value: &ParticleDefinition| &value.id)?;
+        visuals::validate_documents(&manifest, &text_blocks, &particles, &assets_root, &BTreeMap::new(), &animations, &actions)?;
 
         let ui_motions = load_ui_motions(&root, &manifest.ui_motions)?;
         validate_ui_motion_bindings(&manifest.ui_motion_defaults, &ui_motions)?;
@@ -180,6 +188,7 @@ impl ContentCatalog {
             &buttons,
             &actions,
         )?;
+        visuals::validate_scenes(&scenes, &manifest.assets, &text_blocks, &particles)?;
         let chapter_map = load_chapter_map(
             &root,
             manifest.chapter_map.as_deref(),
@@ -198,6 +207,8 @@ impl ContentCatalog {
             chapter_map,
             animations,
             actions,
+            text_blocks,
+            particles,
             animation_metrics,
         })
     }
@@ -266,6 +277,19 @@ impl ContentCatalog {
         animation_files: Option<BTreeMap<String, ImageAnimationDefinition>>,
         action_files: Option<BTreeMap<String, SpriteActionDefinition>>,
     ) -> Result<Self, ContentError> {
+        Self::from_documents_with_visuals(root, manifest, scenes, ui_motion_files, chapter_map, asset_overrides, button_files, animation_files, action_files, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_documents_with_visuals(
+        root: PathBuf, manifest: ContentManifest, scenes: BTreeMap<String, SceneDefinition>,
+        ui_motion_files: BTreeMap<String, UiMotionPreset>, chapter_map: Option<ChapterMapDefinition>,
+        asset_overrides: &BTreeMap<String, PathBuf>, button_files: Option<BTreeMap<String, ButtonTemplate>>,
+        animation_files: Option<BTreeMap<String, ImageAnimationDefinition>>,
+        action_files: Option<BTreeMap<String, SpriteActionDefinition>>,
+        text_files: Option<BTreeMap<String, TextBlockDefinition>>,
+        particle_files: Option<BTreeMap<String, ParticleDefinition>>,
+    ) -> Result<Self, ContentError> {
         let root = canonical_directory(&root)?;
         if manifest.schema_version != CONTENT_SCHEMA_VERSION {
             return Err(ContentError::Validation(format!(
@@ -311,6 +335,10 @@ impl ContentCatalog {
             None => load_actions(&root, &manifest.actions)?,
         };
         validate_action_namespace(&actions, &manifest.assets, &animations)?;
+        let text_blocks = visuals::documents(&root, &manifest.text_blocks, text_files, |value: &TextBlockDefinition| &value.id)?;
+        let particles = visuals::documents(&root, &manifest.particles, particle_files, |value: &ParticleDefinition| &value.id)?;
+        visuals::validate_documents(&manifest, &text_blocks, &particles, &assets_root, asset_overrides, &animations, &actions)?;
+        visuals::validate_scenes(&scenes, &manifest.assets, &text_blocks, &particles)?;
 
         for (scene_id, scene) in &scenes {
             if scene.schema_version != CONTENT_SCHEMA_VERSION {
@@ -367,8 +395,14 @@ impl ContentCatalog {
             chapter_map,
             animations,
             actions,
+            text_blocks,
+            particles,
             animation_metrics,
         })
+    }
+
+    pub fn validate_sprite_source(&self, source: &SpriteSource) -> Result<(), ContentError> {
+        visuals::source(source, &self.manifest.assets, &self.text_blocks)
     }
 
     pub fn assets_root(&self) -> &Path {
@@ -528,6 +562,8 @@ impl ContentCatalog {
             &target.join("sprite-action.schema.json"),
             &schema_for!(SpriteActionDefinition),
         )?;
+        write_schema(&target.join("text-block.schema.json"), &schema_for!(TextBlockDefinition))?;
+        write_schema(&target.join("particle.schema.json"), &schema_for!(ParticleDefinition))?;
         Ok(())
     }
 }
@@ -1519,6 +1555,8 @@ fn validate_manifest_paths(manifest: &ContentManifest) -> Result<(), ContentErro
     for path in &manifest.actions {
         register("action", path)?;
     }
+    for path in &manifest.text_blocks { register("text_block", path)?; }
+    for path in &manifest.particles { register("particle", path)?; }
     if let Some(path) = &manifest.chapter_map {
         register("chapter_map", path)?;
     }
@@ -1751,6 +1789,7 @@ fn validate_scenes(
                 }
                 SceneNode::Sprite {
                     action,
+                    source,
                     asset,
                     character,
                     expression,
@@ -1763,7 +1802,7 @@ fn validate_scenes(
                     next,
                     ..
                 } => {
-                    if *action == SpriteAction::Show && asset.is_none() && character.is_none() {
+                    if *action == SpriteAction::Show && source.is_none() && asset.is_none() && character.is_none() {
                         return node_error(
                             scene_id,
                             node_id,
@@ -1771,7 +1810,7 @@ fn validate_scenes(
                         );
                     }
                     if let Some(id) = asset {
-                        require_asset(assets, id, AssetKind::Sprite, scene_id, node_id)?;
+                        visuals::source(&SpriteSource::Image { asset: id.clone() }, assets, &BTreeMap::new())?;
                     }
                     if let Some(character_id) = character {
                         let Some(character_definition) = characters.get(character_id) else {
@@ -1815,6 +1854,9 @@ fn validate_scenes(
                     if let Some(duration) = crossfade_ms {
                         validate_duration(*duration, scene_id, node_id)?;
                     }
+                    require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::Particle { next, .. } => {
                     require_node(scene, next, scene_id, node_id)?;
                 }
                 SceneNode::Clear {
@@ -2548,7 +2590,10 @@ fn validate_timeline(
                     return node_error(scene_id, node_id, "同一立绘不能出现多条时间线轨道");
                 }
                 if let Some(asset) = asset {
-                    require_asset(assets, asset, AssetKind::Sprite, scene_id, node_id)?;
+                    if !assets.get(asset).is_some_and(|definition| matches!(definition.kind,
+                        AssetKind::Background | AssetKind::Sprite | AssetKind::Gui)) {
+                        return node_error(scene_id, node_id, "Sprite 时间线必须引用图片来源");
+                    }
                 }
                 (
                     channels,
@@ -2564,6 +2609,13 @@ fn validate_timeline(
                     ],
                     true,
                 )
+            }
+            TimelineTrack::Emitter { emitter_id, channels, .. } => {
+                validate_identifier("timeline emitter id", emitter_id)?;
+                if !track_ids.insert(format!("emitter:{emitter_id}")) {
+                    return node_error(scene_id, node_id, "同一发射器不能出现多条时间线轨道");
+                }
+                (channels, &["x", "y", "scale", "rotation_deg", "opacity", "z"], true)
             }
             TimelineTrack::Camera { channels } => {
                 if !track_ids.insert("camera".to_owned()) {
@@ -5333,6 +5385,8 @@ mod tests {
         sprite_scenes.get_mut("prologue").unwrap().nodes.insert(
             "invalid_sprite_position".to_owned(),
             SceneNode::Sprite {
+                source: None, sprite_kind: None, space: None, layout: None,
+                scale_x: None, scale_y: None, rotation_deg: None, anchor_x: None, anchor_y: None,
                 sprite_id: "nan".to_owned(),
                 action: SpriteAction::Show,
                 asset: Some("sprite.jelly".to_owned()),

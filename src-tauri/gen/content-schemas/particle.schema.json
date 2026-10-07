@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ParticleDefinition",
+  "type": "object",
+  "properties": {
+    "alpha_end": {
+      "type": "number",
+      "format": "float",
+      "default": 0.0
+    },
+    "alpha_start": {
+      "type": "number",
+      "format": "float",
+      "default": 1.0
+    },
+    "angular_velocity_deg": {
+      "$ref": "#/$defs/ParticleRange",
+      "default": {
+        "max": 0.0,
+        "min": 0.0
+      }
+    },
+    "area": {
+      "$ref": "#/$defs/EmissionArea",
+      "default": {
+        "type": "point"
+      }
+    },
+    "blend": {
+      "$ref": "#/$defs/ParticleBlend",
+      "default": "normal"
+    },
+    "burst_count": {
+      "type": "integer",
+      "format": "uint32",
+      "default": 0,
+      "minimum": 0
+    },
+    "gravity_x": {
+      "type": "number",
+      "format": "float",
+      "default": 0.0
+    },
+    "gravity_y": {
+      "type": "number",
+      "format": "float",
+      "default": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "image": {
+      "type": "string"
+    },
+    "lifetime_ms": {
+      "$ref": "#/$defs/ParticleRange",
+      "default": {
+        "max": 2000.0,
+        "min": 1000.0
+      }
+    },
+    "max_particles": {
+      "type": "integer",
+      "format": "uint32",
+      "default": 500,
+      "minimum": 0
+    },
+    "rate": {
+      "type": "number",
+      "format": "float",
+      "default": 0.0
+    },
+    "rotation_deg": {
+      "$ref": "#/$defs/ParticleRange",
+      "default": {
+        "max": 0.0,
+        "min": 0.0
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "seed": {
+      "type": "integer",
+      "format": "uint32",
+      "default": 0,
+      "minimum": 0
+    },
+    "size": {
+      "$ref": "#/$defs/ParticleRange",
+      "default": {
+        "max": 1.0,
+        "min": 1.0
+      }
+    },
+    "velocity_x": {
+      "$ref": "#/$defs/ParticleRange",
+      "default": {
+        "max": 0.0,
+        "min": 0.0
+      }
+    },
+    "velocity_y": {
+      "$ref": "#/$defs/ParticleRange",
+      "default": {
+        "max": 0.0,
+        "min": 0.0
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "image"
+  ],
+  "$defs": {
+    "EmissionArea": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "point"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "height": {
+              "type": "number",
+              "format": "float"
+            },
+            "type": {
+              "type": "string",
+              "const": "rectangle"
+            },
+            "width": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "width",
+            "height"
+          ]
+        }
+      ]
+    },
+    "ParticleBlend": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "add"
+      ]
+    },
+    "ParticleRange": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": "number",
+          "format": "float"
+        },
+        "min": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    }
+  }
+}

@@ -983,8 +983,7 @@ describe("PresentationController session curtain", () => {
   }
 
   function backgroundUrls(kit: MemoryKit): string[] {
-    const children = (kit.applications[0]?.stage.children[0]?.children[0]
-      ?.children ?? []) as { texture?: { url?: string } }[];
+    const children = (kit.applications[0]?.stage.children[0]?.children ?? []) as { texture?: { url?: string } }[];
     return children
       .map((child) => child.texture?.url ?? "")
       .filter((url) => url.length > 0);
@@ -1072,9 +1071,8 @@ describe("PresentationController session curtain", () => {
     expect(kit.applications[0]?.stage.children[2]?.children ?? []).toHaveLength(
       0,
     );
-    const backgrounds = (kit.applications[0]?.stage.children[0]?.children[0]
-      ?.children ?? []) as { label: string; mask: unknown }[];
-    expect(backgrounds.every((child) => child.mask === null)).toBe(true);
+    const backgrounds = (kit.applications[0]?.stage.children[0]?.children ?? []) as { label: string; mask: { label: string } | null }[];
+    expect(backgrounds.every((child) => child.mask === null || child.mask.label === "layout:__background__")).toBe(true);
     expect(backgrounds.some((child) => child.label.endsWith("#feather"))).toBe(
       false,
     );

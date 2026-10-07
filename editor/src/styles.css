@@ -2544,6 +2544,11 @@ body.timeline-resizing {
   min-height: 0;
   grid-template-columns: 320px minmax(0, 1fr);
 }
+.visual-workspace-preview {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
 .action-side-panel {
   overflow-y: auto;
   padding: 12px;
@@ -2646,6 +2651,85 @@ body.timeline-resizing {
   background: #020307;
   container-type: size;
   place-items: center;
+}
+.particle-emission-region {
+  position: absolute;
+  border: 1px dashed #7ad7ff;
+  background: rgb(122 215 255 / 5%);
+  pointer-events: none;
+  transform-origin: center;
+}
+.particle-emission-center,
+.particle-emission-handle {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 2px solid #08111d;
+  background: #7ad7ff;
+  pointer-events: auto;
+  touch-action: none;
+  translate: -50% -50%;
+}
+.particle-emission-center {
+  border-radius: 50%;
+  cursor: move;
+}
+.particle-emission-handle {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: #fff0a8;
+  cursor: nwse-resize;
+}
+.particle-emission-center:focus-visible,
+.particle-emission-handle:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.particle-emission-label {
+  position: absolute;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: rgb(5 10 18 / 88%);
+  color: #a6e7ff;
+  font: 10px monospace;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.particle-emission-handle-n,
+.particle-emission-handle-s {
+  cursor: ns-resize;
+}
+.particle-emission-handle-e,
+.particle-emission-handle-w {
+  cursor: ew-resize;
+}
+.particle-emission-handle-ne,
+.particle-emission-handle-sw {
+  cursor: nesw-resize;
+}
+.particle-emission-center.is-dragging {
+  cursor: grabbing;
+}
+.particle-emission-center .particle-emission-label {
+  top: calc(100% + 4px);
+  left: 50%;
+  translate: -50% 0;
+}
+.particle-emission-region .particle-emission-size {
+  right: 0;
+  bottom: calc(100% + 4px);
+}
+.particle-emission-region.is-resizing {
+  border-style: solid;
+}
+.visual-preview-modes {
+  margin-bottom: 8px;
+}
+.scene-text-group {
+  margin: 0 0 4px 14px;
+  padding-top: 4px;
 }
 .cue-preview-transport {
   display: flex;

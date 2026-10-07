@@ -61,6 +61,7 @@ export const NODE_ICONS: Record<NodeType, LucideIcon> = {
   background: Image,
   curtain: Theater,
   sprite: SquareDashedMousePointer,
+  particle: Sparkles,
   clear: Trash2,
   camera: Camera,
   screen_effect: Zap,

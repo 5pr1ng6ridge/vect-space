@@ -1,4 +1,4 @@
-import katex from "katex";
+import { renderMarkupFormula } from "@vectspace/presentation-core/static-markup";
 import { memo, useMemo, type ReactElement } from "react";
 
 import { parseMarkup, type MarkupUnit } from "@vectspace/text";
@@ -74,13 +74,7 @@ function renderUnit(unit: MarkupUnit, index: number): ReactElement | null {
         aria-hidden="true"
         className={`markup-unit math-unit${unit.display ? " display-math" : ""}`}
         dangerouslySetInnerHTML={{
-          __html: katex.renderToString(unit.latex, {
-            displayMode: unit.display,
-            throwOnError: false,
-            strict: "ignore",
-            trust: false,
-            output: "html",
-          }),
+          __html: renderMarkupFormula(unit.latex, unit.display),
         }}
         key={`math-${index}-${unit.latex}`}
       />

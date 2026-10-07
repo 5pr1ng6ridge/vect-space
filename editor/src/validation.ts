@@ -1,4 +1,6 @@
 import { outputPorts } from "./story";
+import { validateSpriteAuthoring, validateVisualDocuments } from "./visualValidation";
+import { validateEmitter } from "@vectspace/presentation-core/particles";
 import { validateTemplate } from "./textTemplate";
 import {
   isWindowVariable,
@@ -54,6 +56,7 @@ const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
 export function validateLive(project: EditorProject): EditorDiagnostic[] {
   const diagnostics: EditorDiagnostic[] = [];
   validateManagedDocumentPaths(project, diagnostics);
+  diagnostics.push(...validateVisualDocuments(project));
   const sceneById = new Map(
     project.scenes.map(
       (file) => [file.definition.id, file.definition] as const,
@@ -961,6 +964,14 @@ function validateManagedDocumentPaths(
       "action",
       path,
     ]),
+    ...(project.manifest.text_blocks ?? []).map((path): [string, string] => [
+      "text_block",
+      path,
+    ]),
+    ...(project.manifest.particles ?? []).map((path): [string, string] => [
+      "particle",
+      path,
+    ]),
   ];
   if (project.manifest.chapter_map != null)
     paths.push(["chapter_map", project.manifest.chapter_map]);
@@ -1387,11 +1398,12 @@ function validateNode(
       break;
     case "sprite":
       if (!ID_PATTERN.test(node.sprite_id))
-        issue("invalid_sprite_id", "立绘实例 ID 非法");
+        issue("invalid_sprite_id", "Sprite 实例 ID 非法");
+      validateSpriteAuthoring(project, node, issue);
       checkAsset(
         node.asset,
         "sprite",
-        node.action === "show" && node.character == null,
+        node.action === "show" && node.character == null && node.source === undefined,
       );
       if (node.character != null) {
         const character = project.manifest.characters[node.character];
@@ -1442,6 +1454,18 @@ function validateNode(
         (!Number.isFinite(node.opacity) || node.opacity < 0 || node.opacity > 1)
       ) {
         issue("invalid_opacity", "透明度必须在 0–1 之间");
+      }
+      break;
+    case "particle":
+      if (!ID_PATTERN.test(node.emitter_id))
+        issue("invalid_emitter_id", "发射器实例 ID 非法");
+      if (node.action !== "stop" && !(project.particles ?? []).some((file) => file.definition.id === node.particle))
+        issue("unknown_particle_definition", "start / burst 必须引用有效粒子定义");
+      try {
+        validateEmitter({ ...node, particle: node.particle ?? "", seed: node.seed ?? 0, generation: 0 });
+        if (!Number.isInteger(node.z)) throw new Error("层级 Z 必须是整数");
+      } catch (reason) {
+        issue("invalid_emitter_transform", reason instanceof Error ? reason.message : String(reason));
       }
       break;
     case "clear":
@@ -1825,8 +1849,10 @@ function validateNode(
         const trackId =
           track.type === "sprite"
             ? `sprite:${track.sprite_id}`
-            : track.type === "button"
-              ? `button:${track.instance_id}`
+            : track.type === "emitter"
+              ? `emitter:${track.emitter_id}`
+              : track.type === "button"
+                ? `button:${track.instance_id}`
               : track.type === "ambience"
                 ? `ambience:${track.slot}`
                 : track.type;
@@ -1850,9 +1876,17 @@ function validateNode(
               issue("invalid_video_clip", "视频裁剪终点必须晚于起点");
             }
           }
-        } else if (track.type === "sprite")
+        } else if (track.type === "sprite") {
+          validateSpriteAuthoring(project, track, issue);
           checkAsset(track.asset, "sprite", false);
-        else if (
+        } else if (track.type === "emitter") {
+          if (!ID_PATTERN.test(track.emitter_id))
+            issue("invalid_emitter_id", "发射器实例 ID 非法");
+          if (!(sceneDefinition !== undefined && Object.values(sceneDefinition.nodes).some(
+            (candidate) => candidate.type === "particle" && candidate.action === "start" && candidate.emitter_id === track.emitter_id,
+          )))
+            issue("unknown_emitter_instance", `时间线引用了未启动的发射器实例：${track.emitter_id}`);
+        } else if (
           track.type === "button" &&
           !(
             sceneDefinition !== undefined &&
@@ -2498,6 +2532,8 @@ function validateButtonAction(
 
 function timelineChannels(track: TimelineTrack): string[] {
   switch (track.type) {
+    case "emitter":
+      return ["x", "y", "scale", "rotation_deg", "opacity", "z"];
     case "sprite":
       return [
         "x",

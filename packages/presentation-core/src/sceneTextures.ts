@@ -21,6 +21,8 @@ export interface SceneTextureLoadFailure {
 
 export interface SceneTextureStoreOptions<T extends SceneTextureLike> {
   load(url: string): Promise<T>;
+  /** Pool-owned resources return to their pool instead of destroying the source. */
+  release?: (texture: T) => void;
   /** Maximum number of distinct urls that may be resident at once. */
   budget: number;
 }
@@ -34,11 +36,13 @@ interface Entry<T extends SceneTextureLike> {
 export class SceneTextureStore<T extends SceneTextureLike = SceneTextureLike> {
   readonly #entries = new Map<string, Entry<T>>();
   readonly #load: (url: string) => Promise<T>;
+  readonly #release: (texture: T) => void;
   #budget: number;
   #disposed = false;
 
   constructor(options: SceneTextureStoreOptions<T>) {
     this.#load = options.load;
+    this.#release = options.release ?? ((texture) => texture.destroy(true));
     this.#budget = Math.max(1, Math.floor(options.budget));
   }
 
@@ -99,7 +103,7 @@ export class SceneTextureStore<T extends SceneTextureLike = SceneTextureLike> {
         if (this.#disposed || this.#entries.get(url) !== entry) {
           // The reference was released (or the store destroyed) while the
           // image was still decoding; the pixels must not outlive it.
-          texture.destroy(true);
+          this.#release(texture);
           return texture;
         }
         entry.texture = texture;
@@ -143,7 +147,7 @@ export class SceneTextureStore<T extends SceneTextureLike = SceneTextureLike> {
     if (entry.refs > 0) return;
     this.#entries.delete(url);
     if (entry.texture !== null) {
-      entry.texture.destroy(true);
+      this.#release(entry.texture);
     }
   }
 
@@ -156,7 +160,7 @@ export class SceneTextureStore<T extends SceneTextureLike = SceneTextureLike> {
   destroy(): void {
     this.#disposed = true;
     for (const entry of this.#entries.values()) {
-      entry.texture?.destroy(true);
+      if (entry.texture !== null) this.#release(entry.texture);
     }
     this.#entries.clear();
   }

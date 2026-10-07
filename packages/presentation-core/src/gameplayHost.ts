@@ -31,6 +31,8 @@ import {
 } from "./timelineSession";
 import { UiMotionHost } from "./uiMotion";
 import type { AnimationMap } from "./imageAnimation";
+import type { TextBlockMap } from "./textBlock";
+import type { ParticleMap } from "./particles";
 import type {
   AssetUrlMap,
   PresentationCue,
@@ -143,6 +145,10 @@ export class PresentationController {
    */
   setAnimationAssets(animations: AnimationMap): void {
     this.#surface.setAnimations(animations);
+  }
+
+  setVisualResources(textBlocks: TextBlockMap, particles: ParticleMap): void {
+    this.#surface.setVisualResources(textBlocks, particles);
   }
 
   unlockAudio(): Promise<void> {
@@ -514,6 +520,11 @@ export class PresentationController {
           getRate: () => (this.#paused ? 0 : this.#playbackRate),
         });
         break;
+      case "particle_state":
+        if (this.#oneShotLedger.consume(key)) {
+          await this.#surface.runCue(cue, { assets, signal, getRate: () => this.#paused ? 0 : this.#playbackRate });
+        }
+        break;
       case "play_sfx":
         if (this.#oneShotLedger.consume(key)) {
           if (!this.#suppressOneShots) {
@@ -657,9 +668,12 @@ function cueResourceIds(cue: PresentationCue): string[] {
   } else if (cue.type === "timeline") {
     for (const track of cue.tracks) {
       if (track.type === "sprite") ids.add(`sprite:${track.sprite_id}`);
+      else if (track.type === "emitter") ids.add(`emitter:${track.emitter_id}`);
       else if (track.type === "bgm") ids.add("bgm");
       else if (track.type === "ambience") ids.add(`ambience:${track.slot}`);
     }
+  } else if (cue.type === "particle_state" && !cue.burst) {
+    ids.add(`emitter:${cue.emitter_id}`);
   } else if (cue.type === "bgm_transition") {
     ids.add("bgm");
   } else if (cue.type === "ambience_transition") {

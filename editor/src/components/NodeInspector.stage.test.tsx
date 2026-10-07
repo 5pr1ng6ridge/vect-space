@@ -16,12 +16,20 @@ import type { Mock } from "vitest";
 import {
   createMemoryKit,
   createMemoryTextureLoader,
+  type MemoryKit,
 } from "@vectspace/presentation-core/scene-test-kit";
 import {
   SceneSurface,
   type SceneWorldSnapshot,
 } from "@vectspace/presentation-core/scene-surface";
 import { worldPointToStage } from "@vectspace/presentation-core/scene-frame";
+import type {
+  EmitterSnapshot,
+  ParticleDefinition,
+} from "@vectspace/presentation-core/particles";
+import type { PresentationCue } from "@vectspace/presentation-core/types";
+
+import { PARTICLE_FIXTURE } from "../../../packages/presentation-core/src/visualTestKit";
 
 import type {
   BuildNodePreviewResult,
@@ -63,6 +71,7 @@ afterEach(cleanup);
 const SPRITE_URL = "C:/sprites/lumi.png";
 const BACKGROUND_A_URL = "C:/bg/a.png";
 const BACKGROUND_B_URL = "C:/bg/b.png";
+const DOT_URL = "C:/game/dot.png";
 
 const ASSETS: EditorAsset[] = [
   {
@@ -82,6 +91,12 @@ const ASSETS: EditorAsset[] = [
     kind: "sprite",
     path: "sprites/lumi.png",
     absolute_path: SPRITE_URL,
+  },
+  {
+    id: "dot",
+    kind: "gui",
+    path: "dot.png",
+    absolute_path: DOT_URL,
   },
 ];
 
@@ -237,6 +252,7 @@ function renderInspector(
   options: { onChange?: ChangeSpy; layout?: EditorLayout } = {},
 ): {
   onChange: ChangeSpy;
+  kit: MemoryKit;
   view: ReturnType<typeof render>;
   rerender(node: SceneNode): void;
 } {
@@ -247,6 +263,7 @@ function renderInspector(
     [SPRITE_URL]: { width: 512, height: 1024 },
     [BACKGROUND_A_URL]: { width: 1920, height: 1080 },
     [BACKGROUND_B_URL]: { width: 1920, height: 1080 },
+    [DOT_URL]: { width: 64, height: 64 },
   });
   const element = (current: SceneNode): ReactElement => (
     <AssetLayoutProvider layout={options.layout ?? null}>
@@ -278,6 +295,7 @@ function renderInspector(
   const view = render(element(node));
   return {
     onChange,
+    kit,
     view,
     rerender: (next) => view.rerender(element(next)),
   };
@@ -750,5 +768,454 @@ describe("NodeInspector background stage drops", () => {
       ...backgroundNode({ background: "bg.a" }),
       background: "bg.b",
     });
+  });
+});
+
+type ParticleNode = Extract<SceneNode, { type: "particle" }>;
+
+function particleNode(overrides: Partial<ParticleNode> = {}): ParticleNode {
+  return {
+    type: "particle",
+    emitter_id: "fx",
+    action: "start",
+    particle: "snow",
+    seed: null,
+    space: "world",
+    x: 900,
+    y: 500,
+    scale: 1,
+    rotation_deg: 0,
+    opacity: 1,
+    z: 0,
+    next: "end",
+    ...overrides,
+  };
+}
+
+/** A burst-only definition that finishes within a few frames. */
+const BURST_PARTICLE: ParticleDefinition = {
+  ...PARTICLE_FIXTURE,
+  image: "dot",
+  rate: 0,
+  burst_count: 5,
+  max_particles: 20,
+  lifetime_ms: { min: 40, max: 60 },
+};
+
+const CONTINUOUS_PARTICLE: ParticleDefinition = {
+  ...PARTICLE_FIXTURE,
+  image: "dot",
+};
+
+const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
+const ZOOMED_CAMERA = { x: 120, y: -60, zoom: 1.6, rotation_deg: 30 };
+
+function emitterAt(
+  node: ParticleNode,
+  overrides: Partial<EmitterSnapshot> = {},
+): EmitterSnapshot {
+  return {
+    particle: "snow",
+    seed: 17,
+    generation: 1,
+    space: node.space,
+    x: node.x,
+    y: node.y,
+    scale: 1,
+    rotation_deg: 0,
+    opacity: 1,
+    z: 0,
+    ...overrides,
+  };
+}
+
+function burstCueFor(
+  node: ParticleNode,
+  emitterId = node.emitter_id,
+  overrides: Partial<EmitterSnapshot> = {},
+): PresentationCue {
+  return {
+    cue_id: `cue.${emitterId}`,
+    gate: "none",
+    type: "particle_state",
+    emitter_id: emitterId,
+    emitter: emitterAt(node, overrides),
+    burst: true,
+  };
+}
+
+/** The runtime answer for a particle node: world, its cues and definitions. */
+function particlePreview(
+  node: ParticleNode,
+  options: {
+    camera?: SceneWorldSnapshot["camera"];
+    persistent?: boolean;
+    cues?: PresentationCue[];
+    particle?: ParticleDefinition;
+  } = {},
+): BuildNodePreviewResult {
+  const world: SceneWorldSnapshot = {
+    background: "bg.a",
+    sprites: {},
+    emitters:
+      options.persistent === true
+        ? { [node.emitter_id]: emitterAt(node) }
+        : {},
+    camera: options.camera ?? IDENTITY_CAMERA,
+    curtain: { covered: false, fill: null },
+  };
+  return {
+    status: "ready",
+    start_snapshot: { world },
+    update: { snapshot: { world }, cues: options.cues ?? [] },
+    trace: [],
+    particles: { snow: options.particle ?? CONTINUOUS_PARTICLE },
+  } as unknown as BuildNodePreviewResult;
+}
+
+/** Measures the overlay layer so a client point is exactly a design pixel. */
+function measureParticleLayer(): void {
+  const layer = screen.getByRole("group", { name: "粒子生成点" });
+  layer.getBoundingClientRect = () => ({
+    width: 1920,
+    height: 1080,
+    left: 0,
+    top: 0,
+    right: 1920,
+    bottom: 1080,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
+}
+
+function liveBatches(kit: MemoryKit) {
+  return kit.particleBatches.filter((batch) => !batch.node.destroyed);
+}
+
+function burstReadout(): { ms: number; finished: boolean } {
+  const text =
+    document.querySelector(".cue-preview-burst-transport code")?.textContent ??
+    "";
+  return {
+    ms: Number(/(\d+) \//.exec(text)?.[1] ?? Number.NaN),
+    finished: text.includes("已结束"),
+  };
+}
+
+describe("NodeInspector particle generation point", () => {
+  it("drags a world-space start emitter through a zoomed and rotated camera, saving x/y once", async () => {
+    const node = particleNode();
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, { camera: ZOOMED_CAMERA, persistent: true }),
+    );
+    const { onChange } = renderInspector(node);
+    const marker = await screen.findByLabelText("拖动生成点");
+    measureParticleLayer();
+
+    // The marker sits where the camera shows the world point (900, 500).
+    const shown = worldPointToStage({ x: 900, y: 500 }, ZOOMED_CAMERA);
+    expect(marker.style.left).toBe(`${(shown.x / 1920) * 100}%`);
+    expect(marker.style.top).toBe(`${(shown.y / 1080) * 100}%`);
+
+    fireEvent.pointerDown(marker, {
+      button: 0,
+      clientX: shown.x,
+      clientY: shown.y,
+    });
+    fireEvent.pointerMove(marker, { clientX: shown.x + 50, clientY: shown.y });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.pointerMove(marker, { clientX: shown.x + 100, clientY: shown.y });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.pointerUp(marker, { clientX: shown.x + 100, clientY: shown.y });
+
+    // 100 design pixels right is (+54.13, -31.25) world pixels under this
+    // camera.
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("target", {
+      ...node,
+      x: 954,
+      y: 469,
+    });
+  });
+
+  it("drags a screen-space emitter by raw design pixels, ignoring the camera", async () => {
+    const node = particleNode({ space: "screen", x: 400, y: 300 });
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, { camera: ZOOMED_CAMERA, persistent: true }),
+    );
+    const { onChange } = renderInspector(node);
+    const marker = await screen.findByLabelText("拖动生成点");
+    measureParticleLayer();
+    // A screen emitter is not shown through the camera.
+    expect(marker.style.left).toBe(`${(400 / 1920) * 100}%`);
+
+    fireEvent.pointerDown(marker, { button: 0, clientX: 400, clientY: 300 });
+    fireEvent.pointerMove(marker, { clientX: 480, clientY: 340 });
+    fireEvent.pointerUp(marker, { clientX: 480, clientY: 340 });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("target", {
+      ...node,
+      x: 480,
+      y: 340,
+    });
+  });
+
+  it("writes nothing for a click, a cancelled drag or a drag that lands where it started", async () => {
+    const node = particleNode();
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, { persistent: true }),
+    );
+    const { onChange } = renderInspector(node);
+    const marker = await screen.findByLabelText("拖动生成点");
+    measureParticleLayer();
+
+    fireEvent.pointerDown(marker, { button: 0, clientX: 900, clientY: 500 });
+    fireEvent.pointerUp(marker, { clientX: 900, clientY: 500 });
+
+    for (const cancel of [
+      () => fireEvent.keyDown(window, { key: "Escape" }),
+      () => fireEvent.pointerCancel(marker, { clientX: 1000, clientY: 600 }),
+      () => fireEvent(window, new Event("blur")),
+    ]) {
+      fireEvent.pointerDown(marker, { button: 0, clientX: 900, clientY: 500 });
+      fireEvent.pointerMove(marker, { clientX: 1000, clientY: 600 });
+      cancel();
+      fireEvent.pointerUp(marker, { clientX: 1000, clientY: 600 });
+    }
+
+    fireEvent.pointerDown(marker, { button: 0, clientX: 900, clientY: 500 });
+    fireEvent.pointerMove(marker, { clientX: 1000, clientY: 600 });
+    fireEvent.pointerMove(marker, { clientX: 900, clientY: 500 });
+    fireEvent.pointerUp(marker, { clientX: 900, clientY: 500 });
+
+    expect(onChange).not.toHaveBeenCalled();
+    // The marker is back on the runtime position after every cancel.
+    expect(marker.style.left).toBe(`${(900 / 1920) * 100}%`);
+  });
+
+  it("keeps a dropped marker until the refetch moves it, without applying the drop twice", async () => {
+    const node = particleNode();
+    let current = node;
+    api.buildNodePreview.mockImplementation(() =>
+      Promise.resolve(particlePreview(current, { persistent: true })),
+    );
+    const { onChange, rerender } = renderInspector(node);
+    await screen.findByLabelText("拖动生成点");
+    measureParticleLayer();
+
+    const marker = screen.getByLabelText("拖动生成点");
+    fireEvent.pointerDown(marker, { button: 0, clientX: 900, clientY: 500 });
+    fireEvent.pointerMove(marker, { clientX: 1000, clientY: 560 });
+    fireEvent.pointerUp(marker, { clientX: 1000, clientY: 560 });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    // Until the runtime answers, the marker stays where it was dropped.
+    expect(marker.style.left).toBe(`${(1000 / 1920) * 100}%`);
+
+    // The host applied the change; the refetch reports the new position.
+    current = { ...node, x: 1000, y: 560 };
+    rerender(current);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const settled = screen.getByLabelText("拖动生成点");
+    expect(settled.style.left).toBe(`${(1000 / 1920) * 100}%`);
+    expect(settled.style.top).toBe(`${(560 / 1080) * 100}%`);
+  });
+
+  it("returns the marker to the document position when the drop is undone before its refetch arrives", async () => {
+    const node = particleNode();
+    // Every answer reports the original position, and it is the very same
+    // object each time: only the request revision can tell the answers apart.
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, { persistent: true }),
+    );
+    const { onChange, rerender } = renderInspector(node);
+    await screen.findByLabelText("拖动生成点");
+    measureParticleLayer();
+
+    const marker = screen.getByLabelText("拖动生成点");
+    fireEvent.pointerDown(marker, { button: 0, clientX: 900, clientY: 500 });
+    fireEvent.pointerMove(marker, { clientX: 1000, clientY: 560 });
+    fireEvent.pointerUp(marker, { clientX: 1000, clientY: 560 });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(marker.style.left).toBe(`${(1000 / 1920) * 100}%`);
+
+    // Commit, then undo before the runtime answered the commit.
+    rerender({ ...node, x: 1000, y: 560 });
+    rerender(node);
+
+    await waitFor(
+      () =>
+        expect(screen.getByLabelText("拖动生成点").style.left).toBe(
+          `${(900 / 1920) * 100}%`,
+        ),
+      { timeout: 3000 },
+    );
+    expect(screen.getByLabelText("拖动生成点").style.top).toBe(
+      `${(500 / 1080) * 100}%`,
+    );
+  });
+
+  it("still drags a start emitter by hitting it on the canvas", async () => {
+    const node = particleNode({ x: 600, y: 300 });
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, { persistent: true }),
+    );
+    const { onChange } = renderInspector(node);
+    const canvas = await screen.findByLabelText<HTMLCanvasElement>("粒子预览");
+    stubStageRect(canvas);
+    await waitFor(() => expect(stageClass(canvas)).toContain("is-draggable"));
+
+    fireEvent.pointerDown(canvas, { button: 0, clientX: 600, clientY: 300 });
+    fireEvent.pointerMove(canvas, { clientX: 700, clientY: 350 });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.pointerUp(canvas, { clientX: 700, clientY: 350 });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("target", {
+      ...node,
+      x: 700,
+      y: 350,
+    });
+  });
+
+  it("previews a burst node's own cue without a saved emitter and drags its generation point", async () => {
+    const node = particleNode({ action: "burst", x: 700, y: 400 });
+    const decoy = burstCueFor(node, "other", { x: 100, y: 100 });
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, {
+        cues: [decoy, burstCueFor(node)],
+        particle: BURST_PARTICLE,
+      }),
+    );
+    const { onChange, kit } = renderInspector(node);
+    const marker = await screen.findByLabelText("拖动生成点");
+    measureParticleLayer();
+
+    // The matching cue is previewed: one transient batch at the node's
+    // position, never the decoy's.
+    await waitFor(() => expect(kit.particleBatches).toHaveLength(1));
+    expect(kit.particleBatches[0]?.node.position).toMatchObject({
+      x: 700,
+      y: 400,
+    });
+    expect(marker).toHaveTextContent("爆发生成点");
+    expect(marker.style.left).toBe(`${(700 / 1920) * 100}%`);
+    await waitFor(() => expect(burstReadout().finished).toBe(true), {
+      timeout: 4000,
+    });
+    // Nothing persistent was faked: once the burst expired nothing is left.
+    expect(liveBatches(kit)).toHaveLength(0);
+
+    fireEvent.pointerDown(marker, { button: 0, clientX: 700, clientY: 400 });
+    fireEvent.pointerMove(marker, { clientX: 640, clientY: 460 });
+    fireEvent.pointerUp(marker, { clientX: 640, clientY: 460 });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("target", {
+      ...node,
+      x: 640,
+      y: 460,
+    });
+  });
+
+  it("drags a burst generation point through the camera", async () => {
+    const node = particleNode({ action: "burst", x: 900, y: 500 });
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, {
+        camera: ZOOMED_CAMERA,
+        cues: [burstCueFor(node)],
+        particle: BURST_PARTICLE,
+      }),
+    );
+    const { onChange } = renderInspector(node);
+    const marker = await screen.findByLabelText("拖动生成点");
+    measureParticleLayer();
+    const shown = worldPointToStage({ x: 900, y: 500 }, ZOOMED_CAMERA);
+
+    fireEvent.pointerDown(marker, {
+      button: 0,
+      clientX: shown.x,
+      clientY: shown.y,
+    });
+    fireEvent.pointerMove(marker, { clientX: shown.x + 100, clientY: shown.y });
+    fireEvent.pointerUp(marker, { clientX: shown.x + 100, clientY: shown.y });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("target", {
+      ...node,
+      x: 954,
+      y: 469,
+    });
+  });
+
+  it("replays a burst node with Space after it completed, without history", async () => {
+    const node = particleNode({ action: "burst" });
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, {
+        cues: [burstCueFor(node)],
+        particle: BURST_PARTICLE,
+      }),
+    );
+    const { onChange, kit } = renderInspector(node);
+    await screen.findByRole("button", { name: /重播爆发/ });
+    await waitFor(() => expect(burstReadout().finished).toBe(true), {
+      timeout: 4000,
+    });
+    expect(kit.particleBatches).toHaveLength(1);
+
+    const press = createEvent.keyDown(document.body, {
+      key: " ",
+      code: "Space",
+    });
+    fireEvent(document.body, press);
+    expect(press.defaultPrevented).toBe(true);
+    await waitFor(() => expect(kit.particleBatches).toHaveLength(2));
+    await waitFor(() => expect(burstReadout().finished).toBe(true), {
+      timeout: 4000,
+    });
+
+    // The button is the same operation.
+    fireEvent.click(screen.getByRole("button", { name: /重播爆发/ }));
+    await waitFor(() => expect(kit.particleBatches).toHaveLength(3));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("offers neither a burst transport nor Space for a start node, and nothing for stop", async () => {
+    const start = particleNode();
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(start, { persistent: true }),
+    );
+    const first = renderInspector(start);
+    await screen.findByLabelText("拖动生成点");
+    expect(screen.queryByRole("button", { name: /重播爆发/ })).toBeNull();
+    const press = createEvent.keyDown(document.body, {
+      key: " ",
+      code: "Space",
+    });
+    fireEvent(document.body, press);
+    expect(press.defaultPrevented).toBe(false);
+    first.view.unmount();
+
+    const stop = particleNode({ action: "stop" });
+    api.buildNodePreview.mockResolvedValue(particlePreview(stop));
+    renderInspector(stop);
+    await screen.findByLabelText("粒子预览");
+    expect(screen.queryByLabelText("拖动生成点")).toBeNull();
+    expect(screen.getByText(/停止节点没有可拖动的目标/)).toBeInTheDocument();
+  });
+
+  it("shows no burst transport or marker when the runtime produced no matching cue", async () => {
+    const node = particleNode({ action: "burst" });
+    api.buildNodePreview.mockResolvedValue(
+      particlePreview(node, {
+        cues: [burstCueFor(node, "other")],
+        particle: BURST_PARTICLE,
+      }),
+    );
+    const { kit } = renderInspector(node);
+    await screen.findByLabelText("粒子预览");
+    expect(screen.queryByRole("button", { name: /重播爆发/ })).toBeNull();
+    expect(screen.queryByLabelText("拖动生成点")).toBeNull();
+    expect(kit.particleBatches).toHaveLength(0);
   });
 });

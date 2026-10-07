@@ -18,10 +18,12 @@ import {
   type ActiveScreenEffect,
   type TimelineFrame,
 } from "./timelineEvaluator";
+import { LEGACY_BACKGROUND_ID, spriteResourceId, spriteFit, type CoordinateSpace, type SpriteKind, type SpriteLayout, type SpriteSource } from "./visual";
 import type {
   ButtonSnapshot,
   CameraSnapshot,
   SpriteSnapshot,
+  EmitterSnapshot,
   TimelineTrack,
 } from "./types";
 
@@ -44,7 +46,7 @@ export const ENTRY_TWEEN_SCALE = 0.96;
 
 export interface SceneObjectFrame {
   id: string;
-  kind: "sprite" | "video" | "button";
+  kind: "sprite" | "video" | "button" | "emitter";
   x: number;
   y: number;
   width: number;
@@ -56,6 +58,10 @@ export interface SceneObjectFrame {
   opacity: number;
   z: number;
   asset: string;
+  source?: SpriteSource;
+  sprite_kind?: SpriteKind;
+  space?: CoordinateSpace;
+  layout?: SpriteLayout | null;
   anchor_x: number;
   anchor_y: number;
   flip_x: boolean;
@@ -106,12 +112,15 @@ export function isEmptySceneOverrides(overrides: SceneOverrides): boolean {
 /** Layout knowledge the surface has about the pixels behind an asset id. */
 export interface SceneSpriteGeometry {
   spriteSize(asset: string): { width: number; height: number };
+  /** Selection geometry is the emitter area, never individual particles. */
+  emitterSize?(particle: string): { width: number; height: number };
 }
 
 export interface SceneFrameInput {
   duration_ms: number;
   tracks: readonly TimelineTrack[];
   sprites: Readonly<Record<string, SpriteSnapshot>>;
+  emitters?: Readonly<Record<string, EmitterSnapshot>>;
   buttons?: Readonly<Record<string, ButtonSnapshot>>;
   camera: CameraSnapshot;
   bgm_volume: number;
@@ -134,6 +143,7 @@ export function evaluateSceneFrame(
     { duration_ms: input.duration_ms, tracks: input.tracks },
     {
       sprites: input.sprites,
+      emitters: input.emitters ?? {},
       buttons: input.buttons ?? {},
       camera: input.camera,
       bgm_volume: input.bgm_volume,
@@ -149,6 +159,7 @@ export function sceneFrameFromTimeline(
 ): SceneFrame {
   const objects: SceneObjectFrame[] = [];
   for (const sprite of evaluated.sprites) {
+    const resource = spriteResourceId(sprite);
     objects.push({
       id: sprite.id,
       kind: "sprite",
@@ -156,10 +167,11 @@ export function sceneFrameFromTimeline(
       y: sprite.y,
       ...spriteBox(
         geometry,
-        sprite.asset,
+        resource,
         sprite.scale,
         sprite.scale_x,
         sprite.scale_y,
+        sprite.layout,
       ),
       scale: sprite.scale,
       scale_x: sprite.scale_x,
@@ -167,10 +179,24 @@ export function sceneFrameFromTimeline(
       rotation_deg: sprite.rotation_deg,
       opacity: sprite.opacity,
       z: sprite.z,
-      asset: sprite.asset,
+      asset: resource,
+      ...(sprite.source === undefined ? {} : { source: sprite.source }),
+      ...(sprite.sprite_kind === undefined ? {} : { sprite_kind: sprite.sprite_kind }),
+      ...(sprite.space === undefined ? {} : { space: sprite.space }),
+      ...(sprite.layout === undefined ? {} : { layout: sprite.layout }),
       anchor_x: sprite.anchor_x ?? 0.5,
       anchor_y: sprite.anchor_y ?? 1,
       flip_x: sprite.flip_x ?? false,
+    });
+  }
+  for (const emitter of evaluated.emitters ?? []) {
+    const size = geometry.emitterSize?.(emitter.particle) ?? { width: 24, height: 24 };
+    objects.push({
+      id: `emitter:${emitter.id}`, kind: "emitter", asset: emitter.particle,
+      x: emitter.x, y: emitter.y, scale: emitter.scale, scale_x: 1, scale_y: 1,
+      width: Math.max(1, size.width * emitter.scale), height: Math.max(1, size.height * emitter.scale),
+      rotation_deg: emitter.rotation_deg, opacity: emitter.opacity, z: emitter.z,
+      space: emitter.space, anchor_x: 0.5, anchor_y: 0.5, flip_x: false,
     });
   }
   for (const video of evaluated.videos) {
@@ -235,14 +261,18 @@ export function spriteBox(
   scale: number,
   scale_x: number,
   scale_y: number,
+  layout?: SpriteLayout | null,
 ): { width: number; height: number } {
   const size =
     asset === ""
       ? { width: DEFAULT_SPRITE_WIDTH, height: DEFAULT_SPRITE_HEIGHT }
       : geometry.spriteSize(asset);
+  const fit = spriteFit(size.width, size.height, layout);
+  const width = layout?.fit === "cover" ? layout.width : size.width * fit.x;
+  const height = layout?.fit === "cover" ? layout.height : size.height * fit.y;
   return {
-    width: Math.max(1, Math.abs(size.width * scale * scale_x)),
-    height: Math.max(1, Math.abs(size.height * scale * scale_y)),
+    width: Math.max(1, Math.abs(width * scale * scale_x)),
+    height: Math.max(1, Math.abs(height * scale * scale_y)),
   };
 }
 
@@ -273,8 +303,13 @@ export function mergeSceneOverrides(
           merged.scale,
           merged.scale_x,
           merged.scale_y,
+          merged.layout,
         ),
       };
+    }
+    if (merged.kind === "emitter") {
+      const ratio = object.scale === 0 ? 1 : merged.scale / object.scale;
+      return { ...merged, width: object.width * ratio, height: object.height * ratio };
     }
     return merged;
   });
@@ -324,10 +359,9 @@ export function worldPointToStage(
 /**
  * Topmost object under a design-space point.
  *
- * Sprites are anchored (`anchor_x`/`anchor_y`), videos and buttons are laid out
- * from their top-left corner.  Rotation is intentionally ignored: the
- * interactive hit area of an authoring gesture is the axis-aligned box of the
- * object, which is also what the editor's DOM gizmo shows while dragging.
+ * Sprites and whole emitters are anchored, videos/buttons use top-left layout.
+ * Camera and object rotation are inverted before testing the shared layout box;
+ * screen-space objects skip the camera conversion.
  */
 export function hitTestSceneFrame(
   frame: SceneFrame,
@@ -335,23 +369,30 @@ export function hitTestSceneFrame(
   shake: { x: number; y: number } = { x: 0, y: 0 },
 ): SceneObjectFrame | null {
   const world = stagePointToWorld(point, frame.camera, shake);
-  const ordered = [...frame.objects].sort((left, right) => left.z - right.z);
+  const ordered = [...frame.objects].sort((left, right) =>
+    Number(left.space === "screen" || left.kind === "button") - Number(right.space === "screen" || right.kind === "button") || left.z - right.z);
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const object = ordered[index];
-    if (object === undefined) continue;
+    // The background-node adapter is owned by background nodes, never a stage
+    // gesture; authored background Sprites use their own instance ids.
+    if (object === undefined || object.opacity <= 0 || object.id === LEGACY_BACKGROUND_ID) continue;
+    const target = object.space === "screen" || object.kind === "button" ? point : world;
+    const angle = -object.rotation_deg * Math.PI / 180;
+    const dx = target.x - object.x, dy = target.y - object.y;
+    const local = { x: object.x + dx * Math.cos(angle) - dy * Math.sin(angle), y: object.y + dx * Math.sin(angle) + dy * Math.cos(angle) };
     const left =
-      object.kind === "sprite"
-        ? object.x - object.anchor_x * object.width
+      (object.kind === "sprite" || object.kind === "emitter")
+        ? object.x - (object.flip_x ? 1 - object.anchor_x : object.anchor_x) * object.width
         : object.x;
     const top =
-      object.kind === "sprite"
+      (object.kind === "sprite" || object.kind === "emitter")
         ? object.y - object.anchor_y * object.height
         : object.y;
     if (
-      world.x >= left &&
-      world.x <= left + object.width &&
-      world.y >= top &&
-      world.y <= top + object.height
+      local.x >= left &&
+      local.x <= left + object.width &&
+      local.y >= top &&
+      local.y <= top + object.height
     ) {
       return object;
     }

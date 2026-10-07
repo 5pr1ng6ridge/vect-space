@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TextBlockDefinition",
+  "type": "object",
+  "properties": {
+    "align": {
+      "$ref": "#/$defs/TextAlign",
+      "default": "left"
+    },
+    "background": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "color": {
+      "type": "string",
+      "default": "#FFFFFF"
+    },
+    "content": {
+      "type": "string"
+    },
+    "font": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "font_size": {
+      "type": "number",
+      "format": "float",
+      "default": 32.0
+    },
+    "height": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "id": {
+      "type": "string"
+    },
+    "line_height": {
+      "type": "number",
+      "format": "float",
+      "default": 1.399999976158142
+    },
+    "padding": {
+      "type": "number",
+      "format": "float",
+      "default": 0.0
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "vertical_align": {
+      "$ref": "#/$defs/VerticalAlign",
+      "default": "top"
+    },
+    "width": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "content",
+    "width",
+    "height"
+  ],
+  "$defs": {
+    "TextAlign": {
+      "type": "string",
+      "enum": [
+        "left",
+        "center",
+        "right"
+      ]
+    },
+    "VerticalAlign": {
+      "type": "string",
+      "enum": [
+        "top",
+        "center",
+        "bottom"
+      ]
+    }
+  }
+}

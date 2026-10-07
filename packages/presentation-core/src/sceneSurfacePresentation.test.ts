@@ -88,11 +88,11 @@ async function createSurface(): Promise<Harness> {
       }
     },
     backgrounds: () =>
-      (kit.applications[0]?.stage.children[0]?.children[0]?.children ??
-        []) as MemorySprite[],
+      (kit.applications[0]?.stage.children[0]?.children ?? []).filter((node): node is MemorySprite =>
+        node instanceof MemorySprite && !node.label.endsWith("#feather")),
     featherStrips: () =>
       (
-        (kit.applications[0]?.stage.children[0]?.children[0]?.children ??
+        (kit.applications[0]?.stage.children[0]?.children ??
           []) as MemorySprite[]
       ).filter((child) => child.label.endsWith("#feather")),
     effects: () =>
@@ -143,7 +143,7 @@ describe("SceneSurface layer order", () => {
     const z = (stage?.children ?? []).map((child) => child.zIndex);
     // camera(0) < fade-through overlay(5) < curtain(10) < effects(20) <
     // host-only session curtain(30)
-    expect(z).toEqual([0, 20, 5, 10, 30]);
+    expect(z).toEqual([0, 20, 5, 10, 30, 1]);
     harness.surface.dispose();
   });
 });
@@ -395,7 +395,7 @@ describe("SceneSurface background transitions", () => {
     const settled = harness
       .backgrounds()
       .find((view) => view.label === "/assets/next.png");
-    expect(settled?.mask).toBeNull();
+    expect(settled?.mask?.label).toBe("layout:__background__");
     expect(settled?.alpha).toBe(1);
     harness.surface.dispose();
   });
@@ -425,7 +425,7 @@ describe("SceneSurface background transitions", () => {
     const incoming = harness
       .backgrounds()
       .find((view) => view.label === "/assets/next.png");
-    const baseX = -120;
+    const baseX = DESIGN_WIDTH / 2;
     expect(incoming).toBeDefined();
     expect(incoming?.position.x).toBeLessThan(baseX);
     harness.run(150);
@@ -599,7 +599,7 @@ describe("SceneSurface background transition easing", () => {
     const settled = harness
       .backgrounds()
       .find((view) => view.label === "/assets/other.png");
-    expect(settled?.mask).toBeNull();
+    expect(settled?.mask?.label).toBe("layout:__background__");
     harness.surface.dispose();
   });
 
@@ -632,7 +632,7 @@ describe("SceneSurface background transition easing", () => {
     const incoming = harness
       .backgrounds()
       .find((view) => view.label === "/assets/next.png");
-    const baseX = -120;
+    const baseX = DESIGN_WIDTH / 2;
     const half = (DESIGN_WIDTH * 0.25) / 2;
     // The incoming leads by half a feather; the outgoing lags by the same
     // amount so the ramp always blends into the outgoing's pixels.
@@ -739,9 +739,10 @@ describe("SceneSurface overlapping background transitions", () => {
       backgroundCueContext(),
     );
     await flushMicrotasks();
-    const liveMask = (): MemoryGraphics | null =>
-      (harness.backgrounds().find((view) => view.label === "/assets/other.png")
-        ?.mask ?? null) as MemoryGraphics | null;
+    const liveMask = (): MemoryGraphics | null => {
+      const mask = harness.backgrounds().find((view) => view.label === "/assets/other.png")?.mask;
+      return mask == null || mask.label.startsWith("layout:") ? null : mask as MemoryGraphics;
+    };
     expect(liveMask()).not.toBeNull();
 
     // The older wipe finishes while the newer one is still running.  Its
@@ -1097,7 +1098,7 @@ describe("SceneSurface background cue take-over", () => {
       backgroundCueContext(),
     );
     await flushMicrotasks();
-    expect(olderIncoming?.mask).toBeNull();
+    expect(olderIncoming?.mask?.label).toBe("layout:__background__");
     expect(harness.featherStrips()).toHaveLength(0);
 
     // The superseded cue's own cleanup must not tear the newer push down.
@@ -1107,7 +1108,7 @@ describe("SceneSurface background cue take-over", () => {
     const incoming = harness
       .backgrounds()
       .find((view) => view.label === "/assets/other.png");
-    const baseX = -120;
+    const baseX = DESIGN_WIDTH / 2;
     const positionBefore = incoming?.position.x ?? baseX;
     // The newer push is still running (it started after the older wipe) and
     // must keep sliding despite the older cue's settle.
@@ -1281,7 +1282,7 @@ describe("SceneSurface background cue take-over", () => {
     harness.run(400);
     await newer;
     expect(harness.featherStrips()).toHaveLength(0);
-    expect(incoming?.mask).toBeNull();
+    expect(incoming?.mask?.label).toBe("layout:__background__");
     harness.surface.dispose();
   });
 });
@@ -1342,12 +1343,12 @@ describe("SceneSurface reversed soft edges", () => {
 
   /** Design-space span covered by one background view. */
   function imageSpan(view: MemorySprite, axis: 0 | 1): [number, number] {
-    const start = axis === 0 ? view.position.x : view.position.y;
+    const position = axis === 0 ? view.position.x : view.position.y;
+    const anchor = axis === 0 ? view.anchor.x : view.anchor.y;
     const texture = view.texture as MemoryTexture;
-    // The surface sets a uniform cover scale through a single scalar; the
-    // memory kit records it on x while Pixi would mirror it onto both axes.
-    const scale = view.scale.x;
+    const scale = axis === 0 ? view.scale.x : view.scale.y;
     const length = axis === 0 ? texture.width * scale : texture.height * scale;
+    const start = position - anchor * length;
     return [start, start + length];
   }
 
@@ -1399,7 +1400,7 @@ describe("SceneSurface reversed soft edges", () => {
       harness.run(300);
       await pending;
       expect(harness.featherStrips()).toHaveLength(0);
-      expect(incoming?.mask).toBeNull();
+      expect(incoming?.mask?.label).toBe("layout:__background__");
     }
     harness.surface.dispose();
   });

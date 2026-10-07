@@ -70,6 +70,7 @@ export function sceneRole(
 export function timerTargetAllowed(node: SceneNode): boolean {
   switch (node.type) {
     case "set":
+    case "particle":
     case "sfx":
     case "window_title":
     case "window_control":

@@ -1286,7 +1286,7 @@ fn a_repeated_effect_finishes_before_its_next_occurrence() {
         "the effect is presented without gating the story"
     );
     assert!(!updates[0].requires_ack);
-    assert_eq!(runtime.snapshot().world.background.as_deref(), Some("bg.nvctsp"));
+    assert_eq!(runtime.snapshot().world.background_asset(), Some("bg.nvctsp"));
     assert_eq!(
         runtime.snapshot().interaction.timers["fade_timer"].remaining_ms,
         400,

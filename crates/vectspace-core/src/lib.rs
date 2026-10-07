@@ -10,3 +10,4 @@ pub mod interaction;
 pub mod model;
 pub mod runtime;
 pub mod text_template;
+pub mod visual;

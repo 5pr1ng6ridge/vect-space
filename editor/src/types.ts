@@ -8,6 +8,12 @@ export type AssetKind =
   | "font"
   | "video";
 
+import type { CoordinateSpace, SpriteKind, SpriteLayout, SpriteSource, TextBlockDefinition, ParticleDefinition } from "@vectspace/presentation-core/types";
+export type { CoordinateSpace, SpriteKind, SpriteLayout, SpriteSource, TextBlockDefinition, ParticleDefinition } from "@vectspace/presentation-core/types";
+
+export interface TextBlockFile { path: string; definition: TextBlockDefinition }
+export interface ParticleFile { path: string; definition: ParticleDefinition }
+
 import type { WireAssetInspection } from "../../shared/generated/WireAssetInspection";
 import type { WireAssetMetadata } from "../../shared/generated/WireAssetMetadata";
 
@@ -222,6 +228,8 @@ export interface ContentManifest {
   buttons?: string[];
   animations?: string[];
   actions?: string[];
+  text_blocks?: string[];
+  particles?: string[];
   ui_motion_defaults: UiMotionBindings;
   chapter_map?: string | null;
 }
@@ -307,6 +315,15 @@ export interface SpriteNode extends AwaitedNode {
   type: "sprite";
   sprite_id: string;
   action: "show" | "move" | "hide";
+  source?: SpriteSource;
+  sprite_kind?: SpriteKind;
+  space?: CoordinateSpace;
+  layout?: SpriteLayout;
+  scale_x?: number | null;
+  scale_y?: number | null;
+  rotation_deg?: number | null;
+  anchor_x?: number | null;
+  anchor_y?: number | null;
   /**
    * Optional in YAML when a character/expression supplies the artwork. Rust
    * omits null optionals while serializing, so the editor must accept both
@@ -323,6 +340,21 @@ export interface SpriteNode extends AwaitedNode {
   opacity: number | null;
   z: number | null;
   easing: Easing;
+}
+
+export interface ParticleNode extends NextNode {
+  type: "particle";
+  emitter_id: string;
+  action: "start" | "stop" | "burst";
+  particle?: string | null;
+  seed?: number | null;
+  space: CoordinateSpace;
+  x: number;
+  y: number;
+  scale: number;
+  rotation_deg: number;
+  opacity: number;
+  z: number;
 }
 
 /** Fade all scene-owned visual content to an empty world. */
@@ -591,28 +623,7 @@ export interface AmbienceNode extends AwaitedNode {
   loop_end_ms?: number | null;
 }
 
-export type TimelineTrack =
-  | {
-      type: "sprite";
-      sprite_id: string;
-      asset: string | null;
-      remove_at_end: boolean;
-      channels: TimelineChannels;
-    }
-  | { type: "camera"; channels: TimelineChannels }
-  | { type: "button"; instance_id: string; channels: TimelineChannels }
-  | {
-      type: "video";
-      asset: string;
-      clip_start_ms: number;
-      clip_end_ms?: number | null;
-      loop: boolean;
-      fit: "contain" | "cover" | "stretch";
-      audio_enabled: boolean;
-      channels: TimelineChannels;
-    }
-  | { type: "bgm"; channels: TimelineChannels }
-  | { type: "ambience"; slot: AmbienceSlot; channels: TimelineChannels };
+export type TimelineTrack = import("@vectspace/presentation-core/types").TimelineTrack;
 
 export type TimelineEvent =
   | { type: "sfx"; id: string; at_ms: number; asset: string; volume: number }
@@ -721,6 +732,7 @@ export type SceneNode =
   | BackgroundNode
   | CurtainNode
   | SpriteNode
+  | ParticleNode
   | ClearNode
   | SayNode
   | LongTextNode
@@ -798,6 +810,14 @@ export interface SceneLayout {
   viewport: EditorViewport | null;
   /** Rigid node clusters used only by the editor's automatic graph layout. */
   groups?: SceneGroup[];
+  /**
+   * Fixed text block ids the author filed under this scene before any Sprite
+   * uses them.  Editor-only: the runtime registry and text YAML never see it.
+   * The sidebar shows the union of these pins and the scene's real Sprite /
+   * timeline references (see `textBlockGroups`); the field is omitted rather
+   * than saved empty.
+   */
+  text_block_ids?: string[];
 }
 
 export interface EditorLayout {
@@ -878,6 +898,8 @@ export interface EditorProject {
   buttons?: ButtonFile[];
   animations?: AnimationFile[];
   actions?: ActionFile[];
+  text_blocks?: TextBlockFile[];
+  particles?: ParticleFile[];
   chapter_map?: ChapterMapFile | null;
   layout: EditorLayout;
   assets: EditorAsset[];
@@ -892,6 +914,8 @@ export interface SaveProjectRequest {
   buttons?: ButtonFile[];
   animations?: AnimationFile[];
   actions?: ActionFile[];
+  text_blocks?: TextBlockFile[];
+  particles?: ParticleFile[];
   chapter_map: ChapterMapFile | null;
   layout: EditorLayout;
   expected_fingerprint: string;
@@ -912,20 +936,7 @@ export interface StoryLocation {
   node_id: string;
 }
 
-export interface SpriteSnapshot {
-  asset: string;
-  x: number;
-  y: number;
-  scale: number;
-  scale_x: number;
-  scale_y: number;
-  rotation_deg: number;
-  flip_x?: boolean;
-  anchor_x?: number;
-  anchor_y?: number;
-  opacity: number;
-  z: number;
-}
+export type SpriteSnapshot = import("@vectspace/presentation-core/types").SpriteSnapshot;
 
 export interface BuildNodePreviewRequest {
   project: SaveProjectRequest;
@@ -948,6 +959,10 @@ export type BuildNodePreviewResult =
       update: RuntimeUpdate;
       trace: StoryLocation[];
       resolved_texts?: Record<string, string>;
+      assets?: PreviewResolvedAsset[];
+      text_blocks?: Record<string, TextBlockDefinition>;
+      particles?: Record<string, ParticleDefinition>;
+      font_versions?: Record<string, string>;
     }
   | {
       status: "unreachable";
@@ -993,6 +1008,9 @@ export type PreviewSessionStartResult =
       session_id: string;
       update: RuntimeUpdate;
       assets: PreviewResolvedAsset[];
+      text_blocks?: Record<string, TextBlockDefinition>;
+      particles?: Record<string, ParticleDefinition>;
+      font_versions?: Record<string, string>;
       /** What a single-window preview could not do; absent in old fixtures. */
       notes?: string[];
     }

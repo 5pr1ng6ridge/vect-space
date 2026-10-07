@@ -12,6 +12,8 @@ import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import type { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
+import type { TextBlockMap } from "@vectspace/presentation-core/text-block";
+import type { ParticleMap } from "@vectspace/presentation-core/particles";
 import type {
   AssetUrlMap,
   PresentationOutcome,
@@ -57,6 +59,8 @@ interface SceneCanvasProps {
   activeTimers?: readonly string[] | null;
   assets: AssetUrlMap;
   animations: AnimationMap;
+  textBlocks?: TextBlockMap;
+  particles?: ParticleMap;
   settings: Settings;
   typingSfxActive: boolean;
   typingSfxCps: number;
@@ -77,6 +81,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       activeTimers = null,
       assets,
       animations,
+      textBlocks = NO_TEXT_BLOCKS,
+      particles = NO_PARTICLES,
       settings,
       typingSfxActive,
       typingSfxCps,
@@ -192,6 +198,10 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
       // actually changed, so this never restarts a running animation.
       controller?.setAnimationAssets(animations);
     }, [animations, controller]);
+
+    useEffect(() => {
+      controller?.setVisualResources(textBlocks, particles);
+    }, [controller, particles, textBlocks]);
 
     useEffect(() => {
       if (controller === null) {
@@ -346,6 +356,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, SceneCanvasProps>(
 );
 
 const NO_EFFECTS: readonly RuntimeUpdate[] = [];
+const NO_TEXT_BLOCKS: TextBlockMap = {};
+const NO_PARTICLES: ParticleMap = {};
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);

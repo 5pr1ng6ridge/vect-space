@@ -27,10 +27,14 @@ import {
   Application,
   Container,
   Graphics,
+  ImageSource,
   Rectangle,
+  Particle,
+  ParticleContainer,
   Sprite,
   Texture,
   VideoSource,
+  type TextureSource,
 } from "pixi.js";
 
 import {
@@ -53,6 +57,9 @@ import {
   type SceneSpriteGeometry,
 } from "./sceneFrame";
 import { SceneTextureStore, type SceneTextureLike } from "./sceneTextures";
+import { normalizeVisualWorld, spritePreset, spriteResourceId, spriteFit, textBlockId } from "./visual";
+import { TextBlockRasterizer, textBlockVersion, type TextBlockMap, type TextBlockSource } from "./textBlock";
+import { ParticleEvaluator, PARTICLE_STRIDE, MAX_SURFACE_PARTICLES, validateEmitter, validateParticleDefinition, type EmitterSnapshot, type ParticleDefinition, type ParticleMap } from "./particles";
 import { animate, mix } from "./motion";
 import {
   FrameLoopRegistry,
@@ -196,6 +203,7 @@ export interface SceneApplicationLike {
   init(options: SceneApplicationInit): Promise<void>;
   readonly stage: SceneNodeLike;
   readonly renderer: {
+    readonly htmlText?: ConstructorParameters<typeof TextBlockRasterizer>[0];
     readonly extract: {
       canvas(
         target:
@@ -225,8 +233,23 @@ export interface SceneApplicationInit {
   autoStart: boolean;
 }
 
+export interface SceneParticleBatchLike {
+  readonly node: SceneNodeLike;
+  update(data: Float32Array, count: number): void;
+  destroy(): void;
+}
+
 export interface SceneKit {
   application(): SceneApplicationLike;
+  /**
+   * Nearest-sampling copy of an already decoded texture, for particles only.
+   *
+   * It owns an isolated sampler (and GPU upload) over the same decoded pixels
+   * at the same dimensions, so the shared texture that Sprites draw keeps its
+   * own filtering.  Destroying it never destroys `base`.
+   */
+  particleTexture(base: SceneTextureLike): SceneTextureLike;
+  particles(texture: SceneTextureLike, capacity: number, blend: "normal" | "add", bounds: SceneRect): SceneParticleBatchLike;
   container(): SceneNodeLike;
   sprite(texture: SceneTextureLike): SceneSpriteLike;
   graphics(): SceneGraphicsLike;
@@ -237,11 +260,44 @@ export interface SceneKit {
   shaderHost(target: SceneNodeLike): SceneShaderHostLike;
 }
 
+/**
+ * Nearest-sampling texture over its own `ImageSource`.
+ *
+ * The source is exclusively owned, so destroying the texture always destroys
+ * it (after `unbind` ran) and never touches the shared texture it was copied
+ * from.
+ */
+class ParticleTexture extends Texture {
+  readonly #unbind: (source: TextureSource) => void;
+
+  constructor(source: ImageSource, unbind: (source: TextureSource) => void) {
+    super({ source, label: "particle-nearest" });
+    this.#unbind = unbind;
+  }
+
+  override destroy(): void {
+    this.#unbind(this.source);
+    super.destroy(true);
+  }
+}
+
 /** Default kit backed by the real Pixi renderer. */
 export function pixiSceneKit(): SceneKit {
+  let owner: Application | undefined;
+  // Pixi's shared particle shader keeps the last drawn source bound; restore
+  // its default before that source goes away so nothing destroyed stays bound.
+  const unbindParticleSource = (source: TextureSource): void => {
+    const pipes = owner?.renderer as unknown as
+      | { renderPipes?: { particle?: { defaultShader?: { resources?: Record<string, unknown> } } } }
+      | undefined;
+    const resources = pipes?.renderPipes?.particle?.defaultShader?.resources;
+    if (resources !== undefined && resources.uTexture === source)
+      resources.uTexture = Texture.WHITE.source;
+  };
   return {
     application: () => {
       const application = new Application();
+      owner = application;
       return {
         get stage(): SceneNodeLike {
           return application.stage as unknown as SceneNodeLike;
@@ -267,6 +323,52 @@ export function pixiSceneKit(): SceneKit {
         destroy: (rendererOptions, destroyOptions) =>
           application.destroy(rendererOptions ?? {}, destroyOptions ?? {}),
       } satisfies SceneApplicationLike;
+    },
+    particleTexture: (base) => {
+      const shared = (base as Texture).source;
+      const resource: unknown = shared.resource;
+      if (!ImageSource.test(resource)) throw new Error("粒子纹理需要已解码的位图");
+      // Same decoded bitmap, own sampler: the style lives on the source, so a
+      // second source is the only way to sample particles differently without
+      // changing how Sprites draw the cached shared texture.
+      const texture = new ParticleTexture(new ImageSource({
+        resource, resolution: shared.resolution, alphaMode: shared.alphaMode,
+        scaleMode: "nearest", label: "particle-nearest",
+      }), unbindParticleSource);
+      if (texture.width !== base.width || texture.height !== base.height) {
+        texture.destroy();
+        throw new Error("粒子纹理尺寸与原图不一致");
+      }
+      return texture;
+    },
+    particles: (texture, capacity, blend, bounds) => {
+      const container = new ParticleContainer({
+        texture: texture as Texture, blendMode: blend,
+        dynamicProperties: { position: true, rotation: true, vertex: true, color: true, uvs: false },
+        boundsArea: new Rectangle(bounds.x, bounds.y, bounds.width, bounds.height),
+      });
+      const pool = Array.from({ length: capacity }, () => new Particle({ texture: texture as Texture, anchorX: 0.5, anchorY: 0.5 }));
+      return {
+        node: container as unknown as SceneNodeLike,
+        update: (data, count) => {
+          const previousCount = container.particleChildren.length;
+          container.particleChildren.length = count;
+          for (let index = 0; index < count; index += 1) {
+            const particle = pool[index]!;
+            const offset = index * PARTICLE_STRIDE;
+            particle.x = data[offset]!;
+            particle.y = data[offset + 1]!;
+            particle.scaleX = particle.scaleY = data[offset + 2]!;
+            particle.rotation = data[offset + 3]!;
+            particle.alpha = data[offset + 4]!;
+            container.particleChildren[index] = particle;
+          }
+          if (previousCount !== count) container.update();
+        },
+        // The texture is shared by every emitter of the image and released by
+        // the surface, so the batch never owns it.
+        destroy: () => container.destroy({ texture: false, textureSource: false }),
+      };
     },
     container: () => new Container() as unknown as SceneNodeLike,
     sprite: (texture) =>
@@ -390,8 +492,9 @@ export class SceneRenderLoop {
 // ---------------------------------------------------------------------------
 
 export interface SceneWorldSnapshot {
-  background: string | null;
+  background?: string | null;
   sprites: Record<string, SpriteSnapshot>;
+  emitters?: Record<string, EmitterSnapshot>;
   camera: CameraSnapshot;
   /** Stable curtain state restored by a hard reconcile (never a cue). */
   curtain?: CurtainSnapshot | null;
@@ -461,15 +564,17 @@ export interface SceneVideoHandle {
   release(): void;
 }
 
-/** One character instance a timeline needs before it can start. */
+/** One Sprite instance a timeline needs before it can start. */
 export interface SceneCharacterRequest {
   id: string;
   asset: string;
+  state?: SpriteSnapshot;
 }
 
 /** Inheritance seed for a timeline: what the scene currently shows. */
 export interface SceneBases {
   sprites: Record<string, SpriteSnapshot>;
+  emitters?: Record<string, EmitterSnapshot>;
   buttons: Record<string, ButtonSnapshot>;
   camera: CameraSnapshot;
   bgmVolume: number;
@@ -481,6 +586,7 @@ export type SceneVisualCue = Extract<
     type:
       | "background_transition"
       | "sprite_tween"
+      | "particle_state"
       | "clear_scene"
       | "camera_tween"
       | "screen_effect"
@@ -498,6 +604,8 @@ export interface SceneSurfaceOptions {
   canvas: HTMLCanvasElement;
   diagnostic?: (message: string) => void;
   animations?: AnimationMap;
+  textBlocks?: TextBlockMap;
+  particles?: ParticleMap;
   /** Test seam; defaults to the real Pixi kit. */
   kit?: SceneKit;
   /** Test seam for the render loop clock. */
@@ -563,6 +671,21 @@ interface SceneSpriteView {
   refs: string[];
   player: FrameSequencePlayer;
   unsubscribe: () => void;
+  state?: SpriteSnapshot;
+  layoutMask?: SceneGraphicsLike;
+  parent: SceneNodeLike;
+}
+
+interface SceneEmitterView {
+  state: EmitterSnapshot;
+  version: string;
+  evaluator: ParticleEvaluator;
+  batch: SceneParticleBatchLike;
+  /** Shared decoded texture whose nearest-sampling copy the batch draws. */
+  particleBase: SceneTextureLike;
+  refs: string[];
+  elapsedMs: number;
+  burst: boolean;
 }
 
 interface SceneVideoState {
@@ -591,8 +714,9 @@ export class SceneSurface {
   readonly #diagnostic: (message: string) => void;
   readonly #application: SceneApplicationLike;
   readonly #cameraLayer: SceneNodeLike;
+  readonly #screenLayer: SceneNodeLike;
+  // Legacy transition names alias the same sortable world parent, not layers.
   readonly #backgrounds: SceneNodeLike;
-  readonly #characters: SceneNodeLike;
   readonly #videos: SceneNodeLike;
   readonly #effects: SceneNodeLike;
   /** Screen-space background-transition overlay (fade-through-colour). */
@@ -605,7 +729,23 @@ export class SceneSurface {
   readonly #sprites = new Map<string, SceneSpriteView>();
   readonly #store: SceneTextureStore;
   readonly #geometry: SceneSpriteGeometry;
-  #background: SceneSpriteView | null = null;
+  readonly #textStore: SceneTextureStore;
+  readonly #textSources = new Map<string, TextBlockSource>();
+  readonly #emitters = new Map<string, SceneEmitterView>();
+  /**
+   * Nearest-sampling copies of particle images, keyed by the shared decoded
+   * texture.  Every emitter of the same image holds one reference, so the
+   * surface keeps one copy per image however many emitters or bursts draw it.
+   */
+  readonly #particleTextures = new Map<SceneTextureLike, { texture: SceneTextureLike; refs: number }>();
+  #textBlocks: TextBlockMap = {};
+  #particles: ParticleMap = {};
+  #rasterizer: TextBlockRasterizer | null = null;
+  get #background(): SceneSpriteView | null { return this.#sprites.get(BACKGROUND_ID) ?? null; }
+  set #background(view: SceneSpriteView | null) {
+    if (view === null) this.#sprites.delete(BACKGROUND_ID);
+    else this.#sprites.set(BACKGROUND_ID, view);
+  }
   #video: SceneVideoState | null = null;
   #flash: SceneGraphicsLike | null = null;
   #flashColor: number | null = null;
@@ -720,9 +860,10 @@ export class SceneSurface {
     this.#animations = options.animations ?? {};
     this.#application = this.#kit.application();
     this.#cameraLayer = this.#kit.container();
-    this.#backgrounds = this.#kit.container();
-    this.#characters = this.#kit.container();
-    this.#videos = this.#kit.container();
+    this.#backgrounds = this.#videos = this.#cameraLayer;
+    this.#screenLayer = this.#kit.container();
+    this.#textBlocks = options.textBlocks ?? {};
+    this.#particles = options.particles ?? {};
     this.#effects = this.#kit.container();
     this.#transition = this.#kit.container();
     this.#curtainLayer = this.#kit.container();
@@ -737,8 +878,21 @@ export class SceneSurface {
         options.textureBudget ??
         textureBudgetFor(MIN_SESSION_TEXTURES, this.#animations),
     });
+    this.#textStore = new SceneTextureStore<SceneTextureLike>({
+      budget: 64,
+      load: async (key) => {
+        const source = this.#textSources.get(key);
+        if (source === undefined || this.#rasterizer === null) throw new Error("文本纹理生成器未初始化");
+        return this.#rasterizer.create(source);
+      },
+      release: (texture) => this.#rasterizer?.release(texture as Texture),
+    });
     this.#geometry = {
       spriteSize: (asset) => this.#spriteSize(asset),
+      emitterSize: (particle) => {
+        const area = this.#particles[particle]?.area;
+        return area?.type === "rectangle" ? { width: Math.max(24, area.width), height: Math.max(24, area.height) } : { width: 24, height: 24 };
+      },
     };
     this.#requestFrame = options.requestFrame;
     this.#cancelFrame = options.cancelFrame;
@@ -792,10 +946,10 @@ export class SceneSurface {
         autoStart: false,
       });
       this.#cameraLayer.sortableChildren = true;
-      this.#backgrounds.zIndex = -1_000_000;
-      this.#cameraLayer.addChild(this.#backgrounds);
-      this.#cameraLayer.addChild(this.#characters);
-      this.#cameraLayer.addChild(this.#videos);
+      this.#screenLayer.sortableChildren = true;
+      this.#screenLayer.zIndex = 1;
+      const htmlText = this.#application.renderer.htmlText;
+      if (htmlText !== undefined) this.#rasterizer = new TextBlockRasterizer(htmlText);
       // Screen-space stack: world < background-transition overlay < curtain <
       // screen effects.  `sortableChildren` keeps the render order explicit
       // even though the DOM/dialogue layer lives outside this surface.
@@ -814,6 +968,7 @@ export class SceneSurface {
       this.#application.stage.addChild(this.#transition);
       this.#application.stage.addChild(this.#curtainLayer);
       this.#application.stage.addChild(this.#sessionCurtainLayer);
+      this.#application.stage.addChild(this.#screenLayer);
       this.#applyCamera();
       this.#application.render();
       const loop = new SceneRenderLoop({
@@ -835,6 +990,15 @@ export class SceneSurface {
   setAnimations(animations: AnimationMap): void {
     this.#animations = animations;
     this.#store.setBudget(textureBudgetFor(MIN_SESSION_TEXTURES, animations));
+  }
+
+  setVisualResources(textBlocks: TextBlockMap, particles: ParticleMap): void {
+    if (this.#textBlocks === textBlocks && this.#particles === particles) return;
+    this.#prepareAbort?.abort();
+    this.#prepareGeneration += 1;
+    this.#startVisualGeneration();
+    this.#textBlocks = textBlocks;
+    this.#particles = particles;
   }
 
   // -- world -----------------------------------------------------------------
@@ -861,9 +1025,11 @@ export class SceneSurface {
       generation !== this.#prepareGeneration;
     const isStale = (): boolean => generation !== this.#prepareGeneration;
     const resourceId = ++this.#resources;
+    const world = normalizeVisualWorld(request.world);
+    this.#validateEmitterWorld(world.emitters ?? {});
     const preparation: ScenePreparation = {
       generation,
-      world: request.world,
+      world,
       assets: request.assets,
       resourceId,
       resources: new Map<string, PreparedAsset>(),
@@ -879,18 +1045,11 @@ export class SceneSurface {
       acquired.length = 0;
     };
     try {
-      const wanted = new Set<string>(
-        Object.values(request.world.sprites).map((s) => s.asset),
-      );
-      // A logical asset can hold more than one role in the same world: a
-      // background id may also be a sprite's artwork.  Remember which ids are
-      // sprite-owned so the preparation carries them under `resources` as
-      // well as `background`; otherwise `applyWorld` finds no pixels for the
-      // sprite and silently skips it.
-      const spriteAssets = new Set(wanted);
-      if (request.world.background !== null)
-        wanted.add(request.world.background);
-      const curtainAsset = curtainAssetOf(request.world.curtain ?? null);
+      const wanted = new Set<string>(Object.values(world.sprites).map(spriteResourceId));
+      for (const emitter of Object.values(world.emitters ?? {})) {
+        wanted.add(this.#particles[emitter.particle]!.image);
+      }
+      const curtainAsset = curtainAssetOf(world.curtain ?? null);
       if (curtainAsset !== null) wanted.add(curtainAsset);
       for (const asset of wanted) {
         if (aborted()) {
@@ -904,16 +1063,13 @@ export class SceneSurface {
           releaseAcquired();
           return null;
         }
-        if (spriteAssets.has(asset)) {
-          preparation.resources.set(asset, prepared);
-        }
-        if (request.world.background === asset) {
-          (preparation as { background: PreparedAsset | null }).background =
-            prepared;
-        }
+        preparation.resources.set(asset, prepared);
         if (curtainAsset === asset) {
           (preparation as { curtain: PreparedAsset | null }).curtain = prepared;
         }
+      }
+      for (const state of Object.values(world.emitters ?? {})) {
+        this.#validateEmitterResource(state, preparation.resources.get(this.#particles[state.particle]!.image));
       }
     } catch (error) {
       releaseAcquired();
@@ -935,12 +1091,19 @@ export class SceneSurface {
       if (preparation !== null) this.discardPreparation(preparation);
       return false;
     }
+    const world = preparation.world;
+    try {
+      // Bursts can arrive while a snapshot decodes; check the final budget again
+      // before changing any view, rather than fail halfway through a commit.
+      this.#validateEmitterWorld(world.emitters ?? {});
+    } catch (error) {
+      this.discardPreparation(preparation);
+      throw error;
+    }
     // A committed world is a new visual generation: cues that are still in
     // flight release what they detached and give up settling their pose.
     this.#startVisualGeneration();
-    const world = preparation.world;
     this.#assets = preparation.assets;
-    this.#commitBackground(preparation.background);
     const wanted = new Set(Object.keys(world.sprites));
     for (const [id, view] of [...this.#sprites]) {
       if (wanted.has(id)) continue;
@@ -949,18 +1112,19 @@ export class SceneSurface {
     }
     for (const [id, state] of Object.entries(world.sprites)) {
       const view = this.#sprites.get(id);
-      const prepared = preparation.resources.get(state.asset);
+      const resource = spriteResourceId(state);
+      const prepared = preparation.resources.get(resource);
       // A view is only reused for the *same revision* of its asset: an edited
       // animation under the same logical id must replace the view and restart
       // its loop instead of silently keeping the old frames and phase.
       const keepsView =
         view !== undefined &&
         (prepared === undefined
-          ? view.label === this.#assetLabel(state.asset, preparation.assets)
+          ? view.label === this.#assetLabel(resource, preparation.assets)
           : view.version === prepared.version);
       if (keepsView) {
         // Same asset revision: keep the loop position and apply the pose.
-        applySprite(view.sprite, state);
+        this.#poseView(view, state);
         continue;
       }
       if (view !== undefined) {
@@ -968,11 +1132,12 @@ export class SceneSurface {
         this.#sprites.delete(id);
       }
       if (prepared === undefined) continue;
-      const next = this.#createView(id, prepared, this.#characters);
+      const next = this.#createView(id, prepared, this.#objectParent(state.space));
       if (next === null) continue;
-      applySprite(next.sprite, state);
+      this.#poseView(next, state);
       this.#sprites.set(id, next);
     }
+    this.#reconcileEmitters(world.emitters ?? {}, preparation);
     this.#camera = { ...world.camera };
     this.#commitCurtain(preparation.curtain, world.curtain ?? null);
     this.discardPreparation(preparation);
@@ -1020,6 +1185,7 @@ export class SceneSurface {
     this.#clearTransitionOverlay();
     for (const view of this.#sprites.values()) this.#releaseView(view);
     this.#sprites.clear();
+    this.#clearEmitters();
     this.#loops.clear();
     this.#clearEffects();
     this.#overrides = EMPTY_SCENE_OVERRIDES;
@@ -1060,6 +1226,7 @@ export class SceneSurface {
     this.#evaluated = frame;
     if (options.phase === "playhead") {
       this.#refreshFrameTextures(this.#loops.seek(frame.elapsed_ms));
+      this.seekParticles(frame.elapsed_ms);
     }
     this.#applyCurrent();
   }
@@ -1157,6 +1324,9 @@ export class SceneSurface {
       case "sprite_tween":
         await this.#tweenSprite(cue, context);
         return;
+      case "particle_state":
+        await this.#particleCue(cue, context);
+        return;
       case "clear_scene":
         await this.#clearScene(cue.duration_ms, cue.easing, context);
         return;
@@ -1216,13 +1386,13 @@ export class SceneSurface {
   captureBases(): SceneBases {
     const sprites: Record<string, SpriteSnapshot> = {};
     for (const view of this.#sprites.values()) {
-      sprites[view.id] = {
-        asset: view.source.asset,
-        ...readSprite(view.sprite),
-      };
+      sprites[view.id] = this.#readView(view);
     }
+    const emitters: Record<string, EmitterSnapshot> = {};
+    for (const [id, view] of this.#emitters) if (!view.burst) emitters[id] = { ...view.state };
     return {
       sprites,
+      ...(Object.keys(emitters).length === 0 ? {} : { emitters }),
       buttons: {},
       camera: { ...this.#camera },
       bgmVolume: 1,
@@ -1255,10 +1425,14 @@ export class SceneSurface {
         ) {
           continue;
         }
-        if (!isCurrent()) return false;
+        if (!isCurrent()) {
+          for (const item of pending) this.#releasePrepared(item.prepared);
+          return false;
+        }
         const prepared = await this.#acquireAsset(request.asset, assets);
         if (!isCurrent()) {
           this.#releasePrepared(prepared);
+          for (const item of pending) this.#releasePrepared(item.prepared);
           return false;
         }
         pending.push({ request, prepared });
@@ -1274,22 +1448,13 @@ export class SceneSurface {
         this.#sprites.delete(request.id);
         this.#releaseView(current);
       }
-      const view = this.#createView(request.id, prepared, this.#characters);
+      const state = request.state ?? spritePreset("character", { type: "image", asset: request.asset });
+      const view = this.#createView(request.id, prepared, this.#objectParent(state.space));
       if (view === null) {
         this.#releasePrepared(prepared);
         continue;
       }
-      applySprite(view.sprite, {
-        asset: request.asset,
-        x: 960,
-        y: 1080,
-        scale: 1,
-        scale_x: 1,
-        scale_y: 1,
-        rotation_deg: 0,
-        opacity: 1,
-        z: 0,
-      });
+      this.#poseView(view, state);
       this.#sprites.set(request.id, view);
     }
     this.#applyZOrder();
@@ -1588,6 +1753,7 @@ export class SceneSurface {
     this.#clearTransitionOverlay();
     for (const view of this.#sprites.values()) this.#releaseView(view);
     this.#sprites.clear();
+    this.#clearEmitters();
     this.#loops.clear();
     this.#clearEffects();
     this.#destroySessionCurtainFill();
@@ -1597,35 +1763,15 @@ export class SceneSurface {
     this.#loop?.dispose();
     this.#loop = null;
     this.#store.destroy();
+    this.#textStore.destroy();
+    this.#rasterizer?.destroy();
+    this.#textSources.clear();
     this.#shaderHost.destroy();
     this.#shadersActive = false;
     this.#application.destroy({ removeView: false }, { children: true });
   }
 
   // -- internals: world ------------------------------------------------------
-
-  #commitBackground(prepared: PreparedAsset | null): void {
-    if (prepared === null) {
-      // A world without a background clears the previous scene's artwork; the
-      // shipped host did the same, and leaving it on screen mixed two scenes.
-      this.#clearBackground();
-      return;
-    }
-    if (
-      this.#background !== null &&
-      this.#background.version === prepared.version
-    ) {
-      // Same pixels: keep the live instance and its frame phase, and heal a
-      // cross-fade that was cancelled half-way.
-      this.#background.sprite.alpha = 1;
-      return;
-    }
-    const previous = this.#background;
-    const view = this.#createBackgroundView(prepared);
-    if (view === null) return;
-    this.#background = view;
-    if (previous !== null) this.#releaseView(previous);
-  }
 
   /**
    * Decodes every frame of an asset, replacing a broken frame with the nearest
@@ -1636,6 +1782,21 @@ export class SceneSurface {
     asset: string,
     assets: AssetUrlMap,
   ): Promise<PreparedAsset | null> {
+    const textId = textBlockId(asset);
+    if (textId !== undefined) {
+      const source = this.#textBlocks[textId];
+      if (source === undefined) throw new Error(`固定文本块不存在: ${textId}`);
+      const version = textBlockVersion(source);
+      const key = `text-texture:${version}`;
+      this.#textSources.set(key, source);
+      let texture: SceneTextureLike;
+      try { texture = await this.#textStore.acquire(key); }
+      catch (error) { if (!this.#textStore.has(key)) this.#textSources.delete(key); throw error; }
+      return {
+        asset, label: key, version, urls: [key], textures: [texture],
+        source: { asset, url: key, width: source.definition.width, height: source.definition.height },
+      };
+    }
     const source = resolveImageAsset(asset, assets, this.#animations);
     if (source === undefined) {
       throw new Error(`素材尚未解析: ${asset}`);
@@ -1704,7 +1865,7 @@ export class SceneSurface {
   #releasePrepared(prepared: PreparedAsset): void {
     if (prepared.claimed ?? false) return;
     prepared.claimed = true;
-    this.#store.releaseAll(prepared.urls);
+    this.#releaseRefs(prepared.urls);
   }
 
   /**
@@ -1719,7 +1880,7 @@ export class SceneSurface {
       prepared.claimed = true;
       return prepared.urls;
     }
-    return prepared.urls.filter((url) => this.#store.retain(url));
+    return prepared.urls.filter((url) => this.#resourceStore(url).retain(url));
   }
 
   /** Acquires one asset's pixels for an immediate cue (not a world commit). */
@@ -1753,6 +1914,7 @@ export class SceneSurface {
       refs: this.#claim(prepared),
       player: this.#loops.ensure(id, prepared.source),
       unsubscribe: () => undefined,
+      parent,
     };
     view.unsubscribe = view.player.subscribe((changed: FrameSequencePlayer) => {
       this.#applyFrameTexture(view, changed.frameIndex());
@@ -1761,29 +1923,230 @@ export class SceneSurface {
     return view;
   }
 
+  #resourceStore(key: string): SceneTextureStore {
+    return key.startsWith("text-texture:") ? this.#textStore : this.#store;
+  }
+
+  #releaseRefs(refs: readonly string[]): void {
+    for (const key of new Set(refs)) {
+      const store = this.#resourceStore(key);
+      store.release(key);
+      if (store === this.#textStore && !store.has(key)) this.#textSources.delete(key);
+    }
+  }
+
+  #objectParent(space?: "world" | "screen"): SceneNodeLike {
+    return space === "screen" ? this.#screenLayer : this.#cameraLayer;
+  }
+
+  #poseView(view: SceneSpriteView, state: SpriteSnapshot): void {
+    const parent = this.#objectParent(state.space);
+    if (view.parent !== parent) {
+      view.parent.removeChild(view.sprite);
+      if (view.layoutMask !== undefined) view.parent.removeChild(view.layoutMask);
+      parent.addChild(view.sprite);
+      if (view.layoutMask !== undefined) parent.addChild(view.layoutMask);
+      view.parent = parent;
+    }
+    view.state = state;
+    applySprite(view.sprite, state);
+    if (state.layout?.fit === "cover") {
+      const mask = view.layoutMask ?? this.#kit.graphics();
+      if (view.layoutMask === undefined) { mask.label = `layout:${view.id}`; view.layoutMask = mask; parent.addChild(mask); }
+      const fit = spriteFit(view.sprite.texture.width, view.sprite.texture.height, state.layout);
+      const width = state.layout.width / fit.x, height = state.layout.height / fit.y;
+      mask.clear().rect(-(state.anchor_x ?? 0.5) * width, -(state.anchor_y ?? 1) * height, width, height).fill(0xffffff);
+      mask.position.set(state.x, state.y);
+      mask.scale.set(view.sprite.scale.x, view.sprite.scale.y);
+      mask.rotation = view.sprite.rotation;
+      view.sprite.mask = mask;
+    } else if (view.layoutMask !== undefined) {
+      view.sprite.mask = null;
+      view.layoutMask.destroy();
+      delete view.layoutMask;
+    }
+  }
+
+  #readView(view: SceneSpriteView): SpriteSnapshot {
+    const state = view.state;
+    const result = { ...state, ...readSprite(view.sprite) };
+    const fit = spriteFit(view.sprite.texture.width, view.sprite.texture.height, state?.layout);
+    result.scale /= fit.x;
+    result.scale_y *= fit.x / fit.y;
+    result.anchor_x = state?.anchor_x ?? result.anchor_x ?? 0.5;
+    result.anchor_y = state?.anchor_y ?? result.anchor_y ?? 1;
+    result.source ??= { type: "image", asset: view.source.asset };
+    return result;
+  }
+
+  #releaseEmitter(id: string): void {
+    const view = this.#emitters.get(id);
+    if (view === undefined) return;
+    this.#emitters.delete(id);
+    view.batch.destroy();
+    // The nearest-sampling copy shares the decoded bitmap of the base texture,
+    // so it goes away before the references that keep the base resident.
+    this.#releaseParticleTexture(view.particleBase);
+    this.#releaseRefs(view.refs);
+  }
+
+  #retainParticleTexture(base: SceneTextureLike): SceneTextureLike {
+    const existing = this.#particleTextures.get(base);
+    if (existing !== undefined) {
+      existing.refs += 1;
+      return existing.texture;
+    }
+    const texture = this.#kit.particleTexture(base);
+    this.#particleTextures.set(base, { texture, refs: 1 });
+    return texture;
+  }
+
+  #releaseParticleTexture(base: SceneTextureLike): void {
+    const entry = this.#particleTextures.get(base);
+    if (entry === undefined) return;
+    entry.refs -= 1;
+    if (entry.refs > 0) return;
+    this.#particleTextures.delete(base);
+    entry.texture.destroy(true);
+  }
+
+  #clearEmitters(): void {
+    for (const id of this.#emitters.keys()) this.#releaseEmitter(id);
+  }
+
+  #emitterVersion(state: EmitterSnapshot, prepared: PreparedAsset): string {
+    return JSON.stringify([this.#particles[state.particle], state.seed, state.generation, prepared.version]);
+  }
+
+  #poseEmitter(view: SceneEmitterView, state: EmitterSnapshot): void {
+    const previous = this.#objectParent(view.state.space);
+    const parent = this.#objectParent(state.space);
+    if (previous !== parent) { previous.removeChild(view.batch.node); parent.addChild(view.batch.node); }
+    view.state = state;
+    view.batch.node.position.set(state.x, state.y);
+    view.batch.node.scale.set(state.scale, state.scale);
+    view.batch.node.rotation = state.rotation_deg * Math.PI / 180;
+    view.batch.node.alpha = state.opacity;
+    view.batch.node.zIndex = state.z;
+  }
+
+  #validateEmitterWorld(states: Record<string, EmitterSnapshot>): void {
+    let budget = 0;
+    for (const [id, state] of Object.entries(states)) {
+      if (id.startsWith("burst:")) throw new Error("发射器实例 ID 使用了保留前缀");
+      validateEmitter(state);
+      const definition = this.#particles[state.particle];
+      if (definition === undefined) throw new Error(`粒子效果不存在: ${state.particle}`);
+      validateParticleDefinition(definition);
+      budget += definition.max_particles;
+    }
+    for (const view of this.#emitters.values()) if (view.burst) budget += view.evaluator.definition.max_particles;
+    if (budget > MAX_SURFACE_PARTICLES) throw new Error("粒子总量超过画布预算");
+  }
+
+  #validateEmitterResource(state: EmitterSnapshot, prepared?: PreparedAsset): ParticleDefinition {
+    validateEmitter(state);
+    const definition = this.#particles[state.particle];
+    if (definition === undefined) throw new Error(`粒子效果不存在: ${state.particle}`);
+    validateParticleDefinition(definition);
+    const texture = prepared?.textures[0];
+    if (texture === undefined || prepared?.source.animation !== undefined || texture.width > 512 || texture.height > 512) {
+      throw new Error("粒子图片必须为不超过 512×512 的静态图片");
+    }
+    return definition;
+  }
+
+  #createEmitter(id: string, state: EmitterSnapshot, prepared: PreparedAsset, burst: boolean): void {
+    const definition = this.#validateEmitterResource(state, prepared);
+    let budget = definition.max_particles;
+    for (const [otherId, view] of this.#emitters) if (otherId !== id) budget += view.evaluator.definition.max_particles;
+    if (budget > MAX_SURFACE_PARTICLES) throw new Error("粒子总量超过画布预算");
+    const evaluator = new ParticleEvaluator(definition, state.seed, burst);
+    const texture = prepared.textures[0]!;
+    const life = definition.lifetime_ms.max / 1000;
+    const area = definition.area.type === "rectangle" ? definition.area : { width: 0, height: 0 };
+    const extentX = area.width / 2 + Math.max(Math.abs(definition.velocity_x.min), Math.abs(definition.velocity_x.max)) * life
+      + Math.abs(definition.gravity_x) * life ** 2 / 2 + Math.hypot(texture.width, texture.height) * definition.size.max;
+    const extentY = area.height / 2 + Math.max(Math.abs(definition.velocity_y.min), Math.abs(definition.velocity_y.max)) * life
+      + Math.abs(definition.gravity_y) * life ** 2 / 2 + Math.hypot(texture.width, texture.height) * definition.size.max;
+    // Retained before the previous view of this id is released, so replacing an
+    // emitter of the same image keeps its nearest-sampling copy alive.
+    const sampled = this.#retainParticleTexture(texture);
+    let batch: SceneParticleBatchLike;
+    try {
+      batch = this.#kit.particles(sampled, definition.max_particles, definition.blend,
+        { x: -extentX, y: -extentY, width: extentX * 2, height: extentY * 2 });
+    } catch (error) {
+      this.#releaseParticleTexture(texture);
+      throw error;
+    }
+    this.#releaseEmitter(id);
+    const view: SceneEmitterView = { state, version: this.#emitterVersion(state, prepared), evaluator, batch,
+      particleBase: texture, refs: this.#claim(prepared), elapsedMs: 0, burst };
+    this.#emitters.set(id, view);
+    this.#objectParent(state.space).addChild(batch.node);
+    this.#poseEmitter(view, state);
+    batch.update(evaluator.data, evaluator.evaluate(0));
+  }
+
+  #reconcileEmitters(states: Record<string, EmitterSnapshot>, preparation: ScenePreparation): void {
+    for (const [id, view] of this.#emitters) {
+      if (view.burst) continue;
+      const state = states[id];
+      const prepared = state === undefined ? undefined : preparation.resources.get(this.#particles[state.particle]!.image);
+      if (state === undefined || prepared === undefined || view.version !== this.#emitterVersion(state, prepared)) this.#releaseEmitter(id);
+    }
+    for (const [id, state] of Object.entries(states)) {
+      const prepared = preparation.resources.get(this.#particles[state.particle]!.image)!;
+      const view = this.#emitters.get(id);
+      if (view !== undefined && !view.burst && view.version === this.#emitterVersion(state, prepared)) {
+        this.#poseEmitter(view, state);
+      } else this.#createEmitter(id, state, prepared, false);
+    }
+  }
+
+  async #particleCue(cue: Extract<SceneVisualCue, { type: "particle_state" }>, context: SceneCueContext): Promise<void> {
+    const key = cue.burst ? `burst:${cue.cue_id}` : `emitter:${cue.emitter_id}`;
+    const generation = this.#sceneGeneration;
+    const token = this.#beginCueRequest(key);
+    if (cue.emitter === null) { this.#releaseEmitter(cue.emitter_id); this.#requestRender(); return; }
+    const definition = this.#particles[cue.emitter.particle];
+    if (definition === undefined) throw new Error(`粒子效果不存在: ${cue.emitter.particle}`);
+    const prepared = await this.#acquireAsset(definition.image, context.assets);
+    try {
+      if (context.signal.aborted || !this.#isLatestCueRequest(generation, key, token)) return;
+      const id = cue.burst ? `burst:${cue.cue_id}` : cue.emitter_id;
+      this.#createEmitter(id, cue.emitter, prepared, cue.burst);
+      this.#requestRender();
+    } finally { this.#releasePrepared(prepared); }
+  }
+
+  /** Deterministic editor decoration preview; no wall clock is consulted. */
+  seekParticles(elapsedMs: number): void {
+    for (const view of this.#emitters.values()) {
+      view.elapsedMs = elapsedMs;
+      view.batch.update(view.evaluator.data, view.evaluator.evaluate(elapsedMs));
+    }
+    this.#requestRender();
+  }
+
+  /** Nearest-sampling particle copies resident on this surface and their emitter references. */
+  get particleTextures(): { resident: number; refs: number } {
+    let refs = 0;
+    for (const entry of this.#particleTextures.values()) refs += entry.refs;
+    return { resident: this.#particleTextures.size, refs };
+  }
+
+  get particleStats(): { emitters: number; live: number; capacity: number; textures: number } {
+    let live = 0, capacity = 0;
+    for (const view of this.#emitters.values()) { live += view.evaluator.count; capacity += view.evaluator.definition.max_particles; }
+    return { emitters: this.#emitters.size, live, capacity, textures: this.#store.size + this.#textStore.size };
+  }
+
   #createBackgroundView(prepared: PreparedAsset): SceneSpriteView | null {
     const view = this.#createView(BACKGROUND_ID, prepared, this.#backgrounds);
     if (view === null) return null;
-    // Character sprites use a centre-bottom anchor, while background cover
-    // geometry below is expressed from the image's top-left corner.  Keeping
-    // the character anchor here moves a 1920x1080 background almost entirely
-    // outside the viewport (its centre/bottom would sit at 0,0).
-    view.sprite.anchor.set(0, 0);
-    const texture = view.textures[0];
-    const width =
-      prepared.source.animation === undefined
-        ? (texture?.width ?? DESIGN_WIDTH)
-        : prepared.source.width;
-    const height =
-      prepared.source.animation === undefined
-        ? (texture?.height ?? DESIGN_HEIGHT)
-        : prepared.source.height;
-    const scale = Math.max(DESIGN_WIDTH / width, DESIGN_HEIGHT / height);
-    view.sprite.scale.set(scale);
-    view.sprite.position.set(
-      (DESIGN_WIDTH - width * scale) / 2,
-      (DESIGN_HEIGHT - height * scale) / 2,
-    );
+    this.#poseView(view, spritePreset("background", { type: "image", asset: prepared.asset }));
     return view;
   }
 
@@ -1821,7 +2184,8 @@ export class SceneSurface {
     if (this.#loops.player(view.id) === view.player)
       this.#loops.release(view.id);
     view.sprite.destroy();
-    this.#store.releaseAll(view.refs);
+    view.layoutMask?.destroy();
+    this.#releaseRefs(view.refs);
   }
 
   // -- internals: lifecycle --------------------------------------------------
@@ -2082,7 +2446,7 @@ export class SceneSurface {
   #clearBackgroundMask(): void {
     const owner = this.#backgroundMaskOwner;
     this.#backgroundMaskOwner = null;
-    if (owner !== null) owner.sprite.mask = null;
+    if (owner !== null) owner.sprite.mask = owner.layoutMask ?? null;
     this.#clearFeatherStrips();
     const mask = this.#backgroundMask;
     this.#backgroundMask = null;
@@ -2141,7 +2505,7 @@ export class SceneSurface {
       this.#backgrounds.addChild(this.#backgroundMask);
     }
     const previous = this.#backgroundMaskOwner;
-    if (previous !== null && previous !== view) previous.sprite.mask = null;
+    if (previous !== null && previous !== view) previous.sprite.mask = previous.layoutMask ?? null;
     this.#backgroundMaskOwner = view;
     view.sprite.mask = this.#backgroundMask;
   }
@@ -2234,6 +2598,9 @@ export class SceneSurface {
   }
 
   #assetLabel(asset: string, assets: AssetUrlMap): string {
+    const textId = textBlockId(asset);
+    const text = textId === undefined ? undefined : this.#textBlocks[textId];
+    if (text !== undefined) return `text-texture:${textBlockVersion(text)}`;
     const source = resolveImageAsset(asset, assets, this.#animations);
     if (source !== undefined) return assetLabel(source);
     return assets[asset] ?? asset;
@@ -2253,6 +2620,9 @@ export class SceneSurface {
     asset: string,
     assets: AssetUrlMap,
   ): boolean {
+    const textId = textBlockId(asset);
+    const text = textId === undefined ? undefined : this.#textBlocks[textId];
+    if (text !== undefined) return view.version === textBlockVersion(text);
     const source = resolveImageAsset(asset, assets, this.#animations);
     if (source === undefined) {
       return view.label === (assets[asset] ?? asset);
@@ -2261,6 +2631,9 @@ export class SceneSurface {
   }
 
   #spriteSize(asset: string): { width: number; height: number } {
+    const textId = textBlockId(asset);
+    const text = textId === undefined ? undefined : this.#textBlocks[textId];
+    if (text !== undefined) return { width: text.definition.width, height: text.definition.height };
     const source = resolveImageAsset(asset, this.#assets, this.#animations);
     if (source === undefined) {
       return { width: DEFAULT_SPRITE_WIDTH, height: DEFAULT_SPRITE_HEIGHT };
@@ -2300,7 +2673,16 @@ export class SceneSurface {
     if (object.kind === "sprite") {
       const view = this.#sprites.get(object.id);
       if (view === undefined) return;
-      applySpriteTransform(view.sprite, object);
+      this.#poseView(view, { ...view.state, ...object });
+      return;
+    }
+    if (object.kind === "emitter") {
+      const view = this.#emitters.get(object.id.slice("emitter:".length));
+      if (view !== undefined && !view.burst) this.#poseEmitter(view, {
+        ...view.state, x: object.x, y: object.y, scale: object.scale,
+        rotation_deg: object.rotation_deg, opacity: object.opacity, z: object.z,
+        space: object.space ?? view.state.space,
+      });
       return;
     }
     if (object.kind === "video") {
@@ -2338,13 +2720,9 @@ export class SceneSurface {
     // A cue that resumes after the surface was torn down must not write into
     // destroyed Pixi nodes.
     if (this.#disposed) return;
-    let maxSpriteZ = 0;
-    for (const view of this.#sprites.values()) {
-      maxSpriteZ = Math.max(maxSpriteZ, Math.round(view.sprite.zIndex));
-    }
-    this.#characters.zIndex = maxSpriteZ;
-    this.#videos.zIndex =
-      this.#video === null ? 0 : Math.round(this.#video.view.zIndex);
+    // Each Sprite, video and emitter is a direct child of its coordinate space.
+    this.#cameraLayer.sortableChildren = true;
+    this.#screenLayer.sortableChildren = true;
   }
 
   // -- internals: effects and camera ----------------------------------------
@@ -2523,9 +2901,14 @@ export class SceneSurface {
   #tickDecorations(deltaMs: number): boolean {
     if (!this.#decorativeRunning || this.#paused || deltaMs <= 0) return false;
     const changed = this.#loops.advance(deltaMs);
-    if (changed.length === 0) return false;
     this.#refreshFrameTextures(changed);
-    return true;
+    const hasParticles = this.#emitters.size > 0;
+    for (const [id, view] of this.#emitters) {
+      view.elapsedMs += deltaMs;
+      view.batch.update(view.evaluator.data, view.evaluator.evaluate(view.elapsedMs));
+      if (view.burst && view.elapsedMs >= view.evaluator.definition.lifetime_ms.max) this.#releaseEmitter(id);
+    }
+    return changed.length > 0 || hasParticles;
   }
 
   #requestRender(): void {
@@ -2679,8 +3062,7 @@ export class SceneSurface {
       ) {
         // The incoming instance owns the pixels; a cancelled cue settles the
         // visible transition instead of leaving a half-drawn mask behind.
-        next.sprite.alpha = 1;
-        next.sprite.mask = null;
+        this.#poseView(next, next.state!);
         this.#requestRender();
       }
     };
@@ -2821,26 +3203,19 @@ export class SceneSurface {
       return;
     }
 
-    const targetSource = resolveImageAsset(
-      target.asset,
-      assets,
-      this.#animations,
-    );
-    if (targetSource === undefined)
-      throw new Error(`素材尚未解析: ${target.asset}`);
-    const label = assetLabel(targetSource);
-    const replacing = view !== undefined && view.label !== label;
+    const resource = spriteResourceId(target);
+    const replacing = view !== undefined && !this.#showsAssetRevision(view, resource, assets);
     const previousView = replacing ? view : undefined;
     const previousAlpha = previousView?.sprite.alpha ?? 0;
     const previousPose =
-      previousView === undefined ? null : readSprite(previousView.sprite);
+      previousView === undefined ? null : this.#readView(previousView);
     // The capture above and this token are one synchronous step, and the token
     // is taken *before* the decode: a newer cue can therefore never commit a
     // view that an older, still-decoding cue then strands at its entry pose.
     const token = this.#beginCue(key);
     let created: SceneSpriteView | undefined;
     if (view === undefined || replacing) {
-      const prepared = await this.#acquireAsset(target.asset, assets);
+      const prepared = await this.#acquireAsset(resource, assets);
       // A newer cue (or another visual generation) may have taken this
       // instance while the pixels decoded; the late arrival must not clobber
       // either one.
@@ -2852,7 +3227,7 @@ export class SceneSurface {
         this.#releasePrepared(prepared);
         return;
       }
-      const next = this.#createView(id, prepared, this.#characters);
+      const next = this.#createView(id, prepared, this.#objectParent(target.space));
       if (next === null) {
         this.#releasePrepared(prepared);
         return;
@@ -2860,18 +3235,15 @@ export class SceneSurface {
       view = next;
       created = next;
       this.#sprites.set(id, view);
-      const entry = entryTweenPose(target);
-      view.sprite.position.set(entry.x, entry.y);
-      view.sprite.scale.set(
-        target.scale * target.scale_x * ENTRY_TWEEN_SCALE,
-        target.scale * target.scale_y * ENTRY_TWEEN_SCALE,
-      );
-      view.sprite.alpha = 0;
+      const character = (target.sprite_kind ?? "character") === "character";
+      const entry = character ? entryTweenPose(target) : target;
+      this.#poseView(view, { ...target, x: entry.x, y: entry.y,
+        scale: target.scale * (character ? ENTRY_TWEEN_SCALE : 1), opacity: 0 });
       if (previousView !== undefined) this.#stageView(previousView);
     }
     if (view === undefined) return;
     const staged = view;
-    const start = previousPose ?? readSprite(view.sprite);
+    const start = previousPose ?? this.#readView(view);
     const fadeDuration =
       cue.crossfade_ms === undefined || cue.crossfade_ms === null
         ? 0
@@ -2884,38 +3256,19 @@ export class SceneSurface {
         cue.duration_ms <= 0
           ? 1
           : Math.min(1, (progress * animationDuration) / cue.duration_ms);
-      staged.sprite.position.set(
-        mix(start.x, target.x, transformProgress),
-        mix(start.y, target.y, transformProgress),
-      );
-      staged.sprite.anchor.set(target.anchor_x ?? 0.5, target.anchor_y ?? 1);
-      staged.sprite.scale.set(
-        (target.flip_x ? -1 : 1) *
-          mix(
-            start.scale * start.scale_x,
-            target.scale * target.scale_x,
-            transformProgress,
-          ),
-        mix(
-          start.scale * start.scale_y,
-          target.scale * target.scale_y,
-          transformProgress,
-        ),
-      );
-      staged.sprite.rotation =
-        (mix(start.rotation_deg, target.rotation_deg, transformProgress) *
-          Math.PI) /
-        180;
-      staged.sprite.alpha =
-        replacing && fadeDuration > 0
-          ? mix(
-              0,
-              target.opacity,
-              Math.min(1, (progress * animationDuration) / fadeDuration),
-            )
-          : mix(start.opacity, target.opacity, transformProgress);
-      staged.sprite.zIndex =
-        transformProgress < 1 ? start.z : Math.round(target.z);
+      this.#poseView(staged, {
+        ...target,
+        x: mix(start.x, target.x, transformProgress),
+        y: mix(start.y, target.y, transformProgress),
+        scale: 1,
+        scale_x: mix(start.scale * start.scale_x, target.scale * target.scale_x, transformProgress),
+        scale_y: mix(start.scale * start.scale_y, target.scale * target.scale_y, transformProgress),
+        rotation_deg: mix(start.rotation_deg, target.rotation_deg, transformProgress),
+        opacity: replacing && fadeDuration > 0
+          ? mix(0, target.opacity, Math.min(1, progress * animationDuration / fadeDuration))
+          : mix(start.opacity, target.opacity, transformProgress),
+        z: transformProgress < 1 ? start.z : Math.round(target.z),
+      });
       if (replacing && previousView !== undefined) {
         const fadeProgress =
           fadeDuration <= 0
@@ -2950,7 +3303,7 @@ export class SceneSurface {
     // released now.
     const generation = this.#startVisualGeneration();
     this.#releaseCueFlashes();
-    const backgrounds = [...this.#backgrounds.children];
+    const backgrounds = [...this.#cameraLayer.children, ...this.#screenLayer.children];
     const sprites = [...this.#sprites.values()];
     const backgroundAlpha = new Map(
       backgrounds.map((view) => [view, view.alpha]),
@@ -2985,6 +3338,8 @@ export class SceneSurface {
       this.#sprites.delete(view.id);
       this.#releaseView(view);
     }
+    this.#clearEmitters();
+    this.#releaseVideo();
     this.#clearEffects();
     this.#requestRender();
   }
@@ -3340,31 +3695,21 @@ export function applySprite(
   view: SceneSpriteLike,
   state: SpriteSnapshot,
 ): void {
-  view.anchor.set(state.anchor_x ?? 0.5, state.anchor_y ?? 1);
+  const fit = spriteFit(view.texture.width, view.texture.height, state.layout);
+  const anchorX = state.anchor_x ?? 0.5, anchorY = state.anchor_y ?? 1;
+  view.anchor.set(
+    state.layout?.fit === "cover" ? 0.5 + (anchorX - 0.5) * state.layout.width / (view.texture.width * fit.x) : anchorX,
+    state.layout?.fit === "cover" ? 0.5 + (anchorY - 0.5) * state.layout.height / (view.texture.height * fit.y) : anchorY,
+  );
   view.position.set(state.x, state.y);
   const direction = state.flip_x ? -1 : 1;
   view.scale.set(
-    direction * state.scale * state.scale_x,
-    state.scale * state.scale_y,
+    direction * state.scale * state.scale_x * fit.x,
+    state.scale * state.scale_y * fit.y,
   );
   view.rotation = (state.rotation_deg * Math.PI) / 180;
   view.alpha = state.opacity;
   view.zIndex = Math.round(state.z);
-}
-
-function applySpriteTransform(
-  view: SceneSpriteLike,
-  object: SceneObjectFrame,
-): void {
-  view.anchor.set(object.anchor_x, object.anchor_y);
-  view.position.set(object.x, object.y);
-  view.scale.set(
-    (object.flip_x ? -1 : 1) * object.scale * object.scale_x,
-    object.scale * object.scale_y,
-  );
-  view.rotation = (object.rotation_deg * Math.PI) / 180;
-  view.alpha = object.opacity;
-  view.zIndex = Math.round(object.z);
 }
 
 export function readSprite(

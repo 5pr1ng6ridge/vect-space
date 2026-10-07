@@ -8,7 +8,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from "react";
-import { assetUrl, editorApi } from "../api";
+import { assetUrl, editorApi, previewAssetsToUrls } from "../api";
+import { buildEditorVisualResources } from "../visualResources";
 import { defaultFlashEffect } from "../presentationDefaults";
 import {
   SCREEN_EFFECT_PRESETS,
@@ -40,11 +41,13 @@ import {
 import {
   DESIGN_HEIGHT,
   DESIGN_WIDTH,
+  stagePointToWorld,
   type SceneObjectFrame,
   type SceneFrame,
 } from "@vectspace/presentation-core/scene-frame";
 import type { SceneSurface } from "@vectspace/presentation-core/scene-surface";
 import type { ButtonSnapshot } from "@vectspace/presentation-core/types";
+import { LEGACY_BACKGROUND_ID } from "@vectspace/presentation-core/visual";
 import type { TimelineSession } from "@vectspace/presentation-core/timeline-session";
 import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
 import { TemplateButton } from "@vectspace/presentation-react/button";
@@ -386,8 +389,9 @@ export function TimelineWorkspace({
       setContextError(null);
       setPendingChoice(null);
       try {
+        const draft = projectRef.current;
         const result = await editorApi.buildNodePreview({
-          project: projectRequest(projectRef.current, importTokens),
+          project: projectRequest(draft, importTokens),
           target: {
             scene_id: sceneId,
             node_id: nodeId,
@@ -415,9 +419,12 @@ export function TimelineWorkspace({
             // Set the requested audio policy before restoring a snapshot: the
             // snapshot can already contain a looping BGM from the story path.
             session.setMuted(muted);
+            const resolvedUrls = result.assets === undefined ? urls : previewAssetsToUrls(result.assets);
+            const visuals = buildEditorVisualResources(draft, resolvedUrls, result);
+            surface.setVisualResources(visuals.textBlocks, visuals.particles);
             await session.load({
               update: result.update,
-              assets: urls,
+              assets: resolvedUrls,
               snapshot: result.start_snapshot,
               world: "restore",
               animations: animationMap,
@@ -517,7 +524,7 @@ export function TimelineWorkspace({
       void session
         .load({
           update,
-          assets: urls,
+          assets: current.assets === undefined ? urls : previewAssetsToUrls(current.assets),
           snapshot: current.start_snapshot,
           world: "restore",
           animations: animationMap,
@@ -673,6 +680,7 @@ export function TimelineWorkspace({
       let trackIndex = next.tracks.findIndex(
         (track) =>
           (track.type === "sprite" && track.sprite_id === object.id) ||
+          (track.type === "emitter" && `emitter:${track.emitter_id}` === object.id) ||
           (track.type === "button" && track.instance_id === object.id) ||
           (track.type === "video" && `video:${track.asset}` === object.id),
       );
@@ -684,6 +692,10 @@ export function TimelineWorkspace({
           remove_at_end: false,
           channels: {},
         });
+        trackIndex = next.tracks.length - 1;
+      }
+      if (trackIndex < 0 && object.kind === "emitter") {
+        next.tracks.push({ type: "emitter", emitter_id: object.id.slice("emitter:".length), remove_at_end: false, channels: {} });
         trackIndex = next.tracks.length - 1;
       }
       if (trackIndex < 0 && object.kind === "button") {
@@ -698,7 +710,9 @@ export function TimelineWorkspace({
       const channels =
         object.kind === "video"
           ? ["x", "y", "width", "height", "opacity", "z"]
-          : object.kind === "button"
+          : object.kind === "emitter"
+            ? ["x", "y", "scale", "rotation_deg", "opacity", "z"]
+            : object.kind === "button"
             ? [
                 "x",
                 "y",
@@ -756,6 +770,10 @@ export function TimelineWorkspace({
     const move = (moveEvent: PointerEvent): void => {
       const dx = ((moveEvent.clientX - startX) / rect.width) * DESIGN_WIDTH;
       const dy = ((moveEvent.clientY - startY) / rect.height) * DESIGN_HEIGHT;
+      const camera = frame?.camera;
+      const screen = object.kind === "button" || object.space === "screen";
+      const down = !screen && camera !== undefined ? stagePointToWorld({ x: 0, y: 0 }, camera) : { x: 0, y: 0 };
+      const now = !screen && camera !== undefined ? stagePointToWorld({ x: dx, y: dy }, camera) : { x: dx, y: dy };
       moved = moved || Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5;
       const corner =
         handle === "scale_tl" ||
@@ -769,7 +787,7 @@ export function TimelineWorkspace({
         : dy;
       const transform: Partial<SceneObjectFrame> =
         handle === "move"
-          ? { x: initial.x + dx, y: initial.y + dy }
+          ? { x: initial.x + now.x - down.x, y: initial.y + now.y - down.y }
           : handle === "rotate"
             ? { rotation_deg: initial.rotation_deg + dx * 0.35 }
             : handle === "scale_x"
@@ -959,6 +977,16 @@ export function TimelineWorkspace({
       onError("同一时间线中不能重复添加同一按钮实例轨道。");
       return;
     }
+    if (trackType === "emitter" && selected?.kind !== "emitter") {
+      onError("请先选择场景中已启动的发射器实例。单次爆发和单个粒子不能添加轨道。");
+      return;
+    }
+    if (selected?.kind === "emitter" && current.tracks.some((track) =>
+      track.type === "emitter" && `emitter:${track.emitter_id}` === selected.id
+    )) {
+      onError("选中的发射器已有时间线轨道。");
+      return;
+    }
     const spriteAsset = firstVisibleAssetId(assets, assetLayout, "sprite");
     const videoAsset = firstVisibleAssetId(assets, assetLayout, "video");
     const ambienceSlot =
@@ -1053,9 +1081,11 @@ export function TimelineWorkspace({
                     : selectedButtonInstanceId,
                 channels: {},
               }
-            : trackType === "ambience"
-              ? { type: "ambience", slot: ambienceSlot, channels: {} }
-              : { type: trackType, channels: {} };
+            : trackType === "emitter"
+              ? { type: "emitter", emitter_id: selected?.id.slice("emitter:".length) ?? "", remove_at_end: false, channels: {} }
+              : trackType === "ambience"
+                ? { type: "ambience", slot: ambienceSlot, channels: {} }
+                : { type: trackType, channels: {} };
     commitNode({ ...current, tracks: [...current.tracks, track] });
   };
 
@@ -1306,8 +1336,13 @@ export function TimelineWorkspace({
     }
   };
 
+  // The background-node adapter renders like any Sprite but is owned by
+  // background nodes, so it gets no gizmo or list entry here.
   const objects = useMemo(
-    () => [...(frame?.objects ?? [])].sort((left, right) => left.z - right.z),
+    () =>
+      (frame?.objects ?? [])
+        .filter((object) => object.id !== LEGACY_BACKGROUND_ID)
+        .sort((left, right) => left.z - right.z),
     [frame?.objects],
   );
   // Buttons are placed by the DOM overlay in the game, above the camera-
@@ -1579,6 +1614,7 @@ export function TimelineWorkspace({
                           type="button"
                         />
                       )}
+                      {object.kind !== "emitter" && <>
                       <button
                         aria-label="水平缩放素材"
                         className="timeline-gizmo-scale-x"
@@ -1595,7 +1631,8 @@ export function TimelineWorkspace({
                         }
                         type="button"
                       />
-                      {(object.kind === "sprite" ||
+                      </>}
+                      {(object.kind === "sprite" || object.kind === "emitter" ||
                         object.kind === "button") && (
                         <button
                           aria-label="旋转素材"
@@ -1665,7 +1702,8 @@ export function TimelineWorkspace({
               }
               value={newTrackType}
             >
-              <option value="sprite">立绘轨</option>
+              <option value="sprite">Sprite 轨</option>
+              <option value="emitter">发射器整体轨</option>
               <option value="camera">镜头轨</option>
               <option value="video">视频轨</option>
               <option value="bgm">BGM 轨</option>
@@ -1806,7 +1844,7 @@ export function TimelineWorkspace({
                     ? "VID"
                     : object.kind === "button"
                       ? "BTN"
-                      : "SPR"}
+                      : object.kind === "emitter" ? "EMT" : "SPR"}
                 </span>
                 {object.id}
                 <small>z {Math.round(object.z)}</small>
@@ -1883,7 +1921,7 @@ export function TimelineWorkspace({
                 </>
               ) : (
                 <>
-                  {selectedObject.kind === "sprite" && (
+                  {(selectedObject.kind === "sprite" || selectedObject.kind === "emitter") && (
                     <label>
                       Scale
                       <input
@@ -1937,6 +1975,7 @@ export function TimelineWorkspace({
                       </label>
                     </>
                   )}
+                  {selectedObject.kind !== "emitter" && <>
                   <label>
                     Scale X
                     <input
@@ -1969,6 +2008,7 @@ export function TimelineWorkspace({
                       value={selectedObject.scale_y}
                     />
                   </label>
+                  </>}
                   <label>
                     Rotation
                     <input
@@ -2058,6 +2098,7 @@ export function TimelineWorkspace({
         />
         <TimelineEditor
           assets={assets}
+          textBlocks={project.text_blocks ?? []}
           hidePreview
           hideTransport
           node={localNode}
@@ -2395,13 +2436,15 @@ function gizmoStyle(
   object: SceneObjectFrame,
   camera: SceneFrame["camera"] | undefined,
 ): React.CSSProperties {
-  // Buttons live in the DOM overlay in the game, above the camera-transformed
-  // Pixi world. Keep their editor gizmos in design coordinates as well.
+  const screen = object.kind === "button" || object.space === "screen";
+  const anchored = object.kind === "sprite" || object.kind === "emitter";
+  const anchorX = anchored ? (object.flip_x ? 1 - object.anchor_x : object.anchor_x) : 0;
+  const anchorY = anchored ? (object.anchor_y ?? 1) : 0;
   const projected =
-    object.kind === "button"
+    screen
       ? { x: object.x, y: object.y }
       : projectPoint(object.x, object.y, camera);
-  const zoom = object.kind === "button" ? 1 : (camera?.zoom ?? 1);
+  const zoom = screen ? 1 : (camera?.zoom ?? 1);
   // Sprite dimensions already include their evaluated scale in
   // SceneSurface.#spriteDimensions. Button dimensions are layout values, so
   // their outer scale channels must be applied here.
@@ -2410,18 +2453,15 @@ function gizmoStyle(
   const width = Math.max(40, object.width * scaleX * zoom);
   const height = Math.max(56, object.height * scaleY * zoom);
   const rotation =
-    (object.kind === "button" ? 0 : (camera?.rotation_deg ?? 0)) +
+    (screen ? 0 : (camera?.rotation_deg ?? 0)) +
     object.rotation_deg;
   return {
     left: `${(projected.x / DESIGN_WIDTH) * 100}%`,
     top: `${(projected.y / DESIGN_HEIGHT) * 100}%`,
     width: `${(width / DESIGN_WIDTH) * 100}%`,
     height: `${(height / DESIGN_HEIGHT) * 100}%`,
-    transform:
-      object.kind === "sprite"
-        ? `translate(-50%, -100%) rotate(${rotation}deg)`
-        : `rotate(${rotation}deg)`,
-    transformOrigin: object.kind === "sprite" ? "50% 100%" : "50% 50%",
+    transform: `translate(${-anchorX * 100}%, ${-anchorY * 100}%) rotate(${rotation}deg)`,
+    transformOrigin: `${anchorX * 100}% ${anchorY * 100}%`,
   };
 }
 

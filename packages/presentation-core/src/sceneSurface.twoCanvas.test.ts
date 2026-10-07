@@ -23,7 +23,7 @@ import {
   type MemoryApplication,
   type MemoryKit,
   type MemoryNode,
-  type MemorySprite,
+  MemorySprite,
   type MemoryTexture,
 } from "./sceneTestKit";
 import { createFakeMediaDom, type FakeMediaDom } from "./sessionTestKit";
@@ -146,8 +146,10 @@ async function createTwoCanvases(): Promise<TwoCanvasFixture> {
       throw new Error("内存 kit 没有创建 application");
     }
     const container = (index: number): MemoryNode[] =>
-      (application.stage.children[0]?.children[index]?.children ??
-        []) as MemoryNode[];
+      (application.stage.children[0]?.children ?? []).filter((node) =>
+        node instanceof MemorySprite && (index === 2
+          ? node.anchor.y === 0 && node.zIndex !== -10000
+          : node.anchor.y !== 0 && node.zIndex !== -10000));
     return {
       canvas,
       surface,

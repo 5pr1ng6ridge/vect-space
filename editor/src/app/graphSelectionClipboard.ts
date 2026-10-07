@@ -8,6 +8,7 @@ import {
 import {
   outputPorts,
   preparePastedNode,
+  remapCopiedEmitterInstances,
   setPortTarget,
   uniqueNodeId,
 } from "../story";
@@ -113,6 +114,7 @@ export function placeGraphSelection(
   mode: "duplicate" | "paste",
   manifest: ContentManifest,
   buttons: readonly ButtonFile[] = [],
+  scenes: readonly SceneDefinition[] = [scene],
 ): PlacedGraphSelection {
   const allocated = { ...scene, nodes: { ...scene.nodes } };
   const nodeIds = new Map<string, string>();
@@ -166,6 +168,7 @@ export function placeGraphSelection(
     }
     nodes[nextId] = node;
   }
+  remapCopiedEmitterInstances(Object.values(nodes), scenes);
   const groups = normalizeSceneGroups(
     layout?.groups,
     new Set(Object.keys(scene.nodes)),

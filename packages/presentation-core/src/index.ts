@@ -21,3 +21,6 @@ export * from "./virtualClock";
 export * from "./chapterMap";
 export * from "./choiceLayout";
 export * from "./imageAnimation";
+export * from "./visual";
+export * from "./particles";
+export * from "./textBlock";

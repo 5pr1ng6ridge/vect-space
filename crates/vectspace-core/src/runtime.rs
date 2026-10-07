@@ -25,6 +25,7 @@ use crate::{
     text_template::{self, MAX_VARIABLE_STRING_BYTES},
 };
 use thiserror::Error;
+use crate::visual::{EmitterSnapshot, ParticleAction, SpriteKind, SpriteSource, PARTICLE_SURFACE_MAX_LIVE};
 use crate::interaction::{
     AdvanceBlock, SceneTimer, TimerAction, UpdateKind, WindowControlAction,
     WindowRequest, WindowRole, WindowTitles, MAX_SCENE_TIMERS, MIN_TIMER_INTERVAL_MS,
@@ -564,6 +565,8 @@ impl RuntimeEngine {
         let update = self.update_without_cues();
         BootstrapPayload {
             update,
+            text_blocks: content.text_blocks.clone(),
+            particles: content.particles.clone(),
             asset_ids: content.asset_ids(),
             content_version: content.manifest.content_version.clone(),
             chapter_map_available: content.chapter_map.is_some(),
@@ -1259,7 +1262,7 @@ impl RuntimeEngine {
                 await_completion,
                 next,
             } => {
-                self.snapshot.world.background.clone_from(&background);
+                self.snapshot.world.set_legacy_background(background.clone());
                 if !effect_only { self.snapshot.location.node_id = next; }
                 cues.push(self.cue(
                     gate(await_completion),
@@ -1275,109 +1278,51 @@ impl RuntimeEngine {
                 }
             }
             SceneNode::Sprite {
-                sprite_id,
-                action,
-                asset,
-                character,
-                expression,
-                flip_x,
-                crossfade_ms,
-                x,
-                y,
-                scale,
-                opacity,
-                z,
-                duration_ms,
-                easing,
-                await_completion,
-                next,
+                sprite_id, action, source, sprite_kind, space, layout, asset, character,
+                expression, flip_x, crossfade_ms, x, y, scale, scale_x, scale_y,
+                rotation_deg, anchor_x, anchor_y, opacity, z, duration_ms, easing,
+                await_completion, next,
             } => {
                 let from = self.snapshot.world.sprites.get(&sprite_id).cloned();
-                let to = match action {
-                    SpriteAction::Show => {
-                        let (
-                            resolved_asset,
-                            offset_x,
-                            offset_y,
-                            expression_scale,
-                            anchor_x,
-                            anchor_y,
-                        ) = resolve_character_asset(
-                            content,
-                            character.as_deref(),
-                            expression.as_deref(),
-                            asset,
-                            scene_id,
-                            node_id,
-                        )?;
-                        Some(SpriteSnapshot {
-                            asset: resolved_asset.ok_or_else(|| {
-                                RuntimeError::Content(format!(
-                                    "{scene_id}/{node_id}: show 缺少 asset 或有效表情"
-                                ))
-                            })?,
-                            x: x.unwrap_or(960.0) + offset_x,
-                            y: y.unwrap_or(1080.0) + offset_y,
-                            scale: scale.unwrap_or(1.0) * expression_scale,
-                            scale_x: 1.0,
-                            scale_y: 1.0,
-                            rotation_deg: 0.0,
-                            flip_x: flip_x.unwrap_or(false),
-                            anchor_x,
-                            anchor_y,
-                            opacity: opacity.unwrap_or(1.0),
-                            z: z.unwrap_or(0),
-                        })
+                let to = if action == SpriteAction::Hide {
+                    None
+                } else {
+                    let (resolved_asset, offset_x, offset_y, expression_scale, expression_anchor_x, expression_anchor_y)
+                        = resolve_character_asset(content, character.as_deref(), expression.as_deref(), asset, scene_id, node_id)?;
+                    let requested_source = source.or_else(|| resolved_asset.map(|asset| SpriteSource::Image { asset }));
+                    let mut target = if action == SpriteAction::Show {
+                        let source = requested_source.clone().ok_or_else(|| RuntimeError::Content(format!("{scene_id}/{node_id}: show 缺少来源或有效表情")))?;
+                        let kind = sprite_kind.unwrap_or(if matches!(source, SpriteSource::Text { .. }) { SpriteKind::Text } else { SpriteKind::Character });
+                        kind.preset(source)
+                    } else {
+                        from.clone().ok_or_else(|| RuntimeError::Content(format!("{scene_id}/{node_id}: 无法移动不存在的 Sprite {sprite_id}")))?
+                    };
+                    if let Some(source) = requested_source { target.source = source; }
+                    if let Some(kind) = sprite_kind { target.sprite_kind = kind; }
+                    if let Some(space) = space { target.space = space; }
+                    if let Some(layout) = layout { target.layout = Some(layout); }
+                    if action == SpriteAction::Show {
+                        target.x += offset_x;
+                        target.y += offset_y;
+                        target.scale *= expression_scale;
                     }
-                    SpriteAction::Move => {
-                        let mut target = from.clone().ok_or_else(|| {
-                            RuntimeError::Content(format!(
-                                "{scene_id}/{node_id}: 无法移动不存在的立绘 {sprite_id}"
-                            ))
-                        })?;
-                        let (
-                            resolved_asset,
-                            offset_x,
-                            offset_y,
-                            expression_scale,
-                            anchor_x,
-                            anchor_y,
-                        ) = resolve_character_asset(
-                            content,
-                            character.as_deref(),
-                            expression.as_deref(),
-                            asset,
-                            scene_id,
-                            node_id,
-                        )?;
-                        if let Some(value) = resolved_asset {
-                            target.asset = value;
-                        }
-                        if let Some(value) = x {
-                            target.x = value + offset_x;
-                        }
-                        if let Some(value) = y {
-                            target.y = value + offset_y;
-                        }
-                        if let Some(value) = scale {
-                            target.scale = value * expression_scale;
-                        }
-                        if character.is_some() || expression.is_some() {
-                            target.anchor_x = anchor_x;
-                            target.anchor_y = anchor_y;
-                        }
-                        if let Some(value) = opacity {
-                            target.opacity = value;
-                        }
-                        if let Some(value) = z {
-                            target.z = value;
-                        }
-                        if let Some(value) = flip_x {
-                            target.flip_x = value;
-                        }
-                        Some(target)
+                    if let Some(value) = x { target.x = value + offset_x; }
+                    if let Some(value) = y { target.y = value + offset_y; }
+                    if let Some(value) = scale { target.scale = value * expression_scale; }
+                    if character.is_some() || expression.is_some() {
+                        target.anchor_x = expression_anchor_x;
+                        target.anchor_y = expression_anchor_y;
                     }
-                    SpriteAction::Hide => None,
+                    if let Some(value) = scale_x { target.scale_x = value; }
+                    if let Some(value) = scale_y { target.scale_y = value; }
+                    if let Some(value) = rotation_deg { target.rotation_deg = value; }
+                    if let Some(value) = anchor_x { target.anchor_x = value; }
+                    if let Some(value) = anchor_y { target.anchor_y = value; }
+                    if let Some(value) = opacity { target.opacity = value; }
+                    if let Some(value) = z { target.z = value; }
+                    if let Some(value) = flip_x { target.flip_x = value; }
+                    content.validate_sprite_source(&target.source).map_err(|error| RuntimeError::Content(error.to_string()))?;
+                    Some(target)
                 };
                 if let Some(target) = &to {
                     self.snapshot
@@ -1392,7 +1337,7 @@ impl RuntimeEngine {
                         return None;
                     }
                     match (from.as_ref(), to.as_ref()) {
-                        (Some(previous), Some(next)) if previous.asset != next.asset => {
+                        (Some(previous), Some(next)) if previous.source != next.source => {
                             Some(150)
                         }
                         _ => None,
@@ -1413,6 +1358,27 @@ impl RuntimeEngine {
                 if await_completion {
                     return Ok(true);
                 }
+            }
+            SceneNode::Particle { emitter_id, action, particle, seed, space, x, y, scale, rotation_deg, opacity, z, next } => {
+                let emitter = if action == ParticleAction::Stop {
+                    self.snapshot.world.emitters.remove(&emitter_id);
+                    None
+                } else {
+                    let particle = particle.ok_or_else(|| RuntimeError::Content("发射器缺少粒子定义".into()))?;
+                    let definition = content.particles.get(&particle).ok_or_else(|| RuntimeError::Content(format!("未知粒子定义: {particle}")))?;
+                    let emitter = EmitterSnapshot { particle, seed: seed.unwrap_or(definition.seed), generation: self.next_cue_id as u32, space, x, y, scale, rotation_deg, opacity, z };
+                    if action == ParticleAction::Start {
+                        let budget: u32 = self.snapshot.world.emitters.iter().filter(|(id, _)| *id != &emitter_id)
+                            .filter_map(|(_, emitter)| content.particles.get(&emitter.particle)).map(|definition| definition.max_particles).sum();
+                        if budget.saturating_add(definition.max_particles) > PARTICLE_SURFACE_MAX_LIVE {
+                            return Err(RuntimeError::Content("粒子系统超过单画面预算".into()));
+                        }
+                        self.snapshot.world.emitters.insert(emitter_id.clone(), emitter.clone());
+                    }
+                    Some(emitter)
+                };
+                cues.push(self.cue(CueGate::None, PresentationCueKind::ParticleState { emitter_id, emitter, burst: action == ParticleAction::Burst }));
+                if !effect_only { self.snapshot.location.node_id = next; }
             }
             SceneNode::Clear {
                 duration_ms,
@@ -2518,8 +2484,8 @@ impl RuntimeEngine {
     /// Reset the visual portion of a scene. This is also used by an explicit
     /// `clear` node, which must not reset the rest of the scene's state.
     fn clear_scene_visual_state(&mut self) {
-        self.snapshot.world.background = None;
         self.snapshot.world.sprites.clear();
+        self.snapshot.world.emitters.clear();
         self.snapshot.world.buttons.clear();
         self.snapshot.world.camera = CameraSnapshot::default();
         self.snapshot.world.persistent_effects.clear();
@@ -2785,6 +2751,7 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
     match node {
         SceneNode::Background { next, .. }
         | SceneNode::Sprite { next, .. }
+        | SceneNode::Particle { next, .. }
         | SceneNode::Clear { next, .. }
         | SceneNode::Say { next, .. }
         | SceneNode::LongText { next, .. }
@@ -2920,6 +2887,10 @@ fn expand_sprite_action(
     Ok(vec![TimelineTrack::Sprite {
         sprite_id: sprite_id.to_owned(),
         asset: None,
+        source: None,
+        sprite_kind: None,
+        space: None,
+        layout: None,
         remove_at_end: false,
         channels,
     }])
@@ -3036,9 +3007,28 @@ fn apply_timeline_final_state(
 ) -> Result<(), String> {
     for track in tracks {
         match track {
+            TimelineTrack::Emitter { emitter_id, remove_at_end, channels } => {
+                let emitter = snapshot.world.emitters.get_mut(emitter_id)
+                    .ok_or_else(|| format!("发射器 {emitter_id} 未启动，无法应用时间线"))?;
+                if *remove_at_end {
+                    snapshot.world.emitters.remove(emitter_id);
+                    continue;
+                }
+                if let Some(value) = final_channel(channels, "x") { emitter.x = value; }
+                if let Some(value) = final_channel(channels, "y") { emitter.y = value; }
+                if let Some(value) = final_channel(channels, "scale") { emitter.scale = value; }
+                if let Some(value) = final_channel(channels, "rotation_deg") { emitter.rotation_deg = value; }
+                if let Some(value) = final_channel(channels, "opacity") { emitter.opacity = value; }
+                if let Some(value) = final_channel(channels, "z") { emitter.z = value.round() as i32; }
+                if emitter.scale <= 0.0 { return Err(format!("发射器 {emitter_id} 的最终缩放必须大于 0")); }
+            }
             TimelineTrack::Sprite {
                 sprite_id,
                 asset,
+                source,
+                sprite_kind,
+                space,
+                layout,
                 remove_at_end,
                 channels,
             } => {
@@ -3059,27 +3049,26 @@ fn apply_timeline_final_state(
                     .get(sprite_id)
                     .cloned()
                     .or_else(|| {
-                        asset.as_ref().map(|asset| SpriteSnapshot {
-                            asset: asset.clone(),
-                            x: 960.0,
-                            y: 1080.0,
-                            scale: 1.0,
-                            scale_x: 1.0,
-                            scale_y: 1.0,
-                            rotation_deg: 0.0,
-                            flip_x: false,
-                            anchor_x: 0.5,
-                            anchor_y: 1.0,
-                            opacity: 1.0,
-                            z: 0,
-                        })
+                        let requested = source.clone().or_else(|| asset.as_ref().map(|asset|
+                            SpriteSource::Image { asset: asset.clone() }))?;
+                        let kind = sprite_kind.unwrap_or(if matches!(requested, SpriteSource::Text { .. }) {
+                            SpriteKind::Text
+                        } else {
+                            SpriteKind::Character
+                        });
+                        Some(kind.preset(requested))
                     })
                     .ok_or_else(|| {
-                        format!("立绘 {sprite_id} 未指定素材，且进入时间线时实例不存在")
+                        format!("Sprite {sprite_id} 未指定来源，且进入时间线时实例不存在")
                     })?;
-                if let Some(asset) = asset {
-                    target.asset.clone_from(asset);
+                if let Some(source) = source {
+                    target.source = source.clone();
+                } else if let Some(asset) = asset {
+                    target.source = SpriteSource::Image { asset: asset.clone() };
                 }
+                if let Some(kind) = sprite_kind { target.sprite_kind = *kind; }
+                if let Some(space) = space { target.space = *space; }
+                if let Some(layout) = layout { target.layout = Some(layout.clone()); }
                 if let Some(value) = final_channel(channels, "x") {
                     target.x = value;
                 }
@@ -4151,16 +4140,26 @@ fn validate_snapshot(
     // After the prompt/location checks so their more specific errors win.
     interaction::validate_interaction_snapshot(content, snapshot)?;
     let mut referenced_assets = Vec::new();
-    if let Some(background) = &snapshot.world.background {
-        referenced_assets.push(background.clone());
+    for sprite in snapshot.world.sprites.values() {
+        if ![sprite.x, sprite.y, sprite.scale, sprite.scale_x, sprite.scale_y, sprite.rotation_deg, sprite.opacity, sprite.anchor_x, sprite.anchor_y].into_iter().all(f32::is_finite)
+            || sprite.scale <= 0.0 || sprite.scale_x == 0.0 || sprite.scale_y == 0.0
+            || !(0.0..=1.0).contains(&sprite.opacity) || !(0.0..=1.0).contains(&sprite.anchor_x) || !(0.0..=1.0).contains(&sprite.anchor_y)
+            || sprite.layout.as_ref().is_some_and(|layout| [layout.width, layout.height].into_iter().any(|size| !size.is_finite() || size <= 0.0 || size > 16_384.0)) {
+            return Err(RuntimeError::InvalidSnapshot("Sprite 布局或变换无效".into()));
+        }
+        content.validate_sprite_source(&sprite.source).map_err(|error| RuntimeError::InvalidSnapshot(error.to_string()))?;
+        if let Some(asset) = sprite.source.image_asset() { referenced_assets.push(asset.to_owned()); }
     }
-    referenced_assets.extend(
-        snapshot
-            .world
-            .sprites
-            .values()
-            .map(|sprite| sprite.asset.clone()),
-    );
+    let mut particle_budget = 0_u32;
+    for emitter in snapshot.world.emitters.values() {
+        let definition = content.particles.get(&emitter.particle).ok_or_else(|| RuntimeError::InvalidSnapshot(format!("未知粒子定义 {}", emitter.particle)))?;
+        particle_budget = particle_budget.saturating_add(definition.max_particles);
+        if particle_budget > PARTICLE_SURFACE_MAX_LIVE || ![emitter.x, emitter.y, emitter.scale, emitter.rotation_deg, emitter.opacity].into_iter().all(f32::is_finite)
+            || emitter.scale <= 0.0 || !(0.0..=1.0).contains(&emitter.opacity) {
+            return Err(RuntimeError::InvalidSnapshot("发射器变换或预算无效".into()));
+        }
+        referenced_assets.push(definition.image.clone());
+    }
     if let Some(bgm) = &snapshot.audio.bgm {
         referenced_assets.push(bgm.asset.clone());
     }
@@ -4804,6 +4803,8 @@ mod tests {
             (
                 "show_action".to_owned(),
                 SceneNode::Sprite {
+                    source: None, sprite_kind: None, space: None, layout: None,
+                    scale_x: None, scale_y: None, rotation_deg: None, anchor_x: None, anchor_y: None,
                     sprite_id: "jelly".to_owned(),
                     action: SpriteAction::Show,
                     asset: Some("sprite.jelly".to_owned()),
@@ -4902,6 +4903,8 @@ mod tests {
             (
                 "role_show".to_owned(),
                 SceneNode::Sprite {
+                    source: None, sprite_kind: None, space: None, layout: None,
+                    scale_x: None, scale_y: None, rotation_deg: None, anchor_x: None, anchor_y: None,
                     sprite_id: "role".to_owned(),
                     action: SpriteAction::Show,
                     asset: None,
@@ -4923,6 +4926,8 @@ mod tests {
             (
                 "role_change".to_owned(),
                 SceneNode::Sprite {
+                    source: None, sprite_kind: None, space: None, layout: None,
+                    scale_x: None, scale_y: None, rotation_deg: None, anchor_x: None, anchor_y: None,
                     sprite_id: "role".to_owned(),
                     action: SpriteAction::Move,
                     asset: None,
@@ -4947,7 +4952,7 @@ mod tests {
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         let update = runtime.start_scene_preview(&content, "prologue").unwrap();
         let sprite = &update.snapshot.world.sprites["role"];
-        assert_eq!(sprite.asset, "sprite.omo");
+        assert_eq!(sprite.source.image_asset(), Some("sprite.omo"));
         assert_eq!(sprite.x, 116.0);
         assert_eq!(sprite.y, 220.0);
         assert_eq!(sprite.scale, 1.25);
@@ -4961,7 +4966,7 @@ mod tests {
                 crossfade_ms,
                 to: Some(to),
                 ..
-            } if sprite_id == "role" && to.asset == "sprite.omo" => Some((to, *crossfade_ms)),
+            } if sprite_id == "role" && to.source.image_asset() == Some("sprite.omo") => Some((to, *crossfade_ms)),
             _ => None,
         });
         let Some((to, crossfade_ms)) = tween else {
@@ -5008,6 +5013,8 @@ mod tests {
             (
                 "show_restore".to_owned(),
                 SceneNode::Sprite {
+                    source: None, sprite_kind: None, space: None, layout: None,
+                    scale_x: None, scale_y: None, rotation_deg: None, anchor_x: None, anchor_y: None,
                     sprite_id: "jelly".to_owned(),
                     action: SpriteAction::Show,
                     asset: Some("sprite.jelly".to_owned()),
@@ -5363,6 +5370,41 @@ mod tests {
     }
 
     #[test]
+    fn visual_timeline_sources_and_emitter_transforms_share_final_state() {
+        let content = catalog();
+        let mut snapshot = RuntimeEngine::new(&content).unwrap().snapshot;
+        let tracks: Vec<TimelineTrack> = serde_json::from_value(serde_json::json!([
+            {"type":"sprite", "sprite_id":"label", "source":{"type":"text", "text_block":"label"},
+             "sprite_kind":"ui", "channels":{"x":[{"at_ms":100,"value":240}]}},
+            {"type":"sprite", "sprite_id":"room", "source":{"type":"image", "asset":"bg.classroom"},
+             "sprite_kind":"background"}
+        ])).unwrap();
+        apply_timeline_final_state(&mut snapshot, &tracks).unwrap();
+        let label = &snapshot.world.sprites["label"];
+        assert_eq!(label.space, crate::visual::CoordinateSpace::Screen);
+        assert_eq!((label.x, label.y, label.anchor_y), (240.0, 540.0, 0.5));
+        assert_eq!(snapshot.world.sprites["room"].layout.as_ref().unwrap().fit, crate::visual::ImageFit::Cover);
+        let updates: Vec<TimelineTrack> = serde_json::from_value(serde_json::json!([
+            {"type":"sprite", "sprite_id":"label", "sprite_kind":"character"}
+        ])).unwrap();
+        apply_timeline_final_state(&mut snapshot, &updates).unwrap();
+        assert_eq!(snapshot.world.sprites["label"].anchor_y, 0.5);
+        assert_eq!(snapshot.world.sprites["label"].x, 240.0);
+        snapshot.world.emitters.insert("snow".into(), EmitterSnapshot {
+            particle: "snow".into(), seed: 17, generation: 2, space: crate::visual::CoordinateSpace::World,
+            x: 100.0, y: 200.0, scale: 1.0, rotation_deg: 0.0, opacity: 1.0, z: 0,
+        });
+        let emitter_tracks: Vec<TimelineTrack> = serde_json::from_value(serde_json::json!([
+            {"type":"emitter", "emitter_id":"snow", "channels":{"x":[{"at_ms":100,"value":400}], "scale":[{"at_ms":100,"value":2}]}}
+        ])).unwrap();
+        apply_timeline_final_state(&mut snapshot, &emitter_tracks).unwrap();
+        let emitter = &snapshot.world.emitters["snow"];
+        assert_eq!((emitter.x, emitter.scale, emitter.seed, emitter.generation), (400.0, 2.0, 17, 2));
+        snapshot.world.emitters.clear();
+        assert!(apply_timeline_final_state(&mut snapshot, &emitter_tracks).unwrap_err().contains("未启动"));
+    }
+
+    #[test]
     fn clear_node_fades_to_an_empty_scene_owned_world() {
         let mut content = catalog();
         let scene = content.scenes.get_mut("prologue").unwrap();
@@ -5377,11 +5419,11 @@ mod tests {
         );
         let mut runtime = RuntimeEngine::new(&content).unwrap();
         runtime.snapshot.location.node_id = "clear_test".to_owned();
-        runtime.snapshot.world.background = Some("bg.classroom".to_owned());
+        runtime.snapshot.world.set_legacy_background(Some("bg.classroom".to_owned()));
         runtime.snapshot.world.sprites.insert(
             "alice".to_owned(),
             SpriteSnapshot {
-                asset: "sprite.jelly".to_owned(),
+                source: SpriteSource::Image { asset: "sprite.jelly".to_owned() },
                 x: 960.0,
                 y: 1080.0,
                 scale: 1.0,
@@ -5393,6 +5435,7 @@ mod tests {
                 anchor_y: 1.0,
                 opacity: 1.0,
                 z: 4,
+                ..SpriteSnapshot::default()
             },
         );
         runtime.snapshot.world.camera = CameraSnapshot {
@@ -5420,7 +5463,7 @@ mod tests {
         );
 
         let cues = runtime.run_until_boundary(&content).unwrap();
-        assert_eq!(runtime.snapshot.world.background, None);
+        assert_eq!(runtime.snapshot.world.background_asset(), None);
         assert!(runtime.snapshot.world.sprites.is_empty());
         assert_eq!(runtime.snapshot.world.camera, CameraSnapshot::default());
         assert!(runtime.snapshot.world.persistent_effects.is_empty());
@@ -5447,6 +5490,8 @@ mod tests {
         source.nodes.insert(
             "source_sprite".to_owned(),
             SceneNode::Sprite {
+                source: None, sprite_kind: None, space: None, layout: None,
+                scale_x: None, scale_y: None, rotation_deg: None, anchor_x: None, anchor_y: None,
                 sprite_id: "alice".to_owned(),
                 action: SpriteAction::Show,
                 asset: Some("sprite.jelly".to_owned()),
@@ -5530,7 +5575,7 @@ mod tests {
                 node_id: "end".to_owned(),
             }
         );
-        assert_eq!(update.snapshot.world.background, None);
+        assert_eq!(update.snapshot.world.background_asset(), None);
         assert!(update.snapshot.world.sprites.is_empty());
         assert!(update.snapshot.audio.bgm.is_none());
         assert_eq!(update.snapshot.playback, PlaybackSnapshot::default());
@@ -5929,7 +5974,7 @@ mod tests {
             Some(&ScalarValue::Integer(3))
         );
         assert_eq!(
-            runtime.snapshot().world.background.as_deref(),
+            runtime.snapshot().world.background_asset(),
             Some("bg.nvctsp")
         );
         assert!(runtime.snapshot().world.dialogue_ui_visible);
@@ -6901,7 +6946,7 @@ mod tests {
         assert!(opening.requires_ack);
         assert_eq!(opening.snapshot.location.node_id, "timeline");
         assert_eq!(
-            opening.snapshot.world.background.as_deref(),
+            opening.snapshot.world.background_asset(),
             Some("bg.nvctsp")
         );
         assert_eq!(opening.snapshot.world.sprites["lab"].x, 600.0);

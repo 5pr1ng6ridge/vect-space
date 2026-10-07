@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
+use crate::visual::{CoordinateSpace, EmitterSnapshot, ParticleAction, SpriteKind, SpriteLayout, SpriteSource, LEGACY_BACKGROUND_ID};
 
 pub type VariableMap = BTreeMap<String, ScalarValue>;
 
@@ -230,6 +231,10 @@ pub struct ContentManifest {
     /// existing projects and keeps the action system opt-in.
     #[serde(default)]
     pub actions: Vec<String>,
+    #[serde(default)]
+    pub text_blocks: Vec<String>,
+    #[serde(default)]
+    pub particles: Vec<String>,
     /// Optional author-authored room map used as the chapter selector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_map: Option<String>,
@@ -900,6 +905,24 @@ pub enum SceneNode {
         sprite_id: String,
         action: SpriteAction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<SpriteSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sprite_kind: Option<SpriteKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<CoordinateSpace>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<SpriteLayout>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale_x: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale_y: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation_deg: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_x: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_y: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         asset: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         character: Option<String>,
@@ -920,6 +943,29 @@ pub enum SceneNode {
         easing: Easing,
         #[serde(default, rename = "await")]
         await_completion: bool,
+        next: String,
+    },
+    Particle {
+        emitter_id: String,
+        action: ParticleAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        particle: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u32>,
+        #[serde(default)]
+        space: CoordinateSpace,
+        #[serde(default)]
+        x: f32,
+        #[serde(default)]
+        y: f32,
+        #[serde(default = "default_scale_component")]
+        scale: f32,
+        #[serde(default)]
+        rotation_deg: f32,
+        #[serde(default = "default_scale_component")]
+        opacity: f32,
+        #[serde(default)]
+        z: i32,
         next: String,
     },
     /// Fade the current scene's visual world to an empty state. Audio and the
@@ -2251,10 +2297,25 @@ pub enum VideoFit {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TimelineTrack {
+    Emitter {
+        emitter_id: String,
+        #[serde(default)]
+        remove_at_end: bool,
+        #[serde(default)]
+        channels: TimelineChannels,
+    },
     Sprite {
         sprite_id: String,
         #[serde(default)]
         asset: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<SpriteSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sprite_kind: Option<SpriteKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<CoordinateSpace>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<SpriteLayout>,
         #[serde(default)]
         remove_at_end: bool,
         #[serde(default)]
@@ -2433,11 +2494,12 @@ pub struct StoryLocation {
     pub node_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorldSnapshot {
-    pub background: Option<String>,
     pub sprites: BTreeMap<String, SpriteSnapshot>,
+    #[serde(default)]
+    pub emitters: BTreeMap<String, EmitterSnapshot>,
     #[serde(default)]
     pub buttons: BTreeMap<String, ButtonSnapshot>,
     pub camera: CameraSnapshot,
@@ -2452,8 +2514,8 @@ pub struct WorldSnapshot {
 impl Default for WorldSnapshot {
     fn default() -> Self {
         Self {
-            background: None,
             sprites: BTreeMap::new(),
+            emitters: BTreeMap::new(),
             buttons: BTreeMap::new(),
             camera: CameraSnapshot::default(),
             dialogue_ui_visible: true,
@@ -2461,6 +2523,58 @@ impl Default for WorldSnapshot {
             persistent_effects: Vec::new(),
             curtain: CurtainSnapshot::default(),
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldSnapshotInput {
+    #[serde(default)]
+    background: Option<String>,
+    #[serde(default)]
+    sprites: BTreeMap<String, SpriteSnapshot>,
+    #[serde(default)]
+    emitters: BTreeMap<String, EmitterSnapshot>,
+    #[serde(default)]
+    buttons: BTreeMap<String, ButtonSnapshot>,
+    camera: CameraSnapshot,
+    dialogue_ui_visible: bool,
+    #[serde(default)]
+    ui_motion_bindings: UiMotionBindings,
+    persistent_effects: Vec<String>,
+    #[serde(default)]
+    curtain: CurtainSnapshot,
+}
+
+impl WorldSnapshot {
+    pub fn background_asset(&self) -> Option<&str> {
+        self.sprites.get(LEGACY_BACKGROUND_ID).and_then(|sprite| sprite.source.image_asset())
+    }
+    pub fn set_legacy_background(&mut self, background: Option<String>) {
+        if let Some(asset) = background {
+            self.sprites.insert(LEGACY_BACKGROUND_ID.to_owned(), SpriteKind::Background.preset(SpriteSource::Image { asset }));
+        } else {
+            self.sprites.remove(LEGACY_BACKGROUND_ID);
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorldSnapshot {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let input = WorldSnapshotInput::deserialize(deserializer)?;
+        let mut world = Self {
+            sprites: input.sprites, emitters: input.emitters, buttons: input.buttons,
+            camera: input.camera, dialogue_ui_visible: input.dialogue_ui_visible,
+            ui_motion_bindings: input.ui_motion_bindings,
+            persistent_effects: input.persistent_effects, curtain: input.curtain,
+        };
+        if input.background.is_some() {
+            if world.sprites.contains_key(LEGACY_BACKGROUND_ID) {
+                return Err(de::Error::custom("旧 background 与 Sprite __background__ 冲突"));
+            }
+            world.set_legacy_background(input.background);
+        }
+        Ok(world)
     }
 }
 
@@ -2476,10 +2590,16 @@ pub struct CurtainSnapshot {
     pub fill: Option<CurtainFill>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpriteSnapshot {
-    pub asset: String,
+    pub source: SpriteSource,
+    #[serde(default)]
+    pub sprite_kind: SpriteKind,
+    #[serde(default)]
+    pub space: CoordinateSpace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<SpriteLayout>,
     pub x: f32,
     pub y: f32,
     pub scale: f32,
@@ -2496,6 +2616,67 @@ pub struct SpriteSnapshot {
     pub anchor_y: f32,
     pub opacity: f32,
     pub z: i32,
+}
+
+impl Default for SpriteSnapshot {
+    fn default() -> Self {
+        Self {
+            source: SpriteSource::Image { asset: String::new() },
+            sprite_kind: SpriteKind::Character,
+            space: CoordinateSpace::World,
+            layout: None,
+            x: 960.0, y: 1080.0, scale: 1.0, scale_x: 1.0, scale_y: 1.0,
+            rotation_deg: 0.0, flip_x: false, anchor_x: 0.5, anchor_y: 1.0,
+            opacity: 1.0, z: 0,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpriteSnapshotInput {
+    #[serde(default)]
+    source: Option<SpriteSource>,
+    #[serde(default)]
+    asset: Option<String>,
+    #[serde(default)]
+    sprite_kind: SpriteKind,
+    #[serde(default)]
+    space: CoordinateSpace,
+    #[serde(default)]
+    layout: Option<SpriteLayout>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    #[serde(default = "default_scale_component")]
+    scale_x: f32,
+    #[serde(default = "default_scale_component")]
+    scale_y: f32,
+    #[serde(default)]
+    rotation_deg: f32,
+    #[serde(default)]
+    flip_x: bool,
+    anchor_x: f32,
+    anchor_y: f32,
+    opacity: f32,
+    z: i32,
+}
+
+impl<'de> Deserialize<'de> for SpriteSnapshot {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let input = SpriteSnapshotInput::deserialize(deserializer)?;
+        let source = match (input.source, input.asset) {
+            (Some(source), None) => source,
+            (None, Some(asset)) => SpriteSource::Image { asset },
+            _ => return Err(de::Error::custom("Sprite 必须且只能指定 source 或旧 asset")),
+        };
+        Ok(Self {
+            source, sprite_kind: input.sprite_kind, space: input.space, layout: input.layout,
+            x: input.x, y: input.y, scale: input.scale, scale_x: input.scale_x,
+            scale_y: input.scale_y, rotation_deg: input.rotation_deg, flip_x: input.flip_x,
+            anchor_x: input.anchor_x, anchor_y: input.anchor_y, opacity: input.opacity, z: input.z,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2723,6 +2904,12 @@ pub enum PresentationCueKind {
         duration_ms: u64,
         easing: Easing,
     },
+    ParticleState {
+        emitter_id: String,
+        emitter: Option<EmitterSnapshot>,
+        #[serde(default)]
+        burst: bool,
+    },
     SpriteTween {
         sprite_id: String,
         from: Option<SpriteSnapshot>,
@@ -2843,6 +3030,10 @@ pub enum PresentationOutcome {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapPayload {
     pub update: RuntimeUpdate,
+    #[serde(default)]
+    pub text_blocks: BTreeMap<String, crate::visual::TextBlockDefinition>,
+    #[serde(default)]
+    pub particles: BTreeMap<String, crate::visual::ParticleDefinition>,
     pub asset_ids: Vec<String>,
     pub content_version: String,
     /// True when an author-authored chapter map is available.

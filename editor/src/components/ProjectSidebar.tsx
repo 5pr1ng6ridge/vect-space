@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -60,11 +61,20 @@ import {
   Plus,
   Sparkles,
   Trash2,
+  Type,
 } from "lucide-react";
 import { IconButton } from "../ui/Button";
 import { LibraryRow } from "./LibraryRow";
 import { ColorSwatch, DeferredInput } from "./Fields";
 import { ID_RULE_HINT, idUnavailableReason } from "../app/ids";
+import {
+  suggestVisualId,
+  textBlockGroups,
+  visualReferences,
+  VISUAL_KIND_LABELS,
+  type VisualKind,
+} from "../app/visualLibrary";
+import type { MenuItemSpec } from "../ui/Menu";
 import { isComposing } from "../ui/keyboard";
 import { ASSET_KIND_ICONS } from "../ui/assetIcons";
 import {
@@ -146,6 +156,8 @@ interface ProjectSidebarProps {
   onDeleteAction(id: string): void;
   /** Open the shared keyframe workspace for one reusable action. */
   onEditActionKeyframes(id: string): void;
+  /** Fixed text block / image particle libraries; omitted sections stay hidden. */
+  visualLibrary?: VisualLibraryHandlers;
   onNavigate(
     sceneId: string | null,
     nodeId: string | null,
@@ -158,13 +170,24 @@ interface ProjectSidebarProps {
   onToggleSection?(id: ProjectSectionId): void;
   /** Save-independent expanded state for individual character/variable cards. */
   sidebarItemOpen?: Readonly<Record<string, boolean>>;
-  onToggleSidebarItem?(key: string): void;
+  /** `defaultOpen` is the state shown while the key has no saved choice. */
+  onToggleSidebarItem?(key: string, defaultOpen?: boolean): void;
   /** App-owned, save-independent sidebar scroll offsets keyed by tab. */
   scrollStore?: SidebarScrollStore;
   /** The App shell renders its own activity bar; show only the panel. */
   hideTabs?: boolean;
   /** Records the live offset of whichever tab is scrolled. */
   onScrollOffset?(tab: SidebarTab, offset: number): void;
+}
+
+export interface VisualLibraryHandlers {
+  /** `sceneId` files a new text block under that scene's group. */
+  onCreate(kind: VisualKind, id: string, sceneId?: string): boolean;
+  onRename(kind: VisualKind, previousId: string, nextId: string): boolean;
+  onDuplicate(kind: VisualKind, id: string): void;
+  onDelete(kind: VisualKind, id: string): void;
+  /** `sceneId` is the scene whose group was clicked; 返回 lands on it. */
+  onEdit(kind: VisualKind, id: string, sceneId?: string): void;
 }
 
 export type SidebarTab =
@@ -231,14 +254,18 @@ function useSidebarScroller(
 function CollapsibleSection({
   id,
   title,
+  toggleLabel,
   className,
   open,
   onToggle,
   actions,
   children,
 }: {
-  id: ProjectSectionId;
+  /** A project section id, or a stable key for a nested group. */
+  id: string;
   title: string;
+  /** Accessible name of the toggle when the visible title repeats (per scene). */
+  toggleLabel?: string;
   className?: string;
   open: boolean;
   onToggle(): void;
@@ -256,6 +283,7 @@ function CollapsibleSection({
         <button
           aria-controls={contentId}
           aria-expanded={open}
+          aria-label={toggleLabel}
           className="project-section-toggle"
           onClick={onToggle}
           type="button"
@@ -315,6 +343,7 @@ export function ProjectSidebar({
   onDuplicateAction,
   onDeleteAction,
   onEditActionKeyframes,
+  visualLibrary,
   onNavigate,
   onTabChange,
   onScrollOffset,
@@ -403,8 +432,11 @@ export function ProjectSidebar({
           onScrollOffset={onScrollOffset}
           onSelectScene={onSelectScene}
           onSetSceneRole={onSetSceneRole}
+          onToggleSidebarItem={onToggleSidebarItem}
           project={project}
           scrollStore={scrollStore}
+          sidebarItemOpen={sidebarItemOpen}
+          visualLibrary={visualLibrary}
         />
       )}
       {tab === "assets" && (
@@ -449,6 +481,7 @@ export function ProjectSidebar({
           onDuplicateAction={onDuplicateAction}
           onDeleteAction={onDeleteAction}
           onEditActionKeyframes={onEditActionKeyframes}
+          visualLibrary={visualLibrary}
           onScrollOffset={onScrollOffset}
           onToggleSection={onToggleSection}
           sidebarItemOpen={sidebarItemOpen}
@@ -584,8 +617,11 @@ function ScenesPanel({
   onScrollOffset,
   onSelectScene,
   onSetSceneRole,
+  onToggleSidebarItem,
   project,
   scrollStore,
+  sidebarItemOpen,
+  visualLibrary,
 }: {
   activeSceneId: string;
   diagnostics: EditorDiagnostic[];
@@ -595,8 +631,11 @@ function ScenesPanel({
   onScrollOffset?(tab: SidebarTab, offset: number): void;
   onSelectScene(sceneId: string): void;
   onSetSceneRole?(sceneId: string, role: WindowRole): void;
+  onToggleSidebarItem?(key: string, defaultOpen?: boolean): void;
   project: EditorProject;
   scrollStore?: SidebarScrollStore;
+  sidebarItemOpen?: Readonly<Record<string, boolean>>;
+  visualLibrary?: VisualLibraryHandlers;
 }): ReactElement {
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState<{
@@ -606,9 +645,33 @@ function ScenesPanel({
     previous?: string;
     role?: WindowRole;
   } | null>(null);
+  const [textDialog, setTextDialog] = useState<{
+    title: string;
+    value: string;
+    /** Scene whose group is creating; absent for a rename. */
+    sceneId?: string;
+    previous?: string;
+  } | null>(null);
   const scenes = project.scenes.filter((file) =>
     file.definition.id.toLowerCase().includes(query.trim().toLowerCase()),
   );
+  // Fixed texts follow the scene content: each scene lists the texts it pins
+  // or really uses, and the rest fall into shared / unassigned groups.
+  const groups = useMemo(
+    () => (visualLibrary === undefined ? null : textBlockGroups(project)),
+    [project, visualLibrary],
+  );
+  // An author's own expand / collapse choice always wins; until then only the
+  // active scene and groups that actually hold texts are open, so a project
+  // with many scenes does not fill the list with empty headers.
+  const textGroupProps = (key: string, defaultOpen: boolean) => ({
+    open: sidebarItemOpen?.[key] ?? defaultOpen,
+    onToggle: () => onToggleSidebarItem?.(key, defaultOpen),
+    project,
+  });
+  const beginTextRename = (id: string): void =>
+    setTextDialog({ title: "新的固定文本块 ID", value: id, previous: id });
+  const showFallbackGroups = query.trim() === "";
   const { onScroll: onSceneListScroll, ref: sceneListRef } = useSidebarScroller(
     "scenes",
     scrollStore,
@@ -659,10 +722,11 @@ function ScenesPanel({
             (diagnostic) => diagnostic.scene_id === scene.id,
           ).length;
           const entry = project.manifest.entry_scene === scene.id;
+          const sceneTexts = groups?.scenes.get(scene.id) ?? [];
           return (
+            <Fragment key={scene.id}>
             <article
               className={`scene-row${activeSceneId === scene.id ? " active" : ""}`}
-              key={scene.id}
             >
               <button
                 className="scene-main"
@@ -731,8 +795,65 @@ function ScenesPanel({
                 />
               </div>
             </article>
+            {groups !== null && visualLibrary !== undefined && (
+              <TextBlockGroup
+                {...textGroupProps(
+                  `text-scene:${scene.id}`,
+                  scene.id === activeSceneId || sceneTexts.length > 0,
+                )}
+                groupId={`text-scene-${scene.id}`}
+                ids={sceneTexts}
+                library={visualLibrary}
+                onCreate={() =>
+                  setTextDialog({
+                    title: "新固定文本块 ID",
+                    value: suggestVisualId(
+                      project,
+                      "textBlock",
+                      (candidate) =>
+                        idUnavailableReason("textBlock", candidate, project) !== null,
+                    ),
+                    sceneId: scene.id,
+                  })
+                }
+                onRename={beginTextRename}
+                sceneId={scene.id}
+                title="固定文本块"
+                toggleLabel={`场景 ${scene.id} 的固定文本块`}
+              />
+            )}
+            </Fragment>
           );
         })}
+        {groups !== null && visualLibrary !== undefined && showFallbackGroups && (
+          <>
+            {groups.shared.length > 0 && (
+              <TextBlockGroup
+                {...textGroupProps("text-shared", true)}
+                groupId="text-shared"
+                hint="被多个场景使用或归入多个场景；仍然只有一份定义，改动会同时影响这些场景。"
+                ids={groups.shared.map((entry) => entry.id)}
+                library={visualLibrary}
+                onRename={beginTextRename}
+                sharedScenes={
+                  new Map(groups.shared.map((entry) => [entry.id, entry.sceneIds]))
+                }
+                title="共享文本块"
+              />
+            )}
+            {groups.unassigned.length > 0 && (
+              <TextBlockGroup
+                {...textGroupProps("text-unassigned", true)}
+                groupId="text-unassigned"
+                hint="没有任何场景使用或归入；可从场景的 Sprite 来源中选用，或在这里继续编辑。"
+                ids={groups.unassigned}
+                library={visualLibrary}
+                onRename={beginTextRename}
+                title="未归属文本块"
+              />
+            )}
+          </>
+        )}
         {scenes.length === 0 && (
           <p className="library-empty">没有匹配的场景。</p>
         )}
@@ -760,8 +881,154 @@ function ScenesPanel({
           }
         />
       )}
+      {textDialog !== null && (
+        <TextEntryDialog
+          initialValue={textDialog.value}
+          onCancel={() => setTextDialog(null)}
+          onSubmit={(value) => {
+            let accepted = false;
+            if (textDialog.previous === undefined)
+              accepted =
+                visualLibrary?.onCreate("textBlock", value, textDialog.sceneId) ??
+                false;
+            else if (value === textDialog.previous) accepted = true;
+            else
+              accepted =
+                visualLibrary?.onRename("textBlock", textDialog.previous, value) ??
+                false;
+            if (accepted) setTextDialog(null);
+            return accepted;
+          }}
+          hint={ID_RULE_HINT}
+          title={textDialog.title}
+          validate={(value) =>
+            idUnavailableReason("textBlock", value, project, {
+              previous: textDialog.previous,
+            })
+          }
+        />
+      )}
     </div>
   );
+}
+
+/**
+ * One group of fixed text blocks under a scene (or the shared / unassigned
+ * fallbacks).  Every text appears in exactly one group, so each row edits the
+ * single definition no matter where it is listed.
+ */
+function TextBlockGroup({
+  groupId,
+  title,
+  toggleLabel,
+  hint,
+  ids,
+  sceneId,
+  sharedScenes,
+  library,
+  project,
+  open,
+  onToggle,
+  onCreate,
+  onRename,
+}: {
+  groupId: string;
+  title: string;
+  toggleLabel?: string;
+  /** Explains a fallback group; also shown instead of rows when empty. */
+  hint?: string;
+  ids: readonly string[];
+  /** Scene this group belongs to; the new-text button and Back target. */
+  sceneId?: string;
+  /** Text id to the scenes that list it (shared group only). */
+  sharedScenes?: ReadonlyMap<string, readonly string[]>;
+  library: VisualLibraryHandlers;
+  project: EditorProject;
+  open: boolean;
+  onToggle(): void;
+  onCreate?(): void;
+  onRename(id: string): void;
+}): ReactElement {
+  const label = VISUAL_KIND_LABELS.textBlock;
+  return (
+    <CollapsibleSection
+      actions={
+        onCreate !== undefined && (
+          <IconButton
+            icon={Plus}
+            label={`在场景 ${sceneId ?? ""} 新建${label}`}
+            onClick={onCreate}
+            size="sm"
+            variant="ghost"
+          />
+        )
+      }
+      className="scene-text-group"
+      id={groupId}
+      onToggle={onToggle}
+      open={open}
+      title={ids.length > 0 ? `${title} · ${ids.length}` : title}
+      toggleLabel={toggleLabel}
+    >
+      {hint !== undefined && ids.length > 0 && (
+        <p className="library-empty">{hint}</p>
+      )}
+      <div className="library-list">
+        {ids.map((id) => {
+          const definition = (project.text_blocks ?? []).find(
+            (file) => file.definition.id === id,
+          )?.definition;
+          if (definition === undefined) return null;
+          const uses = visualReferences(project, "textBlock", id).length;
+          const scenes = sharedScenes?.get(id);
+          return (
+            <LibraryRow
+              actions={visualRowActions("textBlock", id, library, () =>
+                onRename(id),
+              )}
+              editLabel={`编辑${label} ${id}`}
+              icon={Type}
+              key={id}
+              meta={`${definition.width}×${definition.height} · ${uses} 处引用${
+                scenes === undefined ? "" : ` · ${scenes.join("、")}`
+              }`}
+              onOpen={() => library.onEdit("textBlock", id, sceneId)}
+              title={id}
+            />
+          );
+        })}
+        {ids.length === 0 && (
+          <p className="library-empty">还没有{label}。新建后可在 Sprite 的图像来源中选用。</p>
+        )}
+      </div>
+    </CollapsibleSection>
+  );
+}
+
+/** Rename / copy / remove menu shared by every fixed-text and particle row. */
+function visualRowActions(
+  visual: VisualKind,
+  id: string,
+  library: VisualLibraryHandlers,
+  onRename: () => void,
+): MenuItemSpec[] {
+  return [
+    { id: "rename", label: "重命名 ID…", icon: Pencil, onSelect: onRename },
+    {
+      id: "duplicate",
+      label: "创建副本",
+      icon: CopyPlus,
+      onSelect: () => library.onDuplicate(visual, id),
+    },
+    { kind: "separator", id: "sep" },
+    {
+      id: "delete",
+      label: "从项目移除",
+      icon: Trash2,
+      danger: true,
+      onSelect: () => library.onDelete(visual, id),
+    },
+  ];
 }
 
 function AssetsPanel({
@@ -2847,6 +3114,7 @@ function ProjectPanel({
   onDuplicateAction,
   onDeleteAction,
   onEditActionKeyframes,
+  visualLibrary,
   onScrollOffset,
   project,
   scrollStore,
@@ -2878,6 +3146,7 @@ function ProjectPanel({
   onDuplicateAction(id: string): void;
   onDeleteAction(id: string): void;
   onEditActionKeyframes(id: string): void;
+  visualLibrary?: VisualLibraryHandlers;
   onScrollOffset?(tab: SidebarTab, offset: number): void;
   project: EditorProject;
   scrollStore?: SidebarScrollStore;
@@ -2899,8 +3168,11 @@ function ProjectPanel({
       | "variable_add"
       | "variable_rename"
       | "action_add"
-      | "action_rename";
+      | "action_rename"
+      | "visual_add"
+      | "visual_rename";
     previous?: string;
+    visual?: VisualKind;
   } | null>(null);
   const { onScroll: onSettingsScroll, ref: settingsRef } = useSidebarScroller(
     "project",
@@ -3209,6 +3481,69 @@ function ProjectPanel({
             {(project.actions ?? []).length === 0 && (
               <p className="library-empty">
                 还没有立绘动作。动作以立绘当前姿态为基准，可在「立绘动作」节点中调用。
+              </p>
+            )}
+          </div>
+        </CollapsibleSection>
+      )}
+      {show("library") && visualLibrary !== undefined && (
+        <CollapsibleSection
+          actions={
+            <IconButton
+              icon={Plus}
+              label={`新建${VISUAL_KIND_LABELS.particle}`}
+              onClick={() =>
+                setDialog({
+                  title: `新${VISUAL_KIND_LABELS.particle} ID`,
+                  value: suggestVisualId(
+                    project,
+                    "particle",
+                    (candidate) =>
+                      idUnavailableReason("particle", candidate, project) !== null,
+                  ),
+                  kind: "visual_add",
+                  visual: "particle",
+                })
+              }
+              size="sm"
+              variant="ghost"
+            />
+          }
+          id="particle"
+          onToggle={() => toggleSection("particle")}
+          open={isSectionOpen("particle")}
+          title={VISUAL_KIND_LABELS.particle}
+        >
+          <div className="library-list">
+            {(project.particles ?? []).map(({ definition }) => {
+              const uses = visualReferences(project, "particle", definition.id).length;
+              return (
+                <LibraryRow
+                  actions={visualRowActions(
+                    "particle",
+                    definition.id,
+                    visualLibrary,
+                    () =>
+                      setDialog({
+                        title: `新的${VISUAL_KIND_LABELS.particle} ID`,
+                        value: definition.id,
+                        kind: "visual_rename",
+                        previous: definition.id,
+                        visual: "particle",
+                      }),
+                  )}
+                  editLabel={`编辑${VISUAL_KIND_LABELS.particle} ${definition.id}`}
+                  icon={Sparkles}
+                  key={definition.id}
+                  meta={`${definition.image || "未选图片"} · 上限 ${definition.max_particles} · ${uses} 处引用`}
+                  onOpen={() => visualLibrary.onEdit("particle", definition.id)}
+                  title={definition.id}
+                />
+              );
+            })}
+            {(project.particles ?? []).length === 0 && (
+              <p className="library-empty">
+                还没有粒子效果。粒子由「图片粒子」节点整体启动、停止或爆发。
               </p>
             )}
           </div>
@@ -3613,6 +3948,20 @@ function ProjectPanel({
               } else {
                 accepted = false;
               }
+            } else if (
+              dialog.kind === "visual_add" &&
+              dialog.visual !== undefined
+            ) {
+              accepted = visualLibrary?.onCreate(dialog.visual, value) ?? false;
+            } else if (dialog.kind === "visual_rename") {
+              if (
+                dialog.visual !== undefined &&
+                dialog.previous !== undefined &&
+                value !== dialog.previous
+              )
+                accepted =
+                  visualLibrary?.onRename(dialog.visual, dialog.previous, value) ??
+                  false;
             } else if (dialog.kind === "action_add") {
               accepted = onCreateAction(value);
             } else if (
@@ -3633,11 +3982,12 @@ function ProjectPanel({
           title={dialog.title}
           validate={(value) =>
             idUnavailableReason(
-              dialog.kind.startsWith("character")
-                ? "character"
-                : dialog.kind.startsWith("variable")
-                  ? "variable"
-                  : "action",
+              dialog.visual ??
+                (dialog.kind.startsWith("character")
+                  ? "character"
+                  : dialog.kind.startsWith("variable")
+                    ? "variable"
+                    : "action"),
               value,
               project,
               { previous: dialog.previous },

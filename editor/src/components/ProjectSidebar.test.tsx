@@ -31,6 +31,7 @@ const SECTION_LABELS: Record<ProjectSectionId, string> = {
   "ui-motion": "UI 动效",
   "button-template": "按钮模板",
   "sprite-action": "立绘动作库",
+  particle: "粒子效果",
   character: "角色",
   variable: "剧情变量",
 };
@@ -149,6 +150,13 @@ const SIDEBAR_CALLBACKS = {
   onRenameScene: () => true,
   onRenameVariable: () => true,
   onSelectAsset: () => undefined,
+  visualLibrary: {
+    onCreate: () => true,
+    onRename: () => true,
+    onDuplicate: () => undefined,
+    onDelete: () => undefined,
+    onEdit: () => undefined,
+  },
   onSelectScene: () => undefined,
 };
 
@@ -297,7 +305,7 @@ describe("project panel sections", () => {
     expect(regionFor(courage)).not.toHaveAttribute("hidden");
   });
 
-  it("starts all five sections expanded and toggles each one independently", () => {
+  it("starts every section expanded and toggles each one independently", () => {
     render(<ProjectHarness project={createProject()} />);
 
     for (const id of PROJECT_SECTION_IDS) {

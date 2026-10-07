@@ -9,6 +9,7 @@ import {
   type SceneFrame,
 } from "./sceneFrame";
 import { SceneSurface } from "./sceneSurface";
+import { LEGACY_BACKGROUND_ID, spriteResourceId } from "./visual";
 import type { SceneKit, SceneTextureLike } from "./sceneSurface";
 import {
   MemoryGraphics,
@@ -95,9 +96,9 @@ interface Harness {
 
 function assetsOf(harness: Harness): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(harness.surface.captureBases().sprites).map(
-      ([id, state]) => [id, state.asset],
-    ),
+    Object.entries(harness.surface.captureBases().sprites)
+      .filter(([id]) => id !== LEGACY_BACKGROUND_ID)
+      .map(([id, state]) => [id, spriteResourceId(state)]),
   );
 }
 
@@ -121,8 +122,8 @@ async function createSurface(
   // animation frame; prime it so a later step advances real time.
   pump.step(0);
   const layer = (index: number): MemorySprite[] =>
-    (kit.applications[0]?.stage.children[0]?.children[index]?.children ??
-      []) as MemorySprite[];
+    (kit.applications[0]?.stage.children[0]?.children ?? []).filter((node): node is MemorySprite =>
+      node instanceof MemorySprite && (index === 0 ? node.zIndex === -10000 : node.zIndex !== -10000));
   return {
     surface,
     kit,
@@ -329,8 +330,8 @@ describe("SceneSurface world preparation", () => {
     ]);
     expect(harness.backgrounds()).toHaveLength(1);
     expect(harness.characters()).toHaveLength(1);
-    expect(harness.backgrounds()[0]?.anchor.x).toBe(0);
-    expect(harness.backgrounds()[0]?.anchor.y).toBe(0);
+    expect(harness.backgrounds()[0]?.anchor.x).toBe(0.5);
+    expect(harness.backgrounds()[0]?.anchor.y).toBe(0.5);
     expect(harness.characters()[0]?.anchor.x).toBe(0.5);
     expect(harness.characters()[0]?.anchor.y).toBe(1);
     expect(harness.destroyed).toEqual([]);
@@ -1280,11 +1281,19 @@ describe("SceneSurface rendering and thumbnails", () => {
     expect(harness.kit.applications[0]?.destroyed).toBe(true);
   });
 
-  it("orders the camera layer above the background layer", async () => {
+  it("interleaves backgrounds and other Sprites by object z in one world layer", async () => {
     const harness = await createSurface();
+    harness.surface.applyWorld(await harness.surface.prepare({
+      world: { background: "base", sprites: { hero: sprite("next", { z: -20000 }) }, camera: CAMERA },
+      assets: URLS,
+    }));
     const cameraLayer = harness.kit.applications[0]?.stage.children[0];
     expect(cameraLayer?.sortableChildren).toBe(true);
-    expect(cameraLayer?.children[0]?.zIndex).toBe(-1_000_000);
+    expect(harness.backgrounds()[0]?.parent).toBe(cameraLayer);
+    expect(harness.characters()[0]?.parent).toBe(cameraLayer);
+    expect(harness.backgrounds()[0]?.zIndex).toBe(-10000);
+    expect(harness.characters()[0]?.zIndex).toBe(-20000);
+    expect(Object.keys(harness.surface.captureBases().sprites).sort()).toEqual([LEGACY_BACKGROUND_ID, "hero"]);
     harness.surface.dispose();
   });
 });
@@ -1974,7 +1983,9 @@ describe("SceneSurface cue executors", () => {
     );
     const node = harness.backgrounds()[0];
     expect(node?.scale.x).toBeCloseTo(21.6);
-    expect(node?.position.x).toBeCloseTo((DESIGN_WIDTH - 100 * 21.6) / 2);
+    expect(node?.position.x).toBeCloseTo(DESIGN_WIDTH / 2);
+    expect(node?.anchor.x).toBe(0.5);
+    expect(node?.mask?.label).toBe(`layout:${LEGACY_BACKGROUND_ID}`);
     harness.surface.dispose();
   });
 
@@ -2098,8 +2109,8 @@ describe("SceneSurface cue executors", () => {
 
 describe("SceneSurface transition lifecycle", () => {
   function stageLayer(kit: MemoryKit, index: number): MemorySprite[] {
-    return (kit.applications[0]?.stage.children[0]?.children[index]?.children ??
-      []) as MemorySprite[];
+    return (kit.applications[0]?.stage.children[0]?.children ?? []).filter((node): node is MemorySprite =>
+      node instanceof MemorySprite && (index === 0 ? node.zIndex === -10000 : node.zIndex !== -10000));
   }
 
   /** A surface whose `url` decode only resolves when `release()` is called. */

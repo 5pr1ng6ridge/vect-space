@@ -16,7 +16,14 @@
  * - there is no audio graph at all, so a preview can never make a sound,
  * - the surface is owned by a `DeferredSession`, so React Strict Mode's
  *   setup/cleanup/setup probe reuses one initialized WebGL app and one frame
- *   source instead of duplicating Pixi resources or listeners.
+ *   source instead of duplicating Pixi resources or listeners,
+ * - a static world may also replay one transient particle burst on top of it
+ *   (`decorationTransport.burst`).  A burst cue resolves as soon as its
+ *   emitter exists, so the burst is not driven by the cue promise: the same
+ *   `PreviewFrameClock` that ticks the surface's decoration loops advances it
+ *   from `0` to the particles' maximum lifetime.  Replay and seek rebuild the
+ *   world and recreate the released transient batch, so the same playhead
+ *   always shows the same particles and nothing is ever saved or recorded.
  */
 
 import {
@@ -37,24 +44,25 @@ import {
 import {
   SceneSurface,
   type SceneKit,
+  type SceneVisualCue,
 } from "@vectspace/presentation-core/scene-surface";
 import type { SceneTextureLike } from "@vectspace/presentation-core/scene-textures";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
 
+import { isSpaceKey, shouldReplayBurst } from "./burstShortcut";
+import { emitterDragPosition } from "./particleAreaGeometry";
 import { PreviewFrameClock } from "./previewFrameClock";
+import { beginStageGesture } from "./stageGesture";
 
 import { assetUrl } from "../api";
 import {
   sceneFrameFromWorld,
   type CuePreviewRequest,
 } from "../presentationPreview";
-import {
-  dragWorldPosition,
-  movedEnough,
-  stagePointFromClientPoint,
-} from "../stageEdit";
+import { movedEnough, stagePointFromClientPoint } from "../stageEdit";
 import type { EditorAsset } from "../types";
+import { EMPTY_EDITOR_VISUALS, type EditorVisualResources } from "../visualResources";
 
 export interface CuePreviewEnvironment {
   kit?: SceneKit;
@@ -65,6 +73,20 @@ export interface CuePreviewEnvironment {
 interface PreviewSession {
   surface: SceneSurface;
   clock: PreviewFrameClock;
+}
+
+/** One transient burst of an emitter; it is never part of the saved world. */
+export type BurstCue = Extract<SceneVisualCue, { type: "particle_state" }>;
+
+export interface DecorationTransport {
+  /** Length of the playhead: the continuous loop, or the burst's lifetime. */
+  durationMs: number;
+  /**
+   * Transient burst replayed above the static world.  With it the transport
+   * becomes a burst transport (replay, pause, seek over `durationMs`, and the
+   * Space shortcut); without it the transport scrubs the continuous emitters.
+   */
+  burst?: BurstCue;
 }
 
 type PreviewStatus =
@@ -85,6 +107,7 @@ interface CuePreviewProps {
    * surface play the loop instead.
    */
   animations?: AnimationMap;
+  visuals?: EditorVisualResources;
   /**
    * Sprite instance the author may drag on a static world preview.
    *
@@ -97,6 +120,14 @@ interface CuePreviewProps {
   onDragCommit?(position: { x: number; y: number }): void;
   /** Extra layer rendered inside the 16:9 stage, above the canvas. */
   overlay?: ReactNode;
+  /**
+   * Play/pause/stop/seek for a static world's decoration (particles).  Seeking
+   * evaluates the analytic particle state at that time on the shared surface,
+   * so the same playhead always shows the same frame.  With `burst` the
+   * transport replays one transient burst instead (button and Space), and the
+   * burst is rebuilt for every replay and seek.
+   */
+  decorationTransport?: DecorationTransport;
 }
 
 export function CuePreview({
@@ -106,9 +137,11 @@ export function CuePreview({
   onError,
   environment,
   animations,
+  visuals = EMPTY_EDITOR_VISUALS,
   dragTargetId,
   onDragCommit,
   overlay,
+  decorationTransport,
 }: CuePreviewProps): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lifecycleRef = useRef<DeferredSession<PreviewSession> | null>(null);
@@ -123,9 +156,25 @@ export function CuePreview({
   const dragTargetRef = useRef(dragTargetId);
   const dragCommitRef = useRef(onDragCommit);
   const gestureCleanupRef = useRef<(() => void) | null>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const transportRef = useRef(decorationTransport);
+  const replayShortcutRef = useRef<() => void>(() => undefined);
+  // True from a handled Space keydown until its keyup: holds back the native
+  // auto-repeat and keyup activation of a focused button.
+  const swallowSpaceRef = useRef(false);
   const [status, setStatus] = useState<PreviewStatus>("loading");
   const [progressMs, setProgressMs] = useState(0);
   const [dragging, setDragging] = useState(false);
+  const [decorationPlaying, setDecorationPlaying] = useState(true);
+  const [decorationMs, setDecorationMs] = useState(0);
+  // The playhead the author asked for while a burst is being (re)created.  The
+  // clock restarts at zero for every rebuild, so showing it would snap the
+  // controlled slider back to 0 under the author's hand: the requested target
+  // is shown instead until the newest launch has put the clock there.
+  const [pendingMs, setPendingMsState] = useState<number | null>(null);
+  // Mirror for callbacks: the pause/play toggle must not touch the clock while
+  // a launch has not created the emitter yet.
+  const launchingRef = useRef(false);
 
   const assetsSignature = useMemo(
     () =>
@@ -151,6 +200,11 @@ export function CuePreview({
     diagnosticRef.current(message);
   }, []);
 
+  const setPending = useCallback((ms: number | null): void => {
+    launchingRef.current = ms !== null;
+    setPendingMsState(ms);
+  }, []);
+
   useEffect(() => {
     diagnosticRef.current = (message: string): void => {
       onError?.(message);
@@ -160,6 +214,12 @@ export function CuePreview({
   useEffect(() => {
     requestRef.current = request;
   }, [request]);
+
+  // Declared before the build effect: a rebuild decides from the current
+  // transport whether the clock may run on its own.
+  useEffect(() => {
+    transportRef.current = decorationTransport;
+  }, [decorationTransport]);
 
   useEffect(() => {
     urlsRef.current = urls;
@@ -215,10 +275,22 @@ export function CuePreview({
     const handle = lifecycle.acquire();
     const session = handle.session;
     session.clock.onStep = () => {
-      // A static world preview has no transport readout, and its clock runs
-      // continuously for the decoration loops: writing state on every frame
-      // would re-render the inspector without anything to show.
-      if (requestRef.current.cue === null) return;
+      if (requestRef.current.cue === null) {
+        // A static world preview has no cue readout, and its clock runs
+        // continuously for the decoration loops: writing state on every frame
+        // would re-render the inspector without anything to show.  Only a
+        // burst has a playhead: the shared clock is its time, and the burst
+        // is over once the clock reaches the particles' maximum lifetime.
+        const transport = transportRef.current;
+        if (transport?.burst === undefined) return;
+        const now = session.clock.now;
+        setDecorationMs(Math.min(now, transport.durationMs));
+        if (session.clock.auto && now >= transport.durationMs) {
+          session.clock.pause();
+          setDecorationPlaying(false);
+        }
+        return;
+      }
       setProgressMs(session.clock.now);
     };
     sessionRef.current = session;
@@ -265,6 +337,7 @@ export function CuePreview({
     if (generation !== generationRef.current || sessionRef.current !== session)
       return null;
     session.surface.reset();
+    session.surface.setVisualResources(visuals.textBlocks, visuals.particles);
     const prepared = await session.surface.prepare({
       world: requestRef.current.world,
       assets: urlsRef.current,
@@ -289,13 +362,67 @@ export function CuePreview({
       // but a static world has no transport at all: it has to keep running so
       // the shared render loop ticks the decorative frame loops.  A paused
       // clock would freeze an animated sprite on its first frame forever.
-      session.clock.step(0);
-      session.clock.resume();
+      // A burst transport draws only once the transient batch exists. Drawing
+      // the reset world here would flash an empty canvas during async scrubs.
+      if (transportRef.current?.burst === undefined) {
+        session.clock.step(0);
+        session.clock.resume();
+      }
       return session;
     }
     session.clock.step(0);
     return session;
-  }, []);
+  }, [visuals]);
+
+  /**
+   * Creates the transient burst on a freshly rebuilt world and puts the shared
+   * clock at `atMs`.
+   *
+   * The cue resolves as soon as the emitter exists, so its promise says
+   * nothing about the burst's life.  The world was rebuilt with the clock
+   * paused at zero: stepping to `atMs` hands the surface exactly that much
+   * decoration time, the same time a continuous run would have given it.
+   */
+  const launchBurst = useCallback(
+    async (
+      session: PreviewSession,
+      generation: number,
+      atMs: number,
+      autoplay: boolean,
+    ): Promise<void> => {
+      const transport = transportRef.current;
+      const cue = transport?.burst;
+      if (transport === undefined || cue === undefined) return;
+      const controller = new AbortController();
+      abortRef.current = controller;
+      await session.surface.runCue(cue, {
+        assets: urlsRef.current,
+        signal: controller.signal,
+        getRate: () => 1,
+      });
+      if (
+        controller.signal.aborted ||
+        generation !== generationRef.current ||
+        sessionRef.current !== session
+      )
+        return;
+      const duration = Math.max(1, transport.durationMs);
+      const target = Math.max(0, Math.min(atMs, duration));
+      // The emitter exists now with zero elapsed time: re-base the shared
+      // clock to the same instant, whatever it did while the texture decoded,
+      // so the playhead and the particles can never disagree.
+      session.clock.pause();
+      session.clock.reset();
+      session.clock.step(0);
+      if (target > 0) session.clock.step(target);
+      const playing = autoplay && target < duration;
+      if (playing) session.clock.resume();
+      setDecorationPlaying(playing);
+      setDecorationMs(session.clock.now);
+      setPending(null);
+    },
+    [setPending],
+  );
 
   /**
    * Rebuilds the preview and leaves a terminal state on failure.
@@ -310,14 +437,27 @@ export function CuePreview({
     const generation = generationRef.current;
     try {
       const session = await pending;
-      if (session !== null) setStatus("ready");
+      if (session === null) return;
+      if (transportRef.current?.burst === undefined) {
+        setStatus("ready");
+        return;
+      }
+      // A burst plays once as soon as its world is ready, like the continuous
+      // emitters start on their own.  The transport stays busy (`loading`)
+      // until the emitter exists: before that there is nothing to pause, and
+      // a resumed clock would run ahead of the particles.
+      setPending(0);
+      await launchBurst(session, generation, 0, true);
+      if (generationRef.current === generation && sessionRef.current === session)
+        setStatus("ready");
     } catch (reason: unknown) {
       // A superseded build must not overwrite the newer build's status.
       if (generationRef.current !== generation) return;
+      setPending(null);
       report(`预览构建失败：${errorMessage(reason)}`);
       setStatus("error");
     }
-  }, [rebuild, report]);
+  }, [launchBurst, rebuild, report, setPending]);
 
   useEffect(() => {
     // An authored change is an intentional external-system synchronization:
@@ -326,8 +466,36 @@ export function CuePreview({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus("loading");
     setProgressMs(0);
+    // A rebuilt static world restarts its decoration clock from zero.  A burst
+    // transport starts idle: it plays once its emitter exists.
+    setDecorationPlaying(transportRef.current?.burst === undefined);
+    setDecorationMs(0);
+    setPending(null);
     void runBuild();
-  }, [runBuild, request, urls]);
+  }, [runBuild, request, urls, setPending]);
+
+  /** Freeze decoration and show the analytic particle state at `ms`. */
+  const seekDecoration = useCallback((ms: number): void => {
+    const session = sessionRef.current;
+    if (session === null) return;
+    session.clock.pause();
+    session.surface.seekParticles(ms);
+    session.clock.step(0);
+    setDecorationPlaying(false);
+    setDecorationMs(ms);
+  }, []);
+
+  const toggleDecoration = useCallback((): void => {
+    const session = sessionRef.current;
+    if (session === null) return;
+    if (decorationPlaying) {
+      session.clock.pause();
+      setDecorationPlaying(false);
+    } else {
+      session.clock.resume();
+      setDecorationPlaying(true);
+    }
+  }, [decorationPlaying]);
 
   const retry = useCallback((): void => {
     setStatus("loading");
@@ -350,6 +518,114 @@ export function CuePreview({
         return null;
       }
     }, [rebuild, report]);
+
+  /**
+   * Rebuilds the world and shows the burst at `atMs`: playing from there, or
+   * frozen there.  Replay, stop and seek all recreate the transient batch, so
+   * a burst that already expired comes back exactly as it was.
+   */
+  const replayBurst = useCallback(
+    async (atMs = 0, autoplay = true): Promise<void> => {
+      const transport = transportRef.current;
+      if (transport?.burst === undefined) return;
+      // The newest call owns the target readout and the clock; an older
+      // launch finds its generation superseded and leaves both alone.
+      const building = rebuildSession();
+      const generation = generationRef.current;
+      setPending(Math.max(0, Math.min(atMs, transport.durationMs)));
+      const session = await building;
+      if (session === null) {
+        if (generationRef.current === generation) setPending(null);
+        return;
+      }
+      try {
+        await launchBurst(session, generation, atMs, autoplay);
+      } catch (reason: unknown) {
+        if (generationRef.current !== generation) return;
+        setPending(null);
+        report(`预览爆发失败：${errorMessage(reason)}`);
+        setStatus("error");
+        return;
+      }
+      if (generationRef.current === generation && sessionRef.current === session)
+        setStatus("ready");
+    },
+    [launchBurst, rebuildSession, report, setPending],
+  );
+
+  const toggleBurst = useCallback((): void => {
+    const session = sessionRef.current;
+    const transport = transportRef.current;
+    if (session === null || transport?.burst === undefined) return;
+    // Nothing to pause or resume until the launch created the emitter.
+    if (launchingRef.current) return;
+    if (session.clock.auto) {
+      session.clock.pause();
+      setDecorationPlaying(false);
+    } else if (session.clock.now >= transport.durationMs) {
+      // Finished: playing again starts a new burst.
+      void replayBurst();
+    } else {
+      session.clock.resume();
+      setDecorationPlaying(true);
+    }
+  }, [replayBurst]);
+
+  // The shortcut handler lives as long as the burst transport and reads the
+  // newest replay/status through this ref.
+  useEffect(() => {
+    replayShortcutRef.current = () => {
+      if (status === "loading" || status === "error") return;
+      void replayBurst();
+    };
+  }, [replayBurst, status]);
+
+  const burstEnabled = decorationTransport?.burst !== undefined;
+  useEffect(() => {
+    if (!burstEnabled) return undefined;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      const section = sectionRef.current;
+      if (section === null) return;
+      // Holding Space replays once; the repeats only keep their default
+      // action (page scroll, a focused button's click) away.  A fresh press
+      // (not a repeat) is always judged on its own, so a keyup that never
+      // arrived (focus left the window) cannot disable the shortcut.
+      if (swallowSpaceRef.current && event.repeat && isSpaceKey(event)) {
+        event.preventDefault();
+        return;
+      }
+      const scope = section.closest("aside, main") ?? section.parentElement;
+      if (!shouldReplayBurst(event, scope, section)) return;
+      event.preventDefault();
+      swallowSpaceRef.current = true;
+      replayShortcutRef.current();
+    };
+    const onKeyUp = (event: KeyboardEvent): void => {
+      if (!swallowSpaceRef.current || !isSpaceKey(event)) return;
+      swallowSpaceRef.current = false;
+      // Some engines activate a focused button on keyup, after the keydown
+      // already replayed.
+      event.preventDefault();
+    };
+    const onBlur = (): void => {
+      swallowSpaceRef.current = false;
+    };
+    // Capture phase, like the timeline workspace's Space handler: a third-party
+    // document-level handler (the story graph's key-press hook) consumes Space
+    // in the bubble phase before a bubbling window listener could judge it, so
+    // a press on a bare page would never replay.  The policy in
+    // `shouldReplayBurst` still decides, and nothing is stopped from
+    // propagating.
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onBlur);
+      swallowSpaceRef.current = false;
+    };
+  }, [burstEnabled]);
 
   /** Waits until the cue's own animation registered its first frame. */
   const waitForAnimation = useCallback(
@@ -502,72 +778,59 @@ export function CuePreview({
     const rect = event.currentTarget.getBoundingClientRect();
     const down = stagePointFromClientPoint(rect, event.clientX, event.clientY);
     const object = session.surface.hitTest(down.x, down.y);
-    if (object === null || object.id !== targetId || object.kind !== "sprite")
+    if (object === null || object.id !== targetId || (object.kind !== "sprite" && object.kind !== "emitter"))
       return;
     event.preventDefault();
     const camera = session.surface.camera;
     const origin = { x: object.x, y: object.y };
+    const space = object.space === "screen" ? "screen" : "world";
     let position = origin;
     let moved = false;
+    gestureCleanupRef.current?.();
     setDragging(true);
-    const move = (moveEvent: PointerEvent): void => {
-      const pointer = stagePointFromClientPoint(
-        rect,
-        moveEvent.clientX,
-        moveEvent.clientY,
-      );
-      position = dragWorldPosition({
-        origin,
-        pointerDown: down,
-        pointerNow: pointer,
-        camera,
-      });
-      moved = moved || movedEnough(down, pointer);
-      session.surface.setObjectOverride(object.id, position);
-    };
-    let finished = false;
-    const cleanup = (): void => {
-      if (finished) return;
-      finished = true;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", cancel);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("blur", cancel);
-      if (gestureCleanupRef.current === cancel) {
-        gestureCleanupRef.current = null;
-      }
+    const finish = (): void => {
+      if (gestureCleanupRef.current === stop) gestureCleanupRef.current = null;
       setDragging(false);
     };
-    const onKeyDown = (keyEvent: KeyboardEvent): void => {
-      if (keyEvent.key === "Escape") cancel();
-    };
-    const cancel = (): void => {
-      cleanup();
-      // Overrides never touched the world, so clearing them restores exactly
-      // the evaluated pose without a rebuild or an authored change.
-      session.surface.clearOverrides();
-    };
-    const up = (): void => {
-      cleanup();
-      const commit = dragCommitRef.current;
-      if (!moved || commit === undefined) {
-        // A click, or a stage without a commit owner, never leaves a temporary
-        // pose behind.
+    const stop = beginStageGesture({
+      move: (moveEvent) => {
+        const pointer = stagePointFromClientPoint(
+          rect,
+          moveEvent.clientX,
+          moveEvent.clientY,
+        );
+        position = emitterDragPosition({
+          space,
+          origin,
+          pointerDown: down,
+          pointerNow: pointer,
+          camera,
+        });
+        moved = moved || movedEnough(down, pointer);
+        session.surface.setObjectOverride(object.id, position);
+      },
+      release: () => {
+        finish();
+        const commit = dragCommitRef.current;
+        if (!moved || commit === undefined) {
+          // A click, or a stage without a commit owner, never leaves a
+          // temporary pose behind.
+          session.surface.clearOverrides();
+          return;
+        }
+        // The temporary pose stays on the surface until the host commits the
+        // authored value and the rebuilt world replaces it, so the sprite never
+        // jumps back to its old position in between.
+        commit(position);
+      },
+      abort: () => {
+        finish();
+        // Overrides never touched the world, so clearing them restores exactly
+        // the evaluated pose without a rebuild or an authored change.
         session.surface.clearOverrides();
-        return;
-      }
-      // The temporary pose stays on the surface until the host commits the
-      // authored value and the rebuilt world replaces it, so the sprite never
-      // jumps back to its old position in between.
-      commit(position);
-    };
-    gestureCleanupRef.current = cancel;
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
-    window.addEventListener("pointercancel", cancel, { once: true });
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("blur", cancel);
+      },
+    });
+    gestureCleanupRef.current = stop;
   };
 
   const duration = request.duration_ms;
@@ -578,6 +841,7 @@ export function CuePreview({
   return (
     <section
       className={`cue-preview${staticWorld ? " cue-preview-static" : ""}`}
+      ref={sectionRef}
     >
       <div
         className={`cue-preview-stage${grabbable ? " is-draggable" : ""}${
@@ -600,6 +864,78 @@ export function CuePreview({
             <button onClick={retry} type="button">
               重试
             </button>
+          </div>
+        ) : decorationTransport?.burst !== undefined ? (
+          <div
+            aria-busy={busy || pendingMs !== null}
+            className="cue-preview-transport cue-preview-burst-transport"
+          >
+            <button
+              aria-keyshortcuts="Space"
+              disabled={busy}
+              onClick={() => void replayBurst()}
+              title="重播单次爆发（空格）"
+              type="button"
+            >
+              ↻ 重播爆发
+            </button>
+            <button
+              disabled={busy || pendingMs !== null}
+              onClick={toggleBurst}
+              type="button"
+            >
+              {decorationPlaying ? "❚❚ 暂停" : "▶ 播放"}
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => void replayBurst(0, false)}
+              type="button"
+            >
+              ■ 停止
+            </button>
+            <input
+              aria-label={`${label}播放头`}
+              disabled={busy}
+              max={decorationTransport.durationMs}
+              min={0}
+              onChange={(event) =>
+                void replayBurst(Number(event.currentTarget.value), false)
+              }
+              step={10}
+              type="range"
+              value={pendingMs ?? decorationMs}
+            />
+            <code>
+              {Math.round(pendingMs ?? decorationMs)} /{" "}
+              {decorationTransport.durationMs} ms
+              {pendingMs === null &&
+              !decorationPlaying &&
+              decorationMs >= decorationTransport.durationMs
+                ? " · 已结束"
+                : ""}
+            </code>
+          </div>
+        ) : decorationTransport !== undefined ? (
+          <div className="cue-preview-transport">
+            <button disabled={busy} onClick={toggleDecoration} type="button">
+              {decorationPlaying ? "❚❚ 暂停" : "▶ 播放"}
+            </button>
+            <button disabled={busy} onClick={() => seekDecoration(0)} type="button">
+              ■ 停止
+            </button>
+            <input
+              aria-label={`${label}播放头`}
+              disabled={busy}
+              max={decorationTransport.durationMs}
+              min={0}
+              onChange={(event) => seekDecoration(Number(event.currentTarget.value))}
+              step={10}
+              type="range"
+              value={decorationMs}
+            />
+            <code>
+              {decorationPlaying ? "播放中" : `${Math.round(decorationMs)} ms`}
+            </code>
           </div>
         ) : null
       ) : (

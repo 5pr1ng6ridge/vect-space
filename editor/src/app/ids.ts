@@ -20,7 +20,9 @@ export type IdKind =
   | "uiMotion"
   | "button"
   | "action"
-  | "animation";
+  | "animation"
+  | "textBlock"
+  | "particle";
 
 export const ID_KIND_LABELS: Record<IdKind, string> = {
   scene: "场景",
@@ -31,7 +33,36 @@ export const ID_KIND_LABELS: Record<IdKind, string> = {
   button: "按钮模板",
   action: "立绘动作",
   animation: "帧动画",
+  textBlock: "固定文本块",
+  particle: "粒子效果",
 };
+
+/**
+ * Who already owns `id` in the shared asset / animation / action / visual
+ * document namespace (the Rust loader rejects any collision there).
+ */
+function sharedNamespaceOwner(
+  project: EditorProject,
+  id: string,
+  self: IdKind,
+  previous?: string,
+): string | null {
+  const owns = (kind: IdKind | "asset", ids: readonly string[]): boolean =>
+    ids.some(
+      (candidate) =>
+        candidate === id && !(kind === self && candidate === previous),
+    );
+  if (owns("asset", Object.keys(project.manifest.assets))) return "素材";
+  if (owns("animation", (project.animations ?? []).map((file) => file.definition.id)))
+    return "帧动画";
+  if (owns("action", (project.actions ?? []).map((file) => file.definition.id)))
+    return "立绘动作";
+  if (owns("textBlock", (project.text_blocks ?? []).map((file) => file.definition.id)))
+    return "固定文本块";
+  if (owns("particle", (project.particles ?? []).map((file) => file.definition.id)))
+    return "粒子效果";
+  return null;
+}
 
 /** Format problem of a raw id, or `null` when the text is a valid id. */
 export function idFormatError(id: string): string | null {
@@ -43,11 +74,15 @@ export function idFormatError(id: string): string | null {
 
 /** Library documents are stored under a directory derived from their id. */
 export function libraryFilePath(
-  kind: "uiMotion" | "button" | "action",
+  kind: "uiMotion" | "button" | "action" | "textBlock" | "particle",
   id: string,
 ): string {
   const file = `${id.replaceAll(".", "_")}.yaml`;
   switch (kind) {
+    case "textBlock":
+      return `text_blocks/${file}`;
+    case "particle":
+      return `particles/${file}`;
     case "uiMotion":
       return `ui/motions/${file}`;
     case "button":
@@ -114,10 +149,9 @@ export function idUnavailableReason(
         )
       )
         return taken;
-      if (project.manifest.assets[id] !== undefined)
-        return `「${id}」已被素材使用；立绘动作不能与素材同名。`;
-      if ((project.animations ?? []).some((file) => file.definition.id === id))
-        return `「${id}」已被帧动画使用；立绘动作不能与帧动画同名。`;
+      const owner = sharedNamespaceOwner(project, id, "action", options.previous);
+      if (owner !== null)
+        return `「${id}」已被${owner}使用；立绘动作不能与${owner}同名。`;
       const path = libraryFilePath("action", id);
       const previousPath = actions.find(
         (file) => file.definition.id === options.previous,
@@ -131,11 +165,22 @@ export function idUnavailableReason(
     case "animation":
       if (project.manifest.assets[id] !== undefined)
         return `「${id}」已被素材使用。`;
-      return (project.animations ?? []).some(
-        (file) => file.definition.id === id,
-      )
-        ? taken
+      if ((project.animations ?? []).some((file) => file.definition.id === id))
+        return taken;
+      return sharedNamespaceOwner(project, id, "animation") === null
+        ? null
+        : `「${id}」已被其他资源使用。`;
+    case "textBlock":
+    case "particle": {
+      const owner = sharedNamespaceOwner(project, id, kind, options.previous);
+      if (owner !== null) return `「${id}」已被${owner}使用。`;
+      const files = kind === "textBlock" ? (project.text_blocks ?? []) : (project.particles ?? []);
+      const path = libraryFilePath(kind, id);
+      const previousPath = files.find((file) => file.definition.id === options.previous)?.path;
+      return files.some((file) => file.path === path && file.path !== previousPath)
+        ? `文件 ${path} 已被其他${label}使用。`
         : null;
+    }
   }
 }
 

@@ -656,7 +656,7 @@ describe("TimelineSession load", () => {
     expect(harness.surface.stagedWorlds).toEqual(["world"]);
     expect(harness.audio.reconciled).toEqual([snapshotState.audio]);
     expect(harness.surface.characters).toEqual([
-      [{ id: "hero", asset: "hero-asset" }],
+      [expect.objectContaining({ id: "hero", asset: "hero-asset", state: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }) })],
     ]);
     expect(harness.dom.videos).toHaveLength(0);
   });
@@ -692,7 +692,7 @@ describe("TimelineSession load", () => {
     // The inherited BGM volume comes from the live audio graph.
     expect(harness.surface.applied.at(-1)?.frame.bgm_volume).toBeCloseTo(0.5);
     expect(harness.surface.characters).toEqual([
-      [{ id: "hero", asset: "hero-asset" }],
+      [expect.objectContaining({ id: "hero", asset: "hero-asset", state: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }) })],
     ]);
   });
 

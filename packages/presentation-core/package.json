@@ -30,6 +30,10 @@
     "./live-update": "./src/liveUpdate.ts",
     "./update-sequencer": "./src/updateSequencer.ts",
     "./motion": "./src/motion.ts",
+    "./static-markup": "./src/staticMarkup.ts",
+    "./text-block": "./src/textBlock.ts",
+    "./visual": "./src/visual.ts",
+    "./particles": "./src/particles.ts",
     "./scene-test-kit": "./src/sceneTestKit.ts",
     "./session-test-kit": "./src/sessionTestKit.ts"
   },

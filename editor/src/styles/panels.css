@@ -199,6 +199,10 @@
     gap: var(--space-2);
   }
 
+  .project-section-content[hidden] {
+    display: none;
+  }
+
   /* A single-section view (角色 / 剧情变量) needs no collapse chrome. */
   .project-view-characters .project-section-caret,
   .project-view-variables .project-section-caret {

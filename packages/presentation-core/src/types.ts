@@ -20,8 +20,20 @@ export interface StoryLocation {
   node_id: string;
 }
 
+import type { CoordinateSpace, SpriteKind, SpriteLayout, SpriteSource } from "./visual";
+import type { TextBlockDefinition } from "./textBlock";
+import type { EmitterSnapshot, ParticleDefinition } from "./particles";
+export type { CoordinateSpace, SpriteKind, SpriteLayout, SpriteSource } from "./visual";
+export type { EmitterSnapshot, ParticleDefinition } from "./particles";
+export type { TextBlockDefinition } from "./textBlock";
+
 export interface SpriteSnapshot {
-  asset: string;
+  /** Legacy input only; canonical runtime snapshots specify source. */
+  asset?: string;
+  source?: SpriteSource;
+  sprite_kind?: SpriteKind;
+  space?: CoordinateSpace;
+  layout?: SpriteLayout | null;
   x: number;
   y: number;
   scale: number;
@@ -110,8 +122,10 @@ export interface CameraSnapshot {
 }
 
 export interface WorldSnapshot {
-  background: string | null;
+  /** Compatibility input; normalized into sprites before rendering. */
+  background?: string | null;
   sprites: Record<string, SpriteSnapshot>;
+  emitters?: Record<string, EmitterSnapshot>;
   buttons?: Record<string, ButtonSnapshot>;
   camera: CameraSnapshot;
   dialogue_ui_visible: boolean;
@@ -528,10 +542,15 @@ export type TimelineTrack =
   | {
       type: "sprite";
       sprite_id: string;
-      asset: string | null;
+      asset?: string | null;
+      source?: SpriteSource;
+      sprite_kind?: SpriteKind;
+      space?: CoordinateSpace;
+      layout?: SpriteLayout;
       remove_at_end: boolean;
       channels: TimelineChannels;
     }
+  | { type: "emitter"; emitter_id: string; remove_at_end: boolean; channels: TimelineChannels }
   | { type: "camera"; channels: TimelineChannels }
   | { type: "button"; instance_id: string; channels: TimelineChannels }
   | {
@@ -583,6 +602,12 @@ export type PresentationCue = CueBase &
         duration_ms: number;
         easing: Easing;
         crossfade_ms?: number | null;
+      }
+    | {
+        type: "particle_state";
+        emitter_id: string;
+        emitter: EmitterSnapshot | null;
+        burst: boolean;
       }
     | {
         type: "clear_scene";
@@ -703,6 +728,8 @@ export interface BootstrapPayload {
   content_version: string;
   chapter_map_available?: boolean;
   default_font?: string | null;
+  text_blocks?: Record<string, TextBlockDefinition>;
+  particles?: Record<string, ParticleDefinition>;
 }
 
 export interface ChapterMapDecorationSnapshot {

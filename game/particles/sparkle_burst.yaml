@@ -1,0 +1,32 @@
+schema_version: 2
+id: particle.sparkle_burst
+image: particle.soft_dot
+area:
+  type: point
+rate: 0
+burst_count: 80
+max_particles: 80
+lifetime_ms:
+  min: 500
+  max: 1200
+velocity_x:
+  min: -420
+  max: 420
+velocity_y:
+  min: -460
+  max: 160
+gravity_x: 0
+gravity_y: 620
+size:
+  min: 0.2
+  max: 0.55
+rotation_deg:
+  min: 0
+  max: 360
+angular_velocity_deg:
+  min: -180
+  max: 180
+alpha_start: 1
+alpha_end: 0
+blend: add
+seed: 7

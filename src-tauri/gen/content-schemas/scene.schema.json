@@ -556,6 +556,13 @@
         }
       ]
     },
+    "CoordinateSpace": {
+      "type": "string",
+      "enum": [
+        "world",
+        "screen"
+      ]
+    },
     "CtrlFastForwardMode": {
       "type": "string",
       "enum": [
@@ -677,6 +684,14 @@
         "ease_in_out"
       ]
     },
+    "ImageFit": {
+      "type": "string",
+      "enum": [
+        "contain",
+        "cover",
+        "stretch"
+      ]
+    },
     "LiteralOperand": {
       "type": "object",
       "properties": {
@@ -796,6 +811,14 @@
         }
       ]
     },
+    "ParticleAction": {
+      "type": "string",
+      "enum": [
+        "start",
+        "stop",
+        "burst"
+      ]
+    },
     "PlaybackAutoMode": {
       "type": "string",
       "enum": [
@@ -872,6 +895,20 @@
             "action": {
               "$ref": "#/$defs/SpriteAction"
             },
+            "anchor_x": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "anchor_y": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
             "asset": {
               "type": [
                 "string",
@@ -918,10 +955,27 @@
                 "null"
               ]
             },
+            "layout": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpriteLayout"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "next": {
               "type": "string"
             },
             "opacity": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "rotation_deg": {
               "type": [
                 "number",
                 "null"
@@ -935,8 +989,52 @@
               ],
               "format": "float"
             },
+            "scale_x": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "scale_y": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpriteSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "space": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CoordinateSpace"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "sprite_id": {
               "type": "string"
+            },
+            "sprite_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpriteKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "type": {
               "type": "string",
@@ -968,6 +1066,79 @@
           "required": [
             "type",
             "sprite_id",
+            "action",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/ParticleAction"
+            },
+            "emitter_id": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "opacity": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0
+            },
+            "particle": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rotation_deg": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0
+            },
+            "scale": {
+              "type": "number",
+              "format": "float",
+              "default": 1.0
+            },
+            "seed": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "space": {
+              "$ref": "#/$defs/CoordinateSpace",
+              "default": "world"
+            },
+            "type": {
+              "type": "string",
+              "const": "particle"
+            },
+            "x": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0
+            },
+            "y": {
+              "type": "number",
+              "format": "float",
+              "default": 0.0
+            },
+            "z": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "emitter_id",
             "action",
             "next"
           ]
@@ -2787,6 +2958,76 @@
         "restore"
       ]
     },
+    "SpriteKind": {
+      "type": "string",
+      "enum": [
+        "background",
+        "character",
+        "item",
+        "ui",
+        "text"
+      ]
+    },
+    "SpriteLayout": {
+      "type": "object",
+      "properties": {
+        "fit": {
+          "$ref": "#/$defs/ImageFit",
+          "default": "contain"
+        },
+        "height": {
+          "type": "number",
+          "format": "float"
+        },
+        "width": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "SpriteSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "asset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text_block": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text_block"
+          ]
+        }
+      ]
+    },
     "TextRevealAnimation": {
       "description": "Player-selectable reveal styles. A story node may optionally override the\ncurrent player setting for a specific prompt.",
       "type": "string",
@@ -2943,6 +3184,37 @@
         {
           "type": "object",
           "properties": {
+            "channels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/TimelineKeyframe"
+                }
+              },
+              "default": {}
+            },
+            "emitter_id": {
+              "type": "string"
+            },
+            "remove_at_end": {
+              "type": "boolean",
+              "default": false
+            },
+            "type": {
+              "type": "string",
+              "const": "emitter"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "emitter_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "asset": {
               "type": [
                 "string",
@@ -2960,12 +3232,52 @@
               },
               "default": {}
             },
+            "layout": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpriteLayout"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "remove_at_end": {
               "type": "boolean",
               "default": false
             },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpriteSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "space": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CoordinateSpace"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "sprite_id": {
               "type": "string"
+            },
+            "sprite_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpriteKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "type": {
               "type": "string",

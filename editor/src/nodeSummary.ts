@@ -172,6 +172,8 @@ export function describeNode(
       return plain(
         `${SPRITE_ACTION_LABELS[node.action]} ${node.sprite_id}${node.asset ? ` · ${node.asset}` : ""}`,
       );
+    case "particle":
+      return plain(`${node.action === "start" ? "持续发射" : node.action === "stop" ? "清除发射器" : "单次爆发"} ${node.emitter_id}${node.particle ? ` · ${node.particle}` : ""}`);
     case "clear":
       return plain(`清除画面 · ${node.duration_ms} ms`);
     case "wait":

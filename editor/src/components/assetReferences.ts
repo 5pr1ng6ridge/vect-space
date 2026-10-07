@@ -50,6 +50,14 @@ export function findAssetReferences(
         references.push(`帧动画:${file.definition.id} / 第 ${index + 1} 帧`);
     }
   }
+  for (const file of project.text_blocks ?? []) {
+    if (file.definition.font === assetId)
+      references.push(`text-block:${file.definition.id}/font`);
+  }
+  for (const file of project.particles ?? []) {
+    if (file.definition.image === assetId)
+      references.push(`particle:${file.definition.id}/image`);
+  }
   const map = project.chapter_map?.definition;
   if (map?.background === assetId) references.push("chapter-map / 背景");
   for (const decoration of map?.decorations ?? []) {
@@ -106,7 +114,7 @@ function nodeReferencesAsset(node: SceneNode, assetId: string): boolean {
         node.fill != null && "asset" in node.fill && node.fill.asset === assetId
       );
     case "sprite":
-      return node.asset === assetId;
+      return node.asset === assetId || (node.source?.type === "image" && node.source.asset === assetId);
     case "choice":
       // A choice icon is a `gui` asset shown next to the option label.
       return node.choices.some((choice) => choice.icon === assetId);
@@ -122,8 +130,8 @@ function nodeReferencesAsset(node: SceneNode, assetId: string): boolean {
       return (
         node.tracks.some(
           (track) =>
-            (track.type === "sprite" || track.type === "video") &&
-            track.asset === assetId,
+            ((track.type === "sprite" || track.type === "video") && track.asset === assetId)
+            || (track.type === "sprite" && track.source?.type === "image" && track.source.asset === assetId),
         ) ||
         node.events.some(
           (event) => event.type === "sfx" && event.asset === assetId,

@@ -1,0 +1,34 @@
+schema_version: 2
+id: particle.snowfall
+image: particle.soft_dot
+area:
+  type: rectangle
+  width: 2200
+  height: 0
+rate: 60
+burst_count: 0
+max_particles: 600
+lifetime_ms:
+  min: 6000
+  max: 9000
+velocity_x:
+  min: -25
+  max: 25
+velocity_y:
+  min: 90
+  max: 160
+gravity_x: 6
+gravity_y: 0
+size:
+  min: 0.25
+  max: 0.7
+rotation_deg:
+  min: 0
+  max: 0
+angular_velocity_deg:
+  min: 0
+  max: 0
+alpha_start: 0.95
+alpha_end: 0.15
+blend: normal
+seed: 2026

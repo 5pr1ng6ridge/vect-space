@@ -48,13 +48,15 @@ import {
   type PlacementPresetGroup,
   type PlacementPresetId,
 } from "../windowLayout";
-import { assetUrl, editorApi } from "../api";
+import { assetUrl, editorApi, previewAssetsToUrls } from "../api";
+import { buildEditorVisualResources, EMPTY_EDITOR_VISUALS, type EditorVisualResources } from "../visualResources";
 import { defaultCurtainFill } from "../presentationDefaults";
 import { animationSourceId } from "../imageAnimation";
 import { isAssetDrag, resolveBackgroundDrop } from "../assetDrag";
 import { authoredSpritePosition, spriteDragTarget } from "../stageEdit";
 import { AssetChooser, useAssetLayout } from "./AssetChooser";
 import { FrameSequencePreview } from "./FrameSequencePreview";
+import { SpriteSourceFields } from "./SpriteSourceFields";
 import type {
   AnimationFile,
   ActionFile,
@@ -93,10 +95,18 @@ import type { AnimationMap } from "@vectspace/presentation-core/image-animation"
 import type { SceneWorldSnapshot } from "@vectspace/presentation-core/scene-surface";
 import type {
   ChoicePrompt,
+  PresentationCue,
   StoryLocation,
 } from "@vectspace/presentation-core/types";
+import type { EmitterSnapshot } from "@vectspace/presentation-core/particles";
 import { CuePreview } from "./CuePreview";
-import type { CuePreviewEnvironment } from "./CuePreview";
+import type { BurstCue, CuePreviewEnvironment } from "./CuePreview";
+import {
+  emitterDragPosition,
+  emitterStagePoint,
+  roundedPosition,
+} from "./particleAreaGeometry";
+import { ParticleGizmo } from "./ParticleGizmo";
 import { DeferredInput, DeferredTextArea, Field, NumberField } from "./Fields";
 import { usePendingCommit } from "../ui/pendingCommits";
 import {
@@ -269,7 +279,9 @@ export function NodeInspector({
           isEntry={scene.entry === nodeId}
           node={node}
           nodeId={nodeId}
-          onChangeType={(type) => update(defaultNode(type, fallback))}
+          onChangeType={(type) =>
+            update(defaultNode(type, fallback, scenes.length > 0 ? scenes : [scene]))
+          }
           onConvertActionToTimeline={
             node.type === "action" &&
             onConvertActionToTimeline !== undefined &&
@@ -634,6 +646,17 @@ function renderFields(
               <option value="hide">隐藏</option>
             </select>
           </Field>
+          <SpriteSourceFields
+            assets={assets}
+            textBlocks={preview?.project.text_blocks ?? []}
+            value={node}
+            onChange={(patch) => update({
+              ...node,
+              ...patch,
+              ...(patch.source === undefined ? {} : { character: null, expression: null }),
+            })}
+          />
+          {node.source === undefined && <>
           <Field label="角色绑定（可选）">
             <select
               value={node.character ?? ""}
@@ -706,6 +729,7 @@ function renderFields(
               value={node.asset}
             />
           )}
+          </>}
           <div className="field-grid">
             <OptionalNumber
               label="X"
@@ -769,6 +793,11 @@ function renderFields(
                 />
               </label>
             )}
+            <OptionalNumber label="横向缩放" value={node.scale_x ?? null} step={0.05} onChange={(scale_x) => update({ ...node, scale_x })} />
+            <OptionalNumber label="纵向缩放" value={node.scale_y ?? null} step={0.05} onChange={(scale_y) => update({ ...node, scale_y })} />
+            <OptionalNumber label="旋转 °" value={node.rotation_deg ?? null} onChange={(rotation_deg) => update({ ...node, rotation_deg })} />
+            <OptionalNumber label="锚点 X" value={node.anchor_x ?? null} min={0} max={1} step={0.05} onChange={(anchor_x) => update({ ...node, anchor_x })} />
+            <OptionalNumber label="锚点 Y" value={node.anchor_y ?? null} min={0} max={1} step={0.05} onChange={(anchor_y) => update({ ...node, anchor_y })} />
             <OptionalNumber
               label="换表情淡化 ms"
               min={0}
@@ -794,6 +823,45 @@ function renderFields(
             preview={preview}
             sceneId={scene.id}
           />
+        </>
+      );
+    case "particle":
+      return (
+        <>
+          <TextField label="发射器实例 ID" value={node.emitter_id} onChange={(emitter_id) => update({ ...node, emitter_id })} />
+          <p className="field-note">同时显示多个持续特效时使用不同的实例 ID；同 ID 的 start 会重启该发射器，stop 会清除该发射器。</p>
+          <Field label="粒子动作">
+            <select value={node.action} onChange={(event) => update({ ...node, action: event.currentTarget.value as typeof node.action })}>
+              <option value="start">持续发射 / 重启</option>
+              <option value="stop">停止并清除</option>
+              <option value="burst">单次爆发（不存档）</option>
+            </select>
+          </Field>
+          {node.action !== "stop" && <>
+            <Field label="粒子效果">
+              <select value={node.particle ?? ""} onChange={(event) => update({ ...node, particle: event.currentTarget.value || null })}>
+                <option value="">选择粒子定义</option>
+                {(preview?.project.particles ?? []).map((file) => <option key={file.definition.id} value={file.definition.id}>{file.definition.id}</option>)}
+              </select>
+            </Field>
+            <OptionalNumber label="随机种子（留空沿用定义）" min={0} max={0xffffffff} value={node.seed ?? null} onChange={(seed) => update({ ...node, seed })} />
+            <Field label="发射器坐标空间">
+              <select value={node.space} onChange={(event) => update({ ...node, space: event.currentTarget.value as typeof node.space })}>
+                <option value="world">世界</option><option value="screen">屏幕</option>
+              </select>
+            </Field>
+            <div className="field-grid">
+              <NumberField label="X" value={node.x} onChange={(x) => update({ ...node, x })} />
+              <NumberField label="Y" value={node.y} onChange={(y) => update({ ...node, y })} />
+              <NumberField label="整体缩放" min={0.001} step={0.05} value={node.scale} onChange={(scale) => update({ ...node, scale })} />
+              <NumberField label="整体旋转 °" value={node.rotation_deg} onChange={(rotation_deg) => update({ ...node, rotation_deg })} />
+              <NumberField label="整体透明度" min={0} max={1} step={0.05} value={node.opacity} onChange={(opacity) => update({ ...node, opacity })} />
+              <NumberField label="层级 Z" value={node.z} onChange={(z) => update({ ...node, z })} />
+            </div>
+          </>}
+          <p className="field-note">只操作整个发射器；单次爆发和单个粒子不能添加时间线轨道。</p>
+          <TargetSelect label="下一节点" targets={targets} value={node.next} onChange={(next) => update({ ...node, next })} />
+          <SpriteStagePreview assets={assets} environment={previewEnvironment} manifest={manifest} node={node} nodeId={nodeId} onChange={update} onError={onError} preview={preview} sceneId={scene.id} />
         </>
       );
     case "clear":
@@ -4501,8 +4569,19 @@ function BackgroundPreview({
  * refetch never blanks the canvas or drops the just-committed pose.
  */
 type SpriteStageState =
-  | { status: "loading"; world: SceneWorldSnapshot | null }
-  | { status: "ready"; world: SceneWorldSnapshot }
+  | {
+      status: "loading";
+      world: SceneWorldSnapshot | null;
+      burst: BurstCue | null;
+      /** Request generation that produced `world`; advances per answer. */
+      revision: number;
+    }
+  | {
+      status: "ready";
+      world: SceneWorldSnapshot;
+      burst: BurstCue | null;
+      revision: number;
+    }
   | { status: "needs_choice"; location: StoryLocation }
   | { status: "unreachable"; message: string }
   | { status: "error"; message: string };
@@ -4514,6 +4593,40 @@ function stageWorld(state: SpriteStageState): SceneWorldSnapshot | null {
   return state.status === "loading" || state.status === "ready"
     ? state.world
     : null;
+}
+
+function stageRevision(state: SpriteStageState): number {
+  return state.status === "loading" || state.status === "ready"
+    ? state.revision
+    : 0;
+}
+
+function stageBurst(state: SpriteStageState): BurstCue | null {
+  return state.status === "loading" || state.status === "ready"
+    ? state.burst
+    : null;
+}
+
+/**
+ * The runtime's transient burst for `emitterId`, if the node produced one.
+ *
+ * A burst never enters the snapshot world (it is not saved), so the only
+ * place the resolved emitter exists is the node's own `particle_state` cue.
+ */
+function matchingBurstCue(
+  cues: readonly PresentationCue[] | undefined,
+  emitterId: string,
+): BurstCue | null {
+  for (const cue of cues ?? []) {
+    if (
+      cue.type === "particle_state" &&
+      cue.burst &&
+      cue.emitter !== null &&
+      cue.emitter_id === emitterId
+    )
+      return cue;
+  }
+  return null;
 }
 
 /**
@@ -4544,7 +4657,7 @@ function SpriteStagePreview({
   assets: readonly EditorAsset[];
   environment: CuePreviewEnvironment | undefined;
   manifest: ContentManifest;
-  node: Extract<SceneNode, { type: "sprite" }>;
+  node: Extract<SceneNode, { type: "sprite" | "particle" }>;
   nodeId: string;
   onChange(node: SceneNode): void;
   onError: ((message: string) => void) | undefined;
@@ -4555,10 +4668,16 @@ function SpriteStagePreview({
   const choices = preview?.choices;
   const importTokens = preview?.importTokens;
   const variableOverrides = preview?.variableOverrides;
+  const [visuals, setVisuals] = useState<EditorVisualResources>(EMPTY_EDITOR_VISUALS);
+  const [resolvedAssets, setResolvedAssets] = useState<readonly EditorAsset[]>(assets);
   const [state, setState] = useState<SpriteStageState>({
     status: "loading",
     world: null,
+    burst: null,
+    revision: 0,
   });
+  const burstEmitterId =
+    node.type === "particle" && node.action === "burst" ? node.emitter_id : null;
   const [attempt, setAttempt] = useState(0);
   const generationRef = useRef(0);
   const sceneChoices = useMemo(
@@ -4580,7 +4699,12 @@ function SpriteStagePreview({
     // intentional external-system synchronization, exactly like the cue
     // preview's own loading state.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState((current) => ({ status: "loading", world: stageWorld(current) }));
+    setState((current) => ({
+      status: "loading",
+      world: stageWorld(current),
+      burst: stageBurst(current),
+      revision: stageRevision(current),
+    }));
     // A short settle window keeps typing in the inspector from firing one
     // host round trip per keystroke; a superseded request never starts.
     const timer = window.setTimeout(() => {
@@ -4601,7 +4725,26 @@ function SpriteStagePreview({
             setState({ status: "unreachable", message: result.message });
             return;
           }
-          setState({ status: "ready", world: result.update.snapshot.world });
+          const urls = result.assets === undefined
+            ? Object.fromEntries(assets.map((asset) => [asset.id, assetUrl(asset.absolute_path)]))
+            : previewAssetsToUrls(result.assets);
+          setResolvedAssets(result.assets === undefined ? assets : assets.map((asset) => ({
+            ...asset,
+            absolute_path: result.assets?.find((resolved) => resolved.id === asset.id)?.absolute_path ?? asset.absolute_path,
+          })));
+          setVisuals(buildEditorVisualResources(project, urls, result));
+          setState({
+            status: "ready",
+            world: result.update.snapshot.world,
+            // Every completed answer is a new revision, even when it reports
+            // the same coordinates: the marker uses it to drop a kept drop
+            // that an undo made obsolete before this answer arrived.
+            revision: generation,
+            burst:
+              burstEmitterId === null
+                ? null
+                : matchingBurstCue(result.update.cues, burstEmitterId),
+          });
         })
         .catch((reason: unknown) => {
           if (!active || generation !== generationRef.current) return;
@@ -4622,9 +4765,11 @@ function SpriteStagePreview({
     overridesKey,
     choicesKey,
     attempt,
+    burstEmitterId,
   ]);
 
   const world = stageWorld(state);
+  const burst = stageBurst(state);
   const request = useMemo(
     () => (world === null ? null : buildWorldPreviewRequest(world)),
     [world],
@@ -4651,30 +4796,91 @@ function SpriteStagePreview({
       </p>
     );
   }
-  const spriteId = spriteDragTarget(node);
+  const spriteId = node.type === "sprite" ? spriteDragTarget(node)
+    : node.action === "start" ? `emitter:${node.emitter_id}` : null;
+  const commitPosition = (position: { x: number; y: number }): boolean => {
+    const authored = node.type === "sprite"
+      ? authoredSpritePosition(node, manifest, position)
+      : roundedPosition(position);
+    if (
+      authored.x === (node.x ?? null) &&
+      authored.y === (node.y ?? null)
+    )
+      return false;
+    onChange({ ...node, x: authored.x, y: authored.y });
+    return true;
+  };
+  // The generation point the runtime resolved: the persistent emitter of a
+  // `start`, or the transient emitter of the node's own burst cue.
+  const generation: EmitterSnapshot | null =
+    node.type !== "particle"
+      ? null
+      : node.action === "start"
+        ? (request.world.emitters?.[node.emitter_id] ?? null)
+        : node.action === "burst"
+          ? (burst?.emitter ?? null)
+          : null;
+  const burstDefinition =
+    burst?.emitter == null ? undefined : visuals.particles[burst.emitter.particle];
+  const gizmo =
+    generation === null ? undefined : (
+      <ParticleGizmo
+        markerAriaLabel="拖动生成点"
+        markerLabel={node.type === "particle" && node.action === "burst" ? "爆发生成点" : "发射器生成点"}
+        onMarkerDrop={
+          state.status === "ready"
+            ? ({ pointerDown, pointerNow }) =>
+                commitPosition(
+                  emitterDragPosition({
+                    space: generation.space,
+                    origin: { x: generation.x, y: generation.y },
+                    pointerDown,
+                    pointerNow,
+                    camera: request.world.camera,
+                  }),
+                )
+            : undefined
+        }
+        point={emitterStagePoint(generation, request.world.camera)}
+        revision={stageRevision(state)}
+      />
+    );
   return (
     <>
       <CuePreview
         animations={preview?.animationMap}
-        assets={assets}
+        assets={resolvedAssets}
+        visuals={visuals}
+        decorationTransport={
+          burst === null
+            ? undefined
+            : {
+                durationMs: Math.max(
+                  1,
+                  Math.ceil(burstDefinition?.lifetime_ms.max ?? 1000),
+                ),
+                burst,
+              }
+        }
         dragTargetId={
           state.status === "ready" && spriteId !== null ? spriteId : undefined
         }
         environment={environment}
-        label="立绘预览"
-        onDragCommit={(position) => {
-          const authored = authoredSpritePosition(node, manifest, position);
-          if (
-            authored.x === (node.x ?? null) &&
-            authored.y === (node.y ?? null)
-          )
-            return;
-          onChange({ ...node, x: authored.x, y: authored.y });
-        }}
+        label={node.type === "sprite" ? "立绘预览" : "粒子预览"}
+        onDragCommit={(position) => void commitPosition(position)}
         onError={onError}
+        overlay={gizmo}
         request={request}
       />
-      {spriteId === null ? (
+      {node.type === "particle" ? (
+        <p className="inspector-preview-note">
+          {node.action === "stop"
+            ? "停止节点没有可拖动的目标；画面是执行后的真实结果。"
+            : node.action === "burst"
+              ? "拖动生成点即可修改 X / Y；单次爆发只在预览中临时播放、不会保存发射器，按空格或“重播爆发”重播。"
+              : "拖动生成点或画面中的发射器即可修改 X / Y。"}
+        </p>
+      ) : spriteId === null ? (
         <p className="inspector-preview-note">
           隐藏节点没有可拖动的目标；画面是执行后的真实结果。
         </p>

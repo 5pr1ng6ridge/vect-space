@@ -372,12 +372,10 @@ describe("NodeInspector canonical presentation editors", () => {
     const blur = screen.getByLabelText("最大模糊 px（0–24）");
     fireEvent.change(blur, { target: { value: "16" } });
     fireEvent.blur(blur);
-    expect(onChange).toHaveBeenLastCalledWith(
+    expect(onChange.mock.lastCall).toMatchObject([
       "target",
-      expect.objectContaining({
-        effect: expect.objectContaining({ type: "focus", blur: 16 }),
-      }),
-    );
+      { effect: { type: "focus", blur: 16 } },
+    ]);
 
     fireEvent.change(screen.getByLabelText("效果类型"), {
       target: { value: "color_grade" },

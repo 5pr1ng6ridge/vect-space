@@ -608,11 +608,101 @@ ordinary action calls remain reusable. The `character_action_showcase` scene
 uses the local test portraits, a 28-frame stop-motion sprite and a bounce
 action as a small end-to-end fixture.
 
+## Unified Sprites, fixed text blocks and image particles
+
+Backgrounds, characters, items, standalone UI images and fixed text blocks are
+all instances in `world.sprites` and share one source/layout/transform model:
+
+```yaml
+type: sprite
+sprite_id: caption
+action: show
+source: { type: text, text_block: text.formula_card }   # or { type: image, asset: gui.badge }
+sprite_kind: text          # background | character | item | ui | text — creation defaults only
+space: screen              # world follows the camera/shake/world shaders; screen does not
+layout: { width: 760, height: 260, fit: contain }        # optional; contain | cover | stretch
+x: 960
+y: 540
+rotation_deg: -2
+```
+
+`sprite_kind` only seeds a *new* instance (background: 1920×1080 cover at the
+bottom z; character: bottom-centre anchor; ui: screen space); omitted fields of
+a later `move` inherit the current pose. `source` cannot be combined with the
+legacy `asset`/`character` fields, which keep working unchanged. A legacy
+`background` node or save field is adapted at the boundary into the reserved
+`__background__` instance; new saves write only Sprites, and authoring that
+reserved id is a validation error. World Sprites, text, video and emitters
+interleave by `z`; screen-space visuals sit above the world and below
+transitions, effects and curtains. Interactive buttons and the dialogue box
+stay DOM controls.
+
+Fixed text blocks (`manifest.text_blocks`, e.g. `text_blocks/*.yaml`) reuse the
+dialogue markup and KaTeX (`trust: false`) — no typing, pagination or
+click-to-advance. Each definition is rasterized once off-stage with the project
+(or default) font and KaTeX fonts embedded, then shared by every Sprite that
+names it; moving, scaling or rotating never re-lays-out the text. The texture
+key includes the definition, font URL, font byte hash and resolution. Limits:
+4096×4096 and 4,194,304 pixels per block, 16,384 characters, fonts up to 16 MiB
+(enforced while streaming) and an 8 s generation timeout.
+
+Image particles (`manifest.particles`, e.g. `particles/*.yaml`) reference one
+static image of at most 512×512 and are driven by `particle` nodes:
+
+```yaml
+type: particle
+emitter_id: snow
+action: start            # start (persistent, saved) | stop | burst (one-shot cue, never saved)
+particle: particle.snowfall
+space: world
+x: 960
+y: -40
+scale: 1
+rotation_deg: 0
+opacity: 1
+z: 20
+```
+
+Each emitter is one Pixi `ParticleContainer` with preallocated particles and a
+reused buffer; particles are evaluated analytically from seed, emission index
+and age, so seeking is O(capacity) and never replays from zero. Caps are 5,000
+live particles per emitter and 10,000 per surface. A persistent emitter saves
+its definition, seed, generation and whole pose in `world.emitters`; loading a
+save restarts it from its seed (like decorative frame loops), and bursts are
+never replayed. Particles share the surface's single render loop — no extra
+RAF, interval or DOM — pause without catch-up, and are valid nonblocking timer
+targets. Timelines may animate a persistent emitter as a whole
+(`type: emitter`, channels `x/y/scale/rotation_deg/opacity/z`); individual
+particles are never selectable or addressable. Newly created particle nodes get
+unused emitter instance IDs so persistent effects can coexist. Duplicating or
+pasting persistent starts also allocates unused IDs; copied stops, restarts and
+emitter tracks in the same selection follow the copied instance. Copying controls
+without a start preserves their external target. Explicitly reusing an ID still
+restarts/stops that instance; existing authored IDs are not automatically migrated.
+
+The editor groups fixed text blocks with their scene contents, deriving existing
+membership from Sprite and timeline references. New, not-yet-referenced text
+blocks retain scene membership in `.vectspace/layout-v1.json`; shared and
+unassigned blocks remain discoverable. Their resource IDs and manifest paths
+stay unchanged. Particles remain in the reusable effects library. Both support
+undoable create / duplicate / rename with reference rewrite / reference-protected
+delete, and dedicated live previews using the same `SceneSurface`.
+
+The particle workspace supports continuous and one-shot burst previews, with
+Space replay, pause, stop and deterministic seeking. Stage handles resize the
+emission rectangle: the outline and size update during dragging, and particles
+rebuild on release. Moving its center in the definition workspace only changes
+preview placement. In a scene's start/burst node, dragging the emission point
+edits the saved node position. A completed authoring gesture is one undo step;
+preview playback never changes project history. `scenes/visual_showcase.yaml`
+exercises the shared visual features.
+
 ## Current scope
 
 The runtime includes the fixed viewport, validated Schema v2 content, Pixi
 presentation and timeline cues, video tracks, KaTeX dialogue, BGM/SFX and
-four-channel ambience buses, character expressions, reusable sprite actions, loop image animations and
+four-channel ambience buses, character expressions, reusable sprite actions,
+unified Sprites with fixed rich-text blocks, batched image particles, loop image animations and
 template-driven choices, automatic playback, three Ctrl fast-forward policies,
 forced playback sections, profile-level read tracking, a Scene-local 500-entry
 dialogue history, three manual slots plus autosave, and the revealed chapter map

@@ -23,6 +23,8 @@ import {
 import { ChoiceLayer } from "@vectspace/presentation-react/choice";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
+import { resolveTextBlocks, type TextBlockMap } from "@vectspace/presentation-core/text-block";
+import type { ParticleMap } from "@vectspace/presentation-core/particles";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import {
   activeTimerIds,
@@ -124,6 +126,8 @@ export default function SecondaryWindow(): ReactElement {
   const { update, effects, receive, setUpdate } = useLiveUpdate();
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [animations, setAnimations] = useState<AnimationMap>({});
+  const [textBlocks, setTextBlocks] = useState<TextBlockMap>({});
+  const [particles, setParticles] = useState<ParticleMap>({});
   const [defaultFontId, setDefaultFontId] = useState<string | null>(null);
   const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
   const [fontLoadErrorUrl, setFontLoadErrorUrl] = useState<string | null>(null);
@@ -185,8 +189,11 @@ export default function SecondaryWindow(): ReactElement {
       const payload = await engineApi.secondaryBootstrap();
       const resolved = await engineApi.resolveAssets(payload.asset_ids);
       if (generation !== generationRef.current) return;
-      setAssets(resolvedAssetsToUrls(resolved));
+      const urls = resolvedAssetsToUrls(resolved);
+      setAssets(urls);
       setAnimations(resolvedAssetsToAnimations(resolved));
+      setTextBlocks(resolveTextBlocks(payload.text_blocks ?? {}, urls, payload.default_font));
+      setParticles(payload.particles ?? {});
       setDefaultFontId(payload.default_font ?? null);
       sessionRef.current = requireSessionId(payload.update.session_id);
       // Updates committed since the bootstrap position are fetched in order;
@@ -704,6 +711,8 @@ export default function SecondaryWindow(): ReactElement {
       <section className="game-viewport" style={viewportStyle}>
         <SceneCanvas
           animations={animations}
+          textBlocks={textBlocks}
+          particles={particles}
           assets={assets}
           onDiagnostic={setError}
           onSettled={handlePresentationSettled}

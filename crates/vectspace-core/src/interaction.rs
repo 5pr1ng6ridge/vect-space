@@ -258,7 +258,7 @@ pub enum WindowRequest {
 /// cannot create an acknowledgement boundary or change the active prompt.
 pub fn timer_target_allowed(node: &SceneNode) -> bool {
     match node {
-        SceneNode::Set { .. } | SceneNode::Sfx { .. }
+        SceneNode::Set { .. } | SceneNode::Sfx { .. } | SceneNode::Particle { .. }
         | SceneNode::WindowTitle { .. } | SceneNode::WindowControl { .. }
         | SceneNode::WindowLayer { .. } => true,
         SceneNode::WindowGeometry { await_completion, .. } => !await_completion,

@@ -38,6 +38,7 @@ import {
 } from "./sceneFrame";
 import { TimelineClock, type TimelineOutcome } from "./timeline";
 import { evaluateVideoClip, type VideoClipPosition } from "./videoClip";
+import { spriteTrackState, spriteResourceId } from "./visual";
 import type { AudioDiagnostics } from "./audio";
 import type {
   SceneActiveEffects,
@@ -456,6 +457,7 @@ export class TimelineSession {
         if (!isCurrent()) return "stale";
         this.#bases = {
           sprites: { ...snapshot.world.sprites },
+          emitters: { ...(snapshot.world.emitters ?? {}) },
           buttons: { ...(snapshot.world.buttons ?? {}) },
           camera: { ...snapshot.world.camera },
           bgmVolume: snapshot.audio.bgm?.volume ?? 1,
@@ -931,6 +933,7 @@ export class TimelineSession {
       { duration_ms: cue.duration_ms, tracks: cue.tracks },
       {
         sprites: this.#bases.sprites,
+        emitters: this.#bases.emitters ?? {},
         buttons: this.#bases.buttons,
         camera: this.#bases.camera,
         bgm_volume: this.#bases.bgmVolume,
@@ -1054,12 +1057,8 @@ export class TimelineSession {
     const requests: SceneCharacterRequest[] = [];
     for (const track of cue.tracks) {
       if (track.type !== "sprite") continue;
-      const asset =
-        track.asset ?? this.#bases.sprites[track.sprite_id]?.asset ?? null;
-      if (asset === null) {
-        throw new Error(`立绘 ${track.sprite_id} 没有可继承的素材`);
-      }
-      requests.push({ id: track.sprite_id, asset });
+      const state = spriteTrackState(this.#bases.sprites[track.sprite_id], track);
+      requests.push({ id: track.sprite_id, asset: spriteResourceId(state), state });
     }
     if (requests.length === 0) return true;
     return this.#surface.ensureCharacters(requests, this.#assets, isCurrent);

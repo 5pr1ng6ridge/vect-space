@@ -16,6 +16,7 @@ import type {
   SceneGraphicsLike,
   SceneKit,
   SceneNodeLike,
+  SceneParticleBatchLike,
   ScenePointLike,
   SceneSpriteLike,
   SceneVideoSourceLike,
@@ -209,10 +210,38 @@ export class MemoryApplication implements SceneApplicationLike {
   }
 }
 
+export class MemoryParticleBatch implements SceneParticleBatchLike {
+  readonly node = new MemoryNode();
+  data: Float32Array | null = null;
+  count = 0;
+
+  constructor(readonly texture: SceneTextureLike, readonly capacity: number, readonly blend: "normal" | "add", readonly bounds: SceneRect) {
+    this.node.label = `particles:${capacity}`;
+  }
+
+  update(data: Float32Array, count: number): void {
+    this.data = data;
+    this.count = count;
+    this.node.width = count;
+  }
+
+  destroy(): void { this.node.destroy(); }
+}
+
+/** Nearest-sampling copy of a shared texture, as `SceneKit.particleTexture` hands out. */
+export interface MemoryParticleTexture extends SceneTextureLike {
+  readonly base: SceneTextureLike;
+  readonly sampling: "nearest";
+  destroyed: boolean;
+  destroyCount: number;
+}
+
 export interface MemoryKit {
   kit: SceneKit;
   readonly applications: MemoryApplication[];
   readonly shaderHosts: MemoryShaderHost[];
+  readonly particleBatches: MemoryParticleBatch[];
+  readonly particleTextures: MemoryParticleTexture[];
   renderCount(): number;
 }
 
@@ -254,11 +283,26 @@ export function createMemoryTextureLoader(
 export function createMemoryKit(): MemoryKit {
   const applications: MemoryApplication[] = [];
   const shaderHosts: MemoryShaderHost[] = [];
+  const particleBatches: MemoryParticleBatch[] = [];
+  const particleTextures: MemoryParticleTexture[] = [];
   const kit: SceneKit = {
     application: () => {
       const application = new MemoryApplication();
       applications.push(application);
       return application;
+    },
+    particleTexture: (base) => {
+      const texture: MemoryParticleTexture = {
+        base, sampling: "nearest", width: base.width, height: base.height, destroyed: false, destroyCount: 0,
+        destroy: () => { texture.destroyed = true; texture.destroyCount += 1; },
+      };
+      particleTextures.push(texture);
+      return texture;
+    },
+    particles: (texture, capacity, blend, bounds) => {
+      const batch = new MemoryParticleBatch(texture, capacity, blend, bounds);
+      particleBatches.push(batch);
+      return batch;
     },
     container: () => new MemoryNode(),
     sprite: (texture) => new MemorySprite(texture),
@@ -286,6 +330,8 @@ export function createMemoryKit(): MemoryKit {
     kit,
     applications,
     shaderHosts,
+    particleBatches,
+    particleTextures,
     renderCount: () =>
       applications.reduce(
         (total, application) => total + application.renders,

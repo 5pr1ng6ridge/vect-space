@@ -32,6 +32,16 @@ finishes with a template-driven `choice` node (KaTeX labels, a `gui` icon, the
 node default template, an option override template, a condition-filtered option
 and a disabled option).
 
+`scenes/visual_showcase.yaml` (chapter-map hotspot `visual_showcase`) shows the
+unified Sprite model: the legacy background node, a character, an item and a
+screen-space UI image (`source: { type: image }`), the fixed formula block
+`text_blocks/formula_card.yaml` as a `source: { type: text }` Sprite, one shared
+`sprite.bounce` action on both the item and the text, a persistent snowfall
+emitter (`particles/snowfall.yaml`) moved and faded as a whole by a timeline
+`emitter` track, and a one-shot `particles/sparkle_burst.yaml` burst. Both
+particle definitions use `assets/particles/soft_dot.png`, a generated 32×32
+white soft dot.
+
 Dialogue markup:
 
 ```text

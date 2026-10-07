@@ -1,8 +1,14 @@
 import { evaluateChannel, type SharedTimelineChannels } from "./timeline";
 import type { AmbienceSlot, ScreenEffectSpec, TimelineEvent } from "./types";
+import { spriteResourceId, spriteTrackState, type SpriteTrackSource, type CoordinateSpace, type SpriteKind, type SpriteLayout, type SpriteSource } from "./visual";
+import type { EmitterSnapshot } from "./particles";
 
 export interface TimelineBaseSprite {
-  asset: string;
+  asset?: string;
+  source?: SpriteSource;
+  sprite_kind?: SpriteKind;
+  space?: CoordinateSpace;
+  layout?: SpriteLayout | null;
   x: number;
   y: number;
   scale: number;
@@ -20,6 +26,7 @@ export interface TimelineBaseSprite {
 
 export interface TimelineBaseState {
   sprites: Readonly<Record<string, TimelineBaseSprite>>;
+  emitters?: Readonly<Record<string, EmitterSnapshot>>;
   /** Scene button transforms are evaluated with the same clock as sprites. */
   buttons?: Readonly<Record<string, TimelineBaseButton>>;
   camera: { x: number; y: number; zoom: number; rotation_deg: number };
@@ -49,6 +56,7 @@ export interface TimelineFrameSprite extends Omit<
   "width" | "height"
 > {
   id: string;
+  asset: string;
   width: number | undefined;
   height: number | undefined;
 }
@@ -68,6 +76,7 @@ export interface TimelineFrameVideo {
 export interface TimelineFrame {
   elapsed_ms: number;
   sprites: TimelineFrameSprite[];
+  emitters?: (EmitterSnapshot & { id: string })[];
   buttons: TimelineFrameButton[];
   camera: TimelineBaseState["camera"];
   videos: TimelineFrameVideo[];
@@ -144,12 +153,12 @@ export interface TimelineCueForEvaluation {
 }
 
 export type TimelineEvaluationTrack =
-  | {
+  | (SpriteTrackSource & {
       type: "sprite";
       sprite_id: string;
-      asset?: string | null;
       channels: SharedTimelineChannels;
-    }
+    })
+  | { type: "emitter"; emitter_id: string; channels: SharedTimelineChannels }
   | { type: "camera"; channels: SharedTimelineChannels }
   | { type: "button"; instance_id: string; channels: SharedTimelineChannels }
   | {
@@ -172,6 +181,8 @@ export function evaluateTimelineFrame(
 ): TimelineFrame {
   const elapsed = Math.max(0, Math.min(cue.duration_ms, elapsedMs));
   const sprites = new Map<string, TimelineFrameSprite>();
+  const emitters = new Map<string, EmitterSnapshot & { id: string }>();
+  for (const [id, state] of Object.entries(bases.emitters ?? {})) emitters.set(id, { ...state, id });
   const buttons = new Map<string, TimelineFrameButton>();
   const camera = { ...bases.camera };
   let bgmVolume = bases.bgm_volume ?? 1;
@@ -182,6 +193,7 @@ export function evaluateTimelineFrame(
     sprites.set(id, {
       id,
       ...base,
+      asset: spriteResourceId(base),
       width: base.width,
       height: base.height,
     });
@@ -191,10 +203,11 @@ export function evaluateTimelineFrame(
   }
   for (const track of cue.tracks) {
     if (track.type === "sprite") {
-      const base = bases.sprites[track.sprite_id] ?? defaultSprite(track.asset);
+      const base = spriteTrackState(bases.sprites[track.sprite_id], track);
       sprites.set(track.sprite_id, {
+        ...base,
         id: track.sprite_id,
-        asset: track.asset ?? base.asset,
+        asset: spriteResourceId(base),
         x: evaluateChannel(track.channels, "x", elapsed, base.x),
         y: evaluateChannel(track.channels, "y", elapsed, base.y),
         scale: evaluateChannel(track.channels, "scale", elapsed, base.scale),
@@ -226,8 +239,20 @@ export function evaluateTimelineFrame(
           base.opacity,
         ),
         z: Math.round(evaluateChannel(track.channels, "z", elapsed, base.z)),
-        width: base.width,
-        height: base.height,
+        width: bases.sprites[track.sprite_id]?.width,
+        height: bases.sprites[track.sprite_id]?.height,
+      });
+    } else if (track.type === "emitter") {
+      const base = bases.emitters?.[track.emitter_id];
+      if (base === undefined) throw new Error(`发射器 ${track.emitter_id} 未启动，无法应用时间线`);
+      emitters.set(track.emitter_id, {
+        ...base, id: track.emitter_id,
+        x: evaluateChannel(track.channels, "x", elapsed, base.x),
+        y: evaluateChannel(track.channels, "y", elapsed, base.y),
+        scale: evaluateChannel(track.channels, "scale", elapsed, base.scale),
+        rotation_deg: evaluateChannel(track.channels, "rotation_deg", elapsed, base.rotation_deg),
+        opacity: evaluateChannel(track.channels, "opacity", elapsed, base.opacity),
+        z: Math.round(evaluateChannel(track.channels, "z", elapsed, base.z)),
       });
     } else if (track.type === "camera") {
       camera.x = evaluateChannel(track.channels, "x", elapsed, camera.x);
@@ -307,6 +332,7 @@ export function evaluateTimelineFrame(
   return {
     elapsed_ms: elapsed,
     sprites: [...sprites.values()],
+    ...(emitters.size === 0 ? {} : { emitters: [...emitters.values()] }),
     buttons: [...buttons.values()],
     camera,
     videos,
@@ -331,18 +357,3 @@ function defaultButton(): TimelineBaseButton {
   };
 }
 
-function defaultSprite(asset: string | null | undefined): TimelineBaseSprite {
-  return {
-    asset: asset ?? "",
-    x: 960,
-    y: 1080,
-    scale: 1,
-    scale_x: 1,
-    scale_y: 1,
-    rotation_deg: 0,
-    anchor_x: 0.5,
-    anchor_y: 1,
-    opacity: 1,
-    z: 0,
-  };
-}

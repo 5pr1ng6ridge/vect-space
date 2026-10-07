@@ -15,6 +15,10 @@ variables:
     scope: profile
     type: boolean
     default: false
+  pair_ready:
+    scope: save
+    type: boolean
+    default: false
   route:
     scope: save
     type: string
@@ -27,10 +31,6 @@ variables:
     scope: save
     type: string
     default: test_string_test
-  pair_ready:
-    scope: save
-    type: boolean
-    default: false
 characters:
   alli:
     display_name: Alli
@@ -206,6 +206,9 @@ assets:
   gui.testbutton_2_hoveradd:
     kind: gui
     path: test/testbutton_2_hoveradd.png
+  particle.soft_dot:
+    kind: gui
+    path: particles/soft_dot.png
   sfx.typing:
     kind: sfx
     path: audio/sfx_typing.wav
@@ -221,6 +224,9 @@ assets:
   sprite.black:
     kind: sprite
     path: sprites/black.png
+  sprite.dust:
+    kind: sprite
+    path: sprites/dust.png
   sprite.jelly:
     kind: sprite
     path: sprites/jelly.png
@@ -236,6 +242,9 @@ assets:
   sprite.sat_soft:
     kind: sprite
     path: test/sat_soft.png
+  sprite.star:
+    kind: sprite
+    path: sprites/star.png
   sprite.stopmotion:
     kind: sprite
     animation: anim.stopmotion
@@ -323,6 +332,9 @@ assets:
   sprite.stopmotion_28:
     kind: sprite
     path: test/sm/stopmotion (28).png
+  sprite.whitedust:
+    kind: sprite
+    path: sprites/pt_diamonddust_0.png
   video.test:
     kind: video
     path: videos/test_movie.mp4
@@ -341,6 +353,7 @@ scenes:
 - scenes/shader_parity.yaml
 - scenes/window_pair_main.yaml
 - scenes/window_pair_side.yaml
+- scenes/visual_showcase.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml
@@ -361,4 +374,11 @@ animations:
 - animations/stopmotion.yaml
 actions:
 - actions/bounce.yaml
+text_blocks:
+- text_blocks/formula_card.yaml
+particles:
+- particles/snowfall.yaml
+- particles/sparkle_burst.yaml
+- particles/particle_v.yaml
+- particles/particle_v_copy.yaml
 chapter_map: chapter-map.yaml

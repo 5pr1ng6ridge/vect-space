@@ -170,3 +170,18 @@ hotspots:
   replay:
     mode: always
   variable_overrides: {}
+- id: visual_showcase
+  scene_id: visual_showcase
+  title: visual_showcase
+  hover_text: 统一 Sprite（背景/角色/物品/屏幕 UI/公式文本块）、共享动作、整体发射器时间线、持续雪花与单次火花粒子。
+  x: 2180
+  "y": 760
+  width: 280
+  height: 160
+  z: 10
+  asset: gui.button_pulse
+  reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}

@@ -55,6 +55,10 @@ import {
   createFakeMediaDom,
   type FakeMediaDom,
 } from "@vectspace/presentation-core/session-test-kit";
+import {
+  EMITTER_FIXTURE,
+  PARTICLE_FIXTURE,
+} from "../../../packages/presentation-core/src/visualTestKit";
 import type { EditorPreviewEnvironment } from "./timelinePreview";
 import { AssetLayoutProvider } from "./AssetChooser";
 import { TimelineWorkspace } from "./TimelineWorkspace";
@@ -1878,7 +1882,9 @@ describe("TimelineWorkspace pending resource load supersession", () => {
     }
 
     const urls = spriteTextureUrls(renderKit);
-    expect(urls.at(-1)).toBe("C:/game/sprite/alice.png");
+    expect(urls.filter((url) => url.startsWith("C:/game/sprite/"))).toEqual([
+      "C:/game/sprite/alice.png",
+    ]);
     expect(urls).not.toContain("C:/game/sprite/bob.png");
     expect(currentNode(handle).tracks[0]).toMatchObject({
       type: "sprite",
@@ -2179,5 +2185,78 @@ describe("TimelineWorkspace shared gameplay buttons", () => {
     expect(
       within(list as HTMLElement).getByRole("button", { name: /confirm/ }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("TimelineWorkspace whole particle emitters", () => {
+  const DOT_ASSET: EditorAsset = {
+    id: "dot",
+    kind: "gui",
+    path: "gui/dot.png",
+    absolute_path: "C:/game/gui/dot.png",
+  };
+
+  async function renderEmitterWorkspace(): Promise<{
+    view: ReturnType<typeof render>;
+    handle: HostHandle;
+  }> {
+    const renderKit = createRenderKit();
+    const node = timelineNode({ tracks: [] });
+    previewApi.handler = () => {
+      const ready = readyPreview(node);
+      ready.start_snapshot.world.emitters = { snow: { ...EMITTER_FIXTURE } };
+      return Promise.resolve({ ...ready, particles: { snow: PARTICLE_FIXTURE } });
+    };
+    const handle: HostHandle = { state: null, backCalls: 0 };
+    const project = makeProject({ [NODE_ID]: node });
+    const view = render(
+      <WorkspaceHost
+        environment={renderKit.environment}
+        onBack={() => undefined}
+        onState={(state) => {
+          handle.state = state;
+        }}
+        project={{ ...project, assets: [...ASSETS, DOT_ASSET] }}
+      />,
+    );
+    await waitForReady();
+    stageRect(view.container);
+    return { view, handle };
+  }
+
+  function selectEmitter(container: HTMLElement): void {
+    const list = container.querySelector<HTMLElement>(".timeline-object-list");
+    if (list === null) throw new Error("缺少对象列表");
+    fireEvent.click(within(list).getByRole("button", { name: /EMT\s*emitter:snow/ }));
+  }
+
+  it("lists the persistent emitter as one whole object and never the background adapter", async () => {
+    const { view } = await renderEmitterWorkspace();
+    const list = view.container.querySelector<HTMLElement>(".timeline-object-list");
+    const labels = within(list as HTMLElement)
+      .getAllByRole("button")
+      .map((button) => button.textContent ?? "");
+    expect(labels.some((label) => label.includes("emitter:snow"))).toBe(true);
+    expect(labels.some((label) => label.includes("__background__"))).toBe(false);
+    selectEmitter(view.container);
+    expect(inspectorField(view.container, "Scale")).toBeInTheDocument();
+    expect(
+      within(view.container.querySelector(".timeline-object-inspector") as HTMLElement)
+        .queryByLabelText("Scale X"),
+    ).toBeNull();
+  });
+
+  it("creates one emitter track per drag, writes only whole channels and undoes it", async () => {
+    const { view, handle } = await renderEmitterWorkspace();
+    selectEmitter(view.container);
+    dragGizmo(selectedGizmo(view.container), 96);
+    const [track] = currentNode(handle).tracks;
+    expect(track).toMatchObject({ type: "emitter", emitter_id: "snow", remove_at_end: false });
+    expect(Object.keys(track?.channels ?? {}).every((channel) =>
+      ["x", "y", "scale", "rotation_deg", "opacity", "z"].includes(channel))).toBe(true);
+    expect(track?.channels.x?.[0]?.value).toBe(EMITTER_FIXTURE.x + 96);
+    expect(handle.state?.past).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    expect(currentNode(handle).tracks).toEqual([]);
   });
 });

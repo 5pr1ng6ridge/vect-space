@@ -517,6 +517,8 @@ pub struct WireDialogueHistoryEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct WireBootstrapPayload {
     pub update: WireRuntimeUpdate,
+    pub text_blocks: BTreeMap<String, vectspace_core::visual::TextBlockDefinition>,
+    pub particles: BTreeMap<String, vectspace_core::visual::ParticleDefinition>,
     pub asset_ids: Vec<String>,
     pub content_version: String,
     #[serde(default)]
@@ -684,6 +686,8 @@ impl From<BootstrapPayload> for WireBootstrapPayload {
             content_version: payload.content_version,
             chapter_map_available: payload.chapter_map_available,
             default_font: payload.default_font,
+            text_blocks: payload.text_blocks,
+            particles: payload.particles,
         }
     }
 }

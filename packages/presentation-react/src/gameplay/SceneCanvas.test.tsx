@@ -21,6 +21,7 @@ const fake = vi.hoisted(() => {
   const state = {
     presents: [] as Call[],
     effects: [] as Call[],
+    visualResources: [] as { textBlocks: unknown; particles: unknown }[],
     cancelled: [] as string[],
     presentGates: [] as ((outcome: PresentationOutcome) => void)[],
     effectGates: [] as ((outcome: PresentationOutcome) => void)[],
@@ -35,6 +36,9 @@ const fake = vi.hoisted(() => {
     setPlaybackMode(): void {}
     setPaused(): void {}
     setAnimationAssets(): void {}
+    setVisualResources(textBlocks: unknown, particles: unknown): void {
+      state.visualResources.push({ textBlocks, particles });
+    }
     setTypingSfx(): Promise<void> {
       return Promise.resolve();
     }
@@ -113,6 +117,8 @@ interface Harness {
 }
 
 interface ViewProps {
+  textBlocks?: import("@vectspace/presentation-core/text-block").TextBlockMap;
+  particles?: Record<string, import("@vectspace/presentation-core/types").ParticleDefinition>;
   update: RuntimeUpdate | null;
   effects: readonly RuntimeUpdate[];
   activeTimers: readonly string[] | null;
@@ -128,6 +134,8 @@ function mount(initial: ViewProps): Harness {
       animations={{}}
       assets={{}}
       effects={props.effects}
+      textBlocks={props.textBlocks}
+      particles={props.particles}
       onDiagnostic={() => undefined}
       onSettled={onSettled}
       paused={false}
@@ -155,6 +163,7 @@ function mount(initial: ViewProps): Harness {
 beforeEach(() => {
   fake.state.presents = [];
   fake.state.effects = [];
+  fake.state.visualResources = [];
   fake.state.cancelled = [];
   fake.state.presentGates = [];
   fake.state.effectGates = [];

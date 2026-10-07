@@ -22,6 +22,7 @@ import type {
   WindowRole,
 } from "./types";
 import { scalarText } from "./scalars";
+import { spritePreset } from "@vectspace/presentation-core/visual";
 import {
   defaultBackgroundTransition,
   defaultCurtainFill,
@@ -55,7 +56,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "choice", label: "选择", group: "逻辑" },
   { type: "condition", label: "条件分支", group: "逻辑" },
   { type: "playback", label: "播放控制", group: "流程" },
-  { type: "action", label: "立绘动作", group: "画面" },
+  { type: "action", label: "Sprite 动作", group: "画面" },
   { type: "set", label: "设置变量", group: "逻辑" },
   { type: "jump", label: "跳转", group: "逻辑" },
   { type: "open_window", label: "打开副窗口", group: "逻辑" },
@@ -66,7 +67,8 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "timer", label: "计时器", group: "流程" },
   { type: "background", label: "背景", group: "画面" },
   { type: "curtain", label: "幕布", group: "画面" },
-  { type: "sprite", label: "立绘", group: "画面" },
+  { type: "sprite", label: "Sprite", group: "画面" },
+  { type: "particle", label: "图片粒子", group: "画面" },
   { type: "clear", label: "清除画面", group: "画面" },
   { type: "camera", label: "镜头", group: "画面" },
   { type: "screen_effect", label: "屏幕效果", group: "画面" },
@@ -236,6 +238,8 @@ export function summarizeNode(node: SceneNode): string {
     }
     case "sprite":
       return `${node.action} ${node.sprite_id}`;
+    case "particle":
+      return `${node.action} ${node.emitter_id}${node.particle ? ` · ${node.particle}` : ""}`;
     case "clear":
       return `淡出全部内容 · ${node.duration_ms} ms`;
     case "wait":
@@ -353,7 +357,64 @@ export function directionLabel(direction: TransitionDirection): string {
   }
 }
 
-export function defaultNode(type: NodeType, fallback: string): SceneNode {
+function emitterInstanceIds(
+  scenes: readonly SceneDefinition[],
+  copies: readonly SceneNode[] = [],
+): Set<string> {
+  const used = new Set<string>();
+  for (const node of [
+    ...scenes.flatMap((scene) => Object.values(scene.nodes)),
+    ...copies,
+  ]) {
+    if (node.type === "particle") used.add(node.emitter_id);
+    if (node.type === "timeline") {
+      for (const track of node.tracks) {
+        if (track.type === "emitter") used.add(track.emitter_id);
+      }
+    }
+  }
+  return used;
+}
+
+function uniqueEmitterId(used: ReadonlySet<string>, prefix = "emitter"): string {
+  let id = prefix;
+  let index = 2;
+  while (used.has(id)) id = `${prefix}_${index++}`;
+  return id;
+}
+
+/** Remap detached copies as one batch so their internal emitter controls stay together. */
+export function remapCopiedEmitterInstances(
+  nodes: readonly SceneNode[],
+  scenes: readonly SceneDefinition[],
+): void {
+  const used = emitterInstanceIds(scenes, nodes);
+  const copiedIds = new Map<string, string>();
+  for (const node of nodes) {
+    if (node.type !== "particle" || node.action !== "start") continue;
+    if (copiedIds.has(node.emitter_id)) continue;
+    const id = uniqueEmitterId(used, node.emitter_id || "emitter");
+    copiedIds.set(node.emitter_id, id);
+    used.add(id);
+  }
+  for (const node of nodes) {
+    if (node.type === "particle") {
+      node.emitter_id = copiedIds.get(node.emitter_id) ?? node.emitter_id;
+    } else if (node.type === "timeline") {
+      for (const track of node.tracks) {
+        if (track.type === "emitter") {
+          track.emitter_id = copiedIds.get(track.emitter_id) ?? track.emitter_id;
+        }
+      }
+    }
+  }
+}
+
+export function defaultNode(
+  type: NodeType,
+  fallback: string,
+  scenes: readonly SceneDefinition[] = [],
+): SceneNode {
   switch (type) {
     case "background":
       return {
@@ -401,6 +462,22 @@ export function defaultNode(type: NodeType, fallback: string): SceneNode {
         duration_ms: 500,
         easing: "ease_in_out",
         await: false,
+        next: fallback,
+      };
+    case "particle":
+      return {
+        type,
+        emitter_id: uniqueEmitterId(emitterInstanceIds(scenes)),
+        action: "start",
+        particle: null,
+        seed: null,
+        space: "world",
+        x: 960,
+        y: 540,
+        scale: 1,
+        rotation_deg: 0,
+        opacity: 1,
+        z: 0,
         next: fallback,
       };
     case "clear":
@@ -664,6 +741,8 @@ export function resolveSpriteAsset(
   node: Extract<SceneNode, { type: "sprite" }>,
   manifest?: ContentManifest,
 ): string | null {
+  if (node.source !== undefined)
+    return node.source.type === "image" ? node.source.asset : null;
   if (node.asset != null && node.asset !== "") return node.asset;
   if (node.character == null || node.character === "") return null;
   if (manifest === undefined) return null;
@@ -751,18 +830,27 @@ export function convertToTimeline(
         : resolveSpriteAsset(node, manifest);
     let channels: TimelineChannels;
     if (node.action === "show") {
-      if (resolvedAsset === null) {
-        throw new Error("显示立绘缺少素材或有效角色表情，无法转换。");
+      const source =
+        node.source ??
+        (resolvedAsset === null
+          ? null
+          : { type: "image" as const, asset: resolvedAsset });
+      if (source === null) {
+        throw new Error("显示 Sprite 缺少图片、文本块或有效角色表情，无法转换。");
       }
+      const preset = spritePreset(
+        node.sprite_kind ?? (source.type === "text" ? "text" : "character"),
+        source,
+      );
       const target = {
-        x: node.x ?? 960,
-        y: node.y ?? 1080,
-        scale: node.scale ?? 1,
-        scale_x: 1,
-        scale_y: 1,
-        rotation_deg: 0,
-        opacity: node.opacity ?? 1,
-        z: node.z ?? 0,
+        x: node.x ?? preset.x,
+        y: node.y ?? preset.y,
+        scale: node.scale ?? preset.scale,
+        scale_x: node.scale_x ?? preset.scale_x,
+        scale_y: node.scale_y ?? preset.scale_y,
+        rotation_deg: node.rotation_deg ?? preset.rotation_deg,
+        opacity: node.opacity ?? preset.opacity,
+        z: node.z ?? preset.z,
       };
       channels = pairedChannels(
         { ...target, y: target.y + 48, scale: target.scale * 0.96, opacity: 0 },
@@ -783,9 +871,12 @@ export function convertToTimeline(
             x: node.x,
             y: node.y,
             scale: node.scale,
+            scale_x: node.scale_x,
+            scale_y: node.scale_y,
+            rotation_deg: node.rotation_deg,
             opacity: node.opacity,
             z: node.z,
-          }).filter((entry): entry is [string, number] => entry[1] !== null),
+          }).filter((entry): entry is [string, number] => entry[1] != null),
         ),
         result.duration_ms,
         node.easing,
@@ -795,7 +886,10 @@ export function convertToTimeline(
       {
         type: "sprite",
         sprite_id: node.sprite_id,
-        asset: resolvedAsset,
+        ...(node.source === undefined ? { asset: resolvedAsset } : { source: node.source }),
+        ...(node.sprite_kind === undefined ? {} : { sprite_kind: node.sprite_kind }),
+        ...(node.space === undefined ? {} : { space: node.space }),
+        ...(node.layout === undefined ? {} : { layout: node.layout }),
         remove_at_end: node.action === "hide",
         channels,
       },
@@ -1232,7 +1326,11 @@ export function insertNode(
 
   const originalTarget =
     side === "right" ? (selectedPort?.target ?? sourceId) : sourceId;
-  const template = defaultNode(type, originalTarget);
+  const template = defaultNode(
+    type,
+    originalTarget,
+    updated.scenes.map((scene) => scene.definition),
+  );
   const templatePorts = outputPorts(template);
   if (templatePorts.length === 0 && !(side === "right" && type === "end")) {
     return { ok: false, error: "结束节点没有出口，不能作为中间插入节点。" };
@@ -1871,6 +1969,8 @@ export function projectRequest(
     buttons: project.buttons ?? [],
     animations: project.animations ?? [],
     actions: project.actions ?? [],
+    text_blocks: project.text_blocks ?? [],
+    particles: project.particles ?? [],
     chapter_map: project.chapter_map ?? null,
     layout: project.layout,
     expected_fingerprint: project.fingerprint,

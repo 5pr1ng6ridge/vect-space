@@ -1742,6 +1742,8 @@ impl EngineState {
             content_version: payload.content_version,
             chapter_map_available: false,
             default_font: payload.default_font,
+            text_blocks: payload.text_blocks,
+            particles: payload.particles,
         })
     }
 
@@ -2067,6 +2069,8 @@ async fn bootstrap(
         content_version: payload.content_version,
         chapter_map_available: payload.chapter_map_available,
         default_font: payload.default_font,
+        text_blocks: payload.text_blocks,
+        particles: payload.particles,
     })
 }
 
