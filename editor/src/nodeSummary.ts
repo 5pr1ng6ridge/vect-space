@@ -28,7 +28,7 @@ export interface NodeDescription {
   summary: string;
 }
 
-export interface DescribeContext {
+interface DescribeContext {
   /** Only the character table is needed (for speaker display names). */
   manifest?: Pick<ContentManifest, "characters">;
 }
@@ -46,7 +46,7 @@ function mutationValue(value: MutationValue | undefined): string {
   return scalar(value);
 }
 
-export function describeCondition(condition: ConditionExpression): string {
+function describeCondition(condition: ConditionExpression): string {
   switch (condition.op) {
     case "eq":
     case "ne":
@@ -72,7 +72,7 @@ export function describeCondition(condition: ConditionExpression): string {
 }
 
 /** Display name of a speaker id: character name, temporary name or 旁白. */
-export function speakerName(
+function speakerName(
   speaker: string | null,
   manifest: Pick<ContentManifest, "characters"> | undefined,
 ): string {

@@ -1,4 +1,14 @@
-use super::*;
+use crate::content::ContentCatalog;
+use crate::interaction::{
+    AdvanceBlock, MAX_SCENE_TIMERS, MIN_TIMER_INTERVAL_MS, timer_target_allowed, UpdateKind,
+    validate_title, WindowControlAction, WindowRequest, WindowRole, WindowTitles,
+};
+use crate::model::{
+    PresentationCueKind, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate, SceneNode, StoryLocation,
+    VariableType,
+};
+use crate::text_template;
+use super::{RuntimeEngine, RuntimeError};
 
 pub(super) fn validate_interaction_snapshot(
     content: &ContentCatalog,
@@ -32,7 +42,7 @@ pub(super) fn validate_interaction_snapshot(
         if let Some(template) = &block.message_template {
             for reference in text_template::references(template).map_err(|error| invalid(&error.to_string()))? {
                 let value_type = if crate::interaction::is_window_variable(&reference.id) {
-                    crate::model::VariableType::String
+                    VariableType::String
                 } else {
                     content.manifest.variables.get(&reference.id)
                         .ok_or_else(|| invalid("阻挡提示引用了未知变量"))?.value_type
@@ -163,30 +173,6 @@ impl RuntimeEngine {
             scene_id: scene_id.to_owned(), node_id: node_id.to_owned(),
         });
         self.snapshot.interaction.prompt_instance = self.next_update_id.to_string();
-    }
-
-    pub(super) fn choice_prompt(
-        &self,
-        content: &ContentCatalog,
-        scene_id: &str,
-        node_id: &str,
-        presentation: Option<&ChoicePresentation>,
-        definitions: &[crate::model::ChoiceDefinition],
-    ) -> Result<PromptSnapshot, RuntimeError> {
-        let mut drafts = Vec::new();
-        for choice in definitions {
-            if !choice.visible_if.as_ref().map(|condition| self.evaluate_condition(content, condition)).transpose()?.unwrap_or(true) {
-                continue;
-            }
-            drafts.push(ChoiceItemDraft {
-                id: choice.id.clone(),
-                label: self.interpolate_text(content, &choice.label)?,
-                enabled: choice.enabled_if.as_ref().map(|condition| self.evaluate_condition(content, condition)).transpose()?.unwrap_or(true),
-                template: choice.template.clone(), icon: choice.icon.clone(),
-            });
-        }
-        let (choices, layout, diagnostics) = resolve_choice_items(content, scene_id, node_id, presentation, &drafts);
-        Ok(PromptSnapshot::Choice { prompt_id: format!("{scene_id}/{node_id}"), choices, layout, diagnostics })
     }
 
     pub fn refresh_prompt(&mut self, content: &ContentCatalog) -> Result<(), RuntimeError> {

@@ -24,7 +24,7 @@ export interface TextOccurrence {
   animation: TextRevealAnimation | null;
 }
 
-export function textOccurrenceKey(
+function textOccurrenceKey(
   update: RuntimeUpdate | null,
   prompt: DialoguePrompt | LongTextPrompt | null,
 ): string | null {

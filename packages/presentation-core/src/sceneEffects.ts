@@ -473,29 +473,47 @@ export function evaluateShockwave(
   };
 }
 
+export interface ParsedColor {
+  /** `0xRRGGBB`; invalid input falls back to opaque white. */
+  color: number;
+  /** `0..1`; `#RRGGBB` (and invalid input) is fully opaque. */
+  alpha: number;
+}
+
 /**
- * Normalised straight-RGB components of a `#RRGGBB`/`#RRGGBBAA` colour.
+ * Parses `#RRGGBB`/`#RRGGBBAA` (the leading `#` is optional).
  *
- * Mirrors the renderer's colour convention (`parseColor`): the leading `#` is
- * optional, a malformed colour falls back to opaque white, and a six-digit
- * colour is fully opaque.
+ * The content validator accepts both lengths, so every renderer path that
+ * consumes an authored colour must keep the alpha instead of silently drawing
+ * an 8-digit colour fully opaque.
  */
+export function parseColor(color: string): ParsedColor {
+  const hex = color.startsWith("#") ? color.slice(1) : color;
+  if (hex.length !== 6 && hex.length !== 8)
+    return { color: 0xffffff, alpha: 1 };
+  const parsed = Number.parseInt(hex.slice(0, 6), 16);
+  if (Number.isNaN(parsed)) return { color: 0xffffff, alpha: 1 };
+  if (hex.length === 6) return { color: parsed, alpha: 1 };
+  const parsedAlpha = Number.parseInt(hex.slice(6, 8), 16);
+  return {
+    color: parsed,
+    alpha: Number.isNaN(parsedAlpha) ? 1 : parsedAlpha / 255,
+  };
+}
+
+/** Normalised straight-RGB components of a colour (see `parseColor`). */
 export function parseHexRgb(color: string): {
   r: number;
   g: number;
   b: number;
   a: number;
 } {
-  const hex = color.startsWith("#") ? color.slice(1) : color;
-  if (hex.length !== 6 && hex.length !== 8) return { r: 1, g: 1, b: 1, a: 1 };
-  const value = Number.parseInt(hex.slice(0, 6), 16);
-  if (Number.isNaN(value)) return { r: 1, g: 1, b: 1, a: 1 };
-  const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) : 0xff;
+  const { color: value, alpha } = parseColor(color);
   return {
     r: ((value >> 16) & 0xff) / 255,
     g: ((value >> 8) & 0xff) / 255,
     b: (value & 0xff) / 255,
-    a: (Number.isNaN(alpha) ? 0xff : alpha) / 255,
+    a: alpha,
   };
 }
 

@@ -10,13 +10,6 @@ export function isIntegerScalar(value: ScalarValue): value is bigint | number {
   );
 }
 
-export function isFiniteNumberScalar(value: ScalarValue): boolean {
-  return (
-    typeof value === "bigint" ||
-    (typeof value === "number" && Number.isFinite(value))
-  );
-}
-
 export function scalarType(value: ScalarValue): VariableType {
   if (typeof value === "boolean") return "boolean";
   if (typeof value === "string") return "string";
@@ -42,12 +35,6 @@ export function stringifyScalarJson(value: unknown, space?: number): string {
       typeof child === "bigint" ? child.toString() : child,
     space,
   );
-}
-
-export function parseIntegerText(value: string): ScalarValue {
-  if (!isCanonicalIntegerText(value)) return 0n;
-  const parsed = BigInt(value);
-  return parsed;
 }
 
 export function isCanonicalIntegerText(value: string): boolean {

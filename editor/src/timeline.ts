@@ -12,7 +12,7 @@ import type {
 } from "./types";
 import { applyEasing } from "@vectspace/presentation-core/timeline";
 
-export interface SpriteActionExpansionOptions {
+interface SpriteActionExpansionOptions {
   action: SpriteActionDefinition;
   spriteId: string;
   base: SpriteSnapshot;
@@ -27,7 +27,7 @@ export interface SpriteActionExpansionOptions {
  * authoritative starting pose; this helper is deliberately pure and is only
  * used when an author explicitly chooses to inline a call in the editor.
  */
-export interface SpriteActionNodeExpansionOptions {
+interface SpriteActionNodeExpansionOptions {
   node: ActionNode;
   action: SpriteActionDefinition;
   base: SpriteSnapshot;
@@ -197,7 +197,7 @@ export const SPRITE_ACTION_CHANNELS = [
   "opacity",
 ] as const;
 
-export interface SpriteActionConversionOptions {
+interface SpriteActionConversionOptions {
   definition: SpriteActionDefinition;
   base?: SpriteSnapshot;
   /** Sprite instance id and artwork used only by the keyframe preview. */
@@ -368,23 +368,6 @@ export interface TimelineKeyframeClipboard {
   }[];
 }
 
-export interface TimelinePasteResult {
-  node: TimelineNode;
-  pasted: TimelineKeyframeAddress[];
-  skipped: number;
-}
-
-export function copyTimelineKeyframes(
-  node: TimelineNode,
-  addresses: readonly TimelineKeyframeAddress[],
-): TimelineKeyframeClipboard | null {
-  return copyTimelineKeyframesFrom(
-    node.tracks,
-    (track: TimelineTrack) => timelineTrackIdentity(track),
-    addresses,
-  );
-}
-
 /**
  * Structural copy shared by every keyframe surface.
  *
@@ -415,30 +398,6 @@ export function copyTimelineKeyframesFrom<
       offsetMs: frame.at_ms - origin,
       frame: structuredClone(frame),
     })),
-  };
-}
-
-export function pasteTimelineKeyframes(
-  node: TimelineNode,
-  clipboard: TimelineKeyframeClipboard,
-  playheadMs: number,
-  snapMs: number,
-  snapPointMs?: number,
-): TimelinePasteResult {
-  const result = pasteTimelineKeyframesInto(
-    node,
-    (track: TimelineTrack) => timelineTrackIdentity(track),
-    (track: TimelineTrack) => timelineTrackChannels(track.type),
-    (track: TimelineTrack) => track.type !== "video",
-    clipboard,
-    playheadMs,
-    snapMs,
-    snapPointMs,
-  );
-  return {
-    node: result.document,
-    pasted: result.pasted,
-    skipped: result.skipped,
   };
 }
 
@@ -523,43 +482,6 @@ export function timelineTrackIdentity(track: TimelineTrack): string {
   if (track.type === "button") return `button:${track.instance_id}`;
   if (track.type === "ambience") return `ambience:${track.slot}`;
   return track.type;
-}
-
-function timelineTrackChannels(type: TimelineTrack["type"]): string[] {
-  switch (type) {
-    case "emitter":
-      return ["x", "y", "scale", "rotation_deg", "opacity", "z"];
-    case "sprite":
-      return [
-        "x",
-        "y",
-        "scale",
-        "scale_x",
-        "scale_y",
-        "rotation_deg",
-        "opacity",
-        "z",
-      ];
-    case "camera":
-      return ["x", "y", "zoom", "rotation_deg"];
-    case "button":
-      return [
-        "x",
-        "y",
-        "width",
-        "height",
-        "scale_x",
-        "scale_y",
-        "rotation_deg",
-        "opacity",
-        "z",
-      ];
-    case "video":
-      return ["x", "y", "width", "height", "opacity", "z", "volume"];
-    case "bgm":
-    case "ambience":
-      return ["volume"];
-  }
 }
 
 export function ease(value: number, easing: TimelineEasing): number {

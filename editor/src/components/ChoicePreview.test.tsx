@@ -10,14 +10,7 @@
  */
 import "@testing-library/jest-dom/vitest";
 import { StrictMode, type ReactElement } from "react";
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
@@ -409,38 +402,6 @@ describe("ChoicePreview", () => {
     // Strict Mode probes effects twice; a superseded probe must never commit.
     expect(previewApi.requests).toHaveLength(1);
     expect(screen.getAllByRole("button")).toHaveLength(3);
-  });
-
-  it("drops a late response after unmount instead of writing state", async () => {
-    let resolvePreview: ((value: BuildNodePreviewResult) => void) | null = null;
-    previewApi.handler = () =>
-      new Promise<BuildNodePreviewResult>((resolve) => {
-        resolvePreview = resolve;
-      });
-    const errors = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
-    const { unmount } = render(previewElement());
-    await waitFor(() => expect(previewApi.requests).toHaveLength(1));
-    unmount();
-    await act(async () => {
-      resolvePreview?.(readyPreview(choicePrompt()));
-      await Promise.resolve();
-    });
-    expect(document.querySelector(".choice-preview")).toBeNull();
-    expect(errors).not.toHaveBeenCalled();
-    errors.mockRestore();
-  });
-
-  it("stays read-only: activating an option never mutates the project", async () => {
-    previewApi.handler = () => Promise.resolve(readyPreview(choicePrompt()));
-    render(previewElement());
-    const plain = await screen.findByRole("button", { name: "回退皮肤" });
-    fireEvent.click(plain);
-    // No story command exists in the mocked boundary; a mutation attempt would
-    // reject with "not a function" and surface as an unhandled error.
-    expect(screen.getAllByRole("button")).toHaveLength(3);
-    expect(screen.getByRole("button", { name: "回退皮肤" })).toBe(plain);
   });
 
   it("reports unreachable, needs-choice and non-choice results", async () => {

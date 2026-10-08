@@ -8,7 +8,6 @@ import {
   resolveLongTextPageWindow,
 } from "./longTextPagination";
 import {
-  advanceLongTextScroll,
   hasReachedLongTextRevealThreshold,
   LONG_TEXT_BOTTOM_BROWSING_SPACE,
   longTextFollowTarget,
@@ -135,7 +134,7 @@ describe("LongTextPanel", () => {
     expect(LONG_TEXT_BOTTOM_BROWSING_SPACE).toBeGreaterThan(70);
   });
 
-  it("keeps the new follower bounded through a stalled frame and resumes from manual positions", () => {
+  it("places the follow target relative to the cursor", () => {
     expect(
       longTextFollowTarget({
         cursorY: 821,
@@ -143,12 +142,6 @@ describe("LongTextPanel", () => {
         maxScroll: 2_000,
       }),
     ).toBeCloseTo(151.4);
-    expect(
-      advanceLongTextScroll(320, 1_800, 2_000, false) - 320,
-    ).toBeLessThanOrEqual(120);
-    expect(
-      advanceLongTextScroll(320, 1_800, 2_000, true) - 320,
-    ).toBeLessThanOrEqual(600);
   });
 
   it("places each paragraph once before reveal and keeps already fitting text still", () => {

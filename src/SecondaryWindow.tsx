@@ -13,17 +13,16 @@ import "./App.css";
 
 import {
   ButtonLayer,
-  DialogueBox,
-  LongTextPanel,
   SceneCanvas,
   type DialogueBoxHandle,
   type LongTextPanelHandle,
   type SceneCanvasHandle,
 } from "@vectspace/presentation-react/gameplay";
-import { ChoiceLayer } from "@vectspace/presentation-react/choice";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
-import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
-import { resolveTextBlocks, type TextBlockMap } from "@vectspace/presentation-core/text-block";
+import {
+  resolveTextBlocks,
+  type TextBlockMap,
+} from "@vectspace/presentation-core/text-block";
 import type { ParticleMap } from "@vectspace/presentation-core/particles";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
 import {
@@ -32,33 +31,32 @@ import {
   isAdvanceBlocked,
 } from "@vectspace/presentation-core/live-update";
 import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
+import { requireSessionId } from "@vectspace/presentation-core/session-transition";
+import type {
+  AdvanceSource,
+  AssetUrlMap,
+  RuntimeUpdate,
+  Settings,
+} from "@vectspace/presentation-core/types";
 import { autoReadingDelay } from "@vectspace/text";
 
+import { CommandError, errorMessage } from "../shared/commandError";
+import type { WireU64 } from "../shared/generated/WireU64";
+import { AdvanceBlockNotice } from "./components/AdvanceBlockNotice";
+import { PromptLayers } from "./components/PromptLayers";
 import {
   engineApi,
   resolvedAssetsToAnimations,
   resolvedAssetsToUrls,
 } from "./engine/api";
-import { CommandError } from "../shared/commandError";
-import { requireSessionId } from "@vectspace/presentation-core/session-transition";
-import { canFastForwardPrompt } from "./engine/playback";
+import { fastForwardState, isInteractiveTarget } from "./engine/playback";
+import { describePrompt } from "./engine/promptView";
 import { RuntimeFeed } from "./engine/runtimeFeed";
 import { StoryPauseSync } from "./engine/storyPause";
-import { useTextOccurrence } from "./engine/textOccurrence";
+import { useDefaultFont } from "./engine/useDefaultFont";
 import { useLiveUpdate } from "./engine/useLiveUpdate";
-import { AdvanceBlockNotice } from "./components/AdvanceBlockNotice";
-import type {
-  AdvanceSource,
-  AssetUrlMap,
-  DialoguePrompt,
-  LongTextPrompt,
-  PresentationCue,
-  RuntimeUpdate,
-  Settings,
-  TextRevealAnimation,
-} from "@vectspace/presentation-core/types";
+import { useTextReveal } from "./engine/useTextReveal";
 import { useViewportMetrics } from "./viewport/viewport";
-import type { WireU64 } from "../shared/generated/WireU64";
 
 /**
  * The single secondary game window's shell.
@@ -96,13 +94,6 @@ const DEFAULT_SETTINGS: Settings = {
 
 type Status = "booting" | "playing" | "failed";
 
-interface LockedTextSettings {
-  instanceKey: string;
-  defaultCps: number;
-  initialCps: number;
-  animation: TextRevealAnimation;
-}
-
 export default function SecondaryWindow(): ReactElement {
   const { metrics: viewportMetrics, style: viewportStyle } =
     useViewportMetrics();
@@ -129,8 +120,6 @@ export default function SecondaryWindow(): ReactElement {
   const [textBlocks, setTextBlocks] = useState<TextBlockMap>({});
   const [particles, setParticles] = useState<ParticleMap>({});
   const [defaultFontId, setDefaultFontId] = useState<string | null>(null);
-  const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
-  const [fontLoadErrorUrl, setFontLoadErrorUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [typingSfxActive, setTypingSfxActive] = useState(false);
@@ -142,8 +131,32 @@ export default function SecondaryWindow(): ReactElement {
   const [completedPromptKey, setCompletedPromptKey] = useState<string | null>(
     null,
   );
-  const [lockedTextSettings, setLockedTextSettings] =
-    useState<LockedTextSettings | null>(null);
+
+  const view = describePrompt(update);
+  const { longText, textPrompt, timelineCue, runtimeTimelineCue, playback } =
+    view;
+  const reveal = useTextReveal(update, textPrompt, {
+    cps: DEFAULT_SETTINGS.text_speed_cps,
+    animation: DEFAULT_SETTINGS.text_reveal_animation,
+  });
+  const { resetLocked: resetLockedTextSettings } = reveal;
+  const textInstanceKey = reveal.instanceKey;
+  const advanceBlocked = update !== null && isAdvanceBlocked(update.snapshot);
+  const runtimeLocked = update?.requires_ack ?? false;
+  const forcedAuto = playback.auto === "forced";
+  const {
+    requested: fastForwardRequested,
+    dialogueAllowed: fastForwardDialogueAllowed,
+    active: fastForwardActive,
+  } = fastForwardState({
+    ctrlHeld,
+    enabled: status === "playing",
+    playback,
+    skipMode: DEFAULT_SETTINGS.skip_mode,
+    update,
+    textPrompt,
+    runtimeTimelineCue,
+  });
 
   /**
    * Single entry of every host update (response, event, sync) into the window.
@@ -183,7 +196,7 @@ export default function SecondaryWindow(): ReactElement {
     setStatus("booting");
     setError(null);
     setCompletedPromptKey(null);
-    setLockedTextSettings(null);
+    resetLockedTextSettings();
     sceneRef.current?.cancelCurrentPresentation();
     try {
       const payload = await engineApi.secondaryBootstrap();
@@ -192,7 +205,13 @@ export default function SecondaryWindow(): ReactElement {
       const urls = resolvedAssetsToUrls(resolved);
       setAssets(urls);
       setAnimations(resolvedAssetsToAnimations(resolved));
-      setTextBlocks(resolveTextBlocks(payload.text_blocks ?? {}, urls, payload.default_font));
+      setTextBlocks(
+        resolveTextBlocks(
+          payload.text_blocks ?? {},
+          urls,
+          payload.default_font,
+        ),
+      );
       setParticles(payload.particles ?? {});
       setDefaultFontId(payload.default_font ?? null);
       sessionRef.current = requireSessionId(payload.update.session_id);
@@ -210,7 +229,7 @@ export default function SecondaryWindow(): ReactElement {
       setError(errorMessage(reason));
       setStatus("failed");
     }
-  }, [setUpdate]);
+  }, [resetLockedTextSettings, setUpdate]);
 
   const recoverReplacedSession = useCallback((): void => {
     void bootstrap();
@@ -286,37 +305,8 @@ export default function SecondaryWindow(): ReactElement {
     };
   }, [applyIncoming, bootstrap, recoverReplacedSession]);
 
-  useEffect(() => {
-    const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
-    if (fontUrl === undefined) return;
-    let active = true;
-    const face = new FontFace("VECT Pixel", `url("${fontUrl}")`, {
-      display: "swap",
-    });
-    document.fonts.add(face);
-    void face
-      .load()
-      .then(async () => {
-        await document.fonts.ready;
-        if (active) setLoadedFontUrl(fontUrl);
-      })
-      .catch((reason: unknown) => {
-        if (active) {
-          setFontLoadErrorUrl(fontUrl);
-          setError(`中文字体加载失败，已使用系统字体：${errorMessage(reason)}`);
-        }
-      });
-    return () => {
-      active = false;
-      document.fonts.delete(face);
-    };
-  }, [assets, defaultFontId]);
-
   const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
-  const fontReady =
-    fontUrl === undefined ||
-    loadedFontUrl === fontUrl ||
-    fontLoadErrorUrl === fontUrl;
+  const fontReady = useDefaultFont(fontUrl, setError);
 
   const runCommand = useCallback(
     async (command: () => Promise<RuntimeUpdate>): Promise<boolean> => {
@@ -459,130 +449,6 @@ export default function SecondaryWindow(): ReactElement {
     },
     [runCommand, status, update],
   );
-
-  const dialogue =
-    update?.snapshot.prompt.kind === "dialogue" ? update.snapshot.prompt : null;
-  const longText =
-    update?.snapshot.prompt.kind === "long_text"
-      ? update.snapshot.prompt
-      : null;
-  const textPrompt: DialoguePrompt | LongTextPrompt | null =
-    dialogue ?? longText;
-  const dialoguePage =
-    update?.snapshot.dialogue_page ??
-    (dialogue === null
-      ? null
-      : {
-          page_id: dialogue.prompt_id,
-          speaker: dialogue.speaker,
-          speaker_id: dialogue.speaker_id ?? null,
-          name_color: dialogue.name_color ?? null,
-          text_color: dialogue.text_color ?? null,
-          segments: [dialogue.text],
-        });
-  const hasUiMotionCue =
-    update?.cues.some(
-      (cue) =>
-        cue.type === "dialogue_ui_transition" || cue.type === "ui_motion",
-    ) ?? false;
-  const renderedDialoguePage =
-    longText === null
-      ? (dialoguePage ??
-        (hasUiMotionCue
-          ? {
-              page_id: "ui_motion_preview",
-              speaker: null,
-              speaker_id: null,
-              name_color: null,
-              text_color: null,
-              segments: [""],
-            }
-          : null))
-      : null;
-  const longTextPage = update?.snapshot.long_text_page ?? null;
-  const choice =
-    update?.snapshot.prompt.kind === "choice" ? update.snapshot.prompt : null;
-  const runtimeLocked = update?.requires_ack ?? false;
-  const timelineCue = update?.cues.find(
-    (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
-      cue.type === "timeline",
-  );
-  const runtimeTimelineCue = update?.cues.find(
-    (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
-      cue.type === "timeline" && cue.gate === "runtime",
-  );
-  const playback = update?.snapshot.playback ?? {
-    auto: "normal" as const,
-    ctrl_fast_forward: "allow" as const,
-  };
-  const forcedAuto = playback.auto === "forced";
-  const fastForwardRequested =
-    ctrlHeld &&
-    !forcedAuto &&
-    playback.ctrl_fast_forward === "allow" &&
-    DEFAULT_SETTINGS.skip_mode !== "disabled";
-  const fastForwardDialogueAllowed =
-    textPrompt !== null &&
-    (DEFAULT_SETTINGS.skip_mode === "all" ||
-      (DEFAULT_SETTINGS.skip_mode === "read_only" && textPrompt.is_read));
-  const fastForwardActive =
-    status === "playing" &&
-    fastForwardRequested &&
-    update !== null &&
-    canFastForwardPrompt(
-      playback,
-      DEFAULT_SETTINGS.skip_mode,
-      update.snapshot.prompt,
-    ) &&
-    (runtimeTimelineCue === undefined ||
-      DEFAULT_SETTINGS.skip_mode === "all" ||
-      (DEFAULT_SETTINGS.skip_mode === "read_only" &&
-        runtimeTimelineCue.is_seen));
-
-  // Reveal settings and identity belong to the prompt *occurrence*: they are
-  // decided when it is first shown and survive refreshes of the same prompt.
-  const occurrence = useTextOccurrence(update, textPrompt);
-  const textCueCps = occurrence?.speedCps;
-  const hasTextRevealCue = occurrence?.hasRevealCue ?? false;
-  const cueRevealAnimation = occurrence?.animation ?? null;
-  const textInstanceKey = occurrence?.key ?? null;
-  const advanceBlocked =
-    update !== undefined &&
-    update !== null &&
-    isAdvanceBlocked(update.snapshot);
-  const currentTextSettings = useMemo<LockedTextSettings | null>(() => {
-    if (textPrompt === null) return null;
-    return {
-      instanceKey: textInstanceKey ?? "none",
-      defaultCps: DEFAULT_SETTINGS.text_speed_cps,
-      initialCps: textCueCps ?? DEFAULT_SETTINGS.text_speed_cps,
-      animation: cueRevealAnimation ?? DEFAULT_SETTINGS.text_reveal_animation,
-    };
-  }, [cueRevealAnimation, textCueCps, textInstanceKey, textPrompt]);
-  useEffect(() => {
-    if (currentTextSettings === null) {
-      const frame = requestAnimationFrame(() => setLockedTextSettings(null));
-      return () => cancelAnimationFrame(frame);
-    }
-    const frame = requestAnimationFrame(() => {
-      setLockedTextSettings((previous) =>
-        previous?.instanceKey === currentTextSettings.instanceKey
-          ? previous
-          : currentTextSettings,
-      );
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [currentTextSettings]);
-  const effectiveTextSettings =
-    lockedTextSettings?.instanceKey === currentTextSettings?.instanceKey
-      ? lockedTextSettings
-      : currentTextSettings;
-  const revealCps =
-    effectiveTextSettings?.initialCps ?? DEFAULT_SETTINGS.text_speed_cps;
-  const revealDefaultCps =
-    effectiveTextSettings?.defaultCps ?? DEFAULT_SETTINGS.text_speed_cps;
-  const revealAnimation =
-    effectiveTextSettings?.animation ?? DEFAULT_SETTINGS.text_reveal_animation;
 
   const handleTypingChange = useCallback(
     (typing: boolean, cps: number): void => {
@@ -754,87 +620,26 @@ export default function SecondaryWindow(): ReactElement {
 
         {status === "playing" && update !== null && (
           <>
-            {renderedDialoguePage !== null && (
-              <DialogueBox
-                defaultCps={revealDefaultCps}
-                dialogueBoxSource={
-                  resolveImageAsset("gui.dialogue_box", assets, animations) ??
-                  null
-                }
-                disabled={busy || runtimeLocked}
-                initialCps={revealCps}
-                key={textInstanceKey ?? `retained:${update.update_id}`}
-                motionHost={uiMotionHost}
-                nameBoxSource={
-                  resolveImageAsset("gui.name_box", assets, animations) ?? null
-                }
-                onTypingChange={handleTypingChange}
-                onRevealComplete={handleRevealComplete}
-                page={renderedDialoguePage}
-                prompt={dialogue}
-                revealAnimation={revealAnimation}
-                fontReady={fontReady}
-                measurementScale={viewportMetrics.scale}
-                ref={dialogueRef}
-                revealImmediately={dialogue === null || !hasTextRevealCue}
-                sessionKey={
-                  dialogue === null
-                    ? `retained:${renderedDialoguePage.page_id}`
-                    : (textInstanceKey ?? update.update_id)
-                }
-                suspended={pageHidden}
-                visible={update.snapshot.world.dialogue_ui_visible}
-              />
-            )}
-
-            {longTextPage !== null && (
-              <LongTextPanel
-                defaultCps={revealDefaultCps}
-                disabled={busy || runtimeLocked || longText === null}
-                fastForward={fastForwardActive}
-                initialCps={revealCps}
-                key={longTextPage.document_id}
-                onRevealComplete={handleRevealComplete}
-                onTypingChange={handleTypingChange}
-                page={longTextPage}
-                paperSource={
-                  longTextPage.paper === null ||
-                  longTextPage.paper === undefined
-                    ? undefined
-                    : (resolveImageAsset(
-                        longTextPage.paper,
-                        assets,
-                        animations,
-                      ) ?? null)
-                }
-                prompt={longText}
-                revealAnimation={revealAnimation}
-                designScale={viewportMetrics.scale}
-                fontReady={fontReady}
-                fontKey={defaultFontId ?? "system"}
-                ref={longTextRef}
-                revealImmediately={!hasTextRevealCue}
-                sessionKey={
-                  longText === null
-                    ? `retained:${longTextPage.document_id}:${longTextPage.active_step_index}`
-                    : (textInstanceKey ?? update.update_id)
-                }
-                suspended={pageHidden}
-                visible={longTextPage.visible !== false}
-              />
-            )}
-
-            {choice !== null && (
-              <ChoiceLayer
-                animations={animations}
-                assets={assets}
-                disabled={busy || runtimeLocked}
-                onChoose={choose}
-                onDiagnostic={(diagnostic) => setError(diagnostic.message)}
-                paused={pageHidden}
-                prompt={choice}
-              />
-            )}
+            <PromptLayers
+              animations={animations}
+              assets={assets}
+              designScale={viewportMetrics.scale}
+              dialogueRef={dialogueRef}
+              disabled={busy || runtimeLocked}
+              fastForward={fastForwardActive}
+              fontKey={defaultFontId ?? "system"}
+              fontReady={fontReady}
+              longTextRef={longTextRef}
+              onChoose={choose}
+              onDiagnostic={setError}
+              onRevealComplete={handleRevealComplete}
+              onTypingChange={handleTypingChange}
+              reveal={reveal}
+              suspended={pageHidden}
+              uiMotionHost={uiMotionHost}
+              update={update}
+              view={view}
+            />
 
             {update.snapshot.prompt.kind === "end" && (
               <div className="end-card">
@@ -878,10 +683,6 @@ export default function SecondaryWindow(): ReactElement {
   );
 }
 
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
-}
-
 /**
  * True when the host rejected a request because this window's session was
  * re-pointed. The host uses this code for every stale token, so it is the one
@@ -889,13 +690,4 @@ function errorMessage(reason: unknown): string {
  */
 function isStaleSessionError(reason: unknown): boolean {
   return reason instanceof CommandError && reason.code === "stale_session";
-}
-
-function isInteractiveTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      "button, input, select, textarea, a, label, [contenteditable='true'], [data-block-story-advance]",
-    ) !== null
-  );
 }

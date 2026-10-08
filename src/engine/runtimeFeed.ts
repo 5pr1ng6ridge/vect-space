@@ -13,7 +13,7 @@ import { engineApi } from "./api";
  * carries no data - the update itself is fetched with the sync command - so a
  * lost or reordered event can only delay an update, never corrupt state.
  */
-export const RUNTIME_UPDATED_EVENT = "vectspace://runtime-updated";
+const RUNTIME_UPDATED_EVENT = "vectspace://runtime-updated";
 
 export type FeedChannel = "main" | "secondary";
 

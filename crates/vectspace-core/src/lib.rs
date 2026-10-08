@@ -11,3 +11,5 @@ pub mod model;
 pub mod runtime;
 pub mod text_template;
 pub mod visual;
+#[cfg(test)]
+mod test_support;

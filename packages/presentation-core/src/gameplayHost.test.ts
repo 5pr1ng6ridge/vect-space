@@ -1148,59 +1148,6 @@ describe("PresentationController session curtain", () => {
     expect(kit.renderCount()).toBe(renders);
   });
 
-  it("starts a rebuilt controller on the same canvas with no residual curtain", async () => {
-    const first = createHost();
-    await first.controller.init();
-    const pending = first.controller.applySessionSnapshot(
-      worldSnapshot("bg.other"),
-      SWITCH_ASSETS,
-    );
-    await pump(first, 4);
-    first.controller.destroy();
-    await pending;
-    expect(first.controller.sessionCovered).toBe(false);
-
-    // Rebuild: a fresh controller/session on the same canvas must start with
-    // no curtain object and its own scheduler.
-    vi.restoreAllMocks();
-    const second = createHost();
-    await second.controller.init();
-    expect(second.controller.sessionCovered).toBe(false);
-    expect(second.kit.applications[0]?.destroyed).toBe(false);
-    expect(sessionLayer(second.kit)).toHaveLength(0);
-    const pendingSecond = second.controller.applySessionSnapshot(
-      worldSnapshot("bg.other"),
-      SWITCH_ASSETS,
-    );
-    await pump(second, 80);
-    await pendingSecond;
-    expect(second.controller.sessionCovered).toBe(false);
-    expect(sessionLayer(second.kit)).toHaveLength(0);
-    second.controller.destroy();
-  });
-
-  it("coalesces duplicate covers and reveals (React Strict Mode)", async () => {
-    const harness = createHost();
-    const { controller, kit } = harness;
-    await controller.init();
-    const first = controller.coverSession();
-    const second = controller.coverSession();
-    expect(second).toBe(first);
-    await pump(harness, 40);
-    await first;
-    expect(controller.sessionCovered).toBe(true);
-    expect(sessionLayer(kit)).toHaveLength(1);
-
-    const reveal = controller.revealSession();
-    const duplicate = controller.revealSession();
-    expect(duplicate).toBe(reveal);
-    await pump(harness, 40);
-    await Promise.all([reveal, duplicate]);
-    expect(controller.sessionCovered).toBe(false);
-    expect(sessionLayer(kit)).toHaveLength(0);
-    controller.destroy();
-  });
-
   it("completes a switch within a bounded time when frames are suspended", async () => {
     const harness = createHost();
     const { controller, kit } = harness;

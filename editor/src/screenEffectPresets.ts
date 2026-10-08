@@ -9,13 +9,13 @@
 
 import type { ScreenEffectSpec, TimelineEvent } from "./types";
 
-export type ScreenEffectPresetId =
+type ScreenEffectPresetId =
   | "reasoning_break"
   | "spatial_impact"
   | "anomaly_escalation"
   | "correction_focus";
 
-export interface ScreenEffectPresetStep {
+interface ScreenEffectPresetStep {
   /** Start relative to the insertion point. */
   offset_ms: number;
   duration_ms: number;

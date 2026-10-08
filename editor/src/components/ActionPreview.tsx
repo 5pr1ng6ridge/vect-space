@@ -28,6 +28,7 @@ import {
   type EditorPreviewEnvironment,
   type EditorTimelinePreview,
 } from "./timelinePreview";
+import { errorMessage } from "./errorMessage";
 
 const PREVIEW_SPRITE_ID = "action.preview";
 
@@ -300,8 +301,4 @@ function buildActionPreviewRequest(
     requires_ack: false,
   };
   return { snapshot, update };
-}
-
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
 }

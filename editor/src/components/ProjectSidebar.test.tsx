@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { EditorDiagnostic, EditorProject } from "../types";
 import { ProjectSidebar, type SidebarTab } from "./ProjectSidebar";
+import { SIDEBAR_CALLBACKS as BASE_CALLBACKS } from "./sidebar/testProps";
 import {
   createProjectSectionState,
   PROJECT_SECTION_IDS,
@@ -121,35 +122,7 @@ function createProject(): EditorProject {
 }
 
 const SIDEBAR_CALLBACKS = {
-  onAddCharacter: () => true,
-  onAddScene: () => true,
-  onAddVariable: () => true,
-  onChangeCharacter: () => undefined,
-  onChangeVariable: () => undefined,
-  onCreateAction: () => true,
-  onCreateButtonTemplate: () => undefined,
-  onCreateImageAnimation: () => true,
-  onCreateUiMotion: () => undefined,
-  onDeleteAction: () => undefined,
-  onDeleteButtonTemplate: () => undefined,
-  onDeleteCharacter: () => undefined,
-  onDeleteScene: () => undefined,
-  onDeleteUiMotion: () => undefined,
-  onDeleteVariable: () => undefined,
-  onDuplicateAction: () => undefined,
-  onDuplicateButtonTemplate: () => undefined,
-  onEditActionKeyframes: () => undefined,
-  onEditButtonTemplate: () => undefined,
-  onEditUiMotion: () => undefined,
-  onImportAssets: () => Promise.resolve(),
-  onManifestChange: () => undefined,
-  onNavigate: () => undefined,
-  onRemoveAsset: () => false,
-  onRenameAction: () => true,
-  onRenameCharacter: () => true,
-  onRenameScene: () => true,
-  onRenameVariable: () => true,
-  onSelectAsset: () => undefined,
+  ...BASE_CALLBACKS,
   visualLibrary: {
     onCreate: () => true,
     onRename: () => true,
@@ -157,7 +130,6 @@ const SIDEBAR_CALLBACKS = {
     onDelete: () => undefined,
     onEdit: () => undefined,
   },
-  onSelectScene: () => undefined,
 };
 
 /** Mimics App: the host owns the section-open state and passes it down. */
@@ -386,31 +358,6 @@ describe("project panel sections", () => {
     expect(onCreateUiMotion).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps individual item collapse state across sidebar unmounts", () => {
-    render(
-      <RoundTripHarness
-        diagnostics={[]}
-        project={createProject()}
-        store={{ current: {} }}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "项目" }));
-    fireEvent.click(screen.getByRole("button", { name: "收起角色 lumi" }));
-    fireEvent.click(screen.getByRole("button", { name: "场景" }));
-    fireEvent.click(screen.getByRole("button", { name: "项目" }));
-    expect(
-      screen.getByRole("button", { name: "展开角色 lumi" }),
-    ).toHaveAttribute("aria-expanded", "false");
-
-    fireEvent.click(screen.getByRole("button", { name: "切换侧栏" }));
-    fireEvent.click(screen.getByRole("button", { name: "切换侧栏" }));
-    fireEvent.click(screen.getByRole("button", { name: "项目" }));
-    expect(
-      screen.getByRole("button", { name: "展开角色 lumi" }),
-    ).toHaveAttribute("aria-expanded", "false");
-  });
-
   it("keeps host-owned collapse state across a sidebar unmount/remount round trip", () => {
     render(
       <RoundTripHarness
@@ -554,5 +501,71 @@ describe("sidebar scroll restoration", () => {
     fireEvent.click(screen.getByRole("button", { name: "素材" }));
     fireEvent.click(screen.getByRole("button", { name: /^问题/ }));
     expect(scroller("problems").scrollTop).toBe(180);
+  });
+});
+
+describe("scene purpose in the project panel", () => {
+  function purposeProject(): EditorProject {
+    const project = createProject();
+    const scene = (id: string, role?: "secondary") => ({
+      path: `scenes/${id}.yaml`,
+      definition: {
+        ...(role === undefined ? {} : { window_role: role }),
+        schema_version: 2 as const,
+        id,
+        entry: "s",
+        nodes: { s: { type: "end" as const } },
+      },
+    });
+    project.manifest.scenes = [
+      "scenes/main.yaml",
+      "scenes/side.yaml",
+      "scenes/two.yaml",
+    ];
+    project.scenes = [scene("main"), scene("side", "secondary"), scene("two")];
+    return project;
+  }
+
+  it("marks secondary Scenes and switches a Scene's purpose", () => {
+    const onSetSceneRole = vi.fn();
+    render(
+      <ProjectHarness
+        overrides={{ activeTab: "scenes", hideTabs: true, onSetSceneRole }}
+        project={purposeProject()}
+      />,
+    );
+    expect(screen.getByText(/副窗口专用/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "设为主窗口专用" }));
+    expect(onSetSceneRole).toHaveBeenCalledWith("side", "main");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "设为副窗口专用" })[1],
+    );
+    expect(onSetSceneRole).toHaveBeenCalledWith("two", "secondary");
+  });
+
+  it("creates a secondary Scene from its own button", () => {
+    const onAddScene = vi.fn(() => true);
+    render(
+      <ProjectHarness
+        overrides={{ activeTab: "scenes", hideTabs: true, onAddScene }}
+        project={purposeProject()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "添加副窗口场景" }));
+    fireEvent.click(screen.getByRole("button", { name: /确定|创建|确认/ }));
+    expect(onAddScene).toHaveBeenCalledWith("new_side_scene", "secondary");
+  });
+
+  it("does not offer a secondary Scene as the project entry", () => {
+    render(
+      <ProjectHarness
+        overrides={{ hideTabs: true }}
+        project={purposeProject()}
+      />,
+    );
+    const ids = Array.from(
+      screen.getByLabelText("项目入口场景").querySelectorAll("option"),
+    ).map((option) => option.value);
+    expect(ids).toEqual(["main", "two"]);
   });
 });

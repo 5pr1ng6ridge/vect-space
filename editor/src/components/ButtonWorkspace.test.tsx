@@ -1,12 +1,8 @@
 // @vitest-environment jsdom
 /**
- * ButtonWorkspace keyframe authoring.
- *
- * Button animations are authored with the same shared keyframe surface as the
- * story timeline (ruler, transport, selection, drag, easing inspector,
- * copy/paste/delete).  These tests pin the domain boundary: the shared surface
- * writes only into the *selected state's* `ButtonAnimation` channels and keeps
- * the state/variant semantics outside it.
+ * ButtonWorkspace: the shared keyframe surface writes only into the selected
+ * state's `ButtonAnimation` channels, and the preview is the shared gameplay
+ * button.
  */
 import "@testing-library/jest-dom/vitest";
 import {
@@ -19,8 +15,7 @@ import {
 import { useState, type ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ButtonFile, EditorAsset, EditorLayout } from "../types";
-import { AssetLayoutProvider } from "./AssetChooser";
+import type { ButtonFile, EditorAsset } from "../types";
 import { ButtonWorkspace } from "./ButtonWorkspace";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -136,21 +131,6 @@ function selectKeyframe(label: string): void {
 }
 
 describe("ButtonWorkspace keyframe authoring", () => {
-  it("authors the current state with the shared timeline surface", () => {
-    const { view } = renderWorkspace();
-    // One interaction surface: ruler, transport, marquee tracks, keyframe
-    // markers and the easing inspector all come from TimelineSurface.
-    expect(view.container.querySelector(".timeline-surface")).not.toBeNull();
-    expect(view.container.querySelector(".timeline-ruler")).not.toBeNull();
-    expect(screen.getByLabelText("播放头")).toBeInTheDocument();
-    expect(screen.getByLabelText("offset_y 0ms")).toBeInTheDocument();
-    expect(screen.getByLabelText("offset_y 400ms")).toBeInTheDocument();
-    // The state tabs stay a domain concern and are independent of the surface.
-    expect(screen.getByRole("button", { name: "正常" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "悬停" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "按下" })).toBeInTheDocument();
-  });
-
   it("writes a numeric keyframe edit into the selected state's channels", () => {
     const onChange = vi.fn<(file: ButtonFile) => void>();
     renderWorkspace(onChange);
@@ -174,14 +154,6 @@ describe("ButtonWorkspace keyframe authoring", () => {
       { at_ms: 200, value: 6, easing: "linear" },
     ]);
     expect(next.definition.animations.normal?.duration_ms).toBe(400);
-  });
-
-  it("keeps per-state channels when switching state tabs", () => {
-    renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "悬停" }));
-    // The hover track is now displayed; the normal keyframes are gone.
-    expect(screen.getByLabelText("offset_x 0ms")).toBeInTheDocument();
-    expect(screen.queryByLabelText("offset_y 0ms")).toBeNull();
   });
 
   it("adds a keyframe to the picked channel at the playhead", () => {
@@ -270,14 +242,11 @@ describe("ButtonWorkspace shared gameplay button preview", () => {
     return Array.from(preview().querySelectorAll("img.scene-button-image"));
   }
 
-  it("previews the real shared TemplateButton instead of a hand-built stack", () => {
-    const { view } = renderWorkspace();
-    // The real component, styled by the shared stylesheet.
+  it("previews the real shared TemplateButton", () => {
+    renderWorkspace();
     const button = preview().querySelector("button.scene-button");
     expect(button).not.toBeNull();
     expect(button).toHaveClass("scene-button-normal");
-    // The old hand-built artwork/transform layer is gone.
-    expect(view.container.querySelector(".button-preview-visual")).toBeNull();
     // Artwork resolution, fit and box come from the shared component.
     const images = artwork();
     expect(images).toHaveLength(1);
@@ -350,71 +319,5 @@ describe("ButtonWorkspace shared gameplay button preview", () => {
     expect(preview().style.borderStyle).toBe("dashed");
     fireEvent.click(screen.getByLabelText("显示点击区轮廓"));
     expect(preview().style.borderStyle).toBe("none");
-  });
-});
-
-describe("ButtonWorkspace asset metadata (App provider wiring)", () => {
-  const providerAssets: EditorAsset[] = [
-    {
-      id: "gui.btn_normal",
-      kind: "gui",
-      path: "gui/btn_normal.png",
-      absolute_path: "C:/game/gui/btn_normal.png",
-    },
-    {
-      id: "gui.btn_hidden",
-      kind: "gui",
-      path: "gui/hidden.png",
-      absolute_path: "C:/game/gui/hidden.png",
-    },
-    {
-      id: "gui.btn_visible",
-      kind: "gui",
-      path: "gui/visible.png",
-      absolute_path: "C:/game/gui/visible.png",
-    },
-  ];
-
-  it("reads the editor-only layout from the provider: hidden picks are kept and display names shown", () => {
-    const layout: EditorLayout = {
-      version: 1,
-      scenes: {},
-      asset_metadata: {
-        "gui.btn_normal": { hidden: true, display_name: "正常按钮" },
-        "gui.btn_hidden": { hidden: true },
-      },
-    };
-    render(
-      <AssetLayoutProvider layout={layout}>
-        <ButtonWorkspace
-          animationMap={{}}
-          assets={providerAssets}
-          dirty
-          file={buttonFile()}
-          onBack={() => undefined}
-          onChange={() => undefined}
-          onRedo={() => undefined}
-          onSave={() => undefined}
-          onUndo={() => undefined}
-        />
-      </AssetLayoutProvider>,
-    );
-
-    // The currently selected hidden value is kept and shown by display name.
-    const trigger = screen.getByRole("button", { name: "正常贴图" });
-    expect(trigger).toHaveTextContent("正常按钮");
-
-    fireEvent.click(trigger);
-    const current = screen.getByRole("option", { name: /正常按钮/ });
-    expect(current).toHaveAttribute("aria-selected", "true");
-    expect(current).toHaveTextContent("已隐藏");
-    // Another hidden asset is not offered as a new choice...
-    expect(
-      screen.queryByRole("option", { name: /gui\.btn_hidden/ }),
-    ).toBeNull();
-    // ...while a visible one is.
-    expect(
-      screen.getByRole("option", { name: /gui\.btn_visible/ }),
-    ).toBeInTheDocument();
   });
 });

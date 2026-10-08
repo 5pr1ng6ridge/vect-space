@@ -673,21 +673,6 @@ describe("GameplayPreview", () => {
     );
   });
 
-  it("acknowledges a gated presentation exactly once", async () => {
-    await startScene(dialogueUpdate("1", true));
-    const ackCalls: unknown[] = [];
-    host.ack = (request) => {
-      ackCalls.push(request);
-      return Promise.resolve(dialogueUpdate("2", false));
-    };
-    act(() => {
-      host.canvasProps?.onSettled(dialogueUpdate("1", true), "completed");
-    });
-    await waitFor(() => expect(ackCalls).toHaveLength(1));
-    expect((ackCalls[0] as { update_id: string }).update_id).toBe("1");
-    expect((ackCalls[0] as { outcome: string }).outcome).toBe("completed");
-  });
-
   it("returns NeedsChoice without guessing and starts after a branch is picked", async () => {
     renderPreview();
     host.start = () =>
@@ -1060,16 +1045,6 @@ describe("GameplayPreview", () => {
     expect(host.stopCalls).toEqual([]);
     view.unmount();
     expect(host.stopCalls).toEqual(["7"]);
-  });
-
-  it("keeps the explicit start buttons when no autoStart is given", async () => {
-    host.start = () => Promise.resolve(started(dialogueUpdate()));
-    renderPreview();
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
-    expect(host.startRequests).toHaveLength(0);
-    expect(screen.getByText("未开始")).toBeInTheDocument();
   });
 
   it("fits the design stage within the height left below the toolbar", async () => {

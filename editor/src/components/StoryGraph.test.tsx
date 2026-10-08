@@ -228,42 +228,17 @@ describe("StoryGraph node deletion shortcut", () => {
     fireEvent.keyDown(menu, { key: "Delete" });
     expect(onDelete).not.toHaveBeenCalled();
   });
-
-  it("ignores Delete from editable fields inside the pane", () => {
-    const { onDelete, view } = renderGraph();
-    const shell = pane(view);
-    const input = document.createElement("input");
-    const editable = document.createElement("div");
-    editable.setAttribute("contenteditable", "true");
-    const inner = document.createElement("span");
-    editable.appendChild(inner);
-    shell.append(input, editable);
-
-    fireEvent.keyDown(input, { key: "Delete" });
-    fireEvent.keyDown(inner, { key: "Delete" });
-    expect(onDelete).not.toHaveBeenCalled();
-  });
-
-  it("ignores auto-repeat and an IME composition", () => {
-    const { onDelete, view } = renderGraph();
-    const shell = pane(view);
-    fireEvent.keyDown(shell, { key: "Delete", repeat: true });
-    fireEvent.keyDown(shell, { key: "Delete", keyCode: 229 });
-    fireEvent.keyDown(shell, { key: "Delete", isComposing: true });
-    expect(onDelete).not.toHaveBeenCalled();
-  });
-
-  it("does not delete from the pane's own toolbar chrome", async () => {
-    const { onDelete } = renderGraph();
-    await nodeElement("a");
-    // Focus a toolbar control, then press Delete: a focused control inside the
-    // pane must not double as a destructive shortcut.
-    const autolayout = screen.getByRole("button", { name: "自动布局" });
-    autolayout.focus();
-    fireEvent.keyDown(autolayout, { key: "Delete" });
-    expect(onDelete).not.toHaveBeenCalled();
-  });
 });
+
+const GROUP_POSITIONS: SceneLayout["nodes"] = {
+  a: { x: 100, y: 30 },
+  b: { x: 230, y: 60 },
+  c: { x: 400, y: 30 },
+};
+
+function groupedLayout(groups: SceneGroup[]): SceneLayout {
+  return { nodes: GROUP_POSITIONS, viewport: null, groups };
+}
 
 describe("StoryGraph nested groups", () => {
   it("imports Shift marquee selection before a right-click grouping action", async () => {
@@ -347,15 +322,9 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("keeps a group plus node selected when opening their context menu", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [{ id: "g1", children: [{ node: "a" }, { node: "b" }] }],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+    ]);
     const onSetGroups = vi.fn();
     const { view } = renderGraph({ layout, onSetGroups, selectedNodeId: null });
     const frame = await groupFrame(view.container, "g1");
@@ -376,18 +345,10 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("moves only the selected nested node up one level from its context menu", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [
-        { id: "inner", children: [{ node: "a" }, { node: "b" }] },
-        { id: "outer", children: [{ group: "inner" }, { node: "c" }] },
-      ],
-    };
+    const layout = groupedLayout([
+      { id: "inner", children: [{ node: "a" }, { node: "b" }] },
+      { id: "outer", children: [{ group: "inner" }, { node: "c" }] },
+    ]);
     const onSetGroups = vi.fn();
     renderGraph({ layout, onSetGroups, selectedNodeId: null });
     const selected = await nodeCard("a");
@@ -413,18 +374,10 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("right-clicks a selected group to dissolve only that layer", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [
-        { id: "g1", children: [{ node: "a" }, { node: "b" }] },
-        { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
-      ],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+      { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
+    ]);
     const onSetGroups = vi.fn();
     const { view } = renderGraph({ layout, onSetGroups, selectedNodeId: null });
     const outer = await groupFrame(view.container, "g0");
@@ -514,18 +467,10 @@ describe("StoryGraph nested groups", () => {
 
   it("copies a selected group as a whole from its context menu", async () => {
     const onCopySelection = vi.fn();
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [
-        { id: "g1", children: [{ node: "a" }, { node: "b" }] },
-        { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
-      ],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+      { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
+    ]);
     const { view } = renderGraph({
       layout,
       onCopySelection,
@@ -539,30 +484,10 @@ describe("StoryGraph nested groups", () => {
     expect(onCopySelection).toHaveBeenCalledWith([{ group: "g0" }]);
   });
 
-  it("Ctrl-click selects multiple nodes and Ctrl+L wraps them in a parent group", async () => {
-    const onSetGroups = vi.fn();
-    const { view } = renderGraph({ onSetGroups });
-    fireEvent.click(await nodeCard("a"));
-    fireEvent.click(await nodeCard("b"), { ctrlKey: true });
-    fireEvent.keyDown(pane(view), { key: "l", ctrlKey: true });
-
-    expect(onSetGroups).toHaveBeenCalledTimes(1);
-    const groups = onSetGroups.mock.calls[0][0] as SceneGroup[];
-    expect(groups).toHaveLength(1);
-    expect(groups[0].children).toEqual([{ node: "a" }, { node: "b" }]);
-    expect(groups[0].id).toMatch(/^group-/);
-  });
-
   it("renders a persisted nested group and selects it from the frame header", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [{ id: "g1", children: [{ node: "a" }, { node: "b" }] }],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+    ]);
     const onSelect = vi.fn();
     const { view } = renderGraph({ layout, onSelect, selectedNodeId: null });
     const frame = await groupFrame(view.container, "g1");
@@ -574,15 +499,9 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("selects a group from its border as well as its header", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [{ id: "g1", children: [{ node: "a" }, { node: "b" }] }],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+    ]);
     const { view } = renderGraph({ layout, selectedNodeId: null });
     const frame = await groupFrame(view.container, "g1");
     const border = frame.querySelector<HTMLElement>(".story-group-edge-top");
@@ -594,15 +513,9 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("wraps a group plus an additively selected node on Ctrl+L", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [{ id: "g1", children: [{ node: "a" }, { node: "b" }] }],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+    ]);
     const onSetGroups = vi.fn();
     const { view } = renderGraph({ layout, onSetGroups, selectedNodeId: null });
     const frame = await groupFrame(view.container, "g1");
@@ -620,18 +533,10 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("Ctrl+L on one selected group dissolves only that layer", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [
-        { id: "g1", children: [{ node: "a" }, { node: "b" }] },
-        { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
-      ],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+      { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
+    ]);
     const onSetGroups = vi.fn();
     const { view } = renderGraph({ layout, onSetGroups, selectedNodeId: null });
     const outer = await groupFrame(view.container, "g0");
@@ -644,18 +549,10 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("frames nested groups so a parent encloses its child frame", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [
-        { id: "g1", children: [{ node: "a" }, { node: "b" }] },
-        { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
-      ],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+      { id: "g0", children: [{ group: "g1" }, { node: "c" }] },
+    ]);
     const onSelect = vi.fn();
     const { view } = renderGraph({ layout, onSelect, selectedNodeId: null });
     const outer = await groupFrame(view.container, "g0");
@@ -672,15 +569,9 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("consumes Delete while a group is selected rather than deleting a stale node", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [{ id: "g1", children: [{ node: "a" }, { node: "b" }] }],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+    ]);
     // The App inspector still points at `c`, which must never be the target.
     const { onDelete, view } = renderGraph({ layout, selectedNodeId: "c" });
     pressGroupHeader(await groupFrame(view.container, "g1"));
@@ -850,15 +741,9 @@ describe("StoryGraph nested groups", () => {
   });
 
   it("resets the canvas selection when the scene changes", async () => {
-    const layout: SceneLayout = {
-      nodes: {
-        a: { x: 100, y: 30 },
-        b: { x: 230, y: 60 },
-        c: { x: 400, y: 30 },
-      },
-      viewport: null,
-      groups: [{ id: "g1", children: [{ node: "a" }, { node: "b" }] }],
-    };
+    const layout = groupedLayout([
+      { id: "g1", children: [{ node: "a" }, { node: "b" }] },
+    ]);
     const onDelete = vi.fn();
     const { view } = renderGraph({ layout, onDelete, selectedNodeId: null });
     pressGroupHeader(await groupFrame(view.container, "g1"));

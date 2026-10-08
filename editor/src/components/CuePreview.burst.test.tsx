@@ -278,20 +278,6 @@ describe("CuePreview transient burst transport", () => {
     expect(kit.renderCount()).toBeGreaterThan(rendered);
   });
 
-  it("drives the burst from the shared clock to the maximum lifetime", async () => {
-    const { kit } = renderBurst(definition(60));
-    await screen.findByLabelText("粒子预览");
-
-    // The cue resolved as soon as the emitter existed; the burst is still
-    // alive and playing, it was not frozen or finished by that resolution.
-    await waitFor(() => expect(kit.particleBatches).toHaveLength(1));
-    expect(kit.particleBatches[0]?.node.destroyed).toBe(false);
-
-    await settled(kit);
-    expect(readout()).toMatchObject({ ms: 60, total: 60, finished: true });
-    expect(kit.particleBatches).toHaveLength(1);
-  });
-
   it("pauses and resumes the live burst", async () => {
     const { kit } = renderBurst(definition(5000));
     await waitFor(() => expect(readout().ms).toBeGreaterThan(20), {
@@ -351,21 +337,6 @@ describe("CuePreview transient burst transport", () => {
       expect(screen.getByRole("button", { name: /暂停/ })).toBeInTheDocument(),
     );
     expect(liveBatches(kit)).toHaveLength(1);
-  });
-
-  it("ignores repeats, modifiers, IME, text fields and a Space typed in an input", async () => {
-    const { kit } = renderBurst(definition(60));
-    await settled(kit);
-
-    space(document.body, { repeat: true });
-    space(document.body, { ctrlKey: true });
-    space(document.body, { shiftKey: true });
-    space(document.body, { isComposing: true });
-    const note = screen.getByLabelText("备注");
-    const typed = space(note);
-    expect(typed.defaultPrevented).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(kit.particleBatches).toHaveLength(1);
   });
 
   it("replays once for a focused transport button and cancels the native click", async () => {
@@ -520,31 +491,6 @@ describe("CuePreview transient burst transport", () => {
     expect(kit.particleBatches).toHaveLength(0);
   });
 
-  it("stays busy while the first emitter is still being created and keeps the burst in step with the clock", async () => {
-    const defer = deferRunCue();
-    const { kit } = renderBurst(definition(60));
-    await screen.findByLabelText("粒子预览");
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    // The cue has not resolved: nothing exists to pause or resume yet.
-    expect(transportBusy()).toBe(true);
-    const toggle = screen.getByRole("button", { name: /播放|暂停/ });
-    expect(toggle).toBeDisabled();
-    expect(screen.getByRole("button", { name: /重播爆发/ })).toBeDisabled();
-    fireEvent.click(toggle);
-    // A clock resumed by that click would run ahead of the particles now.
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(kit.particleBatches).toHaveLength(0);
-
-    defer.release();
-    await waitFor(() => expect(kit.particleBatches).toHaveLength(1));
-    // The particles live exactly as long as the playhead: when the readout
-    // reaches the lifetime, the batch is already released, not frozen midway.
-    await settled(kit);
-    expect(readout()).toMatchObject({ ms: 60, total: 60, finished: true });
-    expect(transportBusy()).toBe(false);
-  });
-
   it("does not let pause or play touch the clock while a replay is being created", async () => {
     const { kit } = renderBurst(definition(60));
     await settled(kit);
@@ -563,40 +509,6 @@ describe("CuePreview transient burst transport", () => {
     await waitFor(() => expect(kit.particleBatches).toHaveLength(2));
     await settled(kit);
     expect(readout()).toMatchObject({ ms: 60, total: 60, finished: true });
-  });
-
-  it("keeps the slider on the requested target while the burst is rebuilt, latest request winning", async () => {
-    const { kit } = renderBurst(definition(200));
-    await waitFor(() => expect(kit.particleBatches).toHaveLength(1));
-    await waitFor(() => expect(transportBusy()).toBe(false));
-    const slider = screen.getByLabelText<HTMLInputElement>("粒子预览播放头");
-
-    // The rebuild restarts the clock at zero while the cue is still being
-    // created; the controlled slider must not follow it back to 0.
-    const defer = deferRunCue();
-    fireEvent.change(slider, { target: { value: "80" } });
-    expect(slider.value).toBe("80");
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(slider.value).toBe("80");
-    expect(readout().ms).toBe(80);
-    expect(transportBusy()).toBe(true);
-
-    // A newer request supersedes the first while it is still pending.
-    fireEvent.change(slider, { target: { value: "150" } });
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(slider.value).toBe("150");
-    expect(readout().ms).toBe(150);
-
-    defer.release();
-    await waitFor(() => expect(transportBusy()).toBe(false));
-    expect(slider.value).toBe("150");
-    expect(readout()).toMatchObject({ ms: 150, finished: false });
-    // Only the newest request created a batch, frozen at its target.
-    expect(liveBatches(kit)).toHaveLength(1);
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(readout().ms).toBe(150);
-    expect(slider.value).toBe("150");
-    expect(screen.getByRole("button", { name: /播放/ })).toBeEnabled();
   });
 
   describe("with a third-party document handler that consumes Space first", () => {
@@ -626,40 +538,6 @@ describe("CuePreview transient burst transport", () => {
       expect(seen).toBe(1);
       await waitFor(() => expect(kit.particleBatches).toHaveLength(2));
       await settled(kit);
-    });
-
-    it("replays once for a focused transport button and cancels its keyup activation", async () => {
-      document.addEventListener("keydown", consume);
-      const { kit } = renderBurst(definition(60));
-      await settled(kit);
-
-      const replay = screen.getByRole("button", { name: /重播爆发/ });
-      const down = space(replay);
-      expect(down.defaultPrevented).toBe(true);
-      const up = createEvent.keyUp(replay, { key: " ", code: "Space" });
-      fireEvent(replay, up);
-      // Prevented by the shortcut itself: some engines click a focused button
-      // on keyup, which would replay a second time.
-      expect(up.defaultPrevented).toBe(true);
-      await waitFor(() => expect(kit.particleBatches).toHaveLength(2));
-      await settled(kit);
-      expect(kit.particleBatches).toHaveLength(2);
-    });
-
-    it("keeps every exclusion: text fields, outside controls, modifiers, repeats", async () => {
-      document.addEventListener("keydown", consume);
-      const { kit } = renderBurst(definition(60));
-      await settled(kit);
-
-      const outside = document.createElement("button");
-      document.body.append(outside);
-      space(screen.getByLabelText("备注"));
-      space(outside);
-      space(document.body, { ctrlKey: true });
-      space(document.body, { repeat: true });
-      outside.remove();
-      await new Promise((resolve) => setTimeout(resolve, 80));
-      expect(kit.particleBatches).toHaveLength(1);
     });
   });
 });

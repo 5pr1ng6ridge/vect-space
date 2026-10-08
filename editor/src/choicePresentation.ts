@@ -24,7 +24,6 @@ import type {
   ChoiceFlowDirection,
   ChoiceNode,
   ChoicePresentation,
-  ContentManifest,
 } from "./types";
 
 export interface ChoiceItemSize {
@@ -179,14 +178,4 @@ export function reseedChoicePresentationAnchor(
 /** Stable two-decimal anchor; a centre from integer sizes is at worst `.5`. */
 function roundAnchor(value: number): number {
   return Math.round(value * 100) / 100;
-}
-
-/** GUI asset ids usable as a choice icon, in stable id order. */
-export function choiceIconOptions(
-  manifest: ContentManifest,
-): { id: string; kind: string }[] {
-  return Object.entries(manifest.assets)
-    .filter(([, asset]) => asset.kind === "gui")
-    .map(([id, asset]) => ({ id, kind: asset.kind }))
-    .sort((left, right) => left.id.localeCompare(right.id));
 }

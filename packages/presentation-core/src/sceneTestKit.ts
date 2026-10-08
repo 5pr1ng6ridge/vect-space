@@ -11,8 +11,6 @@
 import type {
   SceneApplicationInit,
   SceneApplicationLike,
-  SceneFrameCancel,
-  SceneFrameRequest,
   SceneGraphicsLike,
   SceneKit,
   SceneNodeLike,
@@ -20,7 +18,8 @@ import type {
   ScenePointLike,
   SceneSpriteLike,
   SceneVideoSourceLike,
-} from "./sceneSurface";
+} from "./sceneKit";
+import type { SceneFrameCancel, SceneFrameRequest } from "./sceneRenderLoop";
 import type { ShaderEffectFrame } from "./sceneEffects";
 import type { SceneRect, SceneShaderHostLike } from "./sceneShaders";
 import type { SceneTextureLike } from "./sceneTextures";

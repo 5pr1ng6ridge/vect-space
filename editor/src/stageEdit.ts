@@ -41,7 +41,7 @@ type SpriteNode = Extract<SceneNode, { type: "sprite" }>;
 export const DRAG_THRESHOLD_PX = 0.5;
 
 /** The visible rectangle of the stage canvas, in CSS pixels. */
-export interface StageRect {
+interface StageRect {
   left: number;
   top: number;
   width: number;

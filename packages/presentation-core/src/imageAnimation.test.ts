@@ -5,7 +5,6 @@ import {
   FrameLoopRegistry,
   FrameSequencePlayer,
   frameIndexAt,
-  frameIndexForAssetAt,
   resolveImageAsset,
   type AnimationMap,
   type ImageAssetSource,
@@ -239,13 +238,6 @@ describe("resolveImageAsset", () => {
 
   it("returns undefined for unknown ids", () => {
     expect(resolveImageAsset("gui.missing", urls, animations)).toBeUndefined();
-  });
-
-  it("answers the editor's deterministic frame query", () => {
-    expect(frameIndexForAssetAt("gui.blinking", 0, animations)).toBe(0);
-    expect(frameIndexForAssetAt("gui.blinking", 300, animations)).toBe(1);
-    expect(frameIndexForAssetAt("gui.blinking", 390, animations)).toBe(0);
-    expect(frameIndexForAssetAt("gui.missing", 0, animations)).toBe(-1);
   });
 });
 

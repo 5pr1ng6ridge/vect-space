@@ -11,15 +11,12 @@ import {
 } from "react";
 
 import type {
-  AssetKind,
   ChapterMapDefinition,
   EditorAsset,
   ContentManifest,
 } from "../types";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
-import { editorImageSource } from "../imageAnimationMap";
-import { AnimatedImage } from "@vectspace/presentation-react/animated-image";
-import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import { useAssetLayout } from "./AssetChooser";
 import {
   Frame,
   Grid3x3,
@@ -36,17 +33,23 @@ import {
   shouldIgnoreShortcut,
 } from "../ui/keyboard";
 import { isEditableTarget } from "./nodeDeleteShortcut";
-import { ASSET_DRAG_TYPE, draggedAssetId } from "../assetDrag";
+import { draggedAssetId } from "../assetDrag";
 import { assetChoiceOptions, firstVisibleAssetId } from "../assetLibrary";
 import {
   clampMapCenter,
   containMapRect,
-  resolveChapterMapHoverText,
-  snapMap,
   sortMapObjects,
-  sortMapLayer,
 } from "@vectspace/presentation-core/chapter-map";
 import type { MapLayerObject } from "@vectspace/presentation-core/chapter-map";
+import { GRID, MAX_ROOM, MIN_ROOM, snap } from "./chapterMap/mapGrid";
+import {
+  captureMapPointer,
+  isMapInteractiveTarget,
+} from "./chapterMap/mapPointer";
+import type { MapObjectEntry, MapSelection } from "./chapterMap/mapTypes";
+import { MapCanvas } from "./chapterMap/MapCanvas";
+import { MapInspector } from "./chapterMap/MapInspector";
+import { MapSidePanel } from "./chapterMap/MapSidePanel";
 
 interface ChapterMapWorkspaceProps {
   map: ChapterMapDefinition;
@@ -83,69 +86,6 @@ interface ChapterMapWorkspaceProps {
   redoAvailable: boolean;
 }
 
-type Selection = { kind: "hotspot" | "decoration"; id: string } | null;
-
-const MAP_INTERACTIVE_SELECTOR =
-  ".map-editor-object, .map-resize-handle, .map-editor-view-frame span";
-
-function isMapInteractiveTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(MAP_INTERACTIVE_SELECTOR) !== null
-  );
-}
-
-function captureMapPointer(target: HTMLElement, pointerId: number): void {
-  try {
-    target.setPointerCapture?.(pointerId);
-  } catch {
-    // A cancelled pointer cannot be captured. The gesture state is still
-    // useful for the current event, and selection must not be lost with it.
-  }
-}
-
-const GRID = 20;
-const MIN_ROOM = 1920;
-const MAX_ROOM = 16380;
-
-const snap = (value: number): number => snapMap(value, GRID);
-
-function validAsset(asset: EditorAsset, kinds: AssetKind[]): boolean {
-  return kinds.includes(asset.kind);
-}
-
-function ResizeHandles({
-  kind,
-  id,
-  item,
-  onResize,
-}: {
-  kind: "hotspot" | "decoration";
-  id: string;
-  item: { x: number; y: number; width: number; height: number };
-  onResize(
-    event: PointerEvent<HTMLSpanElement>,
-    kind: "hotspot" | "decoration",
-    id: string,
-    item: { x: number; y: number; width: number; height: number },
-    edge: "nw" | "ne" | "sw" | "se",
-  ): void;
-}): ReactElement {
-  return (
-    <>
-      {(["nw", "ne", "sw", "se"] as const).map((edge) => (
-        <span
-          aria-label={`调整大小 ${edge}`}
-          className={`map-resize-handle map-resize-${edge}`}
-          key={edge}
-          onPointerDown={(event) => onResize(event, kind, id, item, edge)}
-          role="presentation"
-        />
-      ))}
-    </>
-  );
-}
-
 export function ChapterMapWorkspace({
   map,
   manifest,
@@ -170,17 +110,10 @@ export function ChapterMapWorkspace({
   undoAvailable,
   redoAvailable,
 }: ChapterMapWorkspaceProps): ReactElement {
-  // Selection is a single derived value, not a mirrored pair of states.
-  //
-  // An earlier design kept a local `selection` state *and* mirrored it to the
-  // parent `selectionId` in two opposing effects.  Creating a hotspot updated
-  // the local value first, the mirror-to-parent effect pushed the new id up,
-  // and the mirror-from-parent effect cleared the local value in the same
-  // commit because its `map` prop had not rendered yet.  That ping-ponged
-  // forever ("selection jumps between background settings and the node").
-  // The component is now controlled: pointer interactions call
-  // `select()`, which only notifies the parent, and the rendered selection is
-  // derived from `selectionId` plus the current map.
+  // Selection is a single value derived from the parent's `selectionId` plus
+  // the current map; pointer interactions call `select()`, which only notifies
+  // the parent.  Mirroring a local copy to the parent in effects ping-pongs
+  // when a freshly created hotspot is selected before its `map` prop renders.
   const [uncontrolledSelectionId, setUncontrolledSelectionId] = useState<
     string | null
   >(null);
@@ -202,13 +135,13 @@ export function ChapterMapWorkspace({
     ? selectionId
     : uncontrolledSelectionId;
   const select = useCallback(
-    (next: Selection | null): void => {
+    (next: MapSelection): void => {
       if (controlledSelection) onSelectionChange?.(next?.id ?? null);
       else setUncontrolledSelectionId(next?.id ?? null);
     },
     [controlledSelection, onSelectionChange],
   );
-  const selection = useMemo<Selection>(() => {
+  const selection = useMemo<MapSelection>(() => {
     if (activeSelectionId === null) return null;
     if (map.hotspots.some((item) => item.id === activeSelectionId))
       return { kind: "hotspot", id: activeSelectionId };
@@ -1119,13 +1052,7 @@ export function ChapterMapWorkspace({
   const mapObjects = sortMapObjects<MapLayerObject>([
     ...map.decorations.map((item) => ({ kind: "decoration" as const, item })),
     ...map.hotspots.map((item) => ({ kind: "hotspot" as const, item })),
-  ]) as (
-    | {
-        kind: "decoration";
-        item: ChapterMapDefinition["decorations"][number];
-      }
-    | { kind: "hotspot"; item: ChapterMapDefinition["hotspots"][number] }
-  )[];
+  ]) as MapObjectEntry[];
 
   const cancelPointerOperation = useCallback((): void => {
     if (drag !== null) onCancelEdit?.(`map:${drag.kind}:${drag.id}`);
@@ -1241,785 +1168,64 @@ export function ChapterMapWorkspace({
         />
       </WorkspaceHeader>
       <section className="map-workspace-body">
-        <aside className="map-side-panel">
-          <h3>未放置的场景</h3>
-          {unplacedScenes.length === 0 && (
-            <p className="muted">所有场景都已放置</p>
-          )}
-          {unplacedScenes.map((sceneId) => (
-            <button
-              className="map-list-button"
-              key={sceneId}
-              draggable
-              onDragStart={(event) => {
-                event.dataTransfer.setData(
-                  "application/x-vectspace-kind",
-                  "scene",
-                );
-                event.dataTransfer.setData(
-                  "application/x-vectspace-id",
-                  sceneId,
-                );
-              }}
-              onClick={() => addHotspot(sceneId)}
-              type="button"
-            >
-              ＋ {sceneId}
-            </button>
-          ))}
-          <button
-            className="map-list-button"
-            disabled={decorationOptions.length === 0}
-            onClick={() => addDecoration()}
-            type="button"
-          >
-            ＋ 添加装饰
-          </button>
-          <h3>可拖放素材</h3>
-          {decorationOptions.map((option) => (
-            <button
-              className="map-list-button"
-              draggable
-              key={option.id}
-              onDragStart={(event) => {
-                event.dataTransfer.setData(ASSET_DRAG_TYPE, option.id);
-              }}
-              onClick={() => addDecoration(option.id)}
-              type="button"
-            >
-              ＋ {option.label}
-              {option.label !== option.id && (
-                <small className="map-list-sub">{option.id}</small>
-              )}
-            </button>
-          ))}
-          <h3>图层</h3>
-          {sortMapLayer([
-            ...map.decorations.map((item) => ({
-              kind: "decoration" as const,
-              id: item.id,
-              z: item.z,
-              label: `装饰 · ${item.id}`,
-            })),
-            ...map.hotspots.map((item) => ({
-              kind: "hotspot" as const,
-              id: item.id,
-              z: item.z,
-              label: `章节 · ${item.title}`,
-            })),
-          ]).map((item) => (
-            <div className="map-layer-row" key={item.id}>
-              <button
-                className={`map-list-button${selection?.id === item.id ? " active" : ""}`}
-                onClick={() => select({ kind: item.kind, id: item.id })}
-                type="button"
-              >
-                {item.label}
-              </button>
-              <button
-                aria-label={`${hiddenIds.has(item.id) ? "显示" : "隐藏"} ${item.id}`}
-                className="map-layer-toggle"
-                onClick={() =>
-                  setHiddenIds((current) => {
-                    const next = new Set(current);
-                    if (next.has(item.id)) next.delete(item.id);
-                    else next.add(item.id);
-                    return next;
-                  })
-                }
-                type="button"
-              >
-                {hiddenIds.has(item.id) ? "○" : "●"}
-              </button>
-            </div>
-          ))}
-        </aside>
-        <div
-          className="map-canvas-wrap"
-          onWheel={(event) => {
-            // The wheel zooms around the pointer, like other map editors.
-            if (event.deltaY === 0) return;
-            zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1, {
-              x: event.clientX,
-              y: event.clientY,
-            });
-          }}
-          ref={canvasRef}
-        >
-          <div
-            className="map-canvas-stage"
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={dropOnStage}
-            onPointerDown={stagePointerDown}
-            onPointerMove={stagePointerMove}
-            onPointerUp={stagePointerUp}
-            onPointerCancel={cancelPointerOperation}
-            onClick={(event) => {
-              // A node click is handled by the node itself.  Keep this guard
-              // even though the child currently stops propagation: it makes
-              // selection robust when the target is a child/handle or when a
-              // browser retargets a captured pointer event.
-              if (isMapInteractiveTarget(event.target)) return;
-              select(null);
-            }}
-            style={{
-              height: `${map.height * scale}px`,
-              transform: `translate(${pan.x}px, ${pan.y}px)`,
-              width: `${map.width * scale}px`,
-            }}
-          >
-            <div
-              className="map-canvas-room"
-              style={{
-                height: `${map.height}px`,
-                transform: `scale(${scale})`,
-                width: `${map.width}px`,
-              }}
-            >
-              {showGrid && <div className="map-grid" />}
-              {showViewFrame && (
-                <div
-                  aria-label="初始视图框"
-                  className="map-editor-view-frame"
-                  style={{
-                    height: viewFrame.height,
-                    left: viewFrame.x,
-                    top: viewFrame.y,
-                    width: viewFrame.width,
-                  }}
-                >
-                  <span onPointerDown={pointerDownView}>初始视图</span>
-                </div>
-              )}
-              {map.background !== null && map.background !== undefined && (
-                <div
-                  className="map-editor-background"
-                  style={{
-                    backgroundImage: undefined,
-                  }}
-                >
-                  <AnimatedImage
-                    alt=""
-                    source={editorImageSource(
-                      assets.find((asset) => asset.id === map.background),
-                      assets,
-                      animationMap,
-                    )}
-                  />
-                </div>
-              )}
-              {mapObjects.map(({ kind, item }) => {
-                const active = selection?.id === item.id;
-                const shown = displayedObject(kind, item.id, item);
-                const source =
-                  kind === "decoration"
-                    ? assets.find((asset) => asset.id === item.asset)
-                    : item.asset === null || item.asset === undefined
-                      ? undefined
-                      : assets.find((asset) => asset.id === item.asset);
-                const hotspot = kind === "hotspot" ? item : null;
-                const hoverText =
-                  hotspot === null
-                    ? null
-                    : resolveChapterMapHoverText(
-                        hotspot.title,
-                        hotspot.hover_text,
-                      );
-                const isHovered = hoveredObjectId === item.id;
-                return (
-                  <div
-                    className={`map-editor-object ${kind}${source === undefined ? "" : " has-artwork"}${active ? " selected" : ""}${isHovered ? " is-hovered" : ""}`}
-                    key={`${kind}:${item.id}:${item.asset ?? ""}:${source?.absolute_path ?? ""}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      select({ kind, id: item.id });
-                    }}
-                    onPointerEnter={() => setHoveredObjectId(item.id)}
-                    onPointerDown={(event) =>
-                      pointerDown(event, kind, item.id, item.x, item.y)
-                    }
-                    onPointerLeave={() => setHoveredObjectId(null)}
-                    style={{
-                      backgroundImage: undefined,
-                      display: hiddenIds.has(item.id) ? "none" : undefined,
-                      height: shown.height,
-                      left: shown.x,
-                      top: shown.y,
-                      width: shown.width,
-                      zIndex: item.z,
-                    }}
-                  >
-                    {source !== undefined && (
-                      <AnimatedImage
-                        alt=""
-                        className="map-editor-object-artwork"
-                        source={editorImageSource(source, assets, animationMap)}
-                      />
-                    )}
-                    {source === undefined &&
-                      (kind === "decoration" ? (
-                        <span>{item.id}</span>
-                      ) : (
-                        <>
-                          <strong>{item.title}</strong>
-                          <small>{item.scene_id}</small>
-                        </>
-                      ))}
-                    {kind === "hotspot" && hoverText !== null && isHovered && (
-                      <span
-                        className="map-hover-card"
-                        id={`map-hover-${item.id}`}
-                        role="tooltip"
-                      >
-                        {hoverText}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-              {selection !== null &&
-                selectedObject !== null &&
-                !hiddenIds.has(selection.id) && (
-                  <div
-                    className="map-resize-overlay"
-                    style={{
-                      height: selectedDisplay?.height,
-                      left: selectedDisplay?.x,
-                      top: selectedDisplay?.y,
-                      width: selectedDisplay?.width,
-                    }}
-                  >
-                    <ResizeHandles
-                      id={selectedObject.id}
-                      item={selectedDisplay ?? selectedObject}
-                      kind={selection.kind}
-                      onResize={pointerDownResize}
-                    />
-                  </div>
-                )}
-            </div>
-          </div>
-        </div>
-        <aside className="map-inspector">
-          <h3>
-            {selectedObject === null
-              ? "地图设置"
-              : selection?.kind === "hotspot"
-                ? "章节热点"
-                : "地图装饰"}
-          </h3>
-          {selectedObject === null ? (
-            <>
-              <label>
-                房间背景
-                <AssetChooser
-                  allowEmpty
-                  assets={assets}
-                  emptyLabel="无"
-                  kind="background"
-                  label="房间背景"
-                  onChange={(value) =>
-                    updateMap((next) => {
-                      next.background = value;
-                    })
-                  }
-                  value={map.background ?? null}
-                />
-              </label>
-              <label>
-                房间宽度
-                <input
-                  onBlur={() =>
-                    commitDraftValue("map.width", (raw) => {
-                      const value = parseNumberDraft(raw, "房间宽度");
-                      return value === null
-                        ? false
-                        : resizeRoom(value, mapRef.current.height);
-                    })
-                  }
-                  min={MIN_ROOM}
-                  max={MAX_ROOM}
-                  step={GRID}
-                  type="number"
-                  value={draftValue("map.width", map.width)}
-                  onChange={(event) =>
-                    setDraftValue("map.width", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <label>
-                房间高度
-                <input
-                  onBlur={() =>
-                    commitDraftValue("map.height", (raw) => {
-                      const value = parseNumberDraft(raw, "房间高度");
-                      return value === null
-                        ? false
-                        : resizeRoom(mapRef.current.width, value);
-                    })
-                  }
-                  min={1080}
-                  max={MAX_ROOM}
-                  step={GRID}
-                  type="number"
-                  value={draftValue("map.height", map.height)}
-                  onChange={(event) =>
-                    setDraftValue("map.height", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <label>
-                初始视图 X
-                <input
-                  onBlur={() =>
-                    commitDraftValue("map.view_x", (raw) => {
-                      const value = parseNumberDraft(raw, "初始视图 X");
-                      if (value === null) return false;
-                      const snapped = snap(value);
-                      const bounded = clampMapCenter(snapped, map.width, 1920);
-                      if (snapped !== bounded) {
-                        setMapError("初始视图 X 超出可见视口边界。");
-                        return false;
-                      }
-                      updateMap((next) => {
-                        next.view_x = snapped;
-                      });
-                      return true;
-                    })
-                  }
-                  step={GRID}
-                  type="number"
-                  value={draftValue("map.view_x", map.view_x)}
-                  onChange={(event) =>
-                    setDraftValue("map.view_x", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <label>
-                初始视图 Y
-                <input
-                  onBlur={() =>
-                    commitDraftValue("map.view_y", (raw) => {
-                      const value = parseNumberDraft(raw, "初始视图 Y");
-                      if (value === null) return false;
-                      const snapped = snap(value);
-                      const bounded = clampMapCenter(snapped, map.height, 1080);
-                      if (snapped !== bounded) {
-                        setMapError("初始视图 Y 超出可见视口边界。");
-                        return false;
-                      }
-                      updateMap((next) => {
-                        next.view_y = snapped;
-                      });
-                      return true;
-                    })
-                  }
-                  step={GRID}
-                  type="number"
-                  value={draftValue("map.view_y", map.view_y)}
-                  onChange={(event) =>
-                    setDraftValue("map.view_y", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <p className="muted">网格：20px。坐标和尺寸保存为设计像素。</p>
-              {mapError !== null && <p className="inline-error">{mapError}</p>}
-            </>
-          ) : (
-            <>
-              {selection?.kind === "hotspot" && (
-                <>
-                  <label>
-                    标题
-                    <input
-                      onBlur={() =>
-                        commitDraftValue("selected.title", (raw) => {
-                          if (raw.trim().length === 0) {
-                            setMapError("章节标题不能为空。");
-                            return false;
-                          }
-                          updateSelected({ title: raw });
-                          return true;
-                        })
-                      }
-                      value={draftValue(
-                        "selected.title",
-                        (
-                          selectedObject as ChapterMapDefinition["hotspots"][number]
-                        ).title,
-                      )}
-                      onChange={(event) =>
-                        setDraftValue(
-                          "selected.title",
-                          event.currentTarget.value,
-                        )
-                      }
-                    />
-                  </label>
-                  <label>
-                    Hover 文案
-                    <textarea
-                      onBlur={() =>
-                        commitDraftValue("selected.hover_text", () => true)
-                      }
-                      placeholder="未配置时使用标题；输入空白可隐藏文字框"
-                      rows={3}
-                      value={draftValue(
-                        "selected.hover_text",
-                        (
-                          selectedObject as ChapterMapDefinition["hotspots"][number]
-                        ).hover_text ?? "",
-                      )}
-                      onChange={(event) =>
-                        setDraftValue(
-                          "selected.hover_text",
-                          event.currentTarget.value,
-                        )
-                      }
-                    />
-                  </label>
-                  <button
-                    className="map-hover-reset"
-                    onClick={() => updateSelected({ hover_text: null })}
-                    type="button"
-                  >
-                    恢复使用标题
-                  </button>
-                  <label>
-                    揭示策略
-                    <select
-                      value={
-                        (
-                          selectedObject as ChapterMapDefinition["hotspots"][number]
-                        ).reveal?.mode ?? "completed"
-                      }
-                      onChange={(event) => {
-                        const mode = event.currentTarget.value as
-                          "completed" | "always" | "condition";
-                        const profile = Object.entries(manifest.variables).find(
-                          ([, definition]) => definition.scope === "profile",
-                        );
-                        const current =
-                          selectedObject as ChapterMapDefinition["hotspots"][number];
-                        const condition =
-                          current.reveal?.mode === "condition"
-                            ? current.reveal.condition
-                            : profile === undefined
-                              ? undefined
-                              : {
-                                  op: "eq" as const,
-                                  left: { variable: profile[0] },
-                                  right: { value: profile[1].default },
-                                };
-                        updateSelected({
-                          reveal:
-                            mode === "condition" && condition !== undefined
-                              ? { mode, condition }
-                              : {
-                                  mode:
-                                    mode === "condition" ? "completed" : mode,
-                                },
-                        });
-                      }}
-                    >
-                      <option value="completed">完成后显示</option>
-                      <option value="always">始终显示</option>
-                      <option
-                        disabled={Object.values(manifest.variables).every(
-                          (definition) => definition.scope !== "profile",
-                        )}
-                        value="condition"
-                      >
-                        条件显示
-                      </option>
-                    </select>
-                  </label>
-                  <label>
-                    重演策略
-                    <select
-                      onChange={(event) =>
-                        updateSelected({
-                          replay: {
-                            mode: event.currentTarget.value as
-                              "completed" | "always",
-                          },
-                        })
-                      }
-                      value={
-                        (
-                          selectedObject as ChapterMapDefinition["hotspots"][number]
-                        ).replay?.mode ?? "completed"
-                      }
-                    >
-                      <option value="completed">完成后可重演</option>
-                      <option value="always">始终可重演</option>
-                    </select>
-                  </label>
-                  {(selectedObject as ChapterMapDefinition["hotspots"][number])
-                    .replay?.mode === "always" && (
-                    <p className="field-note">
-                      未到达的章节也可以直接进入；若同时“始终显示”，编辑器不会再把它报为不可到达。
-                    </p>
-                  )}
-                  {Object.keys(manifest.variables).length > 0 && (
-                    <details className="map-overrides">
-                      <summary>重演变量覆盖</summary>
-                      {Object.entries(manifest.variables).map(
-                        ([id, definition]) => (
-                          <label key={id}>
-                            {id} · {definition.scope}
-                            <input
-                              value={draftValue(
-                                `override.${id}`,
-                                (
-                                  selectedObject as ChapterMapDefinition["hotspots"][number]
-                                ).variable_overrides[id] ?? "",
-                              )}
-                              placeholder={String(definition.default)}
-                              onChange={(event) =>
-                                setDraftValue(
-                                  `override.${id}`,
-                                  event.currentTarget.value,
-                                )
-                              }
-                              onBlur={() =>
-                                commitDraftValue(`override.${id}`, (raw) => {
-                                  const overrides = {
-                                    ...(
-                                      selectedObject as ChapterMapDefinition["hotspots"][number]
-                                    ).variable_overrides,
-                                  };
-                                  if (raw === "") {
-                                    Reflect.deleteProperty(overrides, id);
-                                  } else if (definition.type === "boolean") {
-                                    if (raw !== "true" && raw !== "false") {
-                                      setMapError(
-                                        `${id} 必须是 true 或 false。`,
-                                      );
-                                      return false;
-                                    }
-                                    overrides[id] = raw === "true";
-                                  } else if (definition.type === "integer") {
-                                    if (!/^(?:0|-?[1-9][0-9]*)$/.test(raw)) {
-                                      setMapError(`${id} 必须是规范整数。`);
-                                      return false;
-                                    }
-                                    try {
-                                      overrides[id] = BigInt(raw);
-                                    } catch {
-                                      setMapError(`${id} 超出整数范围。`);
-                                      return false;
-                                    }
-                                  } else if (definition.type === "number") {
-                                    const number = Number(raw);
-                                    if (!Number.isFinite(number)) {
-                                      setMapError(`${id} 必须是有限数字。`);
-                                      return false;
-                                    }
-                                    overrides[id] = number;
-                                  } else {
-                                    overrides[id] = raw;
-                                  }
-                                  setMapError(null);
-                                  updateSelected({
-                                    variable_overrides: overrides,
-                                  });
-                                  return true;
-                                })
-                              }
-                            />
-                          </label>
-                        ),
-                      )}
-                    </details>
-                  )}
-                </>
-              )}
-              <label>
-                素材
-                <AssetChooser
-                  allowEmpty={selection?.kind === "hotspot"}
-                  assets={assets.filter((asset) =>
-                    validAsset(asset, ["gui", "sprite"]),
-                  )}
-                  emptyLabel="默认卡片"
-                  kind={["gui", "sprite"]}
-                  label="素材"
-                  onChange={(value) =>
-                    updateSelected({
-                      asset:
-                        selection?.kind === "hotspot"
-                          ? (value ?? null)
-                          : (value ?? ""),
-                    })
-                  }
-                  value={selectedObject.asset ?? null}
-                />
-              </label>
-              <label>
-                X
-                <input
-                  onBlur={() =>
-                    commitDraftValue("selected.x", (raw) => {
-                      const value = parseNumberDraft(raw, "X");
-                      if (value === null) return false;
-                      const x = snap(value);
-                      if (
-                        x < 0 ||
-                        x > map.width ||
-                        x > map.width - selectedObject.width
-                      ) {
-                        setMapError("X 会使对象超出房间边界。");
-                        return false;
-                      }
-                      updateSelected({
-                        x,
-                      });
-                      return true;
-                    })
-                  }
-                  step={GRID}
-                  type="number"
-                  value={draftValue("selected.x", selectedObject.x)}
-                  onChange={(event) =>
-                    setDraftValue("selected.x", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <label>
-                Y
-                <input
-                  onBlur={() =>
-                    commitDraftValue("selected.y", (raw) => {
-                      const value = parseNumberDraft(raw, "Y");
-                      if (value === null) return false;
-                      const y = snap(value);
-                      if (
-                        y < 0 ||
-                        y > map.height ||
-                        y > map.height - selectedObject.height
-                      ) {
-                        setMapError("Y 会使对象超出房间边界。");
-                        return false;
-                      }
-                      updateSelected({
-                        y,
-                      });
-                      return true;
-                    })
-                  }
-                  step={GRID}
-                  type="number"
-                  value={draftValue("selected.y", selectedObject.y)}
-                  onChange={(event) =>
-                    setDraftValue("selected.y", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <label>
-                宽
-                <input
-                  onBlur={() =>
-                    commitDraftValue("selected.width", (raw) => {
-                      const value = parseNumberDraft(raw, "宽");
-                      if (value === null) return false;
-                      const width = snap(value);
-                      if (
-                        width < GRID ||
-                        width > map.width - selectedObject.x
-                      ) {
-                        setMapError("宽必须是至少 20px 且不能超出房间边界。");
-                        return false;
-                      }
-                      updateSelected({ width });
-                      return true;
-                    })
-                  }
-                  min={GRID}
-                  step={GRID}
-                  type="number"
-                  value={draftValue("selected.width", selectedObject.width)}
-                  onChange={(event) =>
-                    setDraftValue("selected.width", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <label>
-                高
-                <input
-                  onBlur={() =>
-                    commitDraftValue("selected.height", (raw) => {
-                      const value = parseNumberDraft(raw, "高");
-                      if (value === null) return false;
-                      const height = snap(value);
-                      if (
-                        height < GRID ||
-                        height > map.height - selectedObject.y
-                      ) {
-                        setMapError("高必须是至少 20px 且不能超出房间边界。");
-                        return false;
-                      }
-                      updateSelected({ height });
-                      return true;
-                    })
-                  }
-                  min={GRID}
-                  step={GRID}
-                  type="number"
-                  value={draftValue("selected.height", selectedObject.height)}
-                  onChange={(event) =>
-                    setDraftValue("selected.height", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <label>
-                层级
-                <input
-                  onBlur={() =>
-                    commitDraftValue("selected.z", (raw) => {
-                      const value = parseNumberDraft(raw, "层级");
-                      if (value === null) return false;
-                      if (
-                        !Number.isInteger(value) ||
-                        value < -2147483648 ||
-                        value > 2147483647
-                      ) {
-                        setMapError("层级必须是 32 位整数。");
-                        return false;
-                      }
-                      setMapError(null);
-                      updateSelected({ z: Math.trunc(value) });
-                      return true;
-                    })
-                  }
-                  type="number"
-                  value={draftValue("selected.z", selectedObject.z)}
-                  onChange={(event) =>
-                    setDraftValue("selected.z", event.currentTarget.value)
-                  }
-                />
-              </label>
-              <button
-                className="danger-button"
-                onClick={removeSelected}
-                type="button"
-              >
-                删除对象
-              </button>
-              {mapError !== null && <p className="inline-error">{mapError}</p>}
-            </>
-          )}
-          {selectedObject !== null && selection?.kind === "hotspot" && (
-            <p className="muted">
-              Scene：
-              {
-                (selectedObject as ChapterMapDefinition["hotspots"][number])
-                  .scene_id
-              }
-            </p>
-          )}
-          <p className="muted">内容版本：{manifest.content_version}</p>
-        </aside>
+        <MapSidePanel
+          addDecoration={addDecoration}
+          addHotspot={addHotspot}
+          decorationOptions={decorationOptions}
+          hiddenIds={hiddenIds}
+          map={map}
+          select={select}
+          selection={selection}
+          setHiddenIds={setHiddenIds}
+          unplacedScenes={unplacedScenes}
+        />
+        <MapCanvas
+          animationMap={animationMap}
+          assets={assets}
+          cancelPointerOperation={cancelPointerOperation}
+          canvasRef={canvasRef}
+          displayedObject={displayedObject}
+          dropOnStage={dropOnStage}
+          hiddenIds={hiddenIds}
+          hoveredObjectId={hoveredObjectId}
+          map={map}
+          mapObjects={mapObjects}
+          pan={pan}
+          pointerDown={pointerDown}
+          pointerDownResize={pointerDownResize}
+          pointerDownView={pointerDownView}
+          scale={scale}
+          select={select}
+          selectedDisplay={selectedDisplay}
+          selectedObject={selectedObject}
+          selection={selection}
+          setHoveredObjectId={setHoveredObjectId}
+          showGrid={showGrid}
+          showViewFrame={showViewFrame}
+          stagePointerDown={stagePointerDown}
+          stagePointerMove={stagePointerMove}
+          stagePointerUp={stagePointerUp}
+          viewFrame={viewFrame}
+          zoomBy={zoomBy}
+        />
+        <MapInspector
+          assets={assets}
+          commitDraftValue={commitDraftValue}
+          draftValue={draftValue}
+          manifest={manifest}
+          map={map}
+          mapError={mapError}
+          mapRef={mapRef}
+          parseNumberDraft={parseNumberDraft}
+          removeSelected={removeSelected}
+          resizeRoom={resizeRoom}
+          selectedObject={selectedObject}
+          selection={selection}
+          setDraftValue={setDraftValue}
+          setMapError={setMapError}
+          updateMap={updateMap}
+          updateSelected={updateSelected}
+        />
       </section>
     </main>
   );

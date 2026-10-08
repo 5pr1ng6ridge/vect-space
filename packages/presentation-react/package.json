@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.tsx",
     "./animated-image": "./src/animated-image.ts",
     "./gameplay": "./src/gameplay/index.ts",
     "./gameplay.css": "./src/gameplay/gameplay.css",

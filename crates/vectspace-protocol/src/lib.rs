@@ -656,14 +656,6 @@ impl WireRuntimeUpdate {
     }
 }
 
-impl WireRuntimeSnapshot {
-    /// Stamp the window's latest delivery sequence on a plain snapshot read.
-    pub fn with_seq(mut self, seq: u64) -> Self {
-        self.seq = WireU64::from(seq);
-        self
-    }
-}
-
 impl From<DialogueHistoryEntry> for WireDialogueHistoryEntry {
     fn from(entry: DialogueHistoryEntry) -> Self {
         Self {
@@ -825,14 +817,11 @@ mod tests {
     }
 
     #[test]
-    fn wire_audio_empty_omits_ambience_but_keeps_null_bgm() {
-        let value =
-            serde_json::to_value(WireAudioSnapshot::from(AudioSnapshot::default())).unwrap();
-        assert_eq!(value, serde_json::json!({"bgm": null}));
-    }
-
-    #[test]
     fn wire_audio_has_exactly_four_fixed_slots_and_isolated_conversion() {
+        // An empty ambience is omitted entirely while a null bgm stays explicit.
+        let empty = serde_json::to_value(WireAudioSnapshot::from(AudioSnapshot::default())).unwrap();
+        assert_eq!(empty, serde_json::json!({"bgm": null}));
+
         let source = AudioSnapshot {
             bgm: Some(LoopingAudioSnapshot {
                 asset: "bgm.test".to_owned(),
@@ -1107,28 +1096,16 @@ mod tests {
         };
         let mut ambience = AmbienceSnapshot::default();
         ambience.set(AmbienceSlot::Slot1, Some(ambience_state.clone()));
+        let mut snapshot = interaction_test_snapshot();
+        snapshot.audio = AudioSnapshot {
+            bgm: None,
+            ambience,
+        };
         let update = RuntimeUpdate {
             kind: Default::default(),
             effect_timer: None,
             update_id: 3,
-            snapshot: RuntimeSnapshot {
-                interaction: Default::default(),
-                revision: 2,
-                location: StoryLocation {
-                    scene_id: "scene".to_owned(),
-                    node_id: "node".to_owned(),
-                },
-                variables: BTreeMap::new(),
-                world: WorldSnapshot::default(),
-                audio: AudioSnapshot {
-                    bgm: None,
-                    ambience,
-                },
-                playback: PlaybackSnapshot::default(),
-                dialogue_page: None,
-                long_text_page: None,
-                prompt: PromptSnapshot::None,
-            },
+            snapshot,
             cues: vec![PresentationCue {
                 cue_id: 7,
                 gate: CueGate::Runtime,

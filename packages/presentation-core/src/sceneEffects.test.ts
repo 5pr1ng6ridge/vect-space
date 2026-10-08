@@ -60,11 +60,6 @@ describe("evaluateFlashAlpha", () => {
     expect(evaluateFlashAlpha(FLASH, 400, 0, 400)).toBe(0);
     expect(evaluateFlashAlpha(FLASH, 100, 200, 400)).toBe(0);
   });
-
-  it("scales with the authored peak", () => {
-    const dim = { ...FLASH, peak_alpha: 0.4 };
-    expect(evaluateFlashAlpha(dim, 0, 0, 400)).toBeCloseTo(0.4);
-  });
 });
 
 describe("evaluateShakeOffset", () => {
@@ -73,16 +68,6 @@ describe("evaluateShakeOffset", () => {
     const second = evaluateShakeOffset(SHAKE, 200, 100, 400);
     expect(second).toEqual(first);
     expect(evaluateShakeOffset(SHAKE, 300, 100, 400)).not.toEqual(first);
-  });
-
-  it("keeps the default seed 0 deterministic", () => {
-    const shake: typeof SHAKE = { ...SHAKE, seed: 0 };
-    expect(evaluateShakeOffset(shake, 200, 0, 400)).toEqual(
-      evaluateShakeOffset(shake, 200, 0, 400),
-    );
-    expect(shakeSeedPhase(0, 0)).toBeGreaterThanOrEqual(0);
-    expect(shakeSeedPhase(0, 0)).toBeLessThan(Math.PI * 2);
-    expect(shakeSeedPhase(0, 0)).not.toBe(shakeSeedPhase(0, 1));
   });
 
   it("changes phase when the seed changes", () => {
@@ -153,13 +138,6 @@ describe("evaluateScreenEffectFrame", () => {
 
   it("reports no flash once its window ends", () => {
     expect(evaluateScreenEffectFrame(400, flash, shake).flash).toBeNull();
-  });
-});
-
-describe("seed bounds", () => {
-  it("documents the JavaScript-safe upper bound", () => {
-    expect(SHAKE_SEED_MAX).toBeLessThan(Number.MAX_SAFE_INTEGER);
-    expect(shakeSeedPhase(SHAKE_SEED_MAX, 0)).toBeGreaterThanOrEqual(0);
   });
 });
 

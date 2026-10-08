@@ -63,6 +63,7 @@ import {
 import { movedEnough, stagePointFromClientPoint } from "../stageEdit";
 import type { EditorAsset } from "../types";
 import { EMPTY_EDITOR_VISUALS, type EditorVisualResources } from "../visualResources";
+import { errorMessage } from "./errorMessage";
 
 export interface CuePreviewEnvironment {
   kit?: SceneKit;
@@ -992,6 +993,3 @@ export function CuePreview({
   );
 }
 
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
-}

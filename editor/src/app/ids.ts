@@ -1,9 +1,8 @@
 /**
  * Stable-ID rules for everything an author can create or rename.
  *
- * Every create/rename path used to repeat `/^[A-Za-z0-9._-]{1,128}$/` and
- * report a generic "非法或已经存在".  These helpers return the concrete
- * reason in Chinese so dialogs can show it inline, next to the field.
+ * The helpers return the concrete reason in Chinese (not a generic "非法或已经
+ * 存在") so dialogs can show it inline, next to the field.
  */
 import type { EditorProject } from "../types";
 
@@ -12,7 +11,7 @@ export const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 export const ID_RULE_HINT =
   "只能使用英文字母、数字、点（.）、下划线（_）或连字符（-），1–128 个字符。";
 
-export type IdKind =
+type IdKind =
   | "scene"
   | "node"
   | "variable"
@@ -24,7 +23,7 @@ export type IdKind =
   | "textBlock"
   | "particle";
 
-export const ID_KIND_LABELS: Record<IdKind, string> = {
+const ID_KIND_LABELS: Record<IdKind, string> = {
   scene: "场景",
   node: "节点",
   variable: "变量",

@@ -1,8 +1,8 @@
 /**
  * Game presentation host.
  *
- * The controller no longer owns any Pixi object, texture, camera matrix or
- * media element: it sequences the runtime's cues, routes audio and UI concerns
+ * The controller owns no Pixi object, texture, camera matrix or media
+ * element: it sequences the runtime's cues, routes audio and UI concerns
  * to the shared audio graph and the React motion host, and keeps the update
  * generation bookkeeping that guards presentation acknowledgements.
  *
@@ -11,6 +11,7 @@
  * - audio and UI cues stay here because they are host concerns, not pixels.
  */
 
+import { errorMessage } from "./errorMessage";
 import { AudioManager, type AudioDiagnostics } from "./audio";
 import { BoundedLedger } from "./ledger";
 import { animate } from "./motion";
@@ -680,8 +681,4 @@ function cueResourceIds(cue: PresentationCue): string[] {
     ids.add(`ambience:${cue.slot}`);
   }
   return [...ids];
-}
-
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
 }

@@ -28,6 +28,7 @@ import type {
   SpriteSnapshot,
   TimelineNode,
 } from "../types";
+import { errorMessage } from "./errorMessage";
 
 const CHANNEL_LABELS: Record<string, string> = {
   x: "X 偏移",
@@ -133,7 +134,7 @@ export function ActionWorkspace({
     } catch (reason) {
       // Keep the author's edit visible and explain the refusal instead of
       // silently reverting the keyframe they just changed.
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     }
   };
 

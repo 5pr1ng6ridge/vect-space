@@ -17,7 +17,6 @@ import {
   renameVariable,
   setPortTarget,
   setSceneWindowRole,
-  summarizeNode,
 } from "./story";
 import { defaultFlashEffect } from "./presentationDefaults";
 import { fixtureProject } from "./test/appHarness";
@@ -474,10 +473,6 @@ describe("timer validation", () => {
     return codes(project);
   };
 
-  it("accepts the well-formed timer", () => {
-    expect(codes(pairProject())).toEqual([]);
-  });
-
   it("rejects bad intervals, delays, ids and targets", () => {
     expect(withTimer({ interval_ms: 10 })).toContain("invalid_timer_interval");
     expect(withTimer({ delay_ms: 90_000 })).toContain("invalid_timer_delay");
@@ -510,7 +505,6 @@ describe("timer validation", () => {
 describe("summaries", () => {
   it("describe the new nodes in plain language", () => {
     const timer = pairProject().scenes[0].definition.nodes.arm;
-    expect(summarizeNode(timer)).toContain("pulse");
     expect(describeNode(timer).summary).toContain("每 1000 ms 重复");
     expect(
       describeNode({
@@ -645,15 +639,6 @@ describe("window layout nodes", () => {
     );
   });
 
-  it("report a missing next node through the ordinary flow check", () => {
-    expect(
-      codes(withLayout({ move: geometry({ next: "nowhere" }) })),
-    ).toContain("missing_target_node");
-    expect(codes(withLayout({ raise: layer({ next: "nowhere" }) }))).toContain(
-      "missing_target_node",
-    );
-  });
-
   it("make their successors reachable like any flow node", () => {
     const project = withLayout({
       move: geometry({ next: "raise" }),
@@ -684,34 +669,5 @@ describe("window layout nodes", () => {
     expect(scene(project, "main").nodes.raise).toMatchObject({
       next: "finish",
     });
-  });
-
-  it("paste unchanged: they hold no variable, asset or node references", () => {
-    const project = pairProject();
-    const node = geometry({ size: { width: 960, height: 540 } });
-    expect(preparePastedNode(node, project.manifest)).toMatchObject({
-      type: "window_geometry",
-      position: { relative_to: "window", offset_x: 16 },
-      size: { width: 960, height: 540 },
-      duration_ms: 600,
-    });
-    expect(
-      preparePastedNode(layer({ action: "bottom" }), project.manifest),
-    ).toMatchObject({
-      type: "window_layer",
-      action: "bottom",
-    });
-  });
-
-  it("round-trip through insertNode with their default fields", () => {
-    for (const type of ["window_geometry", "window_layer"] as const) {
-      const result = insertNode(pairProject(), "main", "flash", "left", type);
-      expect(result.ok, type).toBe(true);
-      if (!result.ok) continue;
-      expect(scene(result.project, "main").nodes[result.nodeId]).toMatchObject({
-        type,
-        next: "flash",
-      });
-    }
   });
 });

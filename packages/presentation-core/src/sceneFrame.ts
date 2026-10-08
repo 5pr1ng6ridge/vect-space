@@ -9,7 +9,6 @@
  */
 
 import {
-  evaluateFlashAlpha,
   evaluateShakeOffset,
   type ScreenEffectOptions,
 } from "./sceneEffects";
@@ -37,9 +36,8 @@ export const DEFAULT_SPRITE_HEIGHT = 480;
 /**
  * Visual offset applied to the *entry* pose of a character tween.
  *
- * The game shipped with a small rise-and-scale entrance for `show` tweens; the
- * migration keeps the player-visible behaviour and makes it shared instead of
- * duplicating it per host.
+ * `show` tweens enter with a small rise-and-scale; the offset is shared by
+ * every host.
  */
 export const ENTRY_TWEEN_Y_OFFSET = 48;
 export const ENTRY_TWEEN_SCALE = 0.96;
@@ -129,10 +127,9 @@ export interface SceneFrameInput {
 /**
  * Evaluates one instant of a timeline into a scene frame.
  *
- * The evaluator is the same shared implementation used before the migration,
- * so keyframe, `inherit`, easing and button semantics stay identical; this
- * function only adds the pixel geometry (sprite boxes, video rectangle) that
- * the Pixi surface and the editor gizmo both need.
+ * Keyframe, `inherit`, easing and button semantics come from the timeline
+ * evaluator; this function only adds the pixel geometry (sprite boxes, video
+ * rectangle) that the Pixi surface and the editor gizmo both need.
  */
 export function evaluateSceneFrame(
   input: SceneFrameInput,
@@ -426,27 +423,6 @@ export function composeWorldTransform(
     scale: camera.zoom,
     rotation: (camera.rotation_deg * Math.PI) / 180,
   };
-}
-
-/**
- * Flash alpha at one playhead position.
- *
- * The formula lives in the shared pure effect evaluator, so both hosts derive
- * the same alpha from the same playhead and the authored spec.
- */
-export function flashAlpha(
-  elapsedMs: number,
-  flash: ActiveScreenEffect | null,
-  options: ScreenEffectOptions = {},
-): number {
-  if (flash === null || flash.effect.type !== "flash") return 0;
-  return evaluateFlashAlpha(
-    flash.effect,
-    elapsedMs,
-    flash.startMs,
-    flash.durationMs,
-    options,
-  );
 }
 
 /** Shake offset at one playhead position, composed into the camera transform. */

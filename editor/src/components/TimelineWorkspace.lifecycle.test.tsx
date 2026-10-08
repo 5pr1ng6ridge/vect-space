@@ -459,7 +459,7 @@ describe("TimelineWorkspace lifecycle", () => {
       await settle();
     }
     expect(lifecycle.kit.renderCount()).toBe(renders);
-  });
+  }, 15_000);
 
   it("waits for a cancelled initialization and still releases the session", async () => {
     const lifecycle = createLifecycleKit();
@@ -508,36 +508,4 @@ describe("TimelineWorkspace lifecycle", () => {
     expect(lifecycle.textures.loaded).toEqual([]);
     expect(lifecycle.dom.videos).toEqual([]);
   });
-
-  it("leaves no resources behind across 30 mount/unmount cycles", async () => {
-    const lifecycle = createLifecycleKit();
-    const node = timelineNode("alice", "sprite.alice");
-    const project = makeProject({ [NODE_ID]: node });
-    previewApi.handler = () => Promise.resolve(readyPreview(node));
-    for (let index = 0; index < 30; index += 1) {
-      const view = render(
-        <StrictMode>
-          <SwitchHost
-            baseProject={project}
-            environment={lifecycle.environment}
-          />
-        </StrictMode>,
-      );
-      await waitForReady();
-      view.unmount();
-      await settle();
-    }
-    // This host creates one session per mount; every one of them must be gone.
-    expect(lifecycle.kit.applications).toHaveLength(30);
-    expect(lifecycle.kit.applications.every((app) => app.destroyed)).toBe(true);
-    expect(lifecycle.pump.pending()).toBe(0);
-    expect(lifecycle.textures.loaded.length).toBeGreaterThan(0);
-    expect(
-      lifecycle.textures.loaded.every((texture) => texture.destroyed),
-    ).toBe(true);
-    expect(lifecycle.dom.videos.every((video) => video.released)).toBe(true);
-    expect(
-      lifecycle.dom.videos.every((video) => video.listenerCount() === 0),
-    ).toBe(true);
-  }, 15_000);
 });

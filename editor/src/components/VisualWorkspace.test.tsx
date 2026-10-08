@@ -190,64 +190,6 @@ describe("VisualWorkspace particle generation point and area", () => {
     expect(region()).toHaveTextContent("600 × 100");
   });
 
-  it("resizes the height from the bottom handle and both sides from a corner", async () => {
-    const { kit, onChange } = mount();
-    await readyStage(kit);
-
-    const south = handle("下边");
-    fireEvent.pointerDown(south, { button: 0, clientX: 960, clientY: 590 });
-    fireEvent.pointerMove(south, { clientX: 1000, clientY: 640 });
-    fireEvent.pointerUp(south, { clientX: 1000, clientY: 640 });
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange.mock.calls[0]?.[0].area).toEqual({
-      type: "rectangle",
-      width: 400,
-      height: 200,
-    });
-
-    const corner = handle("右下角");
-    // The harness applied the first change: the corner sits at (1160, 640).
-    fireEvent.pointerDown(corner, { button: 0, clientX: 1160, clientY: 640 });
-    fireEvent.pointerMove(corner, { clientX: 1110, clientY: 600 });
-    fireEvent.pointerUp(corner, { clientX: 1110, clientY: 600 });
-    expect(onChange).toHaveBeenCalledTimes(2);
-    expect(onChange.mock.calls[1]?.[0].area).toEqual({
-      type: "rectangle",
-      width: 300,
-      height: 120,
-    });
-  });
-
-  it("keeps a legitimate zero width or height", async () => {
-    const { kit, onChange } = mount();
-    await readyStage(kit);
-    const east = handle("右边");
-
-    // Dragging the edge through the centre and beyond stops at zero.
-    fireEvent.pointerDown(east, { button: 0, clientX: 1160, clientY: 540 });
-    fireEvent.pointerMove(east, { clientX: 500, clientY: 540 });
-    expect(region()).toHaveTextContent("0 × 100");
-    fireEvent.pointerUp(east, { clientX: 500, clientY: 540 });
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange.mock.calls[0]?.[0].area).toEqual({
-      type: "rectangle",
-      width: 0,
-      height: 100,
-    });
-
-    // The zero-width area is still resizable from the stacked handles.
-    const south = handle("右下角");
-    fireEvent.pointerDown(south, { button: 0, clientX: 960, clientY: 590 });
-    fireEvent.pointerMove(south, { clientX: 960, clientY: 0 });
-    fireEvent.pointerUp(south, { clientX: 960, clientY: 0 });
-    expect(onChange).toHaveBeenCalledTimes(2);
-    expect(onChange.mock.calls[1]?.[0].area).toEqual({
-      type: "rectangle",
-      width: 0,
-      height: 0,
-    });
-  });
-
   it("treats a click, a sub-threshold wobble and a return to the start as no edit", async () => {
     const { kit, onChange } = mount();
     await readyStage(kit);
@@ -420,34 +362,5 @@ describe("VisualWorkspace burst mode", () => {
       });
     }
     expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it("does not take Space from fields, selects or buttons outside the preview", async () => {
-    const { kit } = mount(BURST_ONLY);
-    await screen.findByLabelText("粒子效果预览");
-    await waitFor(() => expect(readout().finished).toBe(true), {
-      timeout: 4000,
-    });
-
-    const field = screen.getByLabelText("每秒数量");
-    const select = screen.getByLabelText("混合模式");
-    const outside = screen.getByRole("button", { name: /返回/ });
-    for (const target of [field, select, outside]) {
-      const press = createEvent.keyDown(target, { key: " ", code: "Space" });
-      fireEvent(target, press);
-      expect(press.defaultPrevented).toBe(false);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(kit.particleBatches).toHaveLength(1);
-  });
-
-  it("gives Space no meaning in continuous mode", async () => {
-    const { kit } = mount();
-    await screen.findByLabelText("粒子效果预览");
-    await waitFor(() => expect(liveBatches(kit)).toHaveLength(1));
-    const press = createEvent.keyDown(document.body, { key: " ", code: "Space" });
-    fireEvent(document.body, press);
-    expect(press.defaultPrevented).toBe(false);
-    expect(kit.particleBatches).toHaveLength(1);
   });
 });

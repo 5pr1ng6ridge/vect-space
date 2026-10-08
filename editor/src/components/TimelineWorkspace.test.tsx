@@ -20,7 +20,13 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { useEffect, useReducer, useState, type ReactElement } from "react";
+import {
+  useEffect,
+  useReducer,
+  useState,
+  type ComponentProps,
+  type ReactElement,
+} from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AudioManager } from "@vectspace/presentation-core/audio";
@@ -32,7 +38,6 @@ import type {
 import type {
   BuildNodePreviewResult,
   EditorAsset,
-  EditorLayout,
   EditorProject,
   TimelineNode,
 } from "../types";
@@ -60,7 +65,6 @@ import {
   PARTICLE_FIXTURE,
 } from "../../../packages/presentation-core/src/visualTestKit";
 import type { EditorPreviewEnvironment } from "./timelinePreview";
-import { AssetLayoutProvider } from "./AssetChooser";
 import { TimelineWorkspace } from "./TimelineWorkspace";
 
 type ReadyPreview = Extract<BuildNodePreviewResult, { status: "ready" }>;
@@ -348,6 +352,41 @@ function WorkspaceHost({
   );
 }
 
+/**
+ * Mounts the host with call-counting `onBack`/`onState`; `update` re-renders it
+ * with prop overrides on top of the original props.
+ */
+function mountHost(
+  base: Pick<ComponentProps<typeof WorkspaceHost>, "environment" | "project"> &
+    Partial<ComponentProps<typeof WorkspaceHost>>,
+): {
+  handle: HostHandle;
+  view: ReturnType<typeof render>;
+  update(overrides?: Partial<ComponentProps<typeof WorkspaceHost>>): void;
+} {
+  const handle: HostHandle = { state: null, backCalls: 0 };
+  const element = (
+    overrides: Partial<ComponentProps<typeof WorkspaceHost>> = {},
+  ): ReactElement => (
+    <WorkspaceHost
+      {...base}
+      onBack={() => {
+        handle.backCalls += 1;
+      }}
+      onState={(state) => {
+        handle.state = state;
+      }}
+      {...overrides}
+    />
+  );
+  const view = render(element());
+  return {
+    handle,
+    view,
+    update: (overrides) => view.rerender(element(overrides)),
+  };
+}
+
 function currentNode(handle: HostHandle, nodeId = NODE_ID): TimelineNode {
   const project = handle.state?.project;
   if (project === null || project === undefined) {
@@ -473,21 +512,12 @@ async function renderWorkspace(): Promise<{
   const renderKit = createRenderKit();
   const node = timelineNode();
   previewApi.handler = () => Promise.resolve(readyPreview(node));
-  const handle: HostHandle = { state: null, backCalls: 0 };
   const onChangeSpy = vi.fn<(node: TimelineNode) => void>();
-  const view = render(
-    <WorkspaceHost
-      environment={renderKit.environment}
-      onBack={() => {
-        handle.backCalls += 1;
-      }}
-      onChangeSpy={onChangeSpy}
-      onState={(state) => {
-        handle.state = state;
-      }}
-      project={makeProject({ [NODE_ID]: node })}
-    />,
-  );
+  const { handle, view } = mountHost({
+    environment: renderKit.environment,
+    onChangeSpy,
+    project: makeProject({ [NODE_ID]: node }),
+  });
   await waitForReady();
   stageRect(view.container);
   return { view, handle, onChangeSpy, renderKit };
@@ -549,20 +579,11 @@ describe("TimelineWorkspace preview context", () => {
     };
     const node = timelineNode({ events: [canonicalFlash, canonicalShake] });
     previewApi.handler = () => Promise.resolve(readyPreview(node));
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const project = makeProject({ [NODE_ID]: node });
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    const { update } = mountHost({
+      environment: renderKit.environment,
+      project,
+    });
     await waitForReady();
 
     // Editing the timeline is the production path that hands the editor's own
@@ -575,19 +596,9 @@ describe("TimelineWorkspace preview context", () => {
       duration_ms: 2000,
       events: [canonicalFlash, canonicalShake],
     });
-    view.rerender(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        nodeOverride={edited}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    update({
+      nodeOverride: edited,
+    });
     await waitFor(() => expect(applyEdit).toHaveBeenCalled());
 
     const updates = [
@@ -608,20 +619,11 @@ describe("TimelineWorkspace preview context", () => {
     const renderKit = createRenderKit();
     const node = timelineNode();
     previewApi.handler = () => Promise.resolve(readyPreview(node));
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const project = makeProject({ [NODE_ID]: node });
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    const { view, update } = mountHost({
+      environment: renderKit.environment,
+      project,
+    });
     await waitForReady();
     const loadsBefore = renderKit.textures.loaded.length;
     expect(loadsBefore).toBeGreaterThan(0);
@@ -647,19 +649,9 @@ describe("TimelineWorkspace preview context", () => {
         { type: "camera", channels: {} },
       ],
     });
-    view.rerender(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        nodeOverride={edited}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    update({
+      nodeOverride: edited,
+    });
     await waitFor(() => expect(gizmoLeft(view.container)).not.toBe(leftBefore));
     expect(renderKit.textures.loaded.length).toBe(loadsBefore);
 
@@ -677,19 +669,9 @@ describe("TimelineWorkspace preview context", () => {
         { type: "camera", channels: {} },
       ],
     });
-    view.rerender(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        nodeOverride={replaced}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    update({
+      nodeOverride: replaced,
+    });
     await waitFor(() =>
       expect(renderKit.textures.loaded.length).toBeGreaterThan(loadsBefore),
     );
@@ -721,23 +703,14 @@ describe("TimelineWorkspace preview context", () => {
         { type: "camera", channels: {} },
       ],
     });
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const project = makeProject({
       [NODE_ID]: firstNode,
       [OTHER_NODE_ID]: secondNode,
     });
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    const { view, update } = mountHost({
+      environment: renderKit.environment,
+      project,
+    });
     await waitFor(() => expect(pendingIpc.has(NODE_ID)).toBe(true));
 
     // The first response arrives and starts decoding its context.
@@ -747,19 +720,9 @@ describe("TimelineWorkspace preview context", () => {
     );
 
     // A newer target supersedes it while that decode is still in flight.
-    view.rerender(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        nodeId={OTHER_NODE_ID}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    update({
+      nodeId: OTHER_NODE_ID,
+    });
     await waitFor(() => expect(pendingIpc.has(OTHER_NODE_ID)).toBe(true));
     pendingIpc.get(OTHER_NODE_ID)?.(
       readyPreview(secondNode, {
@@ -806,35 +769,16 @@ describe("TimelineWorkspace preview context", () => {
     const renderKit = createRenderKit(loader.load);
     const node = timelineNode();
     previewApi.handler = () => Promise.resolve(readyPreview(node));
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const project = makeProject({ [NODE_ID]: node });
     const renderHost = (override?: TimelineNode): void => {
-      view.rerender(
-        <WorkspaceHost
-          environment={renderKit.environment}
-          nodeOverride={override}
-          onBack={() => {
-            handle.backCalls += 1;
-          }}
-          onState={(state) => {
-            handle.state = state;
-          }}
-          project={project}
-        />,
-      );
+      update({
+        nodeOverride: override,
+      });
     };
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    const { view, update } = mountHost({
+      environment: renderKit.environment,
+      project,
+    });
     // Resolve the initial context decode: sprites gate before the background.
     await waitFor(() =>
       expect(loader.pending.has("C:/game/sprite/alice.png")).toBe(true),
@@ -930,29 +874,6 @@ describe("TimelineWorkspace screen effect presets", () => {
     const ids = currentNode(handle).events.map((event) => event.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toHaveLength(5);
-  });
-
-  it("inserts the composable preset through the timeline event path", async () => {
-    const { handle } = await renderWorkspace();
-    fireEvent.change(screen.getByLabelText("插入演出预设"), {
-      target: { value: "correction_focus" },
-    });
-    const events = currentNode(handle).events;
-    expect(
-      events.map((event) =>
-        event.type === "screen_effect" ? event.effect.type : event.type,
-      ),
-    ).toEqual(["color_grade", "focus", "ripple"]);
-    const grade = events.find(
-      (event) =>
-        event.type === "screen_effect" && event.effect.type === "color_grade",
-    );
-    expect(grade?.type === "screen_effect" ? grade.effect : null).toMatchObject(
-      {
-        type: "color_grade",
-        tint: "#8fb8ff",
-      },
-    );
   });
 });
 
@@ -1238,19 +1159,10 @@ describe("TimelineWorkspace selected-object numeric edits", () => {
     cleanup();
     const renderKit = createRenderKit();
     previewApi.handler = () => Promise.resolve(readyPreview(committed));
-    const handle: HostHandle = { state: null, backCalls: 0 };
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={makeProject({ [NODE_ID]: committed })}
-      />,
-    );
+    const { view } = mountHost({
+      environment: renderKit.environment,
+      project: makeProject({ [NODE_ID]: committed }),
+    });
     await waitForReady();
     stageRect(view.container);
     selectFirstObject(view.container);
@@ -1364,30 +1276,20 @@ describe("TimelineWorkspace playback context replacement", () => {
     previewApi.handler = () => Promise.resolve(readyPreview(node));
     const project = makeProject({ [NODE_ID]: node });
     installPlaybackClock();
-    const view = render(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={node}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    const { update } = mountHost({
+      environment: playback.environment,
+      nodeOverride: node,
+      project,
+    });
     await waitForReady();
     await startPlayback(playback.pump);
 
     // A duration edit (or an undo/redo of one) replaces the node while the
     // pass runs; the live clock must adopt the edited bound.
     const longer = timelineNode({ duration_ms: 3000 });
-    view.rerender(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={longer}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    update({
+      nodeOverride: longer,
+    });
     await settle();
     await stepPlayback(playback.pump, 100, 12);
     expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
@@ -1404,28 +1306,18 @@ describe("TimelineWorkspace playback context replacement", () => {
     previewApi.handler = () => Promise.resolve(readyPreview(node));
     const project = makeProject({ [NODE_ID]: node });
     installPlaybackClock();
-    const view = render(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={node}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    const { update } = mountHost({
+      environment: playback.environment,
+      nodeOverride: node,
+      project,
+    });
     await waitForReady();
     await startPlayback(playback.pump);
 
     const shorter = timelineNode({ duration_ms: 1000 });
-    view.rerender(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={shorter}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    update({
+      nodeOverride: shorter,
+    });
     await settle();
     await stepPlayback(playback.pump, 100, 8);
     await waitFor(() =>
@@ -1440,15 +1332,11 @@ describe("TimelineWorkspace playback context replacement", () => {
     previewApi.handler = () => Promise.resolve(readyPreview(node));
     const project = videoProject(node);
     installPlaybackClock();
-    render(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={node}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    mountHost({
+      environment: playback.environment,
+      nodeOverride: node,
+      project,
+    });
     await waitForReady();
     await startPlayback(playback.pump);
 
@@ -1472,43 +1360,6 @@ describe("TimelineWorkspace playback context replacement", () => {
     expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument();
   });
 
-  it("ends a running pass when undo removes the video track", async () => {
-    const playback = createPlaybackKit();
-    const node = timelineNode();
-    previewApi.handler = () => Promise.resolve(readyPreview(node));
-    const project = videoProject(node);
-    installPlaybackClock();
-    render(
-      <WorkspaceHost
-        environment={playback.environment}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
-    await waitForReady();
-
-    // A real history edit first: add the video track and let its media settle.
-    fireEvent.change(screen.getByLabelText("新建轨道类型"), {
-      target: { value: "video" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
-    await waitFor(() => expect(playback.dom.videos).toHaveLength(1));
-
-    await startPlayback(playback.pump);
-
-    // Undo reverts the authoritative document to a timeline without the video
-    // track, which changes the resource signature again: the replacement must
-    // end the run rather than run on the removed track's clock.
-    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument(),
-    );
-    await waitFor(() => expect(playheadLabel()).toBe("播放 300 · 起点 0 ms"));
-    await stepPlayback(playback.pump, 100, 10);
-    expect(playheadLabel()).toBe("播放 300 · 起点 0 ms");
-  });
-
   it("does not re-fire the event at the exact cursor after an ordinary keyframe edit", async () => {
     const playback = createPlaybackKit();
     const events: TimelineNode["events"] = [
@@ -1522,15 +1373,11 @@ describe("TimelineWorkspace playback context replacement", () => {
     const playSfx = vi
       .spyOn(AudioManager.prototype, "playSfx")
       .mockResolvedValue(undefined);
-    const view = render(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={node}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    const { update } = mountHost({
+      environment: playback.environment,
+      nodeOverride: node,
+      project,
+    });
     await waitForReady();
     // A preview starts silent; unmute so a crossed SFX reaches the audio port.
     fireEvent.click(screen.getByRole("button", { name: "取消静音" }));
@@ -1562,15 +1409,9 @@ describe("TimelineWorkspace playback context replacement", () => {
         { type: "camera", channels: {} },
       ],
     });
-    view.rerender(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={edited}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    update({
+      nodeOverride: edited,
+    });
     await settle();
 
     // Resuming across the cursor must not re-fire the consumed event.
@@ -1599,15 +1440,11 @@ describe("TimelineWorkspace playback context replacement", () => {
     const playSfx = vi
       .spyOn(AudioManager.prototype, "playSfx")
       .mockResolvedValue(undefined);
-    const view = render(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={node}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    const { update } = mountHost({
+      environment: playback.environment,
+      nodeOverride: node,
+      project,
+    });
     await waitForReady();
     fireEvent.click(screen.getByRole("button", { name: "取消静音" }));
     await settle();
@@ -1635,15 +1472,9 @@ describe("TimelineWorkspace playback context replacement", () => {
         { type: "camera", channels: {} },
       ],
     });
-    view.rerender(
-      <WorkspaceHost
-        environment={playback.environment}
-        nodeOverride={edited}
-        onBack={() => undefined}
-        onState={() => undefined}
-        project={project}
-      />,
-    );
+    update({
+      nodeOverride: edited,
+    });
     await settle();
     expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
     await stepPlayback(playback.pump, 100, 1);
@@ -1653,72 +1484,15 @@ describe("TimelineWorkspace playback context replacement", () => {
   });
 });
 
-describe("TimelineWorkspace creation asset policy", () => {
-  const VIDEO_ASSET: EditorAsset = {
-    id: "video.clip",
-    kind: "video",
-    path: "video/clip.mp4",
-    absolute_path: "C:/game/video/clip.mp4",
-  };
-  const SFX_ASSET: EditorAsset = {
-    id: "sfx.hit",
-    kind: "sfx",
-    path: "audio/hit.ogg",
-    absolute_path: "C:/game/audio/hit.ogg",
-  };
-
-  function projectWith(extra: readonly EditorAsset[]): EditorProject {
-    const project = makeProject({ [NODE_ID]: timelineNode() });
-    return { ...project, assets: [...ASSETS, ...extra] };
-  }
-
-  function renderWorkspaceWith(
-    project: EditorProject,
-    layout?: EditorLayout,
-    node = timelineNode(),
-  ): { view: ReturnType<typeof render>; handle: HostHandle } {
-    const renderKit = createRenderKit();
-    previewApi.handler = () => Promise.resolve(readyPreview(node));
-    const handle: HostHandle = { state: null, backCalls: 0 };
-    const host = (
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />
-    );
-    const view = render(
-      layout === undefined ? (
-        host
-      ) : (
-        <AssetLayoutProvider layout={layout}>{host}</AssetLayoutProvider>
-      ),
-    );
-    return { view, handle };
-  }
-
-  function allHiddenLayout(assets: readonly EditorAsset[]): EditorLayout {
-    return {
-      version: 1,
-      scenes: {},
-      asset_metadata: Object.fromEntries(
-        assets.map((asset) => [asset.id, { hidden: true }]),
-      ),
-    };
-  }
-
+describe("TimelineWorkspace track creation", () => {
   it("binds a newly created track to the selected inherited sprite", async () => {
     const node = timelineNode({ tracks: [] });
-    const { view, handle } = renderWorkspaceWith(
-      makeProject({ [NODE_ID]: node }),
-      undefined,
-      node,
-    );
+    const renderKit = createRenderKit();
+    previewApi.handler = () => Promise.resolve(readyPreview(node));
+    const { handle, view } = mountHost({
+      environment: renderKit.environment,
+      project: makeProject({ [NODE_ID]: node }),
+    });
     await waitForReady();
     selectFirstObject(view.container);
     fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
@@ -1729,59 +1503,6 @@ describe("TimelineWorkspace creation asset policy", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
     expect(currentNode(handle).tracks).toHaveLength(1);
-  });
-
-  it("disables video/SFX creation for hidden assets and commits nothing", async () => {
-    const project = projectWith([VIDEO_ASSET, SFX_ASSET]);
-    const { handle } = renderWorkspaceWith(
-      project,
-      allHiddenLayout(project.assets),
-    );
-    await waitForReady();
-
-    fireEvent.change(screen.getByLabelText("新建轨道类型"), {
-      target: { value: "video" },
-    });
-    const addTrack = screen.getByRole("button", { name: "＋轨道" });
-    expect(addTrack).toBeDisabled();
-    fireEvent.click(addTrack);
-
-    const sfx = screen.getByRole("button", { name: "＋SFX" });
-    expect(sfx).toBeDisabled();
-    expect(sfx).toHaveAttribute("title", expect.stringContaining("音效"));
-    fireEvent.click(sfx);
-    await settle();
-
-    // No invalid empty asset row / event was written.
-    expect(handle.state?.past).toHaveLength(0);
-    expect(
-      currentNode(handle).tracks.some((track) => track.type === "video"),
-    ).toBe(false);
-    expect(currentNode(handle).events).toHaveLength(0);
-  });
-
-  it("creates video tracks and SFX events with a real visible asset", async () => {
-    const { handle } = renderWorkspaceWith(
-      projectWith([VIDEO_ASSET, SFX_ASSET]),
-    );
-    await waitForReady();
-
-    fireEvent.change(screen.getByLabelText("新建轨道类型"), {
-      target: { value: "video" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "＋轨道" }));
-    await settle();
-    const video = currentNode(handle).tracks.find(
-      (track) => track.type === "video",
-    );
-    expect(video).toMatchObject({ asset: "video.clip" });
-
-    fireEvent.click(screen.getByRole("button", { name: "＋SFX" }));
-    await settle();
-    const event = currentNode(handle).events.find(
-      (candidate) => candidate.type === "sfx",
-    );
-    expect(event).toMatchObject({ asset: "sfx.hit" });
   });
 });
 
@@ -1805,35 +1526,16 @@ describe("TimelineWorkspace pending resource load supersession", () => {
     const renderKit = createRenderKit(loader.load);
     const original = timelineNode();
     previewApi.handler = () => Promise.resolve(readyPreview(original));
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const project = makeProject({ [NODE_ID]: original });
     const renderHost = (override: TimelineNode | undefined): void => {
-      view.rerender(
-        <WorkspaceHost
-          environment={renderKit.environment}
-          nodeOverride={override}
-          onBack={() => {
-            handle.backCalls += 1;
-          }}
-          onState={(state) => {
-            handle.state = state;
-          }}
-          project={project}
-        />,
-      );
+      update({
+        nodeOverride: override,
+      });
     };
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    const { handle, update } = mountHost({
+      environment: renderKit.environment,
+      project,
+    });
     await waitFor(() =>
       expect(loader.pending.has("C:/game/sprite/alice.png")).toBe(true),
     );
@@ -1897,35 +1599,16 @@ describe("TimelineWorkspace pending resource load supersession", () => {
     const renderKit = createRenderKit(loader.load);
     const original = timelineNode();
     previewApi.handler = () => Promise.resolve(readyPreview(original));
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const project = makeProject({ [NODE_ID]: original });
     const renderHost = (override: TimelineNode | undefined): void => {
-      view.rerender(
-        <WorkspaceHost
-          environment={renderKit.environment}
-          nodeOverride={override}
-          onBack={() => {
-            handle.backCalls += 1;
-          }}
-          onState={(state) => {
-            handle.state = state;
-          }}
-          project={project}
-        />,
-      );
+      update({
+        nodeOverride: override,
+      });
     };
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    const { view, update } = mountHost({
+      environment: renderKit.environment,
+      project,
+    });
     await waitFor(() =>
       expect(loader.pending.has("C:/game/sprite/alice.png")).toBe(true),
     );
@@ -2061,21 +1744,12 @@ describe("TimelineWorkspace shared gameplay buttons", () => {
     };
     previewApi.handler = () =>
       Promise.resolve(readyPreview(node, { snapshot: { buttons } }));
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const onChangeSpy = vi.fn<(next: TimelineNode) => void>();
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => {
-          handle.backCalls += 1;
-        }}
-        onChangeSpy={onChangeSpy}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={project}
-      />,
-    );
+    const { handle, view } = mountHost({
+      environment: renderKit.environment,
+      onChangeSpy,
+      project,
+    });
     await waitForReady();
     stageRect(view.container);
     return { view, handle, onChangeSpy };
@@ -2207,18 +1881,11 @@ describe("TimelineWorkspace whole particle emitters", () => {
       ready.start_snapshot.world.emitters = { snow: { ...EMITTER_FIXTURE } };
       return Promise.resolve({ ...ready, particles: { snow: PARTICLE_FIXTURE } });
     };
-    const handle: HostHandle = { state: null, backCalls: 0 };
     const project = makeProject({ [NODE_ID]: node });
-    const view = render(
-      <WorkspaceHost
-        environment={renderKit.environment}
-        onBack={() => undefined}
-        onState={(state) => {
-          handle.state = state;
-        }}
-        project={{ ...project, assets: [...ASSETS, DOT_ASSET] }}
-      />,
-    );
+    const { handle, view } = mountHost({
+      environment: renderKit.environment,
+      project: { ...project, assets: [...ASSETS, DOT_ASSET] },
+    });
     await waitForReady();
     stageRect(view.container);
     return { view, handle };

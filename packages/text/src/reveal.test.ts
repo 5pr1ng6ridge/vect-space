@@ -31,63 +31,6 @@ describe("TextRevealSession", () => {
     expect(pauseBoundary.advance(50).state.revealedCount).toBe(2);
   });
 
-  it("allows inline math to animate concurrently but waits for display math", () => {
-    const inline = new TextRevealSession({
-      units: parseMarkup("A$x$B"),
-      initialCps: 20,
-      defaultCps: 20,
-      mathRevealDurations: new Map([[1, 400]]),
-      animation: "drop_fade",
-      waitForInlineMath: false,
-    });
-    expect(inline.advance(150).state.revealedCount).toBe(3);
-    expect(inline.state.completionMs).toBeGreaterThan(150);
-
-    const block = new TextRevealSession({
-      units: parseMarkup("A$$x$$B"),
-      initialCps: 20,
-      defaultCps: 20,
-      mathRevealDurations: new Map([[1, 400]]),
-      animation: "drop_fade",
-      waitForInlineMath: false,
-    });
-    expect(block.advance(150).state.revealedCount).toBe(2);
-  });
-
-  it("does not leak a post-pause character while a drop-fade formula settles", () => {
-    const session = new TextRevealSession({
-      units: parseMarkup("A$x$[pause=100ms]B"),
-      initialCps: 20,
-      defaultCps: 20,
-      mathRevealDurations: new Map([[1, 240]]),
-      animation: "drop_fade",
-      waitForInlineMath: false,
-    });
-
-    // The pause begins only after the inline formula's concurrent animation.
-    // A large frame is still bounded at the pause start/end, so B cannot be
-    // exposed in the same frame as the pause completion.
-    const waiting = session.advance(340);
-    expect(waiting.state).toMatchObject({
-      status: "waiting",
-      revealedCount: 2,
-    });
-    const pauseEnd = waiting.advance(1_000);
-    expect(pauseEnd.state.revealedCount).toBe(2);
-    expect(pauseEnd.advance(50).state.revealedCount).toBe(3);
-  });
-
-  it("separates completion from restoring a saved presentation", () => {
-    const session = new TextRevealSession({
-      units: parseMarkup("完整"),
-      initialCps: 20,
-      defaultCps: 20,
-    });
-    expect(session.completeReveal().state.restored).toBe(false);
-    expect(session.restorePresentation().state.restored).toBe(true);
-    expect(session.cancel().state.status).toBe("cancelled");
-  });
-
   it("supports explicit pause and resume without changing virtual time", () => {
     const session = new TextRevealSession({
       units: parseMarkup("ABC"),
@@ -107,6 +50,67 @@ describe("TextRevealSession", () => {
     });
     expect(plan.pauses[0]).toMatchObject({ startMs: 100, endMs: 200 });
     expect(plan.events.map((event) => event.atMs)).toEqual([100, 300]);
+  });
+
+  it("applies speed controls after pauses and treats plain pacing as no pause", () => {
+    const plan = createRevealPlan({
+      units: parseMarkup("A[pause=500ms][speed=10cps]B"),
+      initialCps: 20,
+      defaultCps: 30,
+    });
+    expect(plan.events.map((event) => event.atMs)).toEqual([50, 650]);
+    expect(plan.pauses).toMatchObject([{ startMs: 50, endMs: 550 }]);
+    expect(
+      createRevealPlan({
+        units: parseMarkup("ABC"),
+        initialCps: 20,
+        defaultCps: 30,
+      }).pauses,
+    ).toEqual([]);
+  });
+
+  it("makes inline formulas block the following text for their measured duration", () => {
+    const plan = createRevealPlan({
+      units: parseMarkup("甲$x$乙"),
+      initialCps: 20,
+      defaultCps: 20,
+      mathRevealDurations: new Map([[1, 240]]),
+    });
+    expect(plan.events.map((event) => event.atMs)).toEqual([50, 100, 390]);
+    expect(
+      createRevealPlan({
+        units: parseMarkup("甲$x$乙"),
+        initialCps: 20,
+        defaultCps: 20,
+      }).events.map((event) => event.atMs),
+    ).toEqual([50, 100, 200]);
+  });
+
+  it.each([
+    ["typewriter", 100],
+    ["line_sweep", 150],
+    ["drop_fade", 260],
+  ] as const)(
+    "completes a %s reveal when its last glyph animation ends",
+    (animation, completionMs) => {
+      const plan = createRevealPlan({
+        units: parseMarkup("甲乙"),
+        initialCps: 20,
+        defaultCps: 20,
+        animation,
+      });
+      expect(plan.completionMs).toBe(completionMs);
+    },
+  );
+
+  it("waits for a final formula animation before completing the reveal", () => {
+    const plan = createRevealPlan({
+      units: parseMarkup("甲$x$"),
+      initialCps: 20,
+      defaultCps: 20,
+      mathRevealDurations: new Map([[1, 240]]),
+    });
+    expect(plan.completionMs).toBe(340);
   });
 
   it.each([
@@ -246,6 +250,7 @@ describe("TextRevealSession timing boundaries", () => {
     expect(completed.state.restored).toBe(false);
     expect(completed.state.revealedCount).toBe(3);
     expect(cancelled.state.status).toBe("cancelled");
+    expect(session.restorePresentation().state.restored).toBe(true);
   });
 
   describe("rebased", () => {

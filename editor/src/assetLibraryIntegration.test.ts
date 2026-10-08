@@ -2,20 +2,16 @@
 /**
  * Integration: drive the *real* editor mutation seam (`editorReducer`) with
  * the asset-library helpers, exactly the way `App.commit` does
- * (`draft.layout = mutate(draft.layout)`), and prove the layout metadata and
- * a staged replacement stay undoable without touching a manifest path.
+ * (`draft.layout = mutate(draft.layout)`), and prove the layout metadata stays
+ * undoable without touching a manifest path.
  */
 import { describe, expect, it } from "vitest";
 
 import {
-  activeImportTokens,
-  applyStagedAsset,
   assetDisplayName,
   assetFolderId,
   isAssetHidden,
-  moveAssetFolder,
   moveAssetToFolder,
-  registerPendingImports,
   setAssetDisplayName,
   setAssetHidden,
 } from "./assetLibrary";
@@ -24,7 +20,7 @@ import {
   INITIAL_EDITOR_STATE,
   type EditorState,
 } from "./editorHistory";
-import type { ContentManifest, EditorProject, ImportedAsset } from "./types";
+import type { ContentManifest, EditorProject } from "./types";
 
 const MANIFEST: ContentManifest = {
   schema_version: 2,
@@ -171,72 +167,5 @@ describe("asset-library layout metadata through the App reducer", () => {
     expect(
       assetFolderId((state.project as EditorProject).layout, "bg.room"),
     ).toBe("bg");
-  });
-
-  it("moves a folder and rejects a cycle before any history entry", () => {
-    let state = editorReducer(INITIAL_EDITOR_STATE, {
-      type: "load",
-      project: project(),
-    });
-    state = layoutCommit(state, (layout) =>
-      moveAssetFolder(layout, "bg", null),
-    );
-    // Moving a folder into its own child is a no-op → no new patch.
-    const scened = layoutCommit(state, (layout) =>
-      moveAssetFolder(layout, "bg", "bg"),
-    );
-    expect(scened.past).toHaveLength(state.past.length);
-  });
-});
-
-describe("staged same-ID replacement through the App reducer", () => {
-  const imported: ImportedAsset = {
-    id: "bg.room",
-    kind: "background",
-    path: "backgrounds/room_v2.png",
-    absolute_path: ".vectspace/tmp/imports/import-1/room_v2.png",
-    size_bytes: "42",
-    token: "import-1",
-    replaced_from: "backgrounds/room.png",
-  };
-
-  it("replaces one row in place, keeps a usable token and undoes cleanly", () => {
-    let state = editorReducer(INITIAL_EDITOR_STATE, {
-      type: "load",
-      project: project(),
-    });
-    const pending = registerPendingImports({}, [imported]);
-    state = commit(
-      state,
-      (draft) => applyStagedAsset(draft, imported, null),
-      "替换素材",
-    );
-
-    const staged = state.project as EditorProject;
-    // One logical id, one row, a new path — the old binary is never touched.
-    expect(staged.assets).toHaveLength(1);
-    expect(staged.assets[0].absolute_path).toContain("room_v2.png");
-    expect(staged.manifest.assets["bg.room"]).toEqual({
-      kind: "background",
-      path: "backgrounds/room_v2.png",
-    });
-    expect(activeImportTokens(pending, staged.manifest)).toEqual(["import-1"]);
-
-    // Undo restores the old registration, so the obsolete token is dropped
-    // instead of being submitted with a path-mismatched capability.
-    state = editorReducer(state, { type: "undo" });
-    const undone = state.project as EditorProject;
-    expect(undone.manifest.assets["bg.room"]).toEqual({
-      kind: "background",
-      path: "backgrounds/room.png",
-    });
-    expect(undone.assets).toHaveLength(1);
-    expect(activeImportTokens(pending, undone.manifest)).toEqual([]);
-
-    // Redo re-applies without a duplicate row, and the token is usable again.
-    state = editorReducer(state, { type: "redo" });
-    const redone = state.project as EditorProject;
-    expect(redone.assets).toHaveLength(1);
-    expect(activeImportTokens(pending, redone.manifest)).toEqual(["import-1"]);
   });
 });

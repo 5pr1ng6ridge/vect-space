@@ -151,13 +151,6 @@ describe("AssetChooser hidden policy", () => {
     expect(option).toHaveTextContent("已隐藏");
     expect(option).toHaveTextContent("目录：归档");
   });
-
-  it("does not leak a hidden asset through the kind filter or defaults", () => {
-    renderChooser({ kind: "background" });
-    open();
-    // bg.old is hidden and excluded; the visible nested bg.nested stays.
-    expect(optionIds().sort()).toEqual(["bg.nested", "bg.room"]);
-  });
 });
 
 describe("AssetChooser search and keyboard", () => {

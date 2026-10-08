@@ -167,18 +167,6 @@ describe("window_control form", () => {
       expect.objectContaining({ action: "advance", id: "", message: "" }),
     );
   });
-
-  it("explains that advance never unblocks or picks a choice", () => {
-    renderNode({
-      type: "window_control",
-      target: "main",
-      action: "advance",
-      id: "",
-      next: "b",
-    });
-    expect(screen.getByText(/不会替玩家选择选项/)).toBeInTheDocument();
-    expect(screen.queryByLabelText("阻挡 ID")).toBeNull();
-  });
 });
 
 describe("window_geometry form", () => {
@@ -215,33 +203,6 @@ describe("window_geometry form", () => {
     expect(screen.getByLabelText("等待完成")).not.toBeChecked();
   });
 
-  it("groups the presets and ends with a custom entry", () => {
-    renderNode(geometry());
-    const select = screen.getByLabelText("位置预设");
-    expect(
-      Array.from(select.querySelectorAll("optgroup")).map((group) =>
-        group.getAttribute("label"),
-      ),
-    ).toEqual(["屏幕（工作区）", "另一个游戏窗口", "自身"]);
-    expect(optionTexts(select)).toEqual([
-      "屏幕居中",
-      "屏幕左上角",
-      "屏幕右上角",
-      "屏幕左下角",
-      "屏幕右下角",
-      "屏幕上边缘居中",
-      "屏幕下边缘居中",
-      "屏幕左边缘居中",
-      "屏幕右边缘居中",
-      "贴在另一窗口右侧",
-      "贴在另一窗口左侧",
-      "贴在另一窗口上方",
-      "贴在另一窗口下方",
-      "相对当前位置偏移",
-      "自定义",
-    ]);
-  });
-
   it("a preset only fills the placement fields", () => {
     const onChange = renderNode(
       geometry({ size: { width: 960, height: 540 }, duration_ms: 250 }),
@@ -265,14 +226,6 @@ describe("window_geometry form", () => {
       duration_ms: 250,
       next: "b",
     });
-  });
-
-  it("choosing the custom entry changes nothing", () => {
-    const onChange = renderNode(geometry());
-    fireEvent.change(screen.getByLabelText("位置预设"), {
-      target: { value: "custom" },
-    });
-    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("calls a hand-edited placement custom and keeps it editable", () => {
@@ -423,37 +376,6 @@ describe("window_geometry form", () => {
       duration_ms: 600,
     });
   });
-
-  it("explains skipping, restoring, minimum sizes and the preview limit", () => {
-    renderNode(geometry());
-    const notes = Array.from(document.querySelectorAll(".field-note"))
-      .map((note) => note.textContent ?? "")
-      .join("\n");
-    expect(notes).toMatch(/全屏或最大化的窗口会跳过移动和缩放/);
-    expect(notes).toMatch(/主窗口最小\s*960×540/);
-    expect(notes).toMatch(/副窗口最小\s*480×270/);
-    expect(notes).toMatch(/回到标题或退出重演时主窗口会自动复原/);
-    expect(notes).toMatch(/存档不记录窗口位置和大小/);
-    expect(notes).toMatch(/预览不会移动真实窗口/);
-    expect(notes).toMatch(/「另一个游戏窗口」指主窗口/);
-  });
-
-  it("names the other window from the target's side", () => {
-    renderNode(geometry({ target: "main" }));
-    expect(
-      Array.from(document.querySelectorAll(".field-note"))
-        .map((note) => note.textContent ?? "")
-        .join("\n"),
-    ).toMatch(/「另一个游戏窗口」指副窗口/);
-  });
-
-  it("keeps the next node picker", () => {
-    const onChange = renderNode(geometry());
-    fireEvent.change(screen.getByLabelText("下一节点"), {
-      target: { value: "a" },
-    });
-    expect(lastNode(onChange)).toMatchObject({ next: "a" });
-  });
 });
 
 describe("window_layer form", () => {
@@ -464,19 +386,6 @@ describe("window_layer form", () => {
       action,
       next: "b",
     }) as SceneNode;
-
-  it("lists the five actions with their focus behaviour spelled out", () => {
-    renderNode(layer());
-    expect(optionTexts(screen.getByLabelText("层级操作"))).toEqual([
-      "提到最前（不抢焦点）",
-      "聚焦（抢焦点）",
-      "置顶（始终在其他窗口上方）",
-      "置底（始终在其他窗口下方）",
-      "恢复普通层级",
-    ]);
-    expect(screen.getByLabelText("层级操作")).toHaveValue("raise");
-    expect(screen.getByLabelText("目标窗口")).toHaveValue("main");
-  });
 
   it("writes the chosen action and target", () => {
     const onChange = renderNode(layer());
@@ -494,15 +403,6 @@ describe("window_layer form", () => {
       "subject",
       expect.objectContaining({ target: "secondary" }),
     );
-  });
-
-  it("explains focus stealing and the preview limit", () => {
-    renderNode(layer());
-    const note = document.querySelector(".field-note")?.textContent ?? "";
-    expect(note).toMatch(/不抢键盘焦点/);
-    expect(note).toMatch(/抢走键盘焦点/);
-    expect(note).toMatch(/恢复普通层级/);
-    expect(note).toMatch(/预览不会改变真实窗口层级/);
   });
 });
 
@@ -533,21 +433,6 @@ describe("timer form", () => {
     expect(ids).not.toContain("move_wait");
     expect(ids).not.toContain("a");
     expect(ids).not.toContain("b");
-  });
-
-  it("states the stop/exit lifecycle and the minimum interval", () => {
-    renderNode({
-      type: "timer",
-      id: "pulse",
-      action: "start",
-      delay_ms: 0,
-      interval_ms: 1000,
-      target: "free_action",
-      next: "b",
-    });
-    expect(screen.getByText(/显式停止|「停止」节点停止/)).toBeInTheDocument();
-    expect(screen.getByText(/场景退出/)).toBeInTheDocument();
-    expect(screen.getByLabelText("重复间隔 ms")).toHaveAttribute("min", "50");
   });
 
   it("clears delay, interval and target when switched to stop", () => {

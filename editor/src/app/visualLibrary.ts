@@ -232,13 +232,13 @@ function nodeTextBlockIds(node: SceneNode): string[] {
 }
 
 /** A text block used (or filed) by more than one scene. */
-export interface SharedTextBlock {
+interface SharedTextBlock {
   id: string;
   sceneIds: readonly string[];
 }
 
 /** Where every fixed text block is listed in the sidebar, exactly once. */
-export interface TextBlockGroups {
+interface TextBlockGroups {
   /** Every scene id to its own text ids, in definition order (maybe empty). */
   scenes: ReadonlyMap<string, readonly string[]>;
   /** Claimed by two or more scenes; still one definition. */

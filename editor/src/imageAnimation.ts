@@ -17,7 +17,7 @@ export const IMAGE_ANIMATION_MAX_FRAMES = 512;
 export const IMAGE_ANIMATION_MIN_FRAME_MS = 1;
 export const IMAGE_ANIMATION_MAX_FRAME_MS = 60_000;
 export const IMAGE_ANIMATION_MAX_DECODED_BYTES = 256 * 1024 * 1024;
-export const IMAGE_ANIMATION_MAX_EDGE = 8192;
+const IMAGE_ANIMATION_MAX_EDGE = 8192;
 
 /** Default frame hold used by 「创建帧动画」 until the author overrides it. */
 export const DEFAULT_FRAME_DURATION_MS = 100;
@@ -36,7 +36,7 @@ export const ANIMATION_FRAME_KINDS: readonly AssetKind[] = [
  */
 export const IDENTIFIER_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
-export function isFrameAssetKind(kind: AssetKind): boolean {
+function isFrameAssetKind(kind: AssetKind): boolean {
   return ANIMATION_FRAME_KINDS.includes(kind);
 }
 
@@ -69,7 +69,7 @@ const naturalCollator = new Intl.Collator(["en"], {
  * plain code-unit comparison would invert.  Case-insensitive ties fall back to
  * a deterministic code-unit comparison so the same list always has one order.
  */
-export function naturalCompare(left: string, right: string): number {
+function naturalCompare(left: string, right: string): number {
   const primary = naturalCollator.compare(left, right);
   if (primary !== 0) return primary;
   return left < right ? -1 : left > right ? 1 : 0;
@@ -155,12 +155,12 @@ export interface AnimationDraft {
   frames: AnimationFrame[];
 }
 
-export interface AnimationDraftValidation {
+interface AnimationDraftValidation {
   errors: string[];
   warnings: string[];
 }
 
-export interface AnimationDraftContext {
+interface AnimationDraftContext {
   existingAssetIds: ReadonlySet<string>;
   existingAnimationIds: ReadonlySet<string>;
   existingAnimationPaths: ReadonlySet<string>;

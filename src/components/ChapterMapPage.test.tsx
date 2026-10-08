@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChapterMapSnapshot } from "@vectspace/presentation-core/types";
 import { ChapterMapPage } from "./ChapterMapPage";
 
+type PageProps = Parameters<typeof ChapterMapPage>[0];
+
 const MAP: ChapterMapSnapshot = {
   width: 4000,
   height: 2160,
@@ -81,20 +83,37 @@ const MAP: ChapterMapSnapshot = {
 
 afterEach(cleanup);
 
+function page(props: Partial<PageProps> = {}) {
+  return (
+    <ChapterMapPage
+      assets={{
+        "gui.backdrop": "backdrop.png",
+        "gui.chapter_b": "chapter-b.png",
+      }}
+      map={MAP}
+      onClose={() => undefined}
+      onReplay={() => undefined}
+      {...props}
+    />
+  );
+}
+
+/** Gives the viewport the 1:1 geometry and pointer capture jsdom lacks. */
+function stubViewportGeometry(viewport: HTMLElement): void {
+  Object.defineProperty(viewport, "setPointerCapture", {
+    configurable: true,
+    value: vi.fn(),
+  });
+  Object.defineProperty(viewport, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({ width: 1920, height: 1080 }),
+  });
+}
+
 describe("ChapterMapPage", () => {
   it("keeps decorations non-interactive and only replays completed hotspots", () => {
     const onReplay = vi.fn();
-    render(
-      <ChapterMapPage
-        assets={{
-          "gui.backdrop": "backdrop.png",
-          "gui.chapter_b": "chapter-b.png",
-        }}
-        map={MAP}
-        onClose={() => undefined}
-        onReplay={onReplay}
-      />,
-    );
+    render(page({ onReplay }));
 
     // The shared z/id ordering leaves b on top of a for an equal-z overlap;
     // the DOM order mirrors that rule and never exposes a decoration target.
@@ -134,24 +153,9 @@ describe("ChapterMapPage", () => {
 
   it("pans from the room background and reports a clamped session center", () => {
     const onViewChange = vi.fn();
-    render(
-      <ChapterMapPage
-        assets={{ "gui.backdrop": "backdrop.png" }}
-        map={MAP}
-        onClose={() => undefined}
-        onReplay={() => undefined}
-        onViewChange={onViewChange}
-      />,
-    );
+    render(page({ onViewChange }));
     const viewport = screen.getByRole("application");
-    Object.defineProperty(viewport, "setPointerCapture", {
-      configurable: true,
-      value: vi.fn(),
-    });
-    Object.defineProperty(viewport, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ width: 1920, height: 1080 }),
-    });
+    stubViewportGeometry(viewport);
 
     fireEvent.pointerDown(viewport, {
       button: 0,
@@ -172,25 +176,10 @@ describe("ChapterMapPage", () => {
   it("keeps a hotspot gesture out of room panning and replays it on click", () => {
     const onViewChange = vi.fn();
     const onReplay = vi.fn();
-    render(
-      <ChapterMapPage
-        assets={{ "gui.backdrop": "backdrop.png" }}
-        map={MAP}
-        onClose={() => undefined}
-        onReplay={onReplay}
-        onViewChange={onViewChange}
-      />,
-    );
+    render(page({ onReplay, onViewChange }));
     const viewport = screen.getByRole("application");
     const hotspot = screen.getByRole("button", { name: "章节 B，可重演" });
-    Object.defineProperty(viewport, "setPointerCapture", {
-      configurable: true,
-      value: vi.fn(),
-    });
-    Object.defineProperty(viewport, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ width: 1920, height: 1080 }),
-    });
+    stubViewportGeometry(viewport);
 
     fireEvent.pointerDown(hotspot, {
       button: 0,
@@ -211,26 +200,12 @@ describe("ChapterMapPage", () => {
   });
 
   it("shows custom hover text and clears it when map artwork is refreshed", () => {
-    const { rerender } = render(
-      <ChapterMapPage
-        assets={{ "gui.chapter_b": "chapter-b.png" }}
-        map={MAP}
-        onClose={() => undefined}
-        onReplay={() => undefined}
-      />,
-    );
+    const { rerender } = render(page());
     const hotspot = screen.getByRole("button", { name: "章节 B，可重演" });
     fireEvent.pointerEnter(hotspot);
     expect(screen.getByRole("tooltip")).toHaveTextContent("章节 B 说明");
 
-    rerender(
-      <ChapterMapPage
-        assets={{ "gui.chapter_b": "chapter-b-replaced.png" }}
-        map={MAP}
-        onClose={() => undefined}
-        onReplay={() => undefined}
-      />,
-    );
+    rerender(page({ assets: { "gui.chapter_b": "chapter-b-replaced.png" } }));
 
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
@@ -246,14 +221,7 @@ describe("ChapterMapPage", () => {
             : hotspot,
       ),
     };
-    render(
-      <ChapterMapPage
-        assets={{ "gui.chapter_b": "chapter-b.png" }}
-        map={map}
-        onClose={() => undefined}
-        onReplay={() => undefined}
-      />,
-    );
+    render(page({ map }));
     const titleFallback = screen.getByRole("button", {
       name: "章节 A，可重演",
     });

@@ -10,23 +10,16 @@ import {
 } from "react";
 import { assetUrl, editorApi, previewAssetsToUrls } from "../api";
 import { buildEditorVisualResources } from "../visualResources";
-import { defaultFlashEffect } from "../presentationDefaults";
 import {
-  SCREEN_EFFECT_PRESETS,
-  findScreenEffectPreset,
   presetTimelineEvents,
   type ScreenEffectPreset,
 } from "../screenEffectPresets";
 import { projectRequest } from "../story";
-import { stringifyScalarJson } from "../scalars";
 import type {
-  AmbienceSlot,
   BuildNodePreviewResult,
   EditorAsset,
   EditorProject,
   PreviewChoiceDecision,
-  ScalarValue,
-  TimelineEasing,
   TimelineEvent,
   TimelineKeyframe,
   TimelineNode,
@@ -41,19 +34,13 @@ import {
 import {
   DESIGN_HEIGHT,
   DESIGN_WIDTH,
-  stagePointToWorld,
   type SceneObjectFrame,
   type SceneFrame,
 } from "@vectspace/presentation-core/scene-frame";
 import type { SceneSurface } from "@vectspace/presentation-core/scene-surface";
-import type { ButtonSnapshot } from "@vectspace/presentation-core/types";
 import { LEGACY_BACKGROUND_ID } from "@vectspace/presentation-core/visual";
 import type { TimelineSession } from "@vectspace/presentation-core/timeline-session";
 import { DeferredSession } from "@vectspace/presentation-core/deferred-session";
-import { TemplateButton } from "@vectspace/presentation-react/button";
-// The shared gameplay stylesheet carries the `scene-button*` rules the real
-// button is styled with; a host-local copy is forbidden by the CSS contract.
-import "@vectspace/presentation-react/gameplay.css";
 import {
   createEditorTimelinePreview,
   disposeEditorTimelinePreview,
@@ -61,8 +48,7 @@ import {
   type EditorTimelinePreview,
 } from "./timelinePreview";
 import { buildAnimationMap } from "../imageAnimationMap";
-import { ScreenEffectFields } from "./SpecFields";
-import { AssetChooser, useAssetLayout } from "./AssetChooser";
+import { useAssetLayout } from "./AssetChooser";
 import { DeferredInput } from "./Fields";
 import {
   Clapperboard,
@@ -82,6 +68,29 @@ import {
 } from "../ui/keyboard";
 import { isEditableTarget } from "./nodeDeleteShortcut";
 import { firstVisibleAssetId } from "../assetLibrary";
+import {
+  type CameraHandle,
+  type Tool,
+  type TransformHandle,
+  dragTransform,
+  objectChannels,
+  releasedTransform,
+} from "./timeline/gizmo";
+import {
+  newTimelineEvent,
+  planNewTrack,
+  selectedObjectAssetChanged,
+  snapTime,
+  upsertKeyframe as upsertKeyframeAt,
+} from "./timeline/trackEdits";
+import { GizmoLayer } from "./timeline/GizmoLayer";
+import { ObjectInspector } from "./timeline/ObjectInspector";
+import { PendingExitDialog } from "./timeline/PendingExitDialog";
+import { PreviewContextPanel } from "./timeline/PreviewContextPanel";
+import { StageToolbar } from "./timeline/StageToolbar";
+import { TimelineKeyframeInspector } from "./timeline/TimelineKeyframeInspector";
+import { TimelineEventInspector } from "./timeline/TimelineEventInspector";
+import { errorMessage } from "./errorMessage";
 
 interface TimelineWorkspaceProps {
   project: EditorProject;
@@ -110,29 +119,11 @@ interface TimelineWorkspaceProps {
   previewEnvironment?: EditorPreviewEnvironment;
 }
 
-type Tool = "select" | "camera";
-type TransformHandle =
-  | "move"
-  | "scale"
-  | "scale_tl"
-  | "scale_tr"
-  | "scale_bl"
-  | "scale_br"
-  | "scale_x"
-  | "scale_y"
-  | "rotate";
-type CameraHandle = "move" | "zoom" | "rotate";
-
 const DEFAULT_PREVIEW_SETTINGS: TimelinePreviewSettings = {
   variable_overrides: {},
   choices: [],
 };
-const AMBIENCE_SLOTS: readonly AmbienceSlot[] = [
-  "slot_1",
-  "slot_2",
-  "slot_3",
-  "slot_4",
-];
+
 const PRESET_NO_ROOM_MESSAGE = "播放头之后的时间线时长不足，无法插入演出预设。";
 
 export function TimelineWorkspace({
@@ -419,8 +410,15 @@ export function TimelineWorkspace({
             // Set the requested audio policy before restoring a snapshot: the
             // snapshot can already contain a looping BGM from the story path.
             session.setMuted(muted);
-            const resolvedUrls = result.assets === undefined ? urls : previewAssetsToUrls(result.assets);
-            const visuals = buildEditorVisualResources(draft, resolvedUrls, result);
+            const resolvedUrls =
+              result.assets === undefined
+                ? urls
+                : previewAssetsToUrls(result.assets);
+            const visuals = buildEditorVisualResources(
+              draft,
+              resolvedUrls,
+              result,
+            );
             surface.setVisualResources(visuals.textBlocks, visuals.particles);
             await session.load({
               update: result.update,
@@ -524,7 +522,10 @@ export function TimelineWorkspace({
       void session
         .load({
           update,
-          assets: current.assets === undefined ? urls : previewAssetsToUrls(current.assets),
+          assets:
+            current.assets === undefined
+              ? urls
+              : previewAssetsToUrls(current.assets),
           snapshot: current.start_snapshot,
           world: "restore",
           animations: animationMap,
@@ -644,29 +645,15 @@ export function TimelineWorkspace({
       trackIndex: number,
       channel: string,
       value: number,
-    ): TimelineNode => {
-      const tracks = structuredClone(next.tracks);
-      const track = tracks[trackIndex];
-      if (track === undefined) return next;
-      const at = snapTime(playheadRef.current, snap, next.duration_ms);
-      const frames = [...(track.channels[channel] ?? [])];
-      const index = frames.findIndex((frame) => frame.at_ms === at);
-      const keyframe = { at_ms: at, value, easing: "linear" as const };
-      if (index >= 0) frames[index] = keyframe;
-      else {
-        if (frames.length === 0 && at > 0 && track.type !== "video") {
-          frames.push({
-            at_ms: 0,
-            value: "inherit",
-            easing: "linear",
-          });
-        }
-        frames.push(keyframe);
-      }
-      frames.sort((left, right) => left.at_ms - right.at_ms);
-      track.channels[channel] = frames;
-      return { ...next, tracks };
-    },
+    ): TimelineNode =>
+      upsertKeyframeAt(
+        next,
+        trackIndex,
+        channel,
+        value,
+        playheadRef.current,
+        snap,
+      ),
     [snap],
   );
 
@@ -680,7 +667,8 @@ export function TimelineWorkspace({
       let trackIndex = next.tracks.findIndex(
         (track) =>
           (track.type === "sprite" && track.sprite_id === object.id) ||
-          (track.type === "emitter" && `emitter:${track.emitter_id}` === object.id) ||
+          (track.type === "emitter" &&
+            `emitter:${track.emitter_id}` === object.id) ||
           (track.type === "button" && track.instance_id === object.id) ||
           (track.type === "video" && `video:${track.asset}` === object.id),
       );
@@ -695,7 +683,12 @@ export function TimelineWorkspace({
         trackIndex = next.tracks.length - 1;
       }
       if (trackIndex < 0 && object.kind === "emitter") {
-        next.tracks.push({ type: "emitter", emitter_id: object.id.slice("emitter:".length), remove_at_end: false, channels: {} });
+        next.tracks.push({
+          type: "emitter",
+          emitter_id: object.id.slice("emitter:".length),
+          remove_at_end: false,
+          channels: {},
+        });
         trackIndex = next.tracks.length - 1;
       }
       if (trackIndex < 0 && object.kind === "button") {
@@ -707,33 +700,7 @@ export function TimelineWorkspace({
         trackIndex = next.tracks.length - 1;
       }
       if (trackIndex < 0) return;
-      const channels =
-        object.kind === "video"
-          ? ["x", "y", "width", "height", "opacity", "z"]
-          : object.kind === "emitter"
-            ? ["x", "y", "scale", "rotation_deg", "opacity", "z"]
-            : object.kind === "button"
-            ? [
-                "x",
-                "y",
-                "width",
-                "height",
-                "scale_x",
-                "scale_y",
-                "rotation_deg",
-                "opacity",
-                "z",
-              ]
-            : [
-                "x",
-                "y",
-                "scale",
-                "scale_x",
-                "scale_y",
-                "rotation_deg",
-                "opacity",
-                "z",
-              ];
+      const channels = objectChannels(object.kind);
       for (const channel of channels) {
         const value = transform[channel as keyof SceneObjectFrame];
         if (typeof value === "number")
@@ -770,50 +737,15 @@ export function TimelineWorkspace({
     const move = (moveEvent: PointerEvent): void => {
       const dx = ((moveEvent.clientX - startX) / rect.width) * DESIGN_WIDTH;
       const dy = ((moveEvent.clientY - startY) / rect.height) * DESIGN_HEIGHT;
-      const camera = frame?.camera;
-      const screen = object.kind === "button" || object.space === "screen";
-      const down = !screen && camera !== undefined ? stagePointToWorld({ x: 0, y: 0 }, camera) : { x: 0, y: 0 };
-      const now = !screen && camera !== undefined ? stagePointToWorld({ x: dx, y: dy }, camera) : { x: dx, y: dy };
       moved = moved || Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5;
-      const corner =
-        handle === "scale_tl" ||
-        handle === "scale_tr" ||
-        handle === "scale_bl" ||
-        handle === "scale_br";
-      const outwardDelta = corner
-        ? (dx * (handle.endsWith("l") ? -1 : 1) +
-            dy * (handle.startsWith("scale_t") ? -1 : 1)) /
-          2
-        : dy;
-      const transform: Partial<SceneObjectFrame> =
-        handle === "move"
-          ? { x: initial.x + now.x - down.x, y: initial.y + now.y - down.y }
-          : handle === "rotate"
-            ? { rotation_deg: initial.rotation_deg + dx * 0.35 }
-            : handle === "scale_x"
-              ? object.kind === "video"
-                ? { width: Math.max(16, initial.width + dx) }
-                : { scale_x: Math.max(0.05, initial.scale_x + dx / 450) }
-              : handle === "scale_y"
-                ? object.kind === "video"
-                  ? { height: Math.max(16, initial.height + dy) }
-                  : { scale_y: Math.max(0.05, initial.scale_y - dy / 450) }
-                : object.kind === "video"
-                  ? {
-                      width: Math.max(16, initial.width + dx),
-                      height: Math.max(16, initial.height + dy),
-                    }
-                  : object.kind === "button"
-                    ? {
-                        scale_x: Math.max(0.05, initial.scale_x + dy / 450),
-                        scale_y: Math.max(0.05, initial.scale_y + dy / 450),
-                      }
-                    : {
-                        scale: Math.max(
-                          0.05,
-                          initial.scale + outwardDelta / 450,
-                        ),
-                      };
+      const transform = dragTransform(
+        handle,
+        object,
+        initial,
+        dx,
+        dy,
+        frame?.camera,
+      );
       surfaceRef.current?.setObjectOverride(object.id, transform);
       setFrame((current) =>
         current === null
@@ -859,27 +791,7 @@ export function TimelineWorkspace({
         ?.frameAt(playheadRef.current)
         .objects.find((candidate) => candidate.id === object.id);
       if (moved && finalObject !== undefined) {
-        const transform =
-          handle === "move"
-            ? { x: finalObject.x, y: finalObject.y }
-            : handle === "rotate"
-              ? { rotation_deg: finalObject.rotation_deg }
-              : handle === "scale_x"
-                ? object.kind === "video"
-                  ? { width: finalObject.width }
-                  : { scale_x: finalObject.scale_x }
-                : handle === "scale_y"
-                  ? object.kind === "video"
-                    ? { height: finalObject.height }
-                    : { scale_y: finalObject.scale_y }
-                  : object.kind === "video"
-                    ? { width: finalObject.width, height: finalObject.height }
-                    : object.kind === "button"
-                      ? {
-                          scale_x: finalObject.scale_x,
-                          scale_y: finalObject.scale_y,
-                        }
-                      : { scale: finalObject.scale };
+        const transform = releasedTransform(handle, object, finalObject);
         writeObjectTransform(finalObject, transform);
       }
     };
@@ -952,141 +864,25 @@ export function TimelineWorkspace({
   };
 
   const addTrack = (): void => {
-    const current = nodeRef.current;
     const selected =
       selectedId === null
         ? undefined
         : frame?.objects.find((object) => object.id === selectedId);
-    const trackType = selected?.kind ?? newTrackType;
-    if (
-      trackType === "button" &&
-      selected === undefined &&
-      selectedButtonInstanceId === ""
-    ) {
-      onError("当前场景没有可添加到时间线的按钮实例。");
+    const plan = planNewTrack({
+      current: nodeRef.current,
+      newTrackType,
+      objectIds: (frame?.objects ?? []).map((object) => object.id),
+      selected,
+      selectedButtonInstanceId,
+      spriteAsset: firstVisibleAssetId(assets, assetLayout, "sprite"),
+      videoAsset: firstVisibleAssetId(assets, assetLayout, "video"),
+    });
+    if ("error" in plan) {
+      onError(plan.error);
       return;
     }
-    if (
-      trackType === "button" &&
-      current.tracks.some(
-        (track) =>
-          track.type === "button" &&
-          track.instance_id === (selected?.id ?? selectedButtonInstanceId),
-      )
-    ) {
-      onError("同一时间线中不能重复添加同一按钮实例轨道。");
-      return;
-    }
-    if (trackType === "emitter" && selected?.kind !== "emitter") {
-      onError("请先选择场景中已启动的发射器实例。单次爆发和单个粒子不能添加轨道。");
-      return;
-    }
-    if (selected?.kind === "emitter" && current.tracks.some((track) =>
-      track.type === "emitter" && `emitter:${track.emitter_id}` === selected.id
-    )) {
-      onError("选中的发射器已有时间线轨道。");
-      return;
-    }
-    const spriteAsset = firstVisibleAssetId(assets, assetLayout, "sprite");
-    const videoAsset = firstVisibleAssetId(assets, assetLayout, "video");
-    const ambienceSlot =
-      AMBIENCE_SLOTS.find(
-        (slot) =>
-          !current.tracks.some(
-            (track) => track.type === "ambience" && track.slot === slot,
-          ),
-      ) ?? "slot_1";
-    if (
-      trackType === "ambience" &&
-      current.tracks.filter((track) => track.type === "ambience").length >=
-        AMBIENCE_SLOTS.length
-    ) {
-      onError("环境声轨道最多只能使用四个固定槽位。");
-      return;
-    }
-    if (
-      trackType === "video" &&
-      selected === undefined &&
-      videoAsset === null
-    ) {
-      onError("没有可用的视频素材（或全部已隐藏），无法新建视频轨。");
-      return;
-    }
-    if (
-      trackType === "video" &&
-      current.tracks.some((track) => track.type === "video")
-    ) {
-      onError("一条时间线只能有一条视频轨。");
-      return;
-    }
-    if (
-      (trackType === "camera" || trackType === "bgm") &&
-      current.tracks.some((track) => track.type === trackType)
-    ) {
-      onError(`一条时间线只能有一条${trackType}轨。`);
-      return;
-    }
-    const spriteId =
-      selected?.kind === "sprite"
-        ? selected.id
-        : (() => {
-            const used = new Set([
-              ...current.tracks
-                .filter((track) => track.type === "sprite")
-                .map((track) => track.sprite_id),
-              ...(frame?.objects ?? []).map((object) => object.id),
-            ]);
-            let index = 1;
-            while (used.has(`sprite_${index}`)) index += 1;
-            return `sprite_${index}`;
-          })();
-    if (
-      trackType === "sprite" &&
-      current.tracks.some(
-        (track) => track.type === "sprite" && track.sprite_id === spriteId,
-      )
-    ) {
-      onError("选中的立绘已有时间线轨道。");
-      return;
-    }
-    const track: TimelineTrack =
-      trackType === "sprite"
-        ? {
-            type: "sprite",
-            sprite_id: spriteId,
-            asset: selected?.kind === "sprite" ? null : spriteAsset,
-            remove_at_end: false,
-            channels: {},
-          }
-        : trackType === "video"
-          ? {
-              type: "video",
-              asset:
-                selected?.kind === "video"
-                  ? selected.asset
-                  : (videoAsset ?? ""),
-              clip_start_ms: 0,
-              clip_end_ms: null,
-              loop: false,
-              fit: "contain",
-              audio_enabled: true,
-              channels: {},
-            }
-          : trackType === "button"
-            ? {
-                type: "button",
-                instance_id:
-                  selected?.kind === "button"
-                    ? selected.id
-                    : selectedButtonInstanceId,
-                channels: {},
-              }
-            : trackType === "emitter"
-              ? { type: "emitter", emitter_id: selected?.id.slice("emitter:".length) ?? "", remove_at_end: false, channels: {} }
-              : trackType === "ambience"
-                ? { type: "ambience", slot: ambienceSlot, channels: {} }
-                : { type: trackType, channels: {} };
-    commitNode({ ...current, tracks: [...current.tracks, track] });
+    const current = nodeRef.current;
+    commitNode({ ...current, tracks: [...current.tracks, plan.track] });
   };
 
   const addTimelineEvent = (kind: TimelineEvent["type"]): void => {
@@ -1096,26 +892,7 @@ export function TimelineWorkspace({
     }
     const current = nodeRef.current;
     const atMs = snapTime(playheadRef.current, snap, current.duration_ms);
-    const used = new Set(current.events.map((event) => event.id));
-    let index = current.events.length + 1;
-    const prefix = kind === "sfx" ? "sfx" : "flash";
-    while (used.has(`${prefix}_${index}`)) index += 1;
-    const event: TimelineEvent =
-      kind === "sfx"
-        ? {
-            type: "sfx",
-            id: `${prefix}_${index}`,
-            at_ms: atMs,
-            asset: visibleSfx ?? "",
-            volume: 1,
-          }
-        : {
-            type: "screen_effect",
-            id: `${prefix}_${index}`,
-            at_ms: atMs,
-            effect: defaultFlashEffect(),
-            duration_ms: Math.max(1, Math.min(200, current.duration_ms - atMs)),
-          };
+    const event = newTimelineEvent(kind, current, atMs, visibleSfx ?? "");
     commitNode({
       ...current,
       events: [...current.events, event].sort(
@@ -1533,303 +1310,66 @@ export function TimelineWorkspace({
               ref={canvasRef}
               width={DESIGN_WIDTH}
             />
-            <div className="timeline-gizmo-layer">
-              {previewButtons !== undefined && buttonObjects.length > 0 && (
-                <div className="timeline-button-layer">
-                  {buttonObjects.map((object) => {
-                    const base = previewButtons[object.id];
-                    if (base === undefined) return null;
-                    return (
-                      <TemplateButton
-                        animations={animationMap}
-                        assets={urls}
-                        button={evaluatedButtonSnapshot(base, object)}
-                        className="scene-button"
-                        disabled
-                        key={object.id}
-                        onActivate={() => undefined}
-                        paused
-                        playbackRate={1}
-                        sessionKey={`${targetKey}:${object.id}`}
-                        style={buttonPreviewStyle(object)}
-                      />
-                    );
-                  })}
-                </div>
-              )}
-              {gizmoObjects.map((object) => (
-                <div
-                  className={`timeline-gizmo${selectedId === object.id ? " selected" : ""}`}
-                  key={object.id}
-                  onPointerDown={(event) =>
-                    beginObjectDrag(event, object, "move")
-                  }
-                  style={gizmoStyle(object, frame?.camera)}
-                >
-                  <span>{object.id}</span>
-                  {selectedId === object.id && (
-                    <>
-                      {object.kind === "sprite" ? (
-                        <>
-                          <button
-                            aria-label="左上角缩放素材"
-                            className="timeline-gizmo-scale timeline-gizmo-scale-tl"
-                            onPointerDown={(event) =>
-                              beginObjectDrag(event, object, "scale_tl")
-                            }
-                            type="button"
-                          />
-                          <button
-                            aria-label="右上角缩放素材"
-                            className="timeline-gizmo-scale timeline-gizmo-scale-tr"
-                            onPointerDown={(event) =>
-                              beginObjectDrag(event, object, "scale_tr")
-                            }
-                            type="button"
-                          />
-                          <button
-                            aria-label="左下角缩放素材"
-                            className="timeline-gizmo-scale timeline-gizmo-scale-bl"
-                            onPointerDown={(event) =>
-                              beginObjectDrag(event, object, "scale_bl")
-                            }
-                            type="button"
-                          />
-                          <button
-                            aria-label="右下角缩放素材"
-                            className="timeline-gizmo-scale timeline-gizmo-scale-br"
-                            onPointerDown={(event) =>
-                              beginObjectDrag(event, object, "scale_br")
-                            }
-                            type="button"
-                          />
-                        </>
-                      ) : (
-                        <button
-                          aria-label="缩放素材"
-                          className="timeline-gizmo-scale"
-                          onPointerDown={(event) =>
-                            beginObjectDrag(event, object, "scale")
-                          }
-                          type="button"
-                        />
-                      )}
-                      {object.kind !== "emitter" && <>
-                      <button
-                        aria-label="水平缩放素材"
-                        className="timeline-gizmo-scale-x"
-                        onPointerDown={(event) =>
-                          beginObjectDrag(event, object, "scale_x")
-                        }
-                        type="button"
-                      />
-                      <button
-                        aria-label="垂直缩放素材"
-                        className="timeline-gizmo-scale-y"
-                        onPointerDown={(event) =>
-                          beginObjectDrag(event, object, "scale_y")
-                        }
-                        type="button"
-                      />
-                      </>}
-                      {(object.kind === "sprite" || object.kind === "emitter" ||
-                        object.kind === "button") && (
-                        <button
-                          aria-label="旋转素材"
-                          className="timeline-gizmo-rotate"
-                          onPointerDown={(event) =>
-                            beginObjectDrag(event, object, "rotate")
-                          }
-                          type="button"
-                        />
-                      )}
-                    </>
-                  )}
-                </div>
-              ))}
-              {tool === "camera" && (
-                <div
-                  className="timeline-camera-gizmo"
-                  onPointerDown={(event) => beginCameraDrag(event, "move")}
-                >
-                  <button
-                    aria-label="缩放镜头"
-                    className="timeline-camera-zoom"
-                    onPointerDown={(event) => beginCameraDrag(event, "zoom")}
-                    type="button"
-                  />
-                  <button
-                    aria-label="旋转镜头"
-                    className="timeline-camera-rotate"
-                    onPointerDown={(event) => beginCameraDrag(event, "rotate")}
-                    type="button"
-                  />
-                </div>
-              )}
-            </div>
+            <GizmoLayer
+              animationMap={animationMap}
+              buttonObjects={buttonObjects}
+              camera={frame?.camera}
+              gizmoObjects={gizmoObjects}
+              onCameraDrag={beginCameraDrag}
+              onObjectDrag={beginObjectDrag}
+              previewButtons={previewButtons}
+              selectedId={selectedId}
+              targetKey={targetKey}
+              tool={tool}
+              urls={urls}
+            />
           </div>
-          <div className="timeline-workspace-controls">
-            <button onClick={() => setPlaybackStartPosition(0)} type="button">
-              ■
-            </button>
-            <button
-              className={tool === "select" ? "active" : ""}
-              onClick={() => setTool("select")}
-              type="button"
-            >
-              选择
-            </button>
-            <button
-              className={tool === "camera" ? "active" : ""}
-              onClick={() => setTool("camera")}
-              type="button"
-            >
-              镜头
-            </button>
-            {!autoKey &&
+          <StageToolbar
+            addTrackDisabled={
+              selectedObject === undefined &&
+              newTrackType === "video" &&
+              visibleVideo === null
+            }
+            addTrackTitle={
+              selectedObject === undefined &&
+              newTrackType === "video" &&
+              visibleVideo === null
+                ? "没有可用的视频素材（或全部已隐藏），无法新建视频轨"
+                : undefined
+            }
+            buttonInstanceIds={buttonInstanceIds}
+            hasPendingEdits={
+              !autoKey &&
               (Object.keys(pendingTransforms).length > 0 ||
-                pendingCamera !== null) && (
-                <button onClick={commitPending} type="button">
-                  写入所改通道
-                </button>
-              )}
-            <select
-              aria-label="新建轨道类型"
-              onChange={(event) =>
-                setNewTrackType(
-                  event.currentTarget.value as TimelineTrack["type"],
-                )
-              }
-              value={newTrackType}
-            >
-              <option value="sprite">Sprite 轨</option>
-              <option value="emitter">发射器整体轨</option>
-              <option value="camera">镜头轨</option>
-              <option value="video">视频轨</option>
-              <option value="bgm">BGM 轨</option>
-              <option value="ambience">环境声轨</option>
-              <option value="button">按钮轨</option>
-            </select>
-            {newTrackType === "button" && (
-              <select
-                aria-label="按钮实例"
-                disabled={buttonInstanceIds.length === 0}
-                onChange={(event) =>
-                  setNewButtonInstanceId(event.currentTarget.value)
-                }
-                value={selectedButtonInstanceId}
-              >
-                {buttonInstanceIds.length === 0 && (
-                  <option value="">暂无按钮实例</option>
-                )}
-                {buttonInstanceIds.map((instanceId) => (
-                  <option key={instanceId} value={instanceId}>
-                    {instanceId}
-                  </option>
-                ))}
-              </select>
-            )}
-            <button
-              disabled={
-                selectedObject === undefined &&
-                newTrackType === "video" &&
-                visibleVideo === null
-              }
-              onClick={addTrack}
-              title={
-                selectedObject === undefined &&
-                newTrackType === "video" &&
-                visibleVideo === null
-                  ? "没有可用的视频素材（或全部已隐藏），无法新建视频轨"
-                  : undefined
-              }
-              type="button"
-            >
-              ＋轨道
-            </button>
-            <button
-              disabled={visibleSfx === null}
-              onClick={() => addTimelineEvent("sfx")}
-              title={
-                visibleSfx === null
-                  ? "没有可用的音效素材（或全部已隐藏），无法新建 SFX 事件"
-                  : undefined
-              }
-              type="button"
-            >
-              ＋SFX
-            </button>
-            <button
-              onClick={() => addTimelineEvent("screen_effect")}
-              type="button"
-            >
-              ＋闪光
-            </button>
-            <select
-              aria-label="插入演出预设"
-              onChange={(event) => {
-                const preset = findScreenEffectPreset(
-                  event.currentTarget.value,
-                );
-                if (preset !== undefined) addScreenEffectPreset(preset);
-              }}
-              title="在播放头处插入一组组合好的屏幕效果事件，插入后可逐个调整"
-              value=""
-            >
-              <option value="">＋演出预设…</option>
-              {SCREEN_EFFECT_PRESETS.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.label}（{preset.description}）
-                </option>
-              ))}
-            </select>
-          </div>
+                pendingCamera !== null)
+            }
+            newTrackType={newTrackType}
+            onAddEvent={addTimelineEvent}
+            onAddPreset={addScreenEffectPreset}
+            onAddTrack={addTrack}
+            onButtonInstanceChange={setNewButtonInstanceId}
+            onCommitPending={commitPending}
+            onNewTrackTypeChange={setNewTrackType}
+            onStop={() => setPlaybackStartPosition(0)}
+            onToolChange={setTool}
+            selectedButtonInstanceId={selectedButtonInstanceId}
+            sfxAvailable={visibleSfx !== null}
+            tool={tool}
+          />
         </section>
         <aside className="timeline-workspace-inspector">
-          <h3>预览上下文</h3>
-          <p>使用运行时默认变量和已保存路径构造，不会写入玩家进度。</p>
-          {contextError !== null && (
-            <div className="timeline-context-error">{contextError}</div>
-          )}
-          {pendingChoice !== null && (
-            <div className="timeline-choice-wizard">
-              <strong>请选择预览路径</strong>
-              {pendingChoice.choices.map((choice) => (
-                <button
-                  disabled={!choice.enabled}
-                  key={choice.id}
-                  onClick={() => onChoice(choice.id)}
-                  type="button"
-                >
-                  {choice.label}
-                </button>
-              ))}
-            </div>
-          )}
-          <label className="timeline-json-field">
-            变量覆盖（JSON）
-            <textarea
-              defaultValue={stringifyScalarJson(settings.variable_overrides, 2)}
-              key={stringifyScalarJson(settings.variable_overrides)}
-              onBlur={(event) => {
-                try {
-                  const value = JSON.parse(event.currentTarget.value) as Record<
-                    string,
-                    ScalarValue
-                  >;
-                  const nextSettings = {
-                    ...settings,
-                    variable_overrides: value,
-                  };
-                  onPreviewSettingsChange(nextSettings);
-                  void buildContext(nextSettings);
-                } catch {
-                  onError("变量覆盖不是有效 JSON");
-                }
-              }}
-              spellCheck={false}
-            />
-          </label>
+          <PreviewContextPanel
+            contextError={contextError}
+            onChoice={onChoice}
+            onInvalidOverrides={() => onError("变量覆盖不是有效 JSON")}
+            onOverridesChange={(variable_overrides) => {
+              const nextSettings = { ...settings, variable_overrides };
+              onPreviewSettingsChange(nextSettings);
+              void buildContext(nextSettings);
+            }}
+            overrides={settings.variable_overrides}
+            pendingChoice={pendingChoice}
+          />
           <h3>对象</h3>
           <div className="timeline-object-list">
             {objects.map((object) => (
@@ -1844,7 +1384,9 @@ export function TimelineWorkspace({
                     ? "VID"
                     : object.kind === "button"
                       ? "BTN"
-                      : object.kind === "emitter" ? "EMT" : "SPR"}
+                      : object.kind === "emitter"
+                        ? "EMT"
+                        : "SPR"}
                 </span>
                 {object.id}
                 <small>z {Math.round(object.z)}</small>
@@ -1852,219 +1394,10 @@ export function TimelineWorkspace({
             ))}
           </div>
           {selectedObject !== undefined && (
-            <div className="timeline-object-inspector">
-              <strong>选中对象</strong>
-              <label>
-                X
-                <input
-                  onChange={(event) =>
-                    editObjectChannel(
-                      selectedObject,
-                      "x",
-                      Number(event.currentTarget.value),
-                    )
-                  }
-                  step="0.1"
-                  type="number"
-                  value={selectedObject.x}
-                />
-              </label>
-              <label>
-                Y
-                <input
-                  onChange={(event) =>
-                    editObjectChannel(
-                      selectedObject,
-                      "y",
-                      Number(event.currentTarget.value),
-                    )
-                  }
-                  step="0.1"
-                  type="number"
-                  value={selectedObject.y}
-                />
-              </label>
-              {selectedObject.kind === "video" ? (
-                <>
-                  <label>
-                    Width
-                    <input
-                      min="16"
-                      onChange={(event) =>
-                        editObjectChannel(
-                          selectedObject,
-                          "width",
-                          Math.max(16, Number(event.currentTarget.value)),
-                        )
-                      }
-                      step="1"
-                      type="number"
-                      value={selectedObject.width}
-                    />
-                  </label>
-                  <label>
-                    Height
-                    <input
-                      min="16"
-                      onChange={(event) =>
-                        editObjectChannel(
-                          selectedObject,
-                          "height",
-                          Math.max(16, Number(event.currentTarget.value)),
-                        )
-                      }
-                      step="1"
-                      type="number"
-                      value={selectedObject.height}
-                    />
-                  </label>
-                </>
-              ) : (
-                <>
-                  {(selectedObject.kind === "sprite" || selectedObject.kind === "emitter") && (
-                    <label>
-                      Scale
-                      <input
-                        onChange={(event) =>
-                          editObjectChannel(
-                            selectedObject,
-                            "scale",
-                            Number(event.currentTarget.value),
-                          )
-                        }
-                        min="0.01"
-                        step="0.01"
-                        type="number"
-                        value={selectedObject.scale}
-                      />
-                    </label>
-                  )}
-                  {selectedObject.kind === "button" && (
-                    <>
-                      <label>
-                        Width
-                        <input
-                          min="1"
-                          onChange={(event) =>
-                            editObjectChannel(
-                              selectedObject,
-                              "width",
-                              Math.max(1, Number(event.currentTarget.value)),
-                            )
-                          }
-                          step="1"
-                          type="number"
-                          value={selectedObject.width}
-                        />
-                      </label>
-                      <label>
-                        Height
-                        <input
-                          min="1"
-                          onChange={(event) =>
-                            editObjectChannel(
-                              selectedObject,
-                              "height",
-                              Math.max(1, Number(event.currentTarget.value)),
-                            )
-                          }
-                          step="1"
-                          type="number"
-                          value={selectedObject.height}
-                        />
-                      </label>
-                    </>
-                  )}
-                  {selectedObject.kind !== "emitter" && <>
-                  <label>
-                    Scale X
-                    <input
-                      onChange={(event) =>
-                        editObjectChannel(
-                          selectedObject,
-                          "scale_x",
-                          Number(event.currentTarget.value),
-                        )
-                      }
-                      min="0.01"
-                      step="0.01"
-                      type="number"
-                      value={selectedObject.scale_x}
-                    />
-                  </label>
-                  <label>
-                    Scale Y
-                    <input
-                      onChange={(event) =>
-                        editObjectChannel(
-                          selectedObject,
-                          "scale_y",
-                          Number(event.currentTarget.value),
-                        )
-                      }
-                      min="0.01"
-                      step="0.01"
-                      type="number"
-                      value={selectedObject.scale_y}
-                    />
-                  </label>
-                  </>}
-                  <label>
-                    Rotation
-                    <input
-                      onChange={(event) =>
-                        editObjectChannel(
-                          selectedObject,
-                          "rotation_deg",
-                          Number(event.currentTarget.value),
-                        )
-                      }
-                      step="0.1"
-                      type="number"
-                      value={selectedObject.rotation_deg}
-                    />
-                  </label>
-                </>
-              )}
-              <label>
-                Opacity
-                <input
-                  max="1"
-                  min="0"
-                  onChange={(event) =>
-                    editObjectChannel(
-                      selectedObject,
-                      "opacity",
-                      Math.max(
-                        0,
-                        Math.min(1, Number(event.currentTarget.value)),
-                      ),
-                    )
-                  }
-                  step="0.01"
-                  type="number"
-                  value={selectedObject.opacity}
-                />
-              </label>
-              <label>
-                Z
-                <input
-                  onChange={(event) =>
-                    editObjectChannel(
-                      selectedObject,
-                      "z",
-                      Math.round(Number(event.currentTarget.value)),
-                    )
-                  }
-                  step="1"
-                  type="number"
-                  value={Math.round(selectedObject.z)}
-                />
-              </label>
-              <p className="timeline-selection-hint">
-                拖动画布对象移动；角点缩放，顶部手柄旋转。当前播放头会作为关键帧时间。
-              </p>
-            </div>
+            <ObjectInspector
+              object={selectedObject}
+              onEditChannel={editObjectChannel}
+            />
           )}
           {selectedKeyframe !== null && (
             <TimelineKeyframeInspector
@@ -2124,360 +1457,20 @@ export function TimelineWorkspace({
         />
       </section>
       {exitPrompt && (
-        <div className="timeline-exit-dialog" role="dialog">
-          <div>
-            <strong>存在未写入的姿态</strong>
-            <p>离开时间轴前如何处理当前修改？</p>
-            <div>
-              <button
-                onClick={() => {
-                  commitPending();
-                  setExitPrompt(false);
-                  onBack();
-                }}
-                type="button"
-              >
-                写入并返回
-              </button>
-              <button
-                onClick={() => {
-                  discardPending();
-                  onBack();
-                }}
-                type="button"
-              >
-                丢弃并返回
-              </button>
-              <button onClick={() => setExitPrompt(false)} type="button">
-                取消
-              </button>
-            </div>
-          </div>
-        </div>
+        <PendingExitDialog
+          onCancel={() => setExitPrompt(false)}
+          onCommitAndLeave={() => {
+            commitPending();
+            setExitPrompt(false);
+            onBack();
+          }}
+          onDiscardAndLeave={() => {
+            discardPending();
+            onBack();
+          }}
+        />
       )}
     </main>
   );
 }
 
-function snapTime(value: number, snap: number, duration: number): number {
-  return Math.max(0, Math.min(duration, Math.round(value / snap) * snap));
-}
-
-function TimelineKeyframeInspector({
-  allowInherit,
-  selection,
-  onChange,
-}: {
-  allowInherit: boolean;
-  selection: TimelineSelection;
-  onChange(patch: Partial<TimelineKeyframe>): void;
-}): ReactElement {
-  const frame = selection.frame;
-  const cubicEasing =
-    typeof frame.easing === "object" ? frame.easing : undefined;
-  const isCubic = cubicEasing !== undefined;
-  const cubic =
-    cubicEasing?.cubic_bezier ??
-    ([0.25, 0.1, 0.25, 1] as [number, number, number, number]);
-  return (
-    <section className="timeline-keyframe-inspector">
-      <strong>
-        选中关键帧 · {selection.channel} · {frame.at_ms} ms
-      </strong>
-      <label>
-        值来源
-        <select
-          value={frame.value === "inherit" ? "inherit" : "number"}
-          onChange={(event) =>
-            onChange({
-              at_ms: event.currentTarget.value === "inherit" ? 0 : frame.at_ms,
-              value: event.currentTarget.value === "inherit" ? "inherit" : 0,
-            })
-          }
-        >
-          <option value="number">固定数值</option>
-          {allowInherit && <option value="inherit">继承入口值</option>}
-        </select>
-      </label>
-      <label>
-        时间
-        <input
-          disabled={frame.value === "inherit"}
-          min={0}
-          type="number"
-          value={frame.at_ms}
-          onChange={(event) =>
-            onChange({ at_ms: Number(event.currentTarget.value) })
-          }
-        />
-      </label>
-      <label>
-        数值
-        <input
-          disabled={frame.value === "inherit"}
-          step="0.01"
-          type="number"
-          value={frame.value === "inherit" ? 0 : frame.value}
-          onChange={(event) =>
-            onChange({ value: Number(event.currentTarget.value) })
-          }
-        />
-      </label>
-      {frame.value === "inherit" && (
-        <small>在 0 ms 读取该通道进入时间轴时的真实值。</small>
-      )}
-      <label>
-        缓动
-        <select
-          value={isCubic ? "cubic" : (frame.easing as string)}
-          onChange={(event) => {
-            const value = event.currentTarget.value;
-            onChange({
-              easing:
-                value === "cubic"
-                  ? { cubic_bezier: cubic }
-                  : (value as TimelineEasing),
-            });
-          }}
-        >
-          <option value="step">step</option>
-          <option value="linear">linear</option>
-          <option value="ease_in">ease in</option>
-          <option value="ease_out">ease out</option>
-          <option value="ease_in_out">ease in/out</option>
-          <option value="cubic">cubic-bezier</option>
-        </select>
-      </label>
-      {isCubic && (
-        <div className="timeline-cubic-controls">
-          {cubic.map((value, index) => (
-            <input
-              aria-label={`Bezier ${index + 1}`}
-              key={index}
-              max={index % 2 === 0 ? 1 : 4}
-              min={index % 2 === 0 ? 0 : -4}
-              step="0.01"
-              type="number"
-              value={value}
-              onChange={(event) => {
-                const next = [...cubic] as [number, number, number, number];
-                next[index] = Number(event.currentTarget.value);
-                onChange({ easing: { cubic_bezier: next } });
-              }}
-            />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function TimelineEventInspector({
-  assets,
-  selection,
-  onChange,
-}: {
-  assets: EditorAsset[];
-  selection: TimelineEventSelection;
-  onChange(event: TimelineEvent): void;
-}): ReactElement {
-  const event = selection.event;
-  return (
-    <section className="timeline-keyframe-inspector">
-      <strong>
-        选中事件 · {event.type} · {event.id}
-      </strong>
-      <label>
-        时间
-        <input
-          min={0}
-          type="number"
-          value={event.at_ms}
-          onChange={(input) =>
-            onChange({
-              ...event,
-              at_ms: Number(input.currentTarget.value),
-            })
-          }
-        />
-      </label>
-      {event.type === "sfx" ? (
-        <>
-          <label>
-            素材
-            <AssetChooser
-              assets={assets}
-              kind="sfx"
-              label="音效素材"
-              onChange={(value) => onChange({ ...event, asset: value ?? "" })}
-              value={event.asset || null}
-            />
-          </label>
-          <label>
-            音量
-            <input
-              max="1"
-              min="0"
-              step="0.01"
-              type="number"
-              value={event.volume}
-              onChange={(input) =>
-                onChange({
-                  ...event,
-                  volume: Math.max(
-                    0,
-                    Math.min(1, Number(input.currentTarget.value)),
-                  ),
-                })
-              }
-            />
-          </label>
-        </>
-      ) : (
-        <>
-          <ScreenEffectFields
-            onChange={(effect) => onChange({ ...event, effect })}
-            value={event.effect}
-          />
-          <label>
-            时长
-            <input
-              min={1}
-              type="number"
-              value={event.duration_ms}
-              onChange={(input) =>
-                onChange({
-                  ...event,
-                  duration_ms: Math.max(1, Number(input.currentTarget.value)),
-                })
-              }
-            />
-          </label>
-        </>
-      )}
-    </section>
-  );
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function selectedObjectAssetChanged(
-  current: TimelineNode,
-  next: TimelineNode,
-  objectId: string,
-): boolean {
-  const findAsset = (node: TimelineNode): string | null | undefined => {
-    const sprite = node.tracks.find(
-      (track) => track.type === "sprite" && track.sprite_id === objectId,
-    );
-    if (sprite?.type === "sprite") return sprite.asset;
-    const video = node.tracks.find(
-      (track) => track.type === "video" && `video:${track.asset}` === objectId,
-    );
-    return video?.type === "video" ? video.asset : undefined;
-  };
-  const currentAsset = findAsset(current);
-  return currentAsset !== undefined && findAsset(next) !== currentAsset;
-}
-
-/**
- * Evaluated placement merged onto the runtime button definition.
- *
- * A timeline cue animates only the placement channels (`x`/`y`/`width`/
- * `height`/`scale_x`/`scale_y`/`rotation_deg`/`opacity`/`z`); the artwork,
- * `asset_mode`, `fit` and the per-state animations stay the template's.  The
- * session-evaluated frame is authoritative for every channel it owns, so
- * scrubbing reproduces exactly what the game would show at that playhead.
- */
-function evaluatedButtonSnapshot(
-  base: ButtonSnapshot,
-  object: SceneObjectFrame,
-): ButtonSnapshot {
-  return {
-    ...base,
-    id: object.id,
-    x: object.x,
-    y: object.y,
-    width: object.width,
-    height: object.height,
-    scale_x: object.scale_x,
-    scale_y: object.scale_y,
-    rotation_deg: object.rotation_deg,
-    opacity: object.opacity,
-    z: object.z,
-  };
-}
-
-/**
- * Placement for one evaluated button inside the scaled design layer.
- *
- * The layer keeps the 16:9 aspect of the 1920x1080 design surface, so
- * percentage units map design pixels exactly and the shared `scene-button`
- * layout stays identical to `ButtonLayer`'s design-pixel placement.  The
- * preview never intercepts pointer events; the gizmo layer above owns the
- * authoring gestures.
- */
-function buttonPreviewStyle(object: SceneObjectFrame): CSSProperties {
-  return {
-    left: `${(object.x / DESIGN_WIDTH) * 100}%`,
-    top: `${(object.y / DESIGN_HEIGHT) * 100}%`,
-    width: `${(object.width / DESIGN_WIDTH) * 100}%`,
-    height: `${(object.height / DESIGN_HEIGHT) * 100}%`,
-    opacity: object.opacity,
-    transform: `translate3d(0, 0, 0) rotate(${object.rotation_deg}deg) scale(${object.scale_x}, ${object.scale_y})`,
-    zIndex: Math.round(object.z),
-    pointerEvents: "none",
-  };
-}
-
-function gizmoStyle(
-  object: SceneObjectFrame,
-  camera: SceneFrame["camera"] | undefined,
-): React.CSSProperties {
-  const screen = object.kind === "button" || object.space === "screen";
-  const anchored = object.kind === "sprite" || object.kind === "emitter";
-  const anchorX = anchored ? (object.flip_x ? 1 - object.anchor_x : object.anchor_x) : 0;
-  const anchorY = anchored ? (object.anchor_y ?? 1) : 0;
-  const projected =
-    screen
-      ? { x: object.x, y: object.y }
-      : projectPoint(object.x, object.y, camera);
-  const zoom = screen ? 1 : (camera?.zoom ?? 1);
-  // Sprite dimensions already include their evaluated scale in
-  // SceneSurface.#spriteDimensions. Button dimensions are layout values, so
-  // their outer scale channels must be applied here.
-  const scaleX = object.kind === "button" ? object.scale_x : 1;
-  const scaleY = object.kind === "button" ? object.scale_y : 1;
-  const width = Math.max(40, object.width * scaleX * zoom);
-  const height = Math.max(56, object.height * scaleY * zoom);
-  const rotation =
-    (screen ? 0 : (camera?.rotation_deg ?? 0)) +
-    object.rotation_deg;
-  return {
-    left: `${(projected.x / DESIGN_WIDTH) * 100}%`,
-    top: `${(projected.y / DESIGN_HEIGHT) * 100}%`,
-    width: `${(width / DESIGN_WIDTH) * 100}%`,
-    height: `${(height / DESIGN_HEIGHT) * 100}%`,
-    transform: `translate(${-anchorX * 100}%, ${-anchorY * 100}%) rotate(${rotation}deg)`,
-    transformOrigin: `${anchorX * 100}% ${anchorY * 100}%`,
-  };
-}
-
-function projectPoint(
-  x: number,
-  y: number,
-  camera: SceneFrame["camera"] | undefined,
-): { x: number; y: number } {
-  if (camera === undefined) return { x, y };
-  const angle = (camera.rotation_deg * Math.PI) / 180;
-  const dx = x - (DESIGN_WIDTH / 2 + camera.x);
-  const dy = y - (DESIGN_HEIGHT / 2 + camera.y);
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  return {
-    x: DESIGN_WIDTH / 2 + (dx * cos - dy * sin) * camera.zoom,
-    y: DESIGN_HEIGHT / 2 + (dx * sin + dy * cos) * camera.zoom,
-  };
-}

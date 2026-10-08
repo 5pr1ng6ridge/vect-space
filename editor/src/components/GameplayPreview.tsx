@@ -60,6 +60,7 @@ import type {
   PreviewSessionTickResult,
   StoryLocation,
 } from "../types";
+import { errorMessage } from "./errorMessage";
 
 const DESIGN_WIDTH = 1920;
 const DESIGN_HEIGHT = 1080;
@@ -1114,6 +1115,3 @@ export function GameplayPreview({
   );
 }
 
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
-}

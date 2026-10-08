@@ -21,9 +21,9 @@ import type {
 } from "./types";
 
 /** `x` / `y` reference points may overshoot the reference rect by this much. */
-export const MAX_WINDOW_POINT = 4;
-export const MAX_WINDOW_OFFSET = 10_000;
-export const MAX_WINDOW_LOGICAL_SIZE = 10_000;
+const MAX_WINDOW_POINT = 4;
+const MAX_WINDOW_OFFSET = 10_000;
+const MAX_WINDOW_LOGICAL_SIZE = 10_000;
 /** Default length of a freshly added move/resize. */
 export const DEFAULT_WINDOW_MOVE_MS = 600;
 
@@ -86,7 +86,7 @@ export const PLACEMENT_PRESET_GROUP_LABELS: Record<
   current: "自身",
 };
 
-export interface PlacementPreset {
+interface PlacementPreset {
   id: PlacementPresetId;
   group: PlacementPresetGroup;
   /** Dropdown label. */
@@ -206,7 +206,7 @@ const PRESET_BY_ID = new Map(
   PLACEMENT_PRESETS.map((preset) => [preset.id, preset] as const),
 );
 
-export function placementPreset(id: PlacementPresetId): PlacementPreset {
+function placementPreset(id: PlacementPresetId): PlacementPreset {
   const preset = PRESET_BY_ID.get(id);
   if (preset === undefined) throw new Error(`unknown placement preset ${id}`);
   return preset;
@@ -267,13 +267,13 @@ export function detectPlacementPreset(
   return match?.id ?? null;
 }
 
-export const DEFAULT_LOGICAL_SIZE: Required<WindowSize> = {
+const DEFAULT_LOGICAL_SIZE: Required<WindowSize> = {
   unit: "logical",
   width: 960,
   height: 540,
 };
 
-export const DEFAULT_WORK_AREA_SIZE: Required<WindowSize> = {
+const DEFAULT_WORK_AREA_SIZE: Required<WindowSize> = {
   unit: "work_area",
   width: 0.5,
   height: 0.5,
@@ -397,7 +397,7 @@ export function describePlacement(
 }
 
 /** Short description of a requested size. */
-export function describeWindowSize(size: WindowSize): string {
+function describeWindowSize(size: WindowSize): string {
   return (size.unit ?? "logical") === "logical"
     ? `大小 ${round(size.width)}×${round(size.height)}`
     : `大小 工作区 ${percent(size.width)}×${percent(size.height)}`;

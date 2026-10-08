@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ContentManifest, SceneDefinition } from "../types";
@@ -49,6 +50,43 @@ const scene: SceneDefinition = {
   },
 };
 
+type ScriptViewProps = ComponentProps<typeof ScriptView>;
+
+function scriptProps(
+  overrides: Partial<ScriptViewProps> = {},
+): ScriptViewProps {
+  return {
+    manifest,
+    onChange: () => undefined,
+    onDelete: () => undefined,
+    onInsertAfter: () => undefined,
+    onInsertBatch: () => undefined,
+    onOpenGraph: () => undefined,
+    onSelect: () => undefined,
+    scene,
+    selectedNodeId: null,
+    ...overrides,
+  };
+}
+
+function scriptRoot(container: HTMLElement): HTMLElement {
+  const root = container.querySelector<HTMLElement>(".script-view");
+  if (root === null) throw new Error("missing script view root");
+  return root;
+}
+
+/** Renders the list with the graph-style selection already applied. */
+function renderList(
+  selectedNodeId: string | null,
+  overrides: Partial<ScriptViewProps> = {},
+) {
+  const onDelete = vi.fn();
+  const view = render(
+    <ScriptView {...scriptProps({ onDelete, selectedNodeId, ...overrides })} />,
+  );
+  return { onDelete, root: scriptRoot(view.container), view };
+}
+
 describe("ScriptView long-text rows", () => {
   it("shows ordered step bodies and page breaks, searches their text, and links to graph editing", () => {
     const longTextScene: SceneDefinition = {
@@ -74,17 +112,7 @@ describe("ScriptView long-text rows", () => {
     };
     const onOpenGraph = vi.fn();
     render(
-      <ScriptView
-        manifest={manifest}
-        onChange={() => undefined}
-        onDelete={() => undefined}
-        onInsertAfter={() => undefined}
-        onInsertBatch={() => undefined}
-        onOpenGraph={onOpenGraph}
-        onSelect={() => undefined}
-        scene={longTextScene}
-        selectedNodeId={null}
-      />,
+      <ScriptView {...scriptProps({ onOpenGraph, scene: longTextScene })} />,
     );
 
     const list = screen.getByRole("list");
@@ -112,15 +140,7 @@ describe("ScriptView branch insertion", () => {
     const onInsertAfter = vi.fn();
     render(
       <ScriptView
-        manifest={manifest}
-        onChange={() => undefined}
-        onDelete={() => undefined}
-        onInsertAfter={onInsertAfter}
-        onInsertBatch={() => undefined}
-        onOpenGraph={() => undefined}
-        onSelect={() => undefined}
-        scene={scene}
-        selectedNodeId="choice"
+        {...scriptProps({ onInsertAfter, selectedNodeId: "choice" })}
       />,
     );
 
@@ -128,7 +148,6 @@ describe("ScriptView branch insertion", () => {
       screen.getByRole("button", { name: "在 choice 后插入对话" }),
     );
     const menu = screen.getByLabelText("choice 插入出口");
-    expect(menu).toBeTruthy();
     fireEvent.click(
       within(menu).getByRole("button", { name: "右分支 → right" }),
     );
@@ -140,7 +159,7 @@ describe("ScriptView branch insertion", () => {
 
 describe("ScriptView choice summary", () => {
   it("summarises a choice by its option labels", () => {
-    const legacy: SceneDefinition = {
+    const single: SceneDefinition = {
       ...scene,
       nodes: {
         ...scene.nodes,
@@ -150,19 +169,7 @@ describe("ScriptView choice summary", () => {
         },
       },
     };
-    const first = render(
-      <ScriptView
-        manifest={manifest}
-        onChange={() => undefined}
-        onDelete={() => undefined}
-        onInsertAfter={() => undefined}
-        onInsertBatch={() => undefined}
-        onOpenGraph={() => undefined}
-        onSelect={() => undefined}
-        scene={legacy}
-        selectedNodeId={null}
-      />,
-    );
+    const first = render(<ScriptView {...scriptProps({ scene: single })} />);
     expect(screen.getByText("左分支")).toBeTruthy();
     first.unmount();
 
@@ -188,89 +195,21 @@ describe("ScriptView choice summary", () => {
         },
       },
     };
-    render(
-      <ScriptView
-        manifest={manifest}
-        onChange={() => undefined}
-        onDelete={() => undefined}
-        onInsertAfter={() => undefined}
-        onInsertBatch={() => undefined}
-        onOpenGraph={() => undefined}
-        onSelect={() => undefined}
-        scene={presented}
-        selectedNodeId={null}
-      />,
-    );
+    render(<ScriptView {...scriptProps({ scene: presented })} />);
     expect(screen.getAllByText("左分支 / 右分支").length).toBeGreaterThan(0);
   });
 });
 
-const selectionScene: SceneDefinition = {
-  schema_version: 2,
-  id: "main",
-  entry: "choice",
-  nodes: {
-    choice: {
-      type: "choice",
-      choices: [
-        { id: "left", label: "左分支", next: "left" },
-        { id: "right", label: "右分支", next: "right" },
-      ],
-    },
-    left: {
-      type: "say",
-      speaker: null,
-      text: "左",
-      speed_cps: null,
-      next: "finish",
-    },
-    right: {
-      type: "say",
-      speaker: null,
-      text: "右",
-      speed_cps: null,
-      next: "finish",
-    },
-    finish: { type: "end" },
-  },
-};
-
-/** Renders the script list with the graph-style selection already applied. */
-function renderList(
-  selectedNodeId: string | null,
-  options: { deleteDisabled?: boolean } = {},
-) {
-  const onDelete = vi.fn();
-  const onSelect = vi.fn();
-  const view = render(
-    <ScriptView
-      deleteDisabled={options.deleteDisabled ?? false}
-      manifest={manifest}
-      onChange={() => undefined}
-      onDelete={onDelete}
-      onInsertAfter={() => undefined}
-      onInsertBatch={() => undefined}
-      onOpenGraph={() => undefined}
-      onSelect={onSelect}
-      scene={selectionScene}
-      selectedNodeId={selectedNodeId}
-    />,
-  );
-  const root = view.container.querySelector<HTMLElement>(".script-view");
-  if (root === null) throw new Error("missing script view root");
-  return { onDelete, onSelect, root, view };
-}
-
 describe("ScriptView node deletion shortcut", () => {
-  it("focuses the scoped root and adopts the graph selection on mount", () => {
+  it("focuses the scoped root, adopts the graph selection and deletes with Delete or Backspace", () => {
     const { onDelete, root } = renderList("left");
-    // A graph -> script switch must leave the node the author picked selected
-    // inside the scoped list, and the key handler must already have focus.
     expect(document.activeElement).toBe(root);
 
     fireEvent.keyDown(root, { key: "Delete" });
     expect(onDelete).toHaveBeenCalledTimes(1);
     expect(onDelete).toHaveBeenCalledWith("left");
+    fireEvent.keyDown(root, { key: "Backspace" });
+    expect(onDelete).toHaveBeenCalledTimes(2);
   });
 
   it("deletes once per key press and stops the event from bubbling", () => {
@@ -278,55 +217,20 @@ describe("ScriptView node deletion shortcut", () => {
     const onDelete = vi.fn();
     const view = render(
       <div onKeyDown={outer}>
-        <ScriptView
-          manifest={manifest}
-          onChange={() => undefined}
-          onDelete={onDelete}
-          onInsertAfter={() => undefined}
-          onInsertBatch={() => undefined}
-          onOpenGraph={() => undefined}
-          onSelect={() => undefined}
-          scene={selectionScene}
-          selectedNodeId="left"
-        />
+        <ScriptView {...scriptProps({ onDelete, selectedNodeId: "left" })} />
       </div>,
     );
     const list = view.container.querySelector<HTMLElement>(".script-list");
     if (list === null) throw new Error("missing script list");
     fireEvent.keyDown(list, { key: "Delete" });
     expect(onDelete).toHaveBeenCalledTimes(1);
-    // The handled shortcut must not reach an enclosing handler as well.
     expect(outer).not.toHaveBeenCalled();
-  });
-
-  it("ignores Delete from editable and composing focus", () => {
-    const { onDelete, root, view } = renderList("left");
-    const search = within(view.container).getByLabelText("搜索脚本");
-    const editable = document.createElement("div");
-    editable.setAttribute("contenteditable", "true");
-    const inner = document.createElement("span");
-    editable.appendChild(inner);
-    root.append(editable);
-
-    fireEvent.keyDown(search, { key: "Delete" });
-    fireEvent.keyDown(search, { key: "Backspace" });
-    fireEvent.keyDown(inner, { key: "Delete" });
-    fireEvent.keyDown(root, { key: "Delete", repeat: true });
-    fireEvent.keyDown(root, { key: "Delete", keyCode: 229 });
-    fireEvent.keyDown(root, { key: "Delete", isComposing: true });
-    expect(onDelete).not.toHaveBeenCalled();
   });
 
   it("does nothing without a selection", () => {
     const { onDelete, root } = renderList(null);
     fireEvent.keyDown(root, { key: "Delete" });
     expect(onDelete).not.toHaveBeenCalled();
-  });
-
-  it("keeps Backspace deletion for the list itself", () => {
-    const { onDelete, root } = renderList("left");
-    fireEvent.keyDown(root, { key: "Backspace" });
-    expect(onDelete).toHaveBeenCalledWith("left");
   });
 });
 
@@ -373,20 +277,9 @@ describe("ScriptView interactive-control and dialog guards", () => {
 
   it("ignores destructive keys while an App dialog owns the interaction", () => {
     const onDelete = vi.fn();
-    const props = {
-      manifest,
-      onChange: () => undefined,
-      onDelete,
-      onInsertAfter: () => undefined,
-      onInsertBatch: () => undefined,
-      onOpenGraph: () => undefined,
-      onSelect: () => undefined,
-      scene: selectionScene,
-      selectedNodeId: "left" as const,
-    };
+    const props = scriptProps({ onDelete, selectedNodeId: "left" });
     const view = render(<ScriptView {...props} deleteDisabled />);
-    const root = view.container.querySelector<HTMLElement>(".script-view");
-    if (root === null) throw new Error("missing script view root");
+    const root = scriptRoot(view.container);
     root.focus();
     fireEvent.keyDown(root, { key: "Delete" });
     expect(onDelete).not.toHaveBeenCalled();

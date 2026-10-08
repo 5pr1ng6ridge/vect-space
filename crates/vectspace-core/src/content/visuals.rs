@@ -1,5 +1,19 @@
-use super::*;
-use crate::visual::{EmissionArea, ParticleAction, ParticleDefinition, ParticleRange, SpriteLayout, SpriteSource, TextBlockDefinition, PARTICLE_MAX_LIVE, TEXT_BLOCK_MAX_PIXELS};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use crate::image_header::probe;
+use crate::model::{
+    AssetDefinition, AssetKind, ContentManifest, ImageAnimationDefinition, SceneDefinition,
+    SceneNode, SpriteActionDefinition, TimelineTrack,
+};
+use crate::visual::{
+    EmissionArea, ParticleAction, ParticleDefinition, ParticleRange, SpriteLayout, SpriteSource,
+    TextBlockDefinition, PARTICLE_MAX_LIVE, TEXT_BLOCK_MAX_PIXELS,
+};
+use super::{CONTENT_SCHEMA_VERSION, ContentError};
+use super::common::{
+    canonical_file_within, node_error, read_yaml, validate_identifier, validate_relative_path,
+};
 
 pub(super) fn documents<T: serde::de::DeserializeOwned + Clone>(
     root: &Path, paths: &[String], drafts: Option<BTreeMap<String, T>>,

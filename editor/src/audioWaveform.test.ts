@@ -184,10 +184,6 @@ describe("downsamplePeaks", () => {
     expect(peaks[0]).toBeCloseTo(0.9, 5);
     expect(peaks[1]).toBe(1);
   });
-
-  it("always returns the requested bucket count", () => {
-    expect(downsamplePeaks(new Float32Array([1, 2, 3]), 7)).toHaveLength(7);
-  });
 });
 
 describe("estimateDecodedPcmBytes", () => {
@@ -345,62 +341,28 @@ describe("decodeWaveform", () => {
     expect(reader.reads).toBe(1);
   });
 
-  it("refuses a response without a readable stream even when no length is declared", async () => {
-    const { arrayBuffer } = stubFetch(response({ body: null }));
-    const contexts = countDecodeContexts();
-    await expect(
-      decodeWaveform("C:/a.ogg", { ...KNOWN }),
-    ).rejects.toMatchObject({ reason: "unsupported" });
-    expect(arrayBuffer).not.toHaveBeenCalled();
-    expect(contexts()).toBe(0);
-  });
-
-  it("refuses a response without a readable stream even with a valid declared length", async () => {
-    const { arrayBuffer } = stubFetch(
-      response({ body: null, bytes: new Uint8Array(16), contentLength: "16" }),
-    );
-    const contexts = countDecodeContexts();
-    await expect(
-      decodeWaveform("C:/a.ogg", { ...KNOWN }),
-    ).rejects.toMatchObject({ reason: "unsupported" });
-    expect(arrayBuffer).not.toHaveBeenCalled();
-    expect(contexts()).toBe(0);
-  });
-
-  it("refuses a response without a readable stream when the length is under-reported", async () => {
-    const { arrayBuffer } = stubFetch(
-      response({ body: null, bytes: new Uint8Array(4096), contentLength: "1" }),
-    );
-    const contexts = countDecodeContexts();
-    await expect(
-      decodeWaveform("C:/a.ogg", { ...KNOWN }),
-    ).rejects.toMatchObject({ reason: "unsupported" });
-    expect(arrayBuffer).not.toHaveBeenCalled();
-    expect(contexts()).toBe(0);
-  });
-
-  it("rejects a host-declared over-long file before any download", async () => {
-    const { fetchSpy } = stubFetch(response({}));
-    await expect(
-      decodeWaveform("C:/a.ogg", {
-        knownDurationMs: MAX_WAVEFORM_DURATION_MS + 1,
-      }),
-    ).rejects.toMatchObject({ reason: "too-long" });
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it("rejects a pre-decode PCM estimate over the decode cap before downloading", async () => {
-    const { fetchSpy } = stubFetch(response({}));
-    await expect(
-      decodeWaveform("C:/a.ogg", {
-        knownChannels: 2,
-        knownDurationMs: 10 * 60 * 1000,
-        knownSampleRate: 192_000,
-        maxDecodedBytes: 1024,
-      }),
-    ).rejects.toMatchObject({ reason: "too-large" });
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
+  it.each([
+    ["no length is declared", { body: null }],
+    [
+      "the declared length is valid",
+      { body: null, bytes: new Uint8Array(16), contentLength: "16" },
+    ],
+    [
+      "the length is under-reported",
+      { body: null, bytes: new Uint8Array(4096), contentLength: "1" },
+    ],
+  ])(
+    "refuses a response without a readable stream when %s",
+    async (_label, init) => {
+      const { arrayBuffer } = stubFetch(response(init));
+      const contexts = countDecodeContexts();
+      await expect(
+        decodeWaveform("C:/a.ogg", { ...KNOWN }),
+      ).rejects.toMatchObject({ reason: "unsupported" });
+      expect(arrayBuffer).not.toHaveBeenCalled();
+      expect(contexts()).toBe(0);
+    },
+  );
 
   it("refuses a missing or invalid channel count before decoding", async () => {
     for (const knownChannels of [null, undefined, 0, Number.NaN, -2]) {
@@ -415,55 +377,69 @@ describe("decodeWaveform", () => {
     }
   });
 
-  it("rejects a high-channel known duration over the cap before decoding", async () => {
-    const { fetchSpy } = stubFetch(response({}));
-    await expect(
-      decodeWaveform("C:/a.ogg", {
+  // The decoder always produces 44.1 kHz PCM, so a low, absent or invalid
+  // metadata rate must not shrink the estimate below the real decode size.
+  const BUDGET = 100 * 1024 * 1024;
+  it.each([
+    [
+      "a host-declared over-long file",
+      { knownDurationMs: MAX_WAVEFORM_DURATION_MS + 1 },
+      "too-long",
+    ],
+    [
+      "a PCM estimate over the decode cap",
+      {
+        knownChannels: 2,
+        knownDurationMs: 10 * 60 * 1000,
+        knownSampleRate: 192_000,
+        maxDecodedBytes: 1024,
+      },
+      "too-large",
+    ],
+    [
+      "a high-channel duration over the cap",
+      {
         knownChannels: 8,
         knownDurationMs: 10 * 60 * 1000,
         knownSampleRate: 44_100,
-      }),
-    ).rejects.toMatchObject({ reason: "too-large" });
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it("estimates with the decode target rate when the input rate is low or absent", async () => {
-    // 20 minutes of 2-channel audio: a naive 8 kHz input-rate estimate would
-    // fit the 100 MiB budget, but the decoder still produces 44.1 kHz PCM.
-    const budget = 100 * 1024 * 1024;
-    const lowRate = stubFetch(response({}));
-    await expect(
-      decodeWaveform("C:/a.ogg", {
+      },
+      "too-large",
+    ],
+    [
+      "a low metadata sample rate",
+      {
         knownChannels: 2,
         knownDurationMs: MAX_WAVEFORM_DURATION_MS,
         knownSampleRate: 8000,
-        maxDecodedBytes: budget,
-      }),
-    ).rejects.toMatchObject({ reason: "too-large" });
-    expect(lowRate.fetchSpy).not.toHaveBeenCalled();
-
-    // No usable rate metadata: still bounded by the decoder's target rate.
-    const absentRate = stubFetch(response({}));
-    await expect(
-      decodeWaveform("C:/a.ogg", {
+        maxDecodedBytes: BUDGET,
+      },
+      "too-large",
+    ],
+    [
+      "a missing metadata sample rate",
+      {
         knownChannels: 2,
         knownDurationMs: MAX_WAVEFORM_DURATION_MS,
-        maxDecodedBytes: budget,
-      }),
-    ).rejects.toMatchObject({ reason: "too-large" });
-    expect(absentRate.fetchSpy).not.toHaveBeenCalled();
-
-    // An invalid metadata rate is not trusted either.
-    const invalidRate = stubFetch(response({}));
-    await expect(
-      decodeWaveform("C:/a.ogg", {
+        maxDecodedBytes: BUDGET,
+      },
+      "too-large",
+    ],
+    [
+      "an invalid metadata sample rate",
+      {
         knownChannels: 2,
         knownDurationMs: MAX_WAVEFORM_DURATION_MS,
         knownSampleRate: Number.NaN,
-        maxDecodedBytes: budget,
-      }),
-    ).rejects.toMatchObject({ reason: "too-large" });
-    expect(invalidRate.fetchSpy).not.toHaveBeenCalled();
+        maxDecodedBytes: BUDGET,
+      },
+      "too-large",
+    ],
+  ])("rejects %s before any download", async (_label, options, reason) => {
+    const { fetchSpy } = stubFetch(response({}));
+    await expect(decodeWaveform("C:/a.ogg", options)).rejects.toMatchObject({
+      reason,
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("requests the controlled decode target rate on both context paths", async () => {

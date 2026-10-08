@@ -235,7 +235,7 @@ export class FrameSequencePlayer {
  *
  * The registry owns the *positions*; the surfaces own the decoded pixels, so
  * two instances that show the same animation share textures but never a frame
- * index.  The rules it encodes are the agreed migration semantics:
+ * index.  Its rules:
  *
  * - pausing freezes every loop without accruing debt,
  * - `advance` is wall-clock decoration and is independent of the timeline
@@ -372,8 +372,8 @@ export class FrameLoopRegistry {
 /**
  * Resolves a logical asset id to its pixels.
  *
- * `urls` keeps the historical id -> url map, `animations` carries the frame
- * lists for animated assets.  An id that is animated but missing from
+ * `urls` is the id -> url map, `animations` carries the frame lists for
+ * animated assets.  An id that is animated but missing from
  * `animations` still yields its first frame, so a partially loaded host shows
  * the static frame instead of nothing.
  */
@@ -397,19 +397,4 @@ export function resolveImageAsset(
     height: animation.height,
     animation,
   };
-}
-
-/**
- * Frame index for an asset at a given decorative time, or `-1` when the asset
- * is unknown.  The editor uses this to place frames deterministically while
- * dragging a playhead.
- */
-export function frameIndexForAssetAt(
-  assetId: string,
-  elapsedMs: number,
-  animations: AnimationMap,
-): number {
-  const animation = animations[assetId];
-  if (animation === undefined) return -1;
-  return frameIndexAt(elapsedMs, animation.frames);
 }

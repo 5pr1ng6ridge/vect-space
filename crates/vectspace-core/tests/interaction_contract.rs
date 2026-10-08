@@ -687,7 +687,7 @@ fn an_oversized_interpolated_title_is_a_content_error_and_emits_no_request() {
 }
 
 #[test]
-fn a_restarted_session_drops_stale_boundary_state_and_titles() {
+fn a_new_session_or_a_load_drops_the_previous_sessions_boundary_requests_and_titles() {
     let content = interaction_catalog();
     let (mut runtime, _) = begin(&content, "ix_title");
     advance(&mut runtime, &content, AdvanceSource::Manual).expect("advance");
@@ -708,6 +708,14 @@ fn a_restarted_session_drops_stale_boundary_state_and_titles() {
         DEFAULT_MAIN_TITLE,
         "the readable title variable stays in sync with the snapshot"
     );
+
+    // Loading a save abandons a pending boundary as well.
+    let (mut runtime, start) = begin(&content, "ix_title");
+    advance(&mut runtime, &content, AdvanceSource::Manual).expect("advance");
+    assert!(runtime.at_host_boundary());
+    runtime.load_snapshot(&content, start.snapshot).expect("load");
+    assert!(!runtime.at_host_boundary());
+    assert!(runtime.take_window_requests().is_empty());
 }
 
 #[test]
@@ -1460,7 +1468,7 @@ fn stop_timer_removes_only_the_named_timer_and_reports_whether_it_existed() {
 #[test]
 fn a_failing_repeating_timer_is_stopped_and_stays_stopped() {
     let content = interaction_catalog();
-    let (mut runtime, start) = begin_with_score(&content, "ix_repeat", i64::MAX);
+    let (mut runtime, _) = begin_with_score(&content, "ix_repeat", i64::MAX);
     let mut expected = runtime.snapshot().clone();
 
     let (updates, diagnostics) = runtime.tick_timers(&content, 100);
@@ -1477,7 +1485,6 @@ fn a_failing_repeating_timer_is_stopped_and_stays_stopped() {
     // The story itself is unaffected.
     let done = choose(&mut runtime, &content, "always").expect("story continues");
     assert_eq!(done.snapshot.location, location("ix_repeat", "done"));
-    let _ = start;
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,19 +1583,6 @@ fn interaction_state_survives_a_json_save_round_trip() {
     assert!(diagnostics.is_empty());
     assert_eq!(updates.len(), 1);
     assert_eq!(score(&restored), ScalarValue::Integer(1));
-}
-
-#[test]
-fn loading_a_snapshot_discards_the_previous_sessions_boundary_and_requests() {
-    let content = interaction_catalog();
-    let (mut runtime, start) = begin(&content, "ix_title");
-    let saved = start.snapshot.clone();
-    advance(&mut runtime, &content, AdvanceSource::Manual).expect("advance");
-    assert!(runtime.at_host_boundary());
-
-    runtime.load_snapshot(&content, saved).expect("load");
-    assert!(!runtime.at_host_boundary());
-    assert!(runtime.take_window_requests().is_empty());
 }
 
 #[test]
@@ -1751,38 +1745,39 @@ fn block_hints_are_templates_that_follow_the_live_state() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn interaction_enums_use_stable_snake_case_names() {
+fn interaction_wire_names_and_defaults_are_stable() {
     use serde_json::json;
-    assert_eq!(serde_json::to_value(UpdateKind::Story).unwrap(), json!("story"));
     assert_eq!(serde_json::to_value(UpdateKind::StateRefresh).unwrap(), json!("state_refresh"));
-    assert_eq!(serde_json::to_value(UpdateKind::Effect).unwrap(), json!("effect"));
     assert_eq!(serde_json::to_value(AdvanceSource::Script).unwrap(), json!("script"));
-    assert_eq!(serde_json::to_value(WindowRole::Main).unwrap(), json!("main"));
     assert_eq!(serde_json::to_value(WindowRole::Secondary).unwrap(), json!("secondary"));
     assert_eq!(serde_json::to_value(WindowControlAction::Unblock).unwrap(), json!("unblock"));
     assert_eq!(serde_json::to_value(TimerAction::Start).unwrap(), json!("start"));
     assert_eq!(UpdateKind::default(), UpdateKind::Story);
     assert_eq!(WindowRole::default(), WindowRole::Main);
-}
 
-#[test]
-fn interaction_snapshot_defaults_and_rejects_unknown_fields() {
     let empty: InteractionSnapshot = serde_json::from_str("{}").expect("all fields default");
     assert_eq!(empty, InteractionSnapshot::default());
-    assert!(empty.blocks.is_empty() && empty.timers.is_empty());
-    assert!(empty.prompt_instance.is_empty() && empty.prompt_source.is_none());
     assert!(serde_json::from_str::<InteractionSnapshot>(r#"{"bogus":1}"#).is_err());
     assert!(serde_json::from_str::<WindowTitles>(r#"{"main":"x"}"#).is_err(), "both titles are required");
-}
 
-#[test]
-fn scene_role_defaults_to_main_and_rejects_unknown_roles() {
-    let legacy = scene_from_yaml("schema_version: 2\nid: legacy\nentry: n\nnodes:\n  n:\n    type: end\n");
+    let legacy = scene_from_yaml("schema_version: 2
+id: legacy
+entry: n
+nodes:
+  n:
+    type: end
+");
     assert_eq!(legacy.window_role, WindowRole::Main);
-    let secondary = scene_from_yaml(SECONDARY_SCENE);
-    assert_eq!(secondary.window_role, WindowRole::Secondary);
+    assert_eq!(scene_from_yaml(SECONDARY_SCENE).window_role, WindowRole::Secondary);
     let bad: Result<SceneDefinition, _> = serde_saphyr::from_str_with_options(
-        "schema_version: 2\nwindow_role: tertiary\nid: x\nentry: n\nnodes:\n  n:\n    type: end\n",
+        "schema_version: 2
+window_role: tertiary
+id: x
+entry: n
+nodes:
+  n:
+    type: end
+",
         yaml_options(),
     );
     assert!(bad.is_err());

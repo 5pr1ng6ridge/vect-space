@@ -1,6 +1,7 @@
 import { validateParticleDefinition } from "@vectspace/presentation-core/particles";
 import { validateTextBlock } from "@vectspace/presentation-core/text-block";
 import { spriteFit } from "@vectspace/presentation-core/visual";
+import { ID_PATTERN } from "./app/ids";
 import type {
   EditorDiagnostic,
   EditorProject,
@@ -8,7 +9,6 @@ import type {
   TimelineTrack,
 } from "./types";
 
-const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 type Issue = (code: string, message: string) => void;
 
 export function validateSpriteAuthoring(

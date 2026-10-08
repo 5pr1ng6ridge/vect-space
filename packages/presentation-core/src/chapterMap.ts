@@ -128,31 +128,3 @@ export function mapDragExceededThreshold(
 ): boolean {
   return Math.hypot(current.x - start.x, current.y - start.y) > threshold;
 }
-
-export function hitTestMapHotspots<T extends MapLayerObject & MapRect>(
-  hotspots: readonly T[],
-  point: MapPoint,
-): T | undefined {
-  const contains = (
-    coordinate: number,
-    origin: number,
-    size: number,
-  ): boolean =>
-    Number.isFinite(coordinate) &&
-    Number.isFinite(origin) &&
-    Number.isFinite(size) &&
-    size >= 0 &&
-    coordinate >= origin &&
-    // Avoid `origin + size`: hostile but finite author data can overflow that
-    // addition and make a point appear inside a rectangle on one engine.
-    coordinate - origin <= size;
-  return [...hotspots]
-    .sort(
-      (left, right) => right.z - left.z || compareStableId(right.id, left.id),
-    )
-    .find(
-      (hotspot) =>
-        contains(point.x, hotspot.x, hotspot.width) &&
-        contains(point.y, hotspot.y, hotspot.height),
-    );
-}

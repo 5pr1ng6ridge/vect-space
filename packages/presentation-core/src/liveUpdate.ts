@@ -39,7 +39,7 @@ export interface LiveState {
 export const EMPTY_LIVE_STATE: LiveState = { update: null, effects: [] };
 
 /** Old hosts and editor fixtures omit `kind`: that always meant a story. */
-export function updateKind(update: RuntimeUpdate): RuntimeUpdateKind {
+function updateKind(update: RuntimeUpdate): RuntimeUpdateKind {
   return update.kind ?? "story";
 }
 
@@ -119,7 +119,7 @@ function promptReplaced(base: RuntimeUpdate, incoming: RuntimeUpdate): boolean {
  * from these objects: handing them structurally equal but fresh objects would
  * make every refresh look like new content.
  */
-export function shareStructure(
+function shareStructure(
   previous: RuntimeSnapshot,
   next: RuntimeSnapshot,
 ): RuntimeSnapshot {
@@ -182,9 +182,7 @@ export function promptOccurrence(update: RuntimeUpdate): string {
 
 const NO_BLOCKS: readonly AdvanceBlock[] = [];
 
-export function advanceBlocks(
-  snapshot: RuntimeSnapshot,
-): readonly AdvanceBlock[] {
+function advanceBlocks(snapshot: RuntimeSnapshot): readonly AdvanceBlock[] {
   return snapshot.interaction?.blocks ?? NO_BLOCKS;
 }
 

@@ -1,11 +1,10 @@
 /**
- * In-memory media/audio kit for `TimelineSession` host integration tests.
+ * In-memory media kit for `TimelineSession` host integration tests.
  *
- * jsdom has neither a usable `HTMLMediaElement` (play/seek never settle) nor
- * Web Audio, so host tests that must run the *real* session and surface
- * ownership code need the same seams the production sessions already accept:
- * a `TimelineDomAdapter` that hands out deterministic video elements and a
- * `PresentationAudioPort` that records instead of decoding.
+ * jsdom has no usable `HTMLMediaElement` (play/seek never settle), so host
+ * tests that must run the *real* session and surface ownership code need the
+ * seam the production session already accepts: a `TimelineDomAdapter` that
+ * hands out deterministic video elements.
  *
  * The fake element deliberately mirrors browser behaviour that the session
  * relies on: `readyState` is current (so metadata and presented-frame waits
@@ -14,16 +13,7 @@
  * that teardown released every callback.
  */
 
-import type {
-  PresentationAudioPort,
-  TimelineDomAdapter,
-} from "./timelineSession";
-import type {
-  AmbienceSlot,
-  AssetUrlMap,
-  AudioSnapshot,
-  Settings,
-} from "./types";
+import type { TimelineDomAdapter } from "./timelineSession";
 
 export interface FakeMediaElement {
   element: HTMLVideoElement;
@@ -200,82 +190,5 @@ export function createFakeMediaDom(
     },
     requestFrame: () => 0,
     cancelFrame: () => undefined,
-  };
-}
-
-export interface RecordingAudio extends PresentationAudioPort {
-  readonly sfx: { asset: string; volume: number }[];
-  readonly attached: HTMLVideoElement[];
-  readonly videoVolumes: number[];
-  readonly bgmTimelineVolumes: number[];
-  readonly ambienceTimelineVolumes: Array<{
-    slot: AmbienceSlot;
-    volume: number;
-  }>;
-  readonly rates: number[];
-  readonly settings: Settings[];
-  readonly reconciled: AudioSnapshot[];
-  unlocks: number;
-  deferredActivations: number;
-  destroys: number;
-}
-
-/** Records every host audio policy call; the session/audio wiring stays real. */
-export function createRecordingAudio(): RecordingAudio {
-  return {
-    sfx: [],
-    attached: [],
-    videoVolumes: [],
-    bgmTimelineVolumes: [],
-    ambienceTimelineVolumes: [],
-    rates: [],
-    settings: [],
-    reconciled: [],
-    unlocks: 0,
-    deferredActivations: 0,
-    destroys: 0,
-    playSfx(asset: string, volume: number): Promise<void> {
-      this.sfx.push({ asset, volume });
-      return Promise.resolve();
-    },
-    attachVideo(element: HTMLVideoElement): void {
-      this.attached.push(element);
-    },
-    setVideoVolume(_element: HTMLVideoElement, volume: number): void {
-      this.videoVolumes.push(volume);
-    },
-    setBgmTimelineVolume(volume: number): void {
-      this.bgmTimelineVolumes.push(volume);
-    },
-    setAmbienceTimelineVolume(slot: AmbienceSlot, volume: number): void {
-      this.ambienceTimelineVolumes.push({ slot, volume });
-    },
-    currentAmbienceVolume(_slot: AmbienceSlot): number | undefined {
-      return undefined;
-    },
-    currentBgmVolume(): number | undefined {
-      return undefined;
-    },
-    setPlaybackRate(rate: number): void {
-      this.rates.push(rate);
-    },
-    reconcile(snapshot: AudioSnapshot, _assets: AssetUrlMap): Promise<void> {
-      this.reconciled.push(snapshot);
-      return Promise.resolve();
-    },
-    applySettings(settings: Settings): void {
-      this.settings.push(settings);
-    },
-    activateDeferred(): Promise<void> {
-      this.deferredActivations += 1;
-      return Promise.resolve();
-    },
-    unlock(): Promise<void> {
-      this.unlocks += 1;
-      return Promise.resolve();
-    },
-    destroy(): void {
-      this.destroys += 1;
-    },
   };
 }

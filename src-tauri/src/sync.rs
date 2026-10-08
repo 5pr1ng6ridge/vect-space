@@ -9,16 +9,23 @@
 //! or a lost response without ever re-running a command.  The notification
 //! itself carries no data and no control cue.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::MutexGuard};
 
 use vectspace_core::{
     interaction::{UpdateKind, WindowRole},
-    model::{CueGate, RuntimeUpdate},
+    model::{BootstrapPayload, CueGate, RuntimeUpdate},
+    runtime::RuntimeEngine,
 };
-use vectspace_protocol::{WirePauseAck, WirePauseReason, WireSyncBatch, WireUpdateNotice};
+use vectspace_protocol::{
+    WireCommandError, WireCommandErrorCode, WirePauseAck, WirePauseReason, WireRuntimeUpdate,
+    WireSessionMode, WireSyncBatch, WireU64, WireUpdateNotice,
+};
 
-use super::pair::{Committed, Produced};
-use super::*;
+use crate::{
+    pair::{Committed, Produced},
+    secondary::secondary_missing,
+    state::EngineState,
+};
 
 /// Per-window bound of the committed-update buffer.
 pub(crate) const OUTBOX_CAPACITY: usize = 32;
@@ -253,7 +260,8 @@ impl EngineState {
             })
     }
 
-    /// The latest delivery sequence of a window (for snapshot reads).
+    /// The latest delivery sequence of a window.
+    #[cfg(test)]
     pub(crate) fn latest_seq(&self, role: WindowRole) -> Result<u64, WireCommandError> {
         let session = match role {
             WindowRole::Main => self.current_session_id(),
@@ -362,8 +370,7 @@ impl EngineState {
     pub(crate) fn bootstrap_update(
         &self,
         role: WindowRole,
-    ) -> Result<(WireRuntimeUpdate, vectspace_core::model::BootstrapPayload), WireCommandError>
-    {
+    ) -> Result<(WireRuntimeUpdate, BootstrapPayload), WireCommandError> {
         let (session, mode, (pending_id, mut payload)) =
             self.with_window_runtime(role, |runtime| {
                 (

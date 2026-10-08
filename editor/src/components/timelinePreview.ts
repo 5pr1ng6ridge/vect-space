@@ -1,10 +1,9 @@
 /**
  * Per-canvas editor timeline preview.
  *
- * The editor no longer has its own Pixi implementation: it instantiates the
- * shared `SceneSurface` together with the shared `TimelineSession`, exactly like
- * the game does, and only supplies the policy differences of an authoring
- * preview:
+ * Instantiates the shared `SceneSurface` together with the shared
+ * `TimelineSession`, exactly like the game does, and only supplies the policy
+ * differences of an authoring preview:
  *
  * - `world: "restore"` loads start from the Rust entry snapshot instead of the
  *   live scene,

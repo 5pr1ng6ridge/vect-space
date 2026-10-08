@@ -183,55 +183,30 @@ describe("choice presentation authoring helpers", () => {
     expect(reseeded.anchor_y).toBe(360 + 88 / 2);
   });
 
-  it("re-seeds horizontal placement from filtered Rust preview choices", () => {
-    const node = choiceNode(
-      {
-        presentation: {
-          ...emptyChoicePresentation(),
-          direction: "horizontal",
-          gap: 8,
-        },
-      },
-      3,
-    );
-    node.choices[0].template = "choice.primary";
-    node.choices[1].template = "choice.wide";
-    node.choices[2].template = "choice.primary";
-    const preview = filteredChoicePrompt("horizontal", 8, [
-      { width: 320, height: 88 },
-      { width: 320, height: 88 },
-    ]);
-
-    const reseeded = reseedChoicePresentationAnchor(node, buttons, preview);
-    // The hidden 500x120 option is absent from the Rust-resolved prompt, so
-    // it contributes neither horizontal extent nor cross-axis height.
-    expect(reseeded.anchor_x).toBe(470 + (320 + 8 + 320) / 2);
-    expect(reseeded.anchor_y).toBe(360 + 88 / 2);
-  });
-
-  it("re-seeds vertical placement from filtered Rust preview choices", () => {
-    const node = choiceNode(
-      {
-        presentation: {
-          ...emptyChoicePresentation(),
-          direction: "vertical",
-          gap: 8,
-        },
-      },
-      3,
-    );
-    node.choices[0].template = "choice.primary";
-    node.choices[1].template = "choice.wide";
-    node.choices[2].template = "choice.primary";
-    const preview = filteredChoicePrompt("vertical", 8, [
-      { width: 320, height: 88 },
-      { width: 320, height: 88 },
-    ]);
-
-    const reseeded = reseedChoicePresentationAnchor(node, buttons, preview);
-    expect(reseeded.anchor_x).toBe(470 + 320 / 2);
-    expect(reseeded.anchor_y).toBe(360 + (88 + 8 + 88) / 2);
-  });
+  it.each([
+    ["horizontal", 470 + (320 + 8 + 320) / 2, 360 + 88 / 2],
+    ["vertical", 470 + 320 / 2, 360 + (88 + 8 + 88) / 2],
+  ] as const)(
+    "re-seeds %s placement from filtered Rust preview choices",
+    (direction, anchorX, anchorY) => {
+      const node = choiceNode(
+        { presentation: { ...emptyChoicePresentation(), direction, gap: 8 } },
+        3,
+      );
+      node.choices[0].template = "choice.primary";
+      node.choices[1].template = "choice.wide";
+      node.choices[2].template = "choice.primary";
+      // The hidden 500x120 option is absent from the Rust-resolved prompt, so
+      // it contributes neither main-axis extent nor cross-axis size.
+      const preview = filteredChoicePrompt(direction, 8, [
+        { width: 320, height: 88 },
+        { width: 320, height: 88 },
+      ]);
+      const reseeded = reseedChoicePresentationAnchor(node, buttons, preview);
+      expect(reseeded.anchor_x).toBe(anchorX);
+      expect(reseeded.anchor_y).toBe(anchorY);
+    },
+  );
 
   it("uses a Rust-filtered prompt layout when first enabling presentation", () => {
     const node = choiceNode({ choices: [choiceNode().choices[0]] });
@@ -259,15 +234,6 @@ describe("choice presentation authoring helpers", () => {
       direction: "horizontal",
       gap: 12,
     });
-  });
-
-  it("returns a fresh empty presentation per call", () => {
-    const first = emptyChoicePresentation();
-    const second = emptyChoicePresentation();
-    expect(first).not.toBe(second);
-    expect(first).toEqual(second);
-    expect(first.anchor_x).toBe(960);
-    expect(first.anchor_y).toBe(540);
   });
 });
 

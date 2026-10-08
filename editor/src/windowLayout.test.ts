@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import { describeNode } from "./nodeSummary";
-import { defaultNode, outputPorts, summarizeNode } from "./story";
 import type {
   WindowGeometryNode,
   WindowLayerNode,
@@ -265,53 +264,11 @@ describe("window geometry bounds (mirror of the core validator)", () => {
   });
 });
 
-describe("window node defaults", () => {
-  it("docks the secondary window beside the main one over 600 ms", () => {
-    const node = defaultNode("window_geometry", "after");
-    expect(node).toEqual({
-      type: "window_geometry",
-      target: "secondary",
-      position: {
-        relative_to: "window",
-        x: 1,
-        y: 0.5,
-        anchor_x: 0,
-        anchor_y: 0.5,
-        offset_x: 16,
-        offset_y: 0,
-      },
-      duration_ms: 600,
-      easing: "ease_in_out",
-      await: false,
-      next: "after",
-    });
-    expect(windowGeometryProblem(node as WindowGeometryNode)).toBeNull();
-  });
-
-  it("raises the main window by default", () => {
-    expect(defaultNode("window_layer", "after")).toEqual({
-      type: "window_layer",
-      target: "main",
-      action: "raise",
-      next: "after",
-    });
-  });
-
-  it("each has the single next port", () => {
-    for (const type of ["window_geometry", "window_layer"] as const) {
-      expect(outputPorts(defaultNode(type, "after"))).toEqual([
-        { id: "next", label: "下一步", target: "after", targetScene: null },
-      ]);
-    }
-  });
-});
-
 describe("window node summaries", () => {
   it("describes docking the secondary window beside the main one", () => {
     const node = geometry();
     expect(describeWindowGeometry(node)).toBe("副窗口 → 贴主窗口右侧 · 600 ms");
     expect(describeNode(node).summary).toBe("副窗口 → 贴主窗口右侧 · 600 ms");
-    expect(summarizeNode(node)).toBe("副窗口 → 贴主窗口右侧 · 600 ms");
   });
 
   it("names the other window from the target's point of view", () => {

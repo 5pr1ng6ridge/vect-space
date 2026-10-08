@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-export interface AssetFontState {
+interface AssetFontState {
   fontFamily: string | undefined;
   error: string | null;
   /** True when loading finished, including the explicit system fallback path. */

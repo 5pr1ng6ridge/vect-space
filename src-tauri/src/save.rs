@@ -7,12 +7,12 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use schemars::JsonSchema;
 use vectspace_core::model::{
     DialogueHistoryEntry, ProfileState, PromptSnapshot, RuntimeSnapshot, SaveSlotSummary,
     ScalarValue, Settings, VariableDefinition, VariableMap, VariableScope, VariableType,
     AMBIENCE_VOLUME_DEFAULT,
 };
+use vectspace_protocol::{WireCommandError, WireCommandErrorCode};
 
 const SAVE_SCHEMA_VERSION: u32 = 3;
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
@@ -47,6 +47,26 @@ pub enum SaveError {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+impl From<SaveError> for WireCommandError {
+    fn from(error: SaveError) -> Self {
+        match error {
+            SaveError::InvalidSlot(message)
+            | SaveError::MissingSlot(message)
+            | SaveError::InvalidData(message) => {
+                WireCommandError::new(WireCommandErrorCode::Validation, message)
+            }
+            SaveError::ContentVersion { expected, actual } => WireCommandError::new(
+                WireCommandErrorCode::Validation,
+                format!("存档内容版本不兼容: 需要 {expected}，实际 {actual}"),
+            ),
+            SaveError::Io { path, source } => {
+                WireCommandError::new(WireCommandErrorCode::Io, source.to_string())
+                    .with_path(path.to_string_lossy())
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -84,7 +104,7 @@ struct SaveFile {
 /// scene it was showing.  Transient host/IPC identity (session tokens, pending
 /// acknowledgements) is deliberately absent: a restored secondary always gets a
 /// fresh token and a fresh frontend bootstrap.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecondaryState {
     /// Scene currently shown in the secondary window.
@@ -174,8 +194,10 @@ impl SaveManager {
 
     pub fn load(&self, slot: &str) -> Result<LoadedSlot, SaveError> {
         validate_slot(slot)?;
-        let (file, _from_backup) =
-            read_json_with_backup_limit_source::<SaveFile>(&self.slot_path(slot), MAX_SAVE_FILE_BYTES)?;
+        let (file, _from_backup) = read_json_with_backup_limit_source::<SaveFile>(
+            &self.slot_path(slot),
+            MAX_SAVE_FILE_BYTES,
+        )?;
         if file.schema_version != SAVE_SCHEMA_VERSION {
             return Err(SaveError::InvalidData(format!(
                 "不支持 schema_version {}",
@@ -750,17 +772,7 @@ fn read_json_with_backup_limit_source<T: serde::de::DeserializeOwned>(
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, SaveError> {
-    let bytes = fs::read(path).map_err(|source| {
-        if source.kind() == std::io::ErrorKind::NotFound {
-            SaveError::MissingSlot(path.display().to_string())
-        } else {
-            SaveError::Io {
-                path: path.to_path_buf(),
-                source,
-            }
-        }
-    })?;
-    serde_json::from_slice(&bytes).map_err(|error| SaveError::InvalidData(error.to_string()))
+    read_json_limited(path, usize::MAX)
 }
 
 fn read_json_limited<T: serde::de::DeserializeOwned>(
@@ -914,8 +926,99 @@ fn now_unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
+    use vectspace_core::{
+        interaction::{AdvanceBlock, SceneTimer, WindowRole, WindowTitles},
+        model::{
+            AmbienceSlot, AmbienceSnapshot, AudioSnapshot, LoopingAudioSnapshot, PlaybackSnapshot,
+            SkipMode, StoryLocation, WorldSnapshot,
+        },
+    };
+
+    fn snapshot_at(scene_id: &str, node_id: &str, revision: u64) -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            interaction: Default::default(),
+            revision,
+            location: StoryLocation {
+                scene_id: scene_id.to_owned(),
+                node_id: node_id.to_owned(),
+            },
+            variables: VariableMap::new(),
+            world: WorldSnapshot::default(),
+            audio: AudioSnapshot::default(),
+            playback: PlaybackSnapshot::default(),
+            dialogue_page: None,
+            long_text_page: None,
+            prompt: PromptSnapshot::None,
+        }
+    }
+
+    fn slot_document(snapshot: &RuntimeSnapshot) -> SlotDocument<'_> {
+        SlotDocument {
+            snapshot,
+            history: &[],
+            secondary: None,
+        }
+    }
+
+    fn history_entry(entry_id: u64, prompt_id: &str, text: &str) -> DialogueHistoryEntry {
+        DialogueHistoryEntry {
+            entry_id,
+            prompt_id: prompt_id.to_owned(),
+            speaker_id: None,
+            speaker: None,
+            name_color: None,
+            text_color: None,
+            text: text.to_owned(),
+        }
+    }
+
+    fn read_json_value(directory: &TempDir, file: &str) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(directory.path().join(file)).unwrap()).unwrap()
+    }
+
+    /// A declared Profile variable `ending_seen` of the given type.
+    fn ending_seen(
+        value_type: VariableType,
+        default: ScalarValue,
+    ) -> BTreeMap<String, VariableDefinition> {
+        BTreeMap::from([(
+            "ending_seen".to_owned(),
+            VariableDefinition {
+                scope: VariableScope::Profile,
+                value_type,
+                default,
+            },
+        )])
+    }
+
+    fn ending_seen_flag() -> BTreeMap<String, VariableDefinition> {
+        ending_seen(VariableType::Boolean, ScalarValue::Boolean(false))
+    }
+
+    fn open_profile(
+        directory: &TempDir,
+        variables: &BTreeMap<String, VariableDefinition>,
+        content_version: &str,
+    ) -> (ProfileManager, ProfileState) {
+        ProfileManager::new(
+            directory.path().to_path_buf(),
+            variables,
+            content_version.to_owned(),
+        )
+        .unwrap()
+    }
+
+    fn write_profile(directory: &TempDir, profile: serde_json::Value) {
+        fs::write(
+            directory.path().join("profile.json"),
+            serde_json::to_vec_pretty(&profile).unwrap(),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn only_the_four_declared_slots_are_valid() {
@@ -927,53 +1030,38 @@ mod tests {
     }
 
     #[test]
-    fn invalid_settings_are_rejected() {
-        let invalid = Settings {
+    fn settings_are_validated_sanitized_and_default_their_missing_fields() {
+        let too_loud = |settings: Settings| validate_settings(settings).is_err();
+        assert!(too_loud(Settings {
             master_volume: 2.0,
             ..Settings::default()
-        };
-        assert!(validate_settings(invalid).is_err());
-    }
+        }));
+        assert!(too_loud(Settings {
+            ambience_volume: 1.1,
+            ..Settings::default()
+        }));
+        let repaired = sanitize_settings(Settings {
+            ambience_volume: f32::NAN,
+            ..Settings::default()
+        });
+        assert_eq!(repaired.ambience_volume, 0.8);
 
-    #[test]
-    fn old_settings_default_to_read_only_skip() {
-        let settings: Settings = serde_json::from_value(serde_json::json!({
+        // A settings file written before these fields existed still loads.
+        let old: Settings = serde_json::from_value(serde_json::json!({
             "master_volume": 1.0,
             "bgm_volume": 0.7,
             "sfx_volume": 0.8,
             "text_speed_cps": 30.0
         }))
         .unwrap();
-        assert_eq!(
-            settings.skip_mode,
-            vectspace_core::model::SkipMode::ReadOnly
-        );
-        assert_eq!(settings.video_volume, 1.0);
-        assert_eq!(settings.ambience_volume, 0.8);
-        assert!(!settings.reduce_motion);
+        assert_eq!(old.skip_mode, SkipMode::ReadOnly);
+        assert_eq!(old.video_volume, 1.0);
+        assert_eq!(old.ambience_volume, 0.8);
+        assert!(!old.reduce_motion);
     }
 
     #[test]
-    fn ambience_volume_is_validated_and_sanitized() {
-        let invalid = Settings {
-            ambience_volume: 1.1,
-            ..Settings::default()
-        };
-        assert!(validate_settings(invalid).is_err());
-        let repaired = sanitize_settings(Settings {
-            ambience_volume: f32::NAN,
-            ..Settings::default()
-        });
-        assert_eq!(repaired.ambience_volume, 0.8);
-    }
-
-    #[test]
-    fn active_ambience_save_load_round_trip_preserves_all_schema_versions() {
-        use vectspace_core::model::{
-            AmbienceSlot, AmbienceSnapshot, AudioSnapshot, LoopingAudioSnapshot, PlaybackSnapshot,
-            RuntimeSnapshot, StoryLocation, WorldSnapshot,
-        };
-
+    fn a_slot_round_trips_ambience_and_every_file_carries_its_schema_version() {
         let directory = tempdir().unwrap();
         let manager =
             SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
@@ -986,36 +1074,13 @@ mod tests {
         };
         let mut ambience = AmbienceSnapshot::default();
         ambience.set(AmbienceSlot::Slot2, Some(state.clone()));
-        let snapshot = RuntimeSnapshot {
-            interaction: Default::default(),
-            revision: 7,
-            location: StoryLocation {
-                scene_id: "prologue".to_owned(),
-                node_id: "ambience".to_owned(),
-            },
-            variables: VariableMap::new(),
-            world: WorldSnapshot::default(),
-            audio: AudioSnapshot {
-                bgm: None,
-                ambience,
-            },
-            playback: PlaybackSnapshot::default(),
-            dialogue_page: None,
-            long_text_page: None,
-            prompt: PromptSnapshot::None,
+        let mut snapshot = snapshot_at("prologue", "ambience", 7);
+        snapshot.audio = AudioSnapshot {
+            bgm: None,
+            ambience,
         };
 
-        manager
-            .save(
-                "1",
-                SlotDocument {
-                    snapshot: &snapshot,
-                    history: &[],
-                    secondary: None,
-                },
-                None,
-            )
-            .unwrap();
+        manager.save("1", slot_document(&snapshot), None).unwrap();
         let loaded = manager.load("1").unwrap();
         assert_eq!(
             loaded.snapshot.audio.ambience.get(AmbienceSlot::Slot2),
@@ -1023,9 +1088,7 @@ mod tests {
         );
         assert!(loaded.history.is_empty());
         assert!(loaded.secondary.is_none());
-        let save_file: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.path().join("slot-1.json")).unwrap())
-                .unwrap();
+        let save_file = read_json_value(&directory, "slot-1.json");
         assert_eq!(save_file["schema_version"], SAVE_SCHEMA_VERSION);
         assert_eq!(
             save_file["snapshot"]["audio"]["ambience"]["slot_2"]["asset"],
@@ -1033,79 +1096,30 @@ mod tests {
         );
 
         manager.save_settings(Settings::default()).unwrap();
-        let settings_file: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.path().join("settings.json")).unwrap())
-                .unwrap();
+        let settings_file = read_json_value(&directory, "settings.json");
         assert_eq!(settings_file["schema_version"], SETTINGS_SCHEMA_VERSION);
         assert_eq!(manager.load_settings().ambience_volume, 0.8);
 
-        let (profile_manager, profile) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-c1".to_owned(),
-        )
-        .unwrap();
+        let (profile_manager, profile) = open_profile(&directory, &BTreeMap::new(), "demo-c1");
         profile_manager.save(&profile).unwrap();
-        let profile_file: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.path().join("profile.json")).unwrap())
-                .unwrap();
+        let profile_file = read_json_value(&directory, "profile.json");
         assert_eq!(profile_file["schema_version"], PROFILE_SCHEMA_VERSION);
     }
 
     #[test]
-    fn schema_v3_round_trips_merged_history_and_secondary_state() {
-        use vectspace_core::model::{
-            AudioSnapshot, PlaybackSnapshot, RuntimeSnapshot, StoryLocation, WorldSnapshot,
-        };
-
+    fn a_slot_round_trips_merged_history_and_secondary_state() {
         let directory = tempdir().unwrap();
         let manager =
             SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
-        let snapshot = RuntimeSnapshot {
-            interaction: Default::default(),
-            revision: 9,
-            location: StoryLocation {
-                scene_id: "prologue".to_owned(),
-                node_id: "intro".to_owned(),
-            },
-            variables: VariableMap::new(),
-            world: WorldSnapshot::default(),
-            audio: AudioSnapshot::default(),
-            playback: PlaybackSnapshot::default(),
-            dialogue_page: None,
-            long_text_page: None,
-            prompt: PromptSnapshot::None,
-        };
+        let snapshot = snapshot_at("prologue", "intro", 9);
         let history = vec![
-            DialogueHistoryEntry {
-                entry_id: 1,
-                prompt_id: "prologue/intro".to_owned(),
-                speaker_id: None,
-                speaker: None,
-                name_color: None,
-                text_color: None,
-                text: "main line".to_owned(),
-            },
-            DialogueHistoryEntry {
-                entry_id: 2,
-                prompt_id: "ambience_lab/intro".to_owned(),
-                speaker_id: None,
-                speaker: None,
-                name_color: None,
-                text_color: None,
-                text: "secondary line".to_owned(),
-            },
+            history_entry(1, "prologue/intro", "main line"),
+            history_entry(2, "ambience_lab/intro", "secondary line"),
         ];
         let secondary = SecondaryState {
             scene_id: "ambience_lab".to_owned(),
             owning_scene: "prologue".to_owned(),
-            snapshot: RuntimeSnapshot {
-                location: StoryLocation {
-                    scene_id: "ambience_lab".to_owned(),
-                    node_id: "intro".to_owned(),
-                },
-                ..snapshot.clone()
-            },
+            snapshot: snapshot_at("ambience_lab", "intro", 9),
             profile: ProfileState {
                 variables: VariableMap::new(),
                 read_content_version: "demo-c1".to_owned(),
@@ -1116,76 +1130,38 @@ mod tests {
             },
         };
 
-        manager
-            .save(
-                "3",
-                SlotDocument {
-                    snapshot: &snapshot,
-                    history: &history,
-                    secondary: Some(&secondary),
-                },
-                None,
-            )
-            .unwrap();
+        let document = SlotDocument {
+            history: &history,
+            secondary: Some(&secondary),
+            ..slot_document(&snapshot)
+        };
+        manager.save("3", document, None).unwrap();
         let loaded = manager.load("3").unwrap();
         assert_eq!(loaded.history, history);
         assert_eq!(loaded.secondary, Some(secondary));
 
         // The ledger lives at the top level, never nested inside the optional
         // secondary, so a slot without a secondary still carries history.
-        manager
-            .save(
-                "1",
-                SlotDocument {
-                    snapshot: &snapshot,
-                    history: &history,
-                    secondary: None,
-                },
-                None,
-            )
-            .unwrap();
-        let only_history: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.path().join("slot-1.json")).unwrap())
-                .unwrap();
+        let document = SlotDocument {
+            history: &history,
+            ..slot_document(&snapshot)
+        };
+        manager.save("1", document, None).unwrap();
+        let only_history = read_json_value(&directory, "slot-1.json");
         assert!(only_history.get("secondary").is_none());
         assert_eq!(
             only_history["history"].as_array().map(Vec::len),
             Some(history.len())
         );
-        assert_eq!(
-            manager.load("1").unwrap().history,
-            history,
-            "history must survive without a live secondary window"
-        );
+        assert_eq!(manager.load("1").unwrap().history, history);
     }
 
     #[test]
     fn interaction_state_round_trips_and_an_old_save_without_it_still_loads() {
-        use vectspace_core::interaction::{
-            AdvanceBlock, SceneTimer, WindowRole, WindowTitles,
-        };
-        use vectspace_core::model::{
-            AudioSnapshot, PlaybackSnapshot, RuntimeSnapshot, StoryLocation, WorldSnapshot,
-        };
-
         let directory = tempdir().unwrap();
         let manager =
             SaveManager::new(directory.path().to_path_buf(), "demo-c1".to_owned()).unwrap();
-        let mut snapshot = RuntimeSnapshot {
-            interaction: Default::default(),
-            revision: 3,
-            location: StoryLocation {
-                scene_id: "prologue".to_owned(),
-                node_id: "intro".to_owned(),
-            },
-            variables: VariableMap::new(),
-            world: WorldSnapshot::default(),
-            audio: AudioSnapshot::default(),
-            playback: PlaybackSnapshot::default(),
-            dialogue_page: None,
-            long_text_page: None,
-            prompt: PromptSnapshot::None,
-        };
+        let mut snapshot = snapshot_at("prologue", "intro", 3);
         snapshot.interaction.titles = WindowTitles {
             main: "Main!".to_owned(),
             secondary: "Side".to_owned(),
@@ -1206,41 +1182,30 @@ mod tests {
             },
         );
         snapshot.interaction.prompt_instance = "7".to_owned();
-        let document = SlotDocument {
-            snapshot: &snapshot,
-            history: &[],
-            secondary: None,
-        };
-        manager.save("2", document, None).unwrap();
+        manager.save("2", slot_document(&snapshot), None).unwrap();
         // Remaining time, not an absolute process time, is what is stored.
         assert_eq!(manager.load("2").unwrap().snapshot, snapshot);
 
         // A save written before this state existed has no `interaction` key.
         let path = directory.path().join("slot-2.json");
-        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["snapshot"].as_object_mut().unwrap().remove("interaction");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("interaction");
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        let old = manager.load("2").unwrap();
-        assert_eq!(old.snapshot.interaction, Default::default());
+        assert_eq!(
+            manager.load("2").unwrap().snapshot.interaction,
+            Default::default()
+        );
     }
 
     #[test]
     fn profile_values_persist_and_reconcile_with_declarations() {
         let directory = tempdir().unwrap();
-        let definitions = std::collections::BTreeMap::from([(
-            "ending_seen".to_owned(),
-            VariableDefinition {
-                scope: VariableScope::Profile,
-                value_type: VariableType::Boolean,
-                default: ScalarValue::Boolean(false),
-            },
-        )]);
-        let (manager, mut values) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &definitions,
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let definitions = ending_seen_flag();
+        let (manager, mut values) = open_profile(&directory, &definitions, "demo-2");
         assert_eq!(
             values.variables.get("ending_seen"),
             Some(&ScalarValue::Boolean(false))
@@ -1250,31 +1215,14 @@ mod tests {
             .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
         manager.save(&values).unwrap();
 
-        let (_, loaded) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &definitions,
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let (_, loaded) = open_profile(&directory, &definitions, "demo-2");
         assert_eq!(
             loaded.variables.get("ending_seen"),
             Some(&ScalarValue::Boolean(true))
         );
 
-        let changed = std::collections::BTreeMap::from([(
-            "ending_seen".to_owned(),
-            VariableDefinition {
-                scope: VariableScope::Profile,
-                value_type: VariableType::String,
-                default: ScalarValue::Text("reset".to_owned()),
-            },
-        )]);
-        let (_, reconciled) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &changed,
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let changed = ending_seen(VariableType::String, ScalarValue::Text("reset".to_owned()));
+        let (_, reconciled) = open_profile(&directory, &changed, "demo-2");
         assert_eq!(
             reconciled.variables.get("ending_seen"),
             Some(&ScalarValue::Text("reset".to_owned()))
@@ -1283,59 +1231,46 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_history_persists_with_profile_and_is_cleared_on_content_change() {
+    fn profile_progress_persists_and_a_content_change_clears_only_the_read_state() {
         let directory = tempdir().unwrap();
-        let (manager, mut state) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-2".to_owned(),
-        )
-        .unwrap();
-        state.dialogue_history.push(DialogueHistoryEntry {
-            entry_id: 1,
-            prompt_id: "prologue/line".to_owned(),
+        let definitions = ending_seen_flag();
+        let (manager, mut profile) = open_profile(&directory, &definitions, "demo-2");
+        profile
+            .variables
+            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
+        profile
+            .read_dialogues
+            .insert("prologue/introduction".to_owned());
+        profile
+            .seen_presentations
+            .insert("prologue/timeline_showcase".to_owned());
+        profile.dialogue_history.push(DialogueHistoryEntry {
             speaker_id: Some("alice".to_owned()),
             speaker: Some("爱丽丝".to_owned()),
             name_color: Some("#80D8FF".to_owned()),
             text_color: Some("#FFFFFF".to_owned()),
-            text: "第一行\n第二行".to_owned(),
+            ..history_entry(1, "prologue/line", "第一行\n第二行")
         });
-        manager.save(&state).unwrap();
+        manager.save(&profile).unwrap();
 
-        let (_, loaded) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-2".to_owned(),
-        )
-        .unwrap();
-        assert_eq!(loaded.dialogue_history, state.dialogue_history);
+        let (_, same_content) = open_profile(&directory, &definitions, "demo-2");
+        assert_eq!(same_content, profile);
 
-        let (_, changed) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-3".to_owned(),
-        )
-        .unwrap();
+        let (_, changed) = open_profile(&directory, &definitions, "demo-3");
+        assert_eq!(
+            changed.variables.get("ending_seen"),
+            Some(&ScalarValue::Boolean(true))
+        );
+        assert_eq!(changed.read_content_version, "demo-3");
+        assert!(changed.read_dialogues.is_empty());
+        assert!(changed.seen_presentations.is_empty());
         assert!(changed.dialogue_history.is_empty());
     }
 
     #[test]
     fn profile_write_failures_are_reported() {
         let directory = tempdir().unwrap();
-        let definitions = std::collections::BTreeMap::from([(
-            "ending_seen".to_owned(),
-            VariableDefinition {
-                scope: VariableScope::Profile,
-                value_type: VariableType::Boolean,
-                default: ScalarValue::Boolean(false),
-            },
-        )]);
-        let (manager, mut values) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &definitions,
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let (manager, mut values) = open_profile(&directory, &ending_seen_flag(), "demo-2");
         values
             .variables
             .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
@@ -1346,9 +1281,9 @@ mod tests {
     #[test]
     fn profile_history_is_preserved_and_invalid_metadata_is_repaired() {
         let directory = tempdir().unwrap();
-        fs::write(
-            directory.path().join("profile.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
+        write_profile(
+            &directory,
+            serde_json::json!({
                 "schema_version": 4,
                 "variables": {},
                 "read_content_version": "demo-2",
@@ -1360,31 +1295,19 @@ mod tests {
                     {"entry_id": 3, "prompt_id": "prologue//line", "speaker": null, "text": "must be removed"}
                 ],
                 "completed_scenes": ["prologue", "../invalid"]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+            }),
+        );
 
-        let (_, state) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let (_, state) = open_profile(&directory, &BTreeMap::new(), "demo-2");
         assert_eq!(
             state.completed_scenes,
-            std::collections::BTreeSet::from(["prologue".to_owned()])
+            BTreeSet::from(["prologue".to_owned()])
         );
         assert_eq!(state.dialogue_history.len(), 1);
         assert_eq!(state.dialogue_history[0].text, "legacy");
-        let written: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.path().join("profile.json")).unwrap())
-                .unwrap();
+        let written = read_json_value(&directory, "profile.json");
         assert_eq!(
-            written
-                .get("dialogue_history")
-                .and_then(serde_json::Value::as_array)
-                .map(Vec::len),
+            written["dialogue_history"].as_array().map(Vec::len),
             Some(1)
         );
         assert!(directory
@@ -1396,34 +1319,20 @@ mod tests {
     #[test]
     fn malformed_history_is_ignored_without_losing_profile_variables() {
         let directory = tempdir().unwrap();
-        fs::write(
-            directory.path().join("profile.json"),
-            br#"{
+        write_profile(
+            &directory,
+            serde_json::json!({
                 "schema_version": 4,
                 "variables": {"ending_seen": true},
                 "read_content_version": "demo-2",
                 "read_dialogues": [],
                 "seen_presentations": [],
-                "dialogue_history": [{"entry_id":"not-an-integer"}],
+                "dialogue_history": [{"entry_id": "not-an-integer"}],
                 "completed_scenes": []
-            }"#,
-        )
-        .unwrap();
+            }),
+        );
 
-        let definitions = std::collections::BTreeMap::from([(
-            "ending_seen".to_owned(),
-            VariableDefinition {
-                scope: VariableScope::Profile,
-                value_type: VariableType::Boolean,
-                default: ScalarValue::Boolean(false),
-            },
-        )]);
-        let (_, state) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &definitions,
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let (_, state) = open_profile(&directory, &ending_seen_flag(), "demo-2");
         assert_eq!(
             state.variables.get("ending_seen"),
             Some(&ScalarValue::Boolean(true))
@@ -1437,24 +1346,14 @@ mod tests {
     #[test]
     fn profile_recovery_repairs_primary_without_overwriting_valid_backup() {
         let directory = tempdir().unwrap();
-        let (_, initial) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let (_, initial) = open_profile(&directory, &BTreeMap::new(), "demo-2");
         let primary = directory.path().join("profile.json");
         let backup = directory.path().join("profile.json.bak");
         let known_good = fs::read(&primary).unwrap();
         fs::write(&backup, &known_good).unwrap();
         fs::write(&primary, b"{\"schema_version\":4").unwrap();
 
-        let (_, recovered) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-2".to_owned(),
-        )
-        .unwrap();
+        let (_, recovered) = open_profile(&directory, &BTreeMap::new(), "demo-2");
         assert_eq!(recovered, initial);
         assert!(serde_json::from_slice::<serde_json::Value>(&fs::read(&primary).unwrap()).is_ok());
         assert_eq!(fs::read(&backup).unwrap(), known_good);
@@ -1467,105 +1366,44 @@ mod tests {
     #[test]
     fn profile_reconciliation_drops_locations_removed_from_current_content() {
         let directory = tempdir().unwrap();
-        fs::write(
-            directory.path().join("profile.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
+        write_profile(
+            &directory,
+            serde_json::json!({
                 "schema_version": 4,
                 "variables": {},
                 "read_content_version": "demo-2",
-                "read_dialogues": ["prologue/kept", "removed/line"],
+                "read_dialogues": ["prologue/kept", "removed/line", "prologue/lecture/definition"],
                 "seen_presentations": ["prologue/kept", "prologue/removed"],
                 "completed_scenes": ["prologue", "removed"]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+            }),
+        );
 
         let (_, state) = ProfileManager::new_with_content(
             directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
             "demo-2".to_owned(),
-            Some(std::collections::BTreeSet::from(["prologue".to_owned()])),
-            Some(std::collections::BTreeSet::from([
-                "prologue/kept".to_owned()
-            ])),
-        )
-        .unwrap();
-        assert_eq!(state.read_dialogues.len(), 1);
-        assert_eq!(state.seen_presentations.len(), 1);
-        assert_eq!(state.completed_scenes.len(), 1);
-    }
-
-    #[test]
-    fn profile_reconciliation_keeps_long_text_step_locations() {
-        let directory = tempdir().unwrap();
-        fs::write(
-            directory.path().join("profile.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": 4,
-                "variables": {},
-                "read_content_version": "demo-2",
-                "read_dialogues": ["prologue/lecture/definition"],
-                "seen_presentations": [],
-                "completed_scenes": []
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let (_, state) = ProfileManager::new_with_content(
-            directory.path().to_path_buf(),
-            &std::collections::BTreeMap::new(),
-            "demo-2".to_owned(),
-            Some(std::collections::BTreeSet::from(["prologue".to_owned()])),
-            Some(std::collections::BTreeSet::from([
+            Some(BTreeSet::from(["prologue".to_owned()])),
+            Some(BTreeSet::from([
+                "prologue/kept".to_owned(),
+                // A long-text step location has three components.
                 "prologue/lecture/definition".to_owned(),
             ])),
         )
         .unwrap();
-        assert!(state.read_dialogues.contains("prologue/lecture/definition"));
-    }
-
-    #[test]
-    fn content_changes_only_clear_read_history() {
-        let directory = tempdir().unwrap();
-        let definitions = std::collections::BTreeMap::from([(
-            "ending_seen".to_owned(),
-            VariableDefinition {
-                scope: VariableScope::Profile,
-                value_type: VariableType::Boolean,
-                default: ScalarValue::Boolean(false),
-            },
-        )]);
-        let (manager, mut profile) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &definitions,
-            "demo-2".to_owned(),
-        )
-        .unwrap();
-        profile
-            .variables
-            .insert("ending_seen".to_owned(), ScalarValue::Boolean(true));
-        profile
-            .read_dialogues
-            .insert("prologue/introduction".to_owned());
-        profile
-            .seen_presentations
-            .insert("prologue/timeline_showcase".to_owned());
-        manager.save(&profile).unwrap();
-
-        let (_, changed) = ProfileManager::new(
-            directory.path().to_path_buf(),
-            &definitions,
-            "demo-3".to_owned(),
-        )
-        .unwrap();
         assert_eq!(
-            changed.variables.get("ending_seen"),
-            Some(&ScalarValue::Boolean(true))
+            state.read_dialogues,
+            BTreeSet::from([
+                "prologue/kept".to_owned(),
+                "prologue/lecture/definition".to_owned()
+            ])
         );
-        assert_eq!(changed.read_content_version, "demo-3");
-        assert!(changed.read_dialogues.is_empty());
-        assert!(changed.seen_presentations.is_empty());
+        assert_eq!(
+            state.seen_presentations,
+            BTreeSet::from(["prologue/kept".to_owned()])
+        );
+        assert_eq!(
+            state.completed_scenes,
+            BTreeSet::from(["prologue".to_owned()])
+        );
     }
 }

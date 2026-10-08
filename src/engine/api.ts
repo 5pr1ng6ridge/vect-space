@@ -5,7 +5,6 @@ import type {
   DialogueHistoryEntry,
   AdvanceSource,
   ResolvedAsset,
-  RuntimeSnapshot,
   RuntimeUpdate,
   SaveSlotSummary,
   Settings,
@@ -136,7 +135,6 @@ export const engineApi = {
       outcome,
       expectedSessionId,
     }),
-  getSnapshot: () => command<RuntimeSnapshot>("get_snapshot"),
   /** Committed updates after `afterSeq`; the host's bounded buffer is the source. */
   syncUpdates: (expectedSessionId: WireU64, afterSeq: WireU64) =>
     command<UpdateBatch>("sync_updates", { expectedSessionId, afterSeq }),
@@ -152,10 +150,6 @@ export const engineApi = {
     }),
   getDialogueHistory: () =>
     command<DialogueHistoryEntry[]>("get_dialogue_history"),
-  clearDialogueHistory: (expectedSessionId: WireU64) =>
-    command<unknown>("clear_dialogue_history", {
-      expectedSessionId,
-    }),
   getChapterMap: () => command<ChapterMapSnapshot | null>("get_chapter_map"),
   startSceneReplay: (sceneId: string, expectedSessionId: WireU64) =>
     command<RuntimeUpdate>("start_scene_replay", {
@@ -195,7 +189,6 @@ export const engineApi = {
   // only: the secondary has no save, settings, history, chapter-map or replay
   // transport at all.
   secondaryBootstrap: () => command<BootstrapPayload>("secondary_bootstrap"),
-  secondarySnapshot: () => command<RuntimeSnapshot>("secondary_snapshot"),
   secondarySyncUpdates: (expectedSessionId: WireU64, afterSeq: WireU64) =>
     command<UpdateBatch>("secondary_sync_updates", {
       expectedSessionId,

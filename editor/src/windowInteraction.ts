@@ -14,8 +14,8 @@ import type {
   WindowRole,
 } from "./types";
 
-export const MAIN_TITLE_VARIABLE = "window.main.title";
-export const SECONDARY_TITLE_VARIABLE = "window.secondary.title";
+const MAIN_TITLE_VARIABLE = "window.main.title";
+const SECONDARY_TITLE_VARIABLE = "window.secondary.title";
 export const WINDOW_TITLE_VARIABLES: readonly string[] = [
   MAIN_TITLE_VARIABLE,
   SECONDARY_TITLE_VARIABLE,
@@ -25,7 +25,7 @@ export const MIN_TIMER_INTERVAL_MS = 50;
 export const MAX_SCENE_TIMERS = 64;
 /** Same cap as every other animation duration. */
 export const MAX_TIMER_DURATION_MS = 60_000;
-export const MAX_WINDOW_TITLE_BYTES = 4096;
+const MAX_WINDOW_TITLE_BYTES = 4096;
 
 export const WINDOW_ROLE_LABELS: Record<WindowRole, string> = {
   main: "主窗口",
@@ -33,7 +33,7 @@ export const WINDOW_ROLE_LABELS: Record<WindowRole, string> = {
 };
 
 /** Built-in, read-only string variables maintained by `window_title` nodes. */
-export const WINDOW_VARIABLE_DEFINITIONS: Readonly<
+const WINDOW_VARIABLE_DEFINITIONS: Readonly<
   Record<string, VariableDefinition>
 > = {
   [MAIN_TITLE_VARIABLE]: { scope: "save", type: "string", default: "" },
@@ -115,7 +115,7 @@ export function validTimerTargets(scene: SceneDefinition): string[] {
  * Today only a starting timer has one (its effect target); it is not a story
  * edge, so `outputPorts` never reports it.
  */
-export interface EffectReference {
+interface EffectReference {
   id: string;
   label: string;
   target: string;
@@ -158,7 +158,7 @@ export function nonEmpty(
 }
 
 /** UTF-8 length used for the native-title byte limit. */
-export function utf8Length(text: string): number {
+function utf8Length(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 

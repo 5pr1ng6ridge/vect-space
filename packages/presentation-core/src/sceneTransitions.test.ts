@@ -179,7 +179,7 @@ describe("evaluateBackgroundTransition", () => {
       width: DESIGN_WIDTH,
       height: DESIGN_HEIGHT * 0.3,
     });
-    // The hard path is exactly the historic wipe rectangle.
+    // The hard path is exactly the plain wipe rectangle.
     expect(maskOpaqueRect(stageMaskFor("left_to_right", 0.25, 0))).toEqual(
       wipeRect("left_to_right", 0.25),
     );
@@ -380,7 +380,7 @@ describe("feather direction geometry", () => {
         );
         // Softness only widens the band around the authored edge: the centre
         // stays exactly on the edge of the `softness 0` hard path (the
-        // historic `wipeRect`), mirrored for the reversed directions.
+        // plain `wipeRect`), mirrored for the reversed directions.
         expect(ramp.startPx + ramp.endPx).toBeCloseTo(2 * hardEdge, 6);
         expect(ramp.endPx - ramp.startPx).toBeCloseTo(2 * half, 6);
         expect(ramp.startPx).toBeGreaterThanOrEqual(0);
@@ -394,7 +394,6 @@ describe("feather direction geometry", () => {
 
   it("keeps the opaque region inside the hard rectangle and preserves coverage", () => {
     for (const direction of DIRECTIONS) {
-      const dimension = axisLength(direction);
       const horizontal =
         direction === "left_to_right" || direction === "right_to_left";
       const forward =

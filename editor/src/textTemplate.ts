@@ -1,18 +1,17 @@
 import type { ScalarValue, VariableType } from "./types";
+import { ID_PATTERN } from "./app/ids";
 import { scalarText } from "./scalars";
 
-export type TemplateContext = "text" | "math";
+type TemplateContext = "text" | "math";
 
-export interface TemplateReference {
+interface TemplateReference {
   id: string;
   context: TemplateContext;
   start: number;
   end: number;
 }
 
-const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
-
-export function templateReferences(source: string): TemplateReference[] {
+function templateReferences(source: string): TemplateReference[] {
   const output: TemplateReference[] = [];
   let cursor = 0;
   while (cursor < source.length) {
