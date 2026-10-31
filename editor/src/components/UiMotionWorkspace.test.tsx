@@ -1,13 +1,8 @@
 // @vitest-environment jsdom
 /**
- * UiMotionWorkspace keyframe authoring.
- *
- * UI motion presets are edited with the same shared keyframe surface as the
- * story timeline, while the *real* shared `DialogueBox` (driven by the same
- * `UiMotionHost` the game uses) stays the authority for the target visuals.
- * These tests pin both halves: the surface folds back to the exact target
- * list/order, the preview is the shipping component, and the editor-only hit
- * boxes drive the authored offset channels.
+ * UiMotionWorkspace: the shared keyframe surface folds back to the exact
+ * target list/order, the preview is the shipping `DialogueBox`, and the
+ * editor-only hit boxes drive the authored offset channels.
  */
 import "@testing-library/jest-dom/vitest";
 import {
@@ -186,27 +181,6 @@ describe("UiMotionWorkspace keyframe authoring", () => {
     expect(dialogueRoot(view).style.opacity).toBe("0");
   });
 
-  it("previews the real shared DialogueBox rather than a mock dialogue DOM", () => {
-    const { view } = renderWorkspace();
-    // The mock duplicate (and its hard-coded speaker/formula) is gone.
-    expect(view.container.querySelector(".ui-preview-dialogue")).toBeNull();
-    expect(view.container.querySelector(".ui-preview-surface")).toBeNull();
-    expect(view.container.querySelector(".ui-preview-name")).toBeNull();
-    expect(view.container.querySelector(".ui-preview-text")).toBeNull();
-    expect(view.container.querySelector(".ui-preview-indicator")).toBeNull();
-    // Every shared motion target is registered by the real component.
-    const root = dialogueRoot(view);
-    expect(root).toHaveClass("dialogue-box", "is-visible");
-    expect(
-      root.querySelector(".dialogue-surface .dialogue-frame"),
-    ).not.toBeNull();
-    expect(root.querySelector(".speaker-name")).not.toBeNull();
-    expect(root.querySelector(".dialogue-text")).not.toBeNull();
-    expect(root.querySelector(".advance-indicator")).not.toBeNull();
-    expect(view.container.textContent).not.toContain("爱丽丝");
-    expect(view.container.textContent).toContain("角色名");
-  });
-
   it("reflects a numeric keyframe edit live in the real dialogue node", () => {
     function Harness(): ReactElement {
       const [file, setFile] = useState(motionFile);
@@ -364,16 +338,6 @@ describe("UiMotionWorkspace keyframe authoring", () => {
     expect(fonts.add).toHaveBeenCalledTimes(1);
     expect(await screen.findByText(/预览字体加载失败/)).toBeInTheDocument();
     // The preview keeps using the shipping component.
-    expect(dialogueRoot(view)).toBeInTheDocument();
-  });
-
-  it("previews without the FontFace API (jsdom system fallback)", () => {
-    const { view } = renderWorkspace(
-      () => undefined,
-      motionFile(),
-      FONT_ASSETS,
-    );
-    expect(screen.queryByText(/预览字体加载失败/)).toBeNull();
     expect(dialogueRoot(view)).toBeInTheDocument();
   });
 

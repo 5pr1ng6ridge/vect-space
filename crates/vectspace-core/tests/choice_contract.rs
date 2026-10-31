@@ -153,48 +153,6 @@ nodes:
 }
 
 #[test]
-fn legacy_choice_yaml_resolves_to_the_shipped_css_panel() {
-    let catalog = fixture_catalog();
-    let content = catalog_with_scene(&catalog, legacy_choice_scene());
-    let (layout, choices, diagnostics) = run_choice(&content, "legacy_choice");
-
-    // The shipped CSS panel is `left: 470px; top: 360px; width: 980px`, so the
-    // resolved layout reports exactly that top-left placement plus the
-    // equivalent group-centre anchor (960, 360 + 204 / 2).
-    assert_eq!(
-        layout,
-        ChoiceLayoutSnapshot {
-            stage_width: CHOICE_STAGE_WIDTH,
-            stage_height: CHOICE_STAGE_HEIGHT,
-            anchor_x: CHOICE_DEFAULT_ANCHOR_X,
-            anchor_y: CHOICE_FALLBACK_PANEL_Y + 204.0 / 2.0,
-            direction: ChoiceFlowDirection::Vertical,
-            gap: CHOICE_DEFAULT_GAP,
-            x: CHOICE_FALLBACK_PANEL_X,
-            y: CHOICE_FALLBACK_PANEL_Y,
-            width: CHOICE_FALLBACK_BUTTON_WIDTH,
-            height: 204.0,
-        }
-    );
-    assert!(diagnostics.is_empty());
-    assert_eq!(choices.len(), 2);
-    for (index, choice) in choices.iter().enumerate() {
-        assert_eq!(choice.template, ChoiceTemplateSnapshot::Fallback);
-        assert_eq!(choice.icon, None);
-        assert_eq!(choice.width, CHOICE_FALLBACK_BUTTON_WIDTH);
-        assert_eq!(choice.height, CHOICE_FALLBACK_BUTTON_HEIGHT);
-        assert_eq!(choice.x, CHOICE_FALLBACK_PANEL_X);
-        assert_eq!(
-            choice.y,
-            CHOICE_FALLBACK_PANEL_Y
-                + index as f32 * (CHOICE_FALLBACK_BUTTON_HEIGHT + CHOICE_DEFAULT_GAP)
-        );
-    }
-    assert_eq!(choices[0].id, "first");
-    assert_eq!(choices[1].id, "second");
-}
-
-#[test]
 fn legacy_choices_stay_top_anchored_at_360_for_one_two_and_three_options() {
     let catalog = fixture_catalog();
     for count in 1..=3 {
@@ -204,21 +162,34 @@ fn legacy_choices_stay_top_anchored_at_360_for_one_two_and_three_options() {
 
         assert!(diagnostics.is_empty(), "{count} options: {diagnostics:?}");
         let height = fallback_group_height(count);
+        // The shipped CSS panel is `left: 470px; top: 360px; width: 980px`; the
+        // reported anchor is the centre that reproduces that top-anchored
+        // placement, not a re-anchoring of the group.
         assert_eq!(
-            (layout.x, layout.y, layout.width, layout.height),
-            (
-                CHOICE_FALLBACK_PANEL_X,
-                CHOICE_FALLBACK_PANEL_Y,
-                CHOICE_FALLBACK_BUTTON_WIDTH,
-                height
-            ),
+            layout,
+            ChoiceLayoutSnapshot {
+                stage_width: CHOICE_STAGE_WIDTH,
+                stage_height: CHOICE_STAGE_HEIGHT,
+                anchor_x: CHOICE_DEFAULT_ANCHOR_X,
+                anchor_y: CHOICE_FALLBACK_PANEL_Y + height / 2.0,
+                direction: ChoiceFlowDirection::Vertical,
+                gap: CHOICE_DEFAULT_GAP,
+                x: CHOICE_FALLBACK_PANEL_X,
+                y: CHOICE_FALLBACK_PANEL_Y,
+                width: CHOICE_FALLBACK_BUTTON_WIDTH,
+                height,
+            },
             "{count} legacy options must keep the CSS panel origin"
         );
-        // The reported anchor is the centre that reproduces the top-anchored
-        // placement, not a re-anchoring of the group.
-        assert_eq!(layout.anchor_x, CHOICE_DEFAULT_ANCHOR_X);
-        assert_eq!(layout.anchor_y, CHOICE_FALLBACK_PANEL_Y + height / 2.0);
+        assert_eq!(choices.len(), count);
         for (index, choice) in choices.iter().enumerate() {
+            assert_eq!(choice.id, format!("option_{index}"));
+            assert_eq!(choice.template, ChoiceTemplateSnapshot::Fallback);
+            assert_eq!(choice.icon, None);
+            assert_eq!(
+                (choice.x, choice.width, choice.height),
+                (CHOICE_FALLBACK_PANEL_X, CHOICE_FALLBACK_BUTTON_WIDTH, CHOICE_FALLBACK_BUTTON_HEIGHT)
+            );
             assert_eq!(
                 choice.y,
                 CHOICE_FALLBACK_PANEL_Y
@@ -948,44 +919,34 @@ nodes:
 }
 
 #[test]
-fn empty_visible_choices_are_a_waiting_prompt() {
+fn a_choice_without_a_usable_option_is_a_waiting_prompt_when_started_and_when_loaded() {
     let catalog = fixture_catalog();
+    // Every option is hidden: another window or a timer may still make one visible.
+    let hidden = |value: u32| {
+        format!("    - id: o{value}
+      label: 选项
+      next: done
+      visible_if: {{op: eq, left: {{variable: score}}, right: {{value: {value}}}}}
+")
+    };
     let content = catalog_with_scene(
         &catalog,
-        scene_from_yaml(
-            r#"
-schema_version: 2
+        scene_from_yaml(&format!(
+            "schema_version: 2
 id: empty_choice
 entry: prompt
 nodes:
   prompt:
     type: choice
     choices:
-    - id: a
-      label: 一
-      next: done
-      visible_if:
-        op: eq
-        left:
-          variable: score
-        right:
-          value: 99
-    - id: b
-      label: 二
-      next: done
-      visible_if:
-        op: eq
-        left:
-          variable: score
-        right:
-          value: 100
-  done:
+{}{}  done:
     type: end
-"#,
-        ),
+",
+            hidden(99),
+            hidden(100)
+        )),
     );
     let mut runtime = RuntimeEngine::new(&content).expect("engine");
-    // Another window or a timer may still make an option visible.
     let update = runtime
         .start_scene_preview(&content, "empty_choice")
         .expect("an empty visible choice list is a waiting prompt");
@@ -993,6 +954,31 @@ nodes:
         panic!("expected a waiting choice prompt");
     };
     assert!(choices.is_empty());
+
+    // A saved prompt that has no (enabled) option left loads as a waiting
+    // prompt too; the host re-evaluates the conditions once both windows are
+    // restored.
+    let content = catalog_with_scene(&catalog, legacy_choice_scene());
+    let update = runtime
+        .start_scene_preview(&content, "legacy_choice")
+        .expect("scene preview");
+    let mut load = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = serde_json::to_value(&update.snapshot).expect("snapshot to value");
+        edit(&mut value["prompt"]["choices"]);
+        let snapshot: RuntimeSnapshot = serde_json::from_value(value).expect("snapshot must deserialize");
+        let loaded = runtime.load_snapshot(&content, snapshot).expect("a waiting prompt loads");
+        let PromptSnapshot::Choice { choices, .. } = loaded.snapshot.prompt else {
+            panic!("expected a waiting choice prompt");
+        };
+        choices
+    };
+    assert!(load(&|choices| *choices = serde_json::json!([])).is_empty());
+    let disabled = load(&|choices| {
+        for choice in choices.as_array_mut().expect("choices") {
+            choice["enabled"] = serde_json::json!(false);
+        }
+    });
+    assert!(!disabled.is_empty() && disabled.iter().all(|choice| !choice.enabled));
 }
 
 #[test]
@@ -1224,59 +1210,6 @@ fn loading_a_choice_prompt_with_duplicate_surviving_ids_is_rejected() {
         .load_snapshot(&content, duplicated)
         .expect_err("duplicate surviving choice ids must be rejected");
     assert!(error.to_string().contains("重复选项 id first"), "{error}");
-}
-
-#[test]
-fn loading_an_empty_choice_prompt_keeps_a_waiting_prompt() {
-    let catalog = fixture_catalog();
-    let content = catalog_with_scene(&catalog, legacy_choice_scene());
-    let mut runtime = RuntimeEngine::new(&content).expect("engine");
-    let update = runtime
-        .start_scene_preview(&content, "legacy_choice")
-        .expect("scene preview");
-
-    // A filtered-out choice set is a legal waiting state; the host
-    // re-evaluates the conditions once both windows are restored.
-    let mut emptied = serde_json::to_value(&update.snapshot).expect("snapshot to value");
-    emptied["prompt"]["choices"] = serde_json::json!([]);
-    let emptied: RuntimeSnapshot =
-        serde_json::from_value(emptied).expect("snapshot must deserialize");
-
-    let loaded = runtime
-        .load_snapshot(&content, emptied)
-        .expect("an empty loaded choice prompt is a waiting prompt");
-    let PromptSnapshot::Choice { choices, .. } = loaded.snapshot.prompt else {
-        panic!("expected a waiting choice prompt");
-    };
-    assert!(choices.is_empty());
-}
-
-#[test]
-fn loading_an_all_disabled_choice_prompt_keeps_a_waiting_prompt() {
-    let catalog = fixture_catalog();
-    let content = catalog_with_scene(&catalog, legacy_choice_scene());
-    let mut runtime = RuntimeEngine::new(&content).expect("engine");
-    let update = runtime
-        .start_scene_preview(&content, "legacy_choice")
-        .expect("scene preview");
-
-    let mut disabled = serde_json::to_value(&update.snapshot).expect("snapshot to value");
-    for choice in disabled["prompt"]["choices"]
-        .as_array_mut()
-        .expect("choices")
-    {
-        choice["enabled"] = serde_json::json!(false);
-    }
-    let disabled: RuntimeSnapshot =
-        serde_json::from_value(disabled).expect("snapshot must deserialize");
-
-    let loaded = runtime
-        .load_snapshot(&content, disabled)
-        .expect("an all-disabled loaded choice prompt is a waiting prompt");
-    let PromptSnapshot::Choice { choices, .. } = loaded.snapshot.prompt else {
-        panic!("expected a waiting choice prompt");
-    };
-    assert!(!choices.is_empty() && choices.iter().all(|choice| !choice.enabled));
 }
 
 #[test]

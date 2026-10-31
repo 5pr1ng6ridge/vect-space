@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Texture } from "pixi.js";
 import { TextBlockRasterizer } from "./textBlock";
 import { TEXT_FIXTURE } from "./visualTestKit";
 
@@ -37,6 +38,7 @@ afterEach(() => {
   Object.assign(fonts.map, fonts.original);
   for (const name of Object.keys(fonts.map)) if (!(name in fonts.original)) delete fonts.map[name];
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("TextBlockRasterizer KaTeX fonts", () => {
@@ -129,5 +131,39 @@ describe("TextBlockRasterizer KaTeX fonts", () => {
       vi.doUnmock("katex/dist/katex.min.css?raw");
       vi.resetModules();
     }
+  });
+});
+
+describe("TextBlockRasterizer resource limits", () => {
+  it("rejects an oversize project font while streaming instead of buffering the whole body", async () => {
+    let pulls = 0;
+    const chunk = new Uint8Array(1024 * 1024);
+    vi.stubGlobal("fetch", vi.fn((url: string) => Promise.resolve(url === "font://big"
+      ? new Response(new ReadableStream<Uint8Array>({ pull(controller) { pulls += 1; controller.enqueue(chunk); } }))
+      : new Response(new Uint8Array([0, 1, 2])))));
+    try {
+      const rasterizer = new TextBlockRasterizer({ getTexturePromise: vi.fn(), returnTexturePromise: vi.fn() });
+      await expect(rasterizer.html({ definition: TEXT_FIXTURE, font_url: "font://big", font_version: "1" }))
+        .rejects.toThrow("16 MiB");
+      expect(pulls).toBeLessThan(24);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns a late pooled texture after disposal rather than committing or destroying its source", async () => {
+    vi.spyOn(TextBlockRasterizer.prototype, "html").mockResolvedValue("<div>safe</div>");
+    let resolve!: (texture: Texture) => void;
+    const pending = new Promise<Texture>((done) => { resolve = done; });
+    const returned = vi.fn();
+    const rasterizer = new TextBlockRasterizer({ getTexturePromise: () => pending, returnTexturePromise: returned });
+    const created = rasterizer.create({ definition: TEXT_FIXTURE });
+    await Promise.resolve();
+    rasterizer.destroy();
+    const texture = { destroy: vi.fn() } as unknown as Texture;
+    resolve(texture);
+    await expect(created).rejects.toThrow("已释放");
+    expect(returned).toHaveBeenCalledExactlyOnceWith(pending);
+    expect(texture.destroy).not.toHaveBeenCalled();
   });
 });

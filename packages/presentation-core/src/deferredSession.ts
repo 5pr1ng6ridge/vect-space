@@ -2,12 +2,11 @@
  * Strict-Mode-safe deferred session lifecycle shared by the game canvas and
  * the editor preview.
  *
- * Both hosts used to hand-roll the same dance: create the WebGL session inside
- * an effect, and on cleanup defer destruction by one task so React's Strict
- * Mode probe (setup → cleanup → setup) can reclaim the very same initialized
- * application instead of tearing down a live WebGL context.  Keeping one
- * implementation means both hosts reap timers, listeners and GPU resources the
- * same way, including after an initialization failure.
+ * The WebGL session is created inside an effect, and cleanup defers destruction
+ * by one task so React's Strict Mode probe (setup → cleanup → setup) can
+ * reclaim the very same initialized application instead of tearing down a live
+ * WebGL context.  Both hosts therefore reap timers, listeners and GPU
+ * resources the same way, including after an initialization failure.
  */
 
 export interface DeferredSessionSchedule {

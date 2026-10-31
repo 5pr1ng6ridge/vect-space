@@ -9,12 +9,19 @@
 //! While the player has a panel open, or both windows are hidden, or the title
 //! screen is showing, no time is credited at all (nothing is replayed on resume).
 
-use std::sync::mpsc;
+use std::{
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
-use vectspace_core::interaction::WindowRole;
+use tauri::Manager;
+use vectspace_core::{interaction::WindowRole, runtime::RuntimeEngine};
+use vectspace_protocol::WireCommandError;
 
-use super::pair::{Pair, MAX_HOST_STEPS};
-use super::*;
+use crate::{
+    pair::{Pair, MAX_HOST_STEPS},
+    state::EngineState,
+};
 
 /// Upper bound of one scheduler sleep while a timer is active, so the stored
 /// remaining time stays fresh for saves and a pause is noticed promptly.

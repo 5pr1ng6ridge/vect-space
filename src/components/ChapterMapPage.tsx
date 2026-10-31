@@ -55,9 +55,7 @@ interface Point {
 const VIEWPORT_WIDTH = 1920;
 const VIEWPORT_HEIGHT = 1080;
 
-/** A read-only room map.  The map is deliberately DOM based for now: its
- * design-pixel coordinate model is identical to the editor and leaves the
- * visual node layer easy to replace with image UI later. */
+/** A read-only room map, laid out in the same design-pixel coordinates as the editor. */
 export function ChapterMapPage({
   map,
   assets,
@@ -96,10 +94,8 @@ export function ChapterMapPage({
   });
 
   useLayoutEffect(() => {
-    // A refreshed map/assets snapshot replaces the rendered hotspot DOM. Do
-    // not carry hover/focus or an in-flight gesture across that replacement;
-    // otherwise the old hotspot can keep its interaction state while its
-    // artwork is being swapped out.
+    // A refreshed map/assets snapshot replaces the hotspot DOM, so hover,
+    // focus and an in-flight gesture must not carry over to the new nodes.
     if (
       contentRef.current.map !== map ||
       contentRef.current.assets !== assets
@@ -160,19 +156,16 @@ export function ChapterMapPage({
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0) return;
-    // A hotspot owns its pointer gesture.  In particular, do not turn a
-    // press-and-drag that starts on a node into a room pan: doing so also
-    // captures the pointer on the viewport and prevents the hotspot click
-    // from reaching the button.
+    // A hotspot owns its pointer gesture: panning from a node would capture the
+    // pointer on the viewport and keep the click from reaching the button.
     if (
       event.target instanceof Element &&
       event.target.closest(".chapter-map-hotspot") !== null
     ) {
       return;
     }
-    // Hotspots and the room use one pointer state machine.  Remember which
-    // pointer state only for room panning. The shared threshold suppresses a
-    // background click after a real pan.
+    // Room panning only; the shared drag threshold suppresses the click that
+    // would follow a real pan.
     event.currentTarget.setPointerCapture(event.pointerId);
     const bounds = event.currentTarget.getBoundingClientRect();
     drag.current = {
@@ -360,13 +353,7 @@ export function ChapterMapPage({
   );
 }
 
-/**
- * One hotspot button.
- *
- * Extracted so each hotspot can own a frame loop (hooks cannot live in the
- * map callback) while keeping the interactive behaviour identical to the
- * static artwork case.
- */
+/** One hotspot button; a component of its own so it can run its artwork's frame loop. */
 function HotspotButton({
   hotspot,
   image,

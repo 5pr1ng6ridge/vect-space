@@ -4,12 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type {
-  AssetMetadata,
-  ContentManifest,
-  EditorAsset,
-  EditorProject,
-} from "../types";
+import type { AssetMetadata, ContentManifest, EditorAsset } from "../types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
@@ -417,57 +412,5 @@ describe("animation round trip", () => {
     expect((request.manifest as { animations: unknown }).animations).toEqual([
       "animations/blink.yaml",
     ]);
-  });
-});
-
-describe("save request", () => {
-  it("carries the animation documents through projectRequest", () => {
-    const manifest: ContentManifest = {
-      schema_version: 2,
-      content_version: "test",
-      entry_scene: "scene-a",
-      default_locale: "zh-CN",
-      variables: {},
-      characters: {},
-      assets: {
-        "img.blink2": { kind: "sprite", path: "sprite/blink2.png" },
-        "anim.blink": { kind: "sprite", animation: "blink" },
-      },
-      scenes: [],
-      ui_motions: [],
-      animations: ["animations/blink.yaml"],
-      ui_motion_defaults: {},
-    };
-    const project: EditorProject = {
-      root: "C:/project",
-      manifest,
-      scenes: [],
-      ui_motions: [],
-      buttons: [],
-      animations: [
-        {
-          path: "animations/blink.yaml",
-          definition: {
-            schema_version: 1,
-            id: "blink",
-            frames: [{ asset: "img.blink2", duration_ms: 120 }],
-          },
-        },
-      ],
-      layout: { version: 1, scenes: {} },
-      assets: [
-        {
-          id: "anim.blink",
-          kind: "sprite",
-          animation: "blink",
-          absolute_path: "C:/assets/blink2.png",
-        },
-      ],
-      diagnostics: [],
-      fingerprint: "fingerprint",
-    };
-    const request = projectRequest(project);
-    expect(request.animations).toEqual(project.animations);
-    expect(request.manifest.animations).toEqual(["animations/blink.yaml"]);
   });
 });

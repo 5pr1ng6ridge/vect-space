@@ -161,7 +161,7 @@ nodes:
     tracks:
     - type: sprite
       sprite_id: character
-      asset: sprite.alli_neutral
+      asset: sprite.jelly
       remove_at_end: false
       channels:
         opacity:
@@ -373,7 +373,8 @@ nodes:
     type: sprite
     sprite_id: character
     action: move
-    asset: sprite.alli_surprise
+    sprite_kind: character
+    asset: sprite.jelly
     x: 524.0
     "y": 1121.0
     scale: 0.7

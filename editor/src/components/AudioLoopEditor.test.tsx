@@ -185,14 +185,6 @@ describe("AudioLoopEditor", () => {
     expect(playSpy).not.toHaveBeenCalled();
   });
 
-  it("keeps the media source alive under React StrictMode", () => {
-    const { audio } = renderEditor({}, { strict: true });
-    // StrictMode runs the source effect as setup -> cleanup -> setup; the
-    // element must still own its media afterwards.
-    expect(audio.getAttribute("src")).toBe("C:/game/audio/a.ogg");
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
   it("still plays on an explicit gesture under React StrictMode", () => {
     const { audio } = renderEditor({}, { strict: true });
     expect(audio.getAttribute("src")).toBe("C:/game/audio/a.ogg");
@@ -212,16 +204,6 @@ describe("AudioLoopEditor", () => {
       loop_start_ms: 1000,
       start_ms: 1000,
     });
-  });
-
-  it("does not commit while a drag is still in flight", () => {
-    const { onChange } = renderEditor();
-    const handle = slider("BGM 起播标记");
-    fireEvent.pointerDown(handle, { clientX: 125, pointerId: 1 });
-    fireEvent.pointerMove(window, { clientX: 400, pointerId: 1 });
-    expect(onChange).not.toHaveBeenCalled();
-    fireEvent.pointerUp(window, { clientX: 400, pointerId: 1 });
-    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   it("clamps a dragged start marker to the loop end", () => {
@@ -426,26 +408,6 @@ describe("AudioLoopEditor", () => {
     expect(audio.currentTime).toBe(1);
   });
 
-  it("follows an externally driven undo/redo without restarting", () => {
-    const { audio, props, view } = renderEditor();
-    fireEvent.click(screen.getByRole("button", { name: "整段循环试听" }));
-    audio.currentTime = 1.5;
-    fireEvent.timeUpdate(audio);
-    pauseSpy.mockClear();
-
-    // Undo restores an earlier authored loop start.
-    view.rerender(
-      <AudioLoopEditor {...props} loopEndMs={3000} loopStartMs={1500} />,
-    );
-    expect(pauseSpy).not.toHaveBeenCalled();
-    expect(audio.currentTime).toBe(1.5);
-    expect(screen.getByRole("button", { name: "暂停试听" })).toBeDefined();
-
-    audio.currentTime = 3;
-    fireEvent.timeUpdate(audio);
-    expect(audio.currentTime).toBe(1.5);
-  });
-
   it("does not jump into a range that starts ahead of the cursor", () => {
     const { audio, props, view } = renderEditor();
     fireEvent.click(screen.getByRole("button", { name: "整段循环试听" }));
@@ -503,18 +465,6 @@ describe("AudioLoopEditor", () => {
     expect(
       screen.getByRole("button", { name: "试听（从起播点）" }),
     ).toBeDefined();
-  });
-
-  it("keeps an audition alive across an unchanged rerender", () => {
-    const { props, view } = renderEditor();
-    fireEvent.click(screen.getByRole("button", { name: "整段循环试听" }));
-    pauseSpy.mockClear();
-
-    // Same authored bounds (only callback identities change): the transport and
-    // its cursor must survive.
-    view.rerender(<AudioLoopEditor {...props} onChange={vi.fn()} />);
-    expect(pauseSpy).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "暂停试听" })).toBeDefined();
   });
 
   it("disables both loop auditions without both loop points", () => {

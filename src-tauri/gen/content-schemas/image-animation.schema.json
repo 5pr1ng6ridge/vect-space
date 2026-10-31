@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ImageAnimationDefinition",
-  "description": "Standalone `image animation` document (Schema v1).\n\nThe plan deliberately keeps animation out of the asset *kind* namespace:\nan asset says what it is used for (background, sprite, GUI) and separately\nsays whether its pixels are one static image or an ordered frame sequence.",
+  "description": "Standalone `image animation` document (Schema v1).\n\nAnimation is deliberately kept out of the asset *kind* namespace:\nan asset says what it is used for (background, sprite, GUI) and separately\nsays whether its pixels are one static image or an ordered frame sequence.",
   "type": "object",
   "properties": {
     "frames": {

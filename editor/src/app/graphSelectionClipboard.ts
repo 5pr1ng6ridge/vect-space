@@ -95,7 +95,7 @@ export function captureGraphSelection(
   };
 }
 
-export interface PlacedGraphSelection {
+interface PlacedGraphSelection {
   nodes: Record<string, SceneNode>;
   positions: Record<string, NodePosition>;
   /** The entire destination forest, including the newly copied groups. */

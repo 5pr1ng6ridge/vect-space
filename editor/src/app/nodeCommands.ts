@@ -18,12 +18,12 @@ import {
 } from "../windowInteraction";
 import type { EditorProject, SceneDefinition } from "../types";
 
-export interface DeletionOption {
+interface DeletionOption {
   id: string;
   label: string;
 }
 
-export type DeletionPlan =
+type DeletionPlan =
   | { ok: true; nodeIds: string[]; options: DeletionOption[] }
   | { ok: false; error: string };
 

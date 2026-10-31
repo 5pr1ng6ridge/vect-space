@@ -84,6 +84,7 @@ export interface StoryGraphProps {
   diagnostics: EditorDiagnostic[];
   /** Used to show character display names in node summaries. */
   manifest?: ContentManifest;
+  proofs?: import("../types").ProofFile[];
   selectedNodeId: string | null;
   onSelect(nodeId: string | null): void;
   /** Open the dedicated workspace of a timeline / long-text node. */
@@ -219,6 +220,7 @@ function StoryGraphInner({
   layout,
   diagnostics,
   manifest,
+  proofs,
   selectedNodeId,
   onSelect,
   onOpen,
@@ -352,7 +354,7 @@ function StoryGraphInner({
         data: {
           nodeId,
           node,
-          description: describeNode(node, { manifest }),
+          description: describeNode(node, { manifest, proofs }),
           entry: scene.entry === nodeId,
           issueCount: issuesByNode.get(nodeId) ?? 0,
           onActivate: activate,
@@ -366,6 +368,7 @@ function StoryGraphInner({
       issuesByNode,
       layout?.nodes,
       manifest,
+      proofs,
       onSelect,
       scene,
       selectionKeys,

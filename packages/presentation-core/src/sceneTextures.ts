@@ -1,22 +1,15 @@
 /**
  * Reference-counted texture store shared by the game and the editor surface.
  *
- * Before the migration the game cached decoded textures per session (with a
- * budget but no sharing between hosts) while the editor preview loaded them
- * module-globally and never released them.  The store gives both hosts the same
- * rule: a decoded image is loaded once, shared by every view that needs it, and
- * destroyed exactly when the last referencing view goes away.
+ * A decoded image is loaded once, shared by every view that needs it, and
+ * destroyed exactly when the last referencing view goes away; the number of
+ * distinct resident urls is bounded by a budget.
  */
 
 export interface SceneTextureLike {
   readonly width: number;
   readonly height: number;
   destroy(destroySource?: boolean): void;
-}
-
-export interface SceneTextureLoadFailure {
-  url: string;
-  message: string;
 }
 
 export interface SceneTextureStoreOptions<T extends SceneTextureLike> {

@@ -16,6 +16,7 @@ import { visualProject, type VisualProject } from "../test/visualFixtures";
 import type { SceneNode } from "../types";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { createProjectSectionState } from "./projectSections";
+import { SIDEBAR_CALLBACKS } from "./sidebar/testProps";
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
@@ -33,39 +34,6 @@ function library() {
     onEdit: vi.fn(),
   };
 }
-
-const CALLBACKS = {
-  onAddCharacter: () => true,
-  onAddScene: () => true,
-  onAddVariable: () => true,
-  onChangeCharacter: () => undefined,
-  onChangeVariable: () => undefined,
-  onCreateAction: () => true,
-  onCreateButtonTemplate: () => undefined,
-  onCreateImageAnimation: () => true,
-  onCreateUiMotion: () => undefined,
-  onDeleteAction: () => undefined,
-  onDeleteButtonTemplate: () => undefined,
-  onDeleteCharacter: () => undefined,
-  onDeleteScene: () => undefined,
-  onDeleteUiMotion: () => undefined,
-  onDeleteVariable: () => undefined,
-  onDuplicateAction: () => undefined,
-  onDuplicateButtonTemplate: () => undefined,
-  onEditActionKeyframes: () => undefined,
-  onEditButtonTemplate: () => undefined,
-  onEditUiMotion: () => undefined,
-  onImportAssets: () => Promise.resolve(),
-  onManifestChange: () => undefined,
-  onNavigate: () => undefined,
-  onRemoveAsset: () => false,
-  onRenameAction: () => true,
-  onRenameCharacter: () => true,
-  onRenameScene: () => true,
-  onRenameVariable: () => true,
-  onSelectAsset: () => undefined,
-  onSelectScene: () => undefined,
-};
 
 /** `main`, `side` and `epilogue`; `label` (text) and `snow` (particle). */
 function threeScenes(): VisualProject {
@@ -116,7 +84,7 @@ function Harness({
   const [itemsOpen, setItemsOpen] = useState<Record<string, boolean>>({});
   return (
     <ProjectSidebar
-      {...CALLBACKS}
+      {...SIDEBAR_CALLBACKS}
       activeSceneId={activeSceneId}
       activeTab={activeTab}
       diagnostics={[]}
@@ -223,16 +191,6 @@ describe("scene text block groups", () => {
     expect(groupToggle("epilogue")).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("follows the active scene until the author chose a state", () => {
-    const project = threeScenes();
-    const view = render(<Harness activeSceneId="main" project={project} />);
-    expect(groupToggle("epilogue")).toHaveAttribute("aria-expanded", "false");
-    view.unmount();
-    render(<Harness activeSceneId="epilogue" project={project} />);
-    expect(groupToggle("epilogue")).toHaveAttribute("aria-expanded", "true");
-    expect(groupToggle("main")).toHaveAttribute("aria-expanded", "false");
-  });
-
   it("creates a text from a scene's button through the validated dialog", () => {
     const handlers = library();
     render(<Harness handlers={handlers} project={threeScenes()} />);
@@ -316,8 +274,8 @@ describe("scene text block groups", () => {
   });
 });
 
-describe("project panel after texts moved to scenes", () => {
-  it("keeps particles as a global resource and no longer lists texts there", () => {
+describe("particles in the project panel", () => {
+  it("lists particles as a global resource, not texts", () => {
     const project = threeScenes();
     render(<Harness activeTab="project" project={project} />);
     expect(screen.getByRole("button", { name: "粒子效果" })).toBeInTheDocument();

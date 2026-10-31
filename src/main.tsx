@@ -15,7 +15,7 @@ installBrowserGuards();
  * `getCurrentWindow()` throws outside Tauri (for example a plain `vite` dev
  * page), which must keep rendering the main application exactly as before.
  */
-export function resolveWindowRole(): "main" | "secondary" {
+function resolveWindowRole(): "main" | "secondary" {
   try {
     return getCurrentWindow().label === "secondary" ? "secondary" : "main";
   } catch {

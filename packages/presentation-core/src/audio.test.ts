@@ -814,32 +814,6 @@ describe("AudioManager four-slot ambience", () => {
     expect(FakeAudioContext.instances[0]?.gains[4]?.gain.value).toBe(0.4);
   });
 
-  it("resumes a suspended context once without duplicating deferred resources", async () => {
-    FakeAudioContext.initialState = "suspended";
-    const manager = new AudioManager(
-      { ...settings, master_volume: 0 },
-      { deferUntilUnmuted: true },
-    );
-    await manager.reconcile(ambienceSnapshot({ slot_1: loop("forest") }), {
-      forest: "forest.mp3",
-    });
-    expect(FakeAudio.instances).toHaveLength(0);
-
-    const first = manager.activateDeferred();
-    const second = manager.activateDeferred();
-    await Promise.all([first, second]);
-
-    expect(FakeAudioContext.instances).toHaveLength(1);
-    expect(FakeAudioContext.instances[0]?.state).toBe("running");
-    expect(FakeAudioContext.instances[0]?.resumeCalls).toBe(1);
-    expect(FakeAudio.instances.map((audio) => audio.url)).toEqual([
-      "forest.mp3",
-    ]);
-    await manager.activateDeferred();
-    expect(FakeAudio.instances).toHaveLength(1);
-    manager.destroy();
-  });
-
   it("does not revive media after a failed-load boundary while resume is delayed", async () => {
     FakeAudioContext.initialState = "suspended";
     const resume = makeDeferred();
@@ -871,32 +845,50 @@ describe("AudioManager four-slot ambience", () => {
     manager.destroy();
   });
 
-  it("does not revive media after reset while context resume is delayed", async () => {
-    FakeAudioContext.initialState = "suspended";
-    const resume = makeDeferred();
-    FakeAudioContext.resumeDeferred = resume;
-    const manager = new AudioManager(
-      { ...settings, master_volume: 0 },
-      { deferUntilUnmuted: true },
-    );
-    await manager.reconcile(
-      ambienceSnapshot({ slot_1: loop("reset-target") }),
-      { "reset-target": "reset-target.mp3" },
-    );
-    manager.applySettings(settings);
-    const activation = manager.activateDeferred();
-    await Promise.resolve();
-    expect(FakeAudioContext.instances).toHaveLength(1);
-    expect(FakeAudioContext.instances[0]?.resumeCalls).toBe(1);
-    expect(FakeAudio.instances).toHaveLength(0);
+  it.each([
+    [
+      "reset",
+      (manager: AudioManager) => {
+        manager.resetSession();
+      },
+      false,
+    ],
+    [
+      "destroy",
+      (manager: AudioManager) => {
+        manager.destroy();
+      },
+      true,
+    ],
+  ] as const)(
+    "does not revive media after %s while context resume is delayed",
+    async (_name, boundary, closes) => {
+      FakeAudioContext.initialState = "suspended";
+      const resume = makeDeferred();
+      FakeAudioContext.resumeDeferred = resume;
+      const manager = new AudioManager(
+        { ...settings, master_volume: 0 },
+        { deferUntilUnmuted: true },
+      );
+      await manager.reconcile(ambienceSnapshot({ slot_1: loop("target") }), {
+        target: "target.mp3",
+      });
+      manager.applySettings(settings);
+      const activation = manager.activateDeferred();
+      await Promise.resolve();
+      expect(FakeAudioContext.instances).toHaveLength(1);
+      expect(FakeAudioContext.instances[0]?.resumeCalls).toBe(1);
+      expect(FakeAudio.instances).toHaveLength(0);
 
-    manager.resetSession();
-    resume.resolve();
-    await activation;
-    expect(FakeAudio.instances).toHaveLength(0);
-    expect(manager.currentAmbienceVolume("slot_1")).toBeUndefined();
-    manager.destroy();
-  });
+      boundary(manager);
+      resume.resolve();
+      await activation;
+      expect(FakeAudio.instances).toHaveLength(0);
+      expect(manager.currentAmbienceVolume("slot_1")).toBeUndefined();
+      if (closes) expect(FakeAudioContext.instances[0]?.closed).toBe(true);
+      manager.destroy();
+    },
+  );
 
   it("does not let an activation waiter revive a post-reset target", async () => {
     FakeAudioContext.initialState = "suspended";
@@ -926,30 +918,6 @@ describe("AudioManager four-slot ambience", () => {
     await Promise.all([first, waiter]);
     expect(FakeAudio.instances).toHaveLength(0);
     manager.destroy();
-  });
-
-  it("does not revive media after destroy while context resume is delayed", async () => {
-    FakeAudioContext.initialState = "suspended";
-    const resume = makeDeferred();
-    FakeAudioContext.resumeDeferred = resume;
-    const manager = new AudioManager(
-      { ...settings, master_volume: 0 },
-      { deferUntilUnmuted: true },
-    );
-    await manager.reconcile(
-      ambienceSnapshot({ slot_2: loop("destroy-target") }),
-      { "destroy-target": "destroy-target.mp3" },
-    );
-    manager.applySettings(settings);
-    const activation = manager.activateDeferred();
-    await Promise.resolve();
-    expect(FakeAudio.instances).toHaveLength(0);
-
-    manager.destroy();
-    resume.resolve();
-    await activation;
-    expect(FakeAudio.instances).toHaveLength(0);
-    expect(FakeAudioContext.instances[0]?.closed).toBe(true);
   });
 
   it("serializes rapid mute-unmute and creates one current resource set", async () => {
@@ -1011,6 +979,7 @@ describe("AudioManager four-slot ambience", () => {
     expect(FakeAudioContext.instances[0]?.resumeCalls).toBe(1);
     resume.resolve();
     await Promise.all(calls);
+    expect(FakeAudioContext.instances[0]?.state).toBe("running");
     expect(FakeAudio.instances.map((audio) => audio.url)).toEqual([
       "one.mp3",
       "two.mp3",
@@ -1021,43 +990,61 @@ describe("AudioManager four-slot ambience", () => {
     manager.destroy();
   });
 
-  it("keeps a newer deferred reconcile after an older aborted reconcile", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const manager = new AudioManager(
-      { ...settings, master_volume: 0 },
-      { deferUntilUnmuted: true },
-    );
-    const first = new AbortController();
-    await manager.reconcile(
-      ambienceSnapshot({ slot_1: loop("first") }),
-      { first: "first.mp3" },
-      first.signal,
-    );
-    const second = new AbortController();
-    await manager.reconcile(
-      ambienceSnapshot({ slot_1: loop("second", 0.4) }),
-      { second: "second.mp3" },
-      second.signal,
-    );
+  it.each([
+    [
+      "a pre-aborted reconcile",
+      "slot_1",
+      0.4,
+      (manager: AudioManager, signal: AbortSignal, slot: AmbienceSlot) =>
+        manager.reconcile(
+          ambienceSnapshot({ [slot]: loop("first") }),
+          { first: "first.mp3" },
+          signal,
+        ),
+    ],
+    [
+      "an aborted activateDeferred",
+      "slot_2",
+      0.6,
+      (manager: AudioManager, signal: AbortSignal) =>
+        manager.activateDeferred(signal),
+    ],
+  ] as const)(
+    "keeps a newer deferred target after %s of an older generation",
+    async (_name, slot, volume, staleOperation) => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const manager = new AudioManager(
+        { ...settings, master_volume: 0 },
+        { deferUntilUnmuted: true },
+      );
+      const first = new AbortController();
+      await manager.reconcile(
+        ambienceSnapshot({ [slot]: loop("first") }),
+        { first: "first.mp3" },
+        first.signal,
+      );
+      const second = new AbortController();
+      await manager.reconcile(
+        ambienceSnapshot({ [slot]: loop("second", volume) }),
+        { second: "second.mp3" },
+        second.signal,
+      );
 
-    first.abort();
-    // This pre-aborted stale operation must not clear the newer generation.
-    await manager.reconcile(
-      ambienceSnapshot({ slot_1: loop("first") }),
-      { first: "first.mp3" },
-      first.signal,
-    );
-    expect(FakeAudioContext.instances).toHaveLength(0);
-    expect(FakeAudio.instances).toHaveLength(0);
-    expect(fetchMock).not.toHaveBeenCalled();
+      first.abort();
+      // The stale operation must not clear the newer generation.
+      await staleOperation(manager, first.signal, slot);
+      expect(FakeAudioContext.instances).toHaveLength(0);
+      expect(FakeAudio.instances).toHaveLength(0);
+      expect(fetchMock).not.toHaveBeenCalled();
 
-    await manager.activateDeferred(second.signal);
-    expect(FakeAudio.instances.map((audio) => audio.url)).toEqual([
-      "second.mp3",
-    ]);
-    expect(manager.currentAmbienceVolume("slot_1")).toBe(0.4);
-  });
+      await manager.activateDeferred(second.signal);
+      expect(FakeAudio.instances.map((audio) => audio.url)).toEqual([
+        "second.mp3",
+      ]);
+      expect(manager.currentAmbienceVolume(slot)).toBe(volume);
+    },
+  );
 
   it("retains a deferred target when remuting cancels pending media play", async () => {
     FakeAudio.deferredUrl = "pending.mp3";
@@ -1122,39 +1109,6 @@ describe("AudioManager four-slot ambience", () => {
     expect(FakeAudio.instances[1]?.removed).toBe(false);
     expect(manager.currentBgmVolume()).toBe(0.6);
     manager.destroy();
-  });
-
-  it("keeps a newer deferred target after a stale activateDeferred abort", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const manager = new AudioManager(
-      { ...settings, master_volume: 0 },
-      { deferUntilUnmuted: true },
-    );
-    const first = new AbortController();
-    await manager.reconcile(
-      ambienceSnapshot({ slot_2: loop("first") }),
-      { first: "first.mp3" },
-      first.signal,
-    );
-    const second = new AbortController();
-    await manager.reconcile(
-      ambienceSnapshot({ slot_2: loop("second", 0.6) }),
-      { second: "second.mp3" },
-      second.signal,
-    );
-
-    first.abort();
-    await manager.activateDeferred(first.signal);
-    expect(FakeAudioContext.instances).toHaveLength(0);
-    expect(FakeAudio.instances).toHaveLength(0);
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    await manager.activateDeferred(second.signal);
-    expect(FakeAudio.instances.map((audio) => audio.url)).toEqual([
-      "second.mp3",
-    ]);
-    expect(manager.currentAmbienceVolume("slot_2")).toBe(0.6);
   });
 
   it("clears deferred desires on abort/reset and handles ambience:null reconciliation", async () => {

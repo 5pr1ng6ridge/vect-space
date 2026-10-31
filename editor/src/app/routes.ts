@@ -14,10 +14,8 @@ export interface VisualRoute {
 }
 
 /**
- * What the editor window is showing.  One value replaces the seven
- * independent "target" states that used to decide, by early-return order,
- * which full-screen workspace was active; routes are mutually exclusive by
- * construction.
+ * What the editor window is showing.  A single value, so the full-screen
+ * workspaces are mutually exclusive by construction.
  */
 export type EditorRoute =
   | { kind: "story" }

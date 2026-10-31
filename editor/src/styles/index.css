@@ -6,7 +6,7 @@
  *   vendor     third-party CSS (React Flow, KaTeX)
  *   elements   native control defaults (below legacy, so old areas keep
  *              their overrides until migrated)
- *   legacy     the pre-redesign stylesheets, shrinking as areas migrate
+ *   legacy     pre-redesign rules (legacy.css), shrinking as areas migrate
  *   tokens     design tokens (tokens.css)
  *   base       document defaults (base.css)
  *   components ui/ primitives
@@ -30,5 +30,4 @@
 @import "./panels.css";
 @import "./script.css";
 @import "./workspaces.css";
-@import "../styles.css" layer(legacy);
-@import "../editor-layout.css" layer(legacy);
+@import "./legacy.css" layer(legacy);

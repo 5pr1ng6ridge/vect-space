@@ -1,16 +1,15 @@
-//! Host-level tests of the `window_geometry` / `window_layer` nodes: effects are
-//! recorded on the candidate pair, applied only after a successful commit and in
-//! node order, animated by an injected step instead of a clock, and undone when
-//! the player returns to the title or leaves a replay.  Everything runs against
-//! the recording native seam with a fake desktop (a 1920x1040 work area; the main
+//! The `window_geometry` / `window_layer` nodes: effects are recorded on the
+//! candidate pair, applied only after a successful commit and in node order,
+//! animated by an injected step instead of a clock, and undone when the player
+//! returns to the title or leaves a replay.  Everything runs against the
+//! recording native seam with a fake desktop (a 1920x1040 work area; the main
 //! window at (100, 100) with a 1280x720 client area and a 16x40 frame).
 
-use super::interaction::{
-    content_with, dialogue_text, main_advance, main_snapshot, open_side, say, start_game,
-    state_with,
-};
 use super::*;
-use crate::window_fx::{Frame, MonitorInfo, Rect};
+use crate::{
+    save::SlotDocument,
+    window_fx::{Frame, LayerState},
+};
 use vectspace_core::{
     interaction::{
         TimerAction, WindowLayerAction, WindowPlacement, WindowReference, WindowSize,
@@ -36,13 +35,11 @@ fn center() -> WindowPlacement {
 
 fn top_left() -> WindowPlacement {
     WindowPlacement {
-        relative_to: WindowReference::WorkArea,
         x: 0.0,
         y: 0.0,
         anchor_x: 0.0,
         anchor_y: 0.0,
-        offset_x: 0.0,
-        offset_y: 0.0,
+        ..center()
     }
 }
 
@@ -50,12 +47,9 @@ fn top_left() -> WindowPlacement {
 fn nudge(dx: f32, dy: f32) -> WindowPlacement {
     WindowPlacement {
         relative_to: WindowReference::Current,
-        x: 0.0,
-        y: 0.0,
-        anchor_x: 0.0,
-        anchor_y: 0.0,
         offset_x: dx,
         offset_y: dy,
+        ..top_left()
     }
 }
 
@@ -106,17 +100,41 @@ fn layer(target: WindowRole, action: WindowLayerAction, next: &str) -> SceneNode
     }
 }
 
-fn side_scene() -> (&'static str, Vec<(&'static str, SceneNode)>) {
-    (
-        "s_say",
-        vec![("s_say", say("side", "s_end")), ("s_end", SceneNode::End)],
+fn start_timer(id: &str, target: &str, next: &str) -> SceneNode {
+    SceneNode::Timer {
+        id: id.to_owned(),
+        action: TimerAction::Start,
+        delay_ms: 100,
+        interval_ms: None,
+        target: Some(target.to_owned()),
+        next: next.to_owned(),
+    }
+}
+
+/// A story that starts on a line and then runs `nodes`; the secondary Scene is a
+/// plain line.
+fn story(entry: &'static str, nodes: Vec<(&'static str, SceneNode)>) -> ContentCatalog {
+    content_with(
+        (entry, nodes),
+        (
+            "s_say",
+            vec![("s_say", say("side", "s_end")), ("s_end", SceneNode::End)],
+        ),
     )
 }
 
-/// A story that starts on a line and then runs `nodes`; the secondary scene is
-/// a plain line.
-fn story(entry: &'static str, nodes: Vec<(&'static str, SceneNode)>) -> ContentCatalog {
-    content_with((entry, nodes), side_scene())
+/// A story that reads a line, runs `node` (which must continue to `s2`), then
+/// reads another line.
+fn after_line(node: SceneNode) -> ContentCatalog {
+    story(
+        "s1",
+        vec![
+            ("s1", say("one", "g")),
+            ("g", node),
+            ("s2", say("two", "end")),
+            ("end", SceneNode::End),
+        ],
+    )
 }
 
 fn call_count(ops: &RecordingWindowOps) -> usize {
@@ -135,6 +153,12 @@ fn run_for(state: &EngineState, total_ms: u64, step_ms: u64) {
 
 fn main_frame() -> ((i32, i32), (i32, i32)) {
     ((100, 100), (1280, 720))
+}
+
+/// Leave the story for the title screen, as the `invalidate_session` command does.
+fn leave_for_title(state: &EngineState) {
+    let _gate = state.session_gate().unwrap();
+    state.leave_story_for_title().unwrap();
 }
 
 #[test]
@@ -172,8 +196,8 @@ fn effects_are_applied_after_the_commit_in_node_order() {
     );
     state.finish_transition(transition).unwrap();
 
-    // Centered 1296x760 frame: (960-648, 520-380); the nudge is relative to
-    // where the first effect left the window, not to where it started.
+    // Centered 1296x760 frame: (960-648, 520-380); the nudge is relative to where
+    // the first effect left the window, not to where it started.
     assert_eq!(
         ops.native_calls(),
         vec![
@@ -186,7 +210,7 @@ fn effects_are_applied_after_the_commit_in_node_order() {
 
 #[test]
 fn a_secondary_window_docks_to_the_main_window_and_respects_its_minimum_size() {
-    let content = story(
+    let (_directory, ops, state) = state_with(story(
         "open",
         vec![
             ("open", open_side("g1")),
@@ -198,8 +222,7 @@ fn a_secondary_window_docks_to_the_main_window_and_respects_its_minimum_size() {
             ("s1", say("one", "end")),
             ("end", SceneNode::End),
         ],
-    );
-    let (_directory, ops, state) = state_with(content);
+    ));
     ops.edit_window(MAIN, |window| {
         window.position = (50, 100);
         window.client = (600, 400);
@@ -265,6 +288,7 @@ fn a_window_that_is_animating_is_referenced_by_its_target_frame() {
 #[test]
 fn a_missing_target_window_is_a_clear_error_and_nothing_happens() {
     for (name, node) in [
+        ("window_title", title(SIDE, "x", "s2")),
         (
             "window_geometry",
             geometry(SIDE, Some(center()), None, 0, "s2"),
@@ -275,15 +299,7 @@ fn a_missing_target_window_is_a_clear_error_and_nothing_happens() {
         ),
         ("window_layer", layer(SIDE, WindowLayerAction::Raise, "s2")),
     ] {
-        let (_directory, ops, state) = state_with(story(
-            "s1",
-            vec![
-                ("s1", say("one", "e")),
-                ("e", node),
-                ("s2", say("two", "end")),
-                ("end", SceneNode::End),
-            ],
-        ));
+        let (_directory, ops, state) = state_with(after_line(node));
         start_game(&state);
         let before = main_snapshot(&state);
         let seq = state.latest_seq(MAIN).unwrap();
@@ -293,7 +309,7 @@ fn a_missing_target_window_is_a_clear_error_and_nothing_happens() {
         assert_eq!(main_snapshot(&state), before);
         assert_eq!(state.latest_seq(MAIN).unwrap(), seq, "nothing is published");
         assert_eq!(call_count(&ops), 0);
-        assert!(ops.effect_diagnostics().is_empty());
+        assert!(ops.diagnostics().is_empty());
     }
 }
 
@@ -304,14 +320,14 @@ fn a_rolled_back_transaction_produces_no_effect_and_the_retry_produces_one() {
         vec![
             ("s1", say("one", "g")),
             ("g", geometry(MAIN, Some(center()), None, 0, "t")),
-            ("t", super::interaction::title(MAIN, "Renamed", "s2")),
+            ("t", title(MAIN, "Renamed", "s2")),
             ("s2", say("two", "end")),
             ("end", SceneNode::End),
         ],
     ));
     start_game(&state);
     let before = main_snapshot(&state);
-    ops.fail_title.store(true, Ordering::Release);
+    ops.fail_title.set(true);
     main_advance(&state).unwrap_err();
     assert_eq!(main_snapshot(&state), before, "the story rolled back");
     assert_eq!(
@@ -320,23 +336,12 @@ fn a_rolled_back_transaction_produces_no_effect_and_the_retry_produces_one() {
         "a rolled-back transaction moves nothing"
     );
 
-    ops.fail_title.store(false, Ordering::Release);
+    ops.fail_title.set(false);
     main_advance(&state).unwrap();
     assert_eq!(
         ops.native_calls(),
         vec![NativeCall::Position(MAIN, 312, 140)]
     );
-}
-
-fn start_timer(id: &str, target: &str, next: &str) -> SceneNode {
-    SceneNode::Timer {
-        id: id.to_owned(),
-        action: TimerAction::Start,
-        delay_ms: 100,
-        interval_ms: None,
-        target: Some(target.to_owned()),
-        next: next.to_owned(),
-    }
 }
 
 #[test]
@@ -374,7 +379,7 @@ fn a_failing_timer_round_is_rolled_back_without_touching_the_effects_of_earlier_
             ("ta", start_timer("a", "move", "tb")),
             ("tb", start_timer("b", "bad", "w")),
             ("move", geometry(MAIN, Some(nudge(60.0, 0.0)), None, 0, "w")),
-            ("bad", super::interaction::title(SIDE, "x", "w")),
+            ("bad", title(SIDE, "x", "w")),
             ("w", say("w", "end")),
             ("end", SceneNode::End),
         ],
@@ -387,52 +392,20 @@ fn a_failing_timer_round_is_rolled_back_without_touching_the_effects_of_earlier_
     );
     assert!(main_snapshot(&state).interaction.timers.is_empty());
     assert!(ops
-        .effect_diagnostics()
+        .diagnostics()
         .iter()
         .any(|message| message.contains("计时器 b 已停止")));
 }
 
 #[test]
-fn a_timer_whose_window_effect_names_a_missing_window_is_stopped_and_moves_nothing() {
-    let (_directory, ops, state) = state_with(story(
-        "ta",
-        vec![
-            ("ta", start_timer("a", "move", "w")),
-            ("move", geometry(SIDE, Some(center()), None, 0, "w")),
-            ("w", say("w", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
-    start_game(&state);
-    state.timer_step(150).unwrap();
-    assert_eq!(call_count(&ops), 0);
-    assert!(main_snapshot(&state).interaction.timers.is_empty());
-    assert!(ops
-        .effect_diagnostics()
-        .iter()
-        .any(|message| message.contains("计时器 a 已停止")));
-}
-
-#[test]
 fn an_animation_runs_from_the_current_frame_to_the_target_and_ends_exactly_there() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            (
-                "g",
-                geometry(
-                    MAIN,
-                    Some(center()),
-                    Some(logical(960.0, 540.0)),
-                    1_000,
-                    "s2",
-                ),
-            ),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
+    let (_directory, ops, state) = state_with(after_line(geometry(
+        MAIN,
+        Some(center()),
+        Some(logical(960.0, 540.0)),
+        1_000,
+        "s2",
+    )));
     start_game(&state);
     main_advance(&state).unwrap();
     // The animation is scheduled, nothing has moved yet, and the story went on.
@@ -460,27 +433,6 @@ fn an_animation_runs_from_the_current_frame_to_the_target_and_ends_exactly_there
         call_count(&ops),
         calls,
         "a finished animation moves nothing"
-    );
-}
-
-#[test]
-fn a_big_step_finishes_the_animation_on_the_target() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            ("g", geometry(MAIN, Some(center()), None, 400, "s2")),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
-    start_game(&state);
-    main_advance(&state).unwrap();
-    state.fx_step(Duration::from_secs(60));
-    assert_eq!(ops.frame_of(MAIN), ((312, 140), (1280, 720)));
-    assert_eq!(
-        ops.native_calls(),
-        vec![NativeCall::Position(MAIN, 312, 140)]
     );
 }
 
@@ -526,15 +478,13 @@ fn a_new_effect_replaces_the_animation_and_starts_from_the_frame_on_screen() {
 
 #[test]
 fn an_animation_stops_when_the_window_becomes_full_screen() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            ("g", geometry(MAIN, Some(center()), None, 1_000, "s2")),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
+    let (_directory, ops, state) = state_with(after_line(geometry(
+        MAIN,
+        Some(center()),
+        None,
+        1_000,
+        "s2",
+    )));
     start_game(&state);
     main_advance(&state).unwrap();
     run_for(&state, 100, 100);
@@ -554,22 +504,20 @@ fn an_animation_stops_when_the_window_becomes_full_screen() {
 
 #[test]
 fn a_native_failure_under_an_animation_stops_it_with_a_diagnostic() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            ("g", geometry(MAIN, Some(center()), None, 1_000, "s2")),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
+    let (_directory, ops, state) = state_with(after_line(geometry(
+        MAIN,
+        Some(center()),
+        None,
+        1_000,
+        "s2",
+    )));
     start_game(&state);
     main_advance(&state).unwrap();
-    ops.fail_window_effects.store(true, Ordering::Release);
+    ops.fail_window_effects.set(true);
     run_for(&state, 100, 100);
     assert!(!state.fx.is_window_animating(MAIN));
     assert!(ops
-        .effect_diagnostics()
+        .diagnostics()
         .iter()
         .any(|message| message.contains("窗口动画已中止")));
 }
@@ -610,15 +558,13 @@ fn full_screen_maximized_and_minimized_windows_are_not_moved_but_layers_still_ap
 
 #[test]
 fn an_effect_that_changes_nothing_makes_no_native_call() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            ("g", geometry(MAIN, Some(nudge(0.0, 0.0)), None, 0, "s2")),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
+    let (_directory, ops, state) = state_with(after_line(geometry(
+        MAIN,
+        Some(nudge(0.0, 0.0)),
+        None,
+        0,
+        "s2",
+    )));
     start_game(&state);
     main_advance(&state).unwrap();
     assert_eq!(call_count(&ops), 0);
@@ -669,7 +615,7 @@ fn layer_actions_call_the_native_flags_in_a_consistent_order() {
         !ops.fake_window(MAIN).minimized,
         "focus restores a minimized window"
     );
-    assert_eq!(state.fx.layer(MAIN), crate::window_fx::LayerState::Normal);
+    assert_eq!(state.fx.layer(MAIN), LayerState::Normal);
 }
 
 #[test]
@@ -702,10 +648,7 @@ fn returning_to_the_title_restores_the_main_window_and_forgets_the_record() {
         })
     );
     ops.clear_native_calls();
-    {
-        let _gate = state.session_gate().unwrap();
-        state.leave_story_for_title().unwrap();
-    }
+    leave_for_title(&state);
     assert_eq!(
         ops.native_calls(),
         vec![
@@ -718,10 +661,7 @@ fn returning_to_the_title_restores_the_main_window_and_forgets_the_record() {
     assert_eq!(state.fx.main_baseline(), None);
     // Nothing is left to restore the second time.
     ops.clear_native_calls();
-    {
-        let _gate = state.session_gate().unwrap();
-        state.leave_story_for_title().unwrap();
-    }
+    leave_for_title(&state);
     assert_eq!(call_count(&ops), 0);
 }
 
@@ -741,10 +681,7 @@ fn returning_to_the_title_does_not_pull_a_full_screen_window_out_of_it() {
     main_advance(&state).unwrap();
     ops.edit_window(MAIN, |window| window.fullscreen = true);
     ops.clear_native_calls();
-    {
-        let _gate = state.session_gate().unwrap();
-        state.leave_story_for_title().unwrap();
-    }
+    leave_for_title(&state);
     // Only the layer goes back; the geometry stays as the player left it.
     assert_eq!(
         ops.native_calls(),
@@ -755,23 +692,18 @@ fn returning_to_the_title_does_not_pull_a_full_screen_window_out_of_it() {
 
 #[test]
 fn returning_to_the_title_cancels_a_running_animation() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            ("g", geometry(MAIN, Some(center()), None, 5_000, "s2")),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
+    let (_directory, ops, state) = state_with(after_line(geometry(
+        MAIN,
+        Some(center()),
+        None,
+        5_000,
+        "s2",
+    )));
     start_game(&state);
     main_advance(&state).unwrap();
     run_for(&state, 1_000, 100);
     assert_ne!(ops.frame_of(MAIN), main_frame());
-    {
-        let _gate = state.session_gate().unwrap();
-        state.leave_story_for_title().unwrap();
-    }
+    leave_for_title(&state);
     assert!(!state.fx.is_animating());
     assert_eq!(ops.frame_of(MAIN), main_frame());
     run_for(&state, 10_000, 100);
@@ -784,15 +716,8 @@ fn returning_to_the_title_cancels_a_running_animation() {
 
 #[test]
 fn loading_a_save_does_not_restore_the_window() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            ("g", geometry(MAIN, Some(center()), None, 0, "s2")),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
+    let (_directory, ops, state) =
+        state_with(after_line(geometry(MAIN, Some(center()), None, 0, "s2")));
     start_game(&state);
     let snapshot = main_snapshot(&state);
     let history = state.runtime().unwrap().dialogue_history().to_vec();
@@ -827,30 +752,20 @@ fn loading_a_save_does_not_restore_the_window() {
 
 #[test]
 fn a_replay_applies_its_effects_on_entry_and_restores_the_window_on_exit() {
-    let mut content = story(
-        "g",
-        vec![
-            ("g", geometry(MAIN, Some(center()), None, 0, "l")),
-            ("l", layer(MAIN, WindowLayerAction::Top, "s1")),
-            ("s1", say("one", "end")),
-            ("end", SceneNode::End),
-        ],
+    let content = with_replays(
+        story(
+            "g",
+            vec![
+                ("g", geometry(MAIN, Some(center()), None, 0, "l")),
+                ("l", layer(MAIN, WindowLayerAction::Top, "s1")),
+                ("s1", say("one", "end")),
+                ("end", SceneNode::End),
+            ],
+        ),
+        &["prologue"],
     );
-    content.chapter_map = Some(ChapterMapDefinition {
-        schema_version: 1,
-        width: 1920,
-        height: 1080,
-        view_x: 0,
-        view_y: 0,
-        background: None,
-        decorations: Vec::new(),
-        hotspots: vec![replay_hotspot("prologue")],
-    });
     let (_directory, ops, state) = state_with(content);
-    {
-        let _gate = state.session_gate().unwrap();
-        state.enter_replay("prologue").unwrap();
-    }
+    enter_replay(&state, "prologue").unwrap();
     assert_eq!(
         ops.native_calls(),
         vec![
@@ -859,10 +774,7 @@ fn a_replay_applies_its_effects_on_entry_and_restores_the_window_on_exit() {
         ]
     );
     ops.clear_native_calls();
-    {
-        let _gate = state.session_gate().unwrap();
-        state.exit_replay().unwrap();
-    }
+    exit_replay(&state).unwrap();
     assert_eq!(
         ops.native_calls(),
         vec![
@@ -876,10 +788,7 @@ fn a_replay_applies_its_effects_on_entry_and_restores_the_window_on_exit() {
 
 #[test]
 fn closing_the_secondary_window_cancels_its_animation_and_forgets_its_layer() {
-    let jump_target = {
-        let catalog = story("s1", vec![("s1", SceneNode::End)]);
-        catalog.scenes.get("sandbox").unwrap().entry.clone()
-    };
+    let jump_target = secondary_test_catalog().scenes["sandbox"].entry.clone();
     let (_directory, ops, state) = state_with(story(
         "open",
         vec![
@@ -905,7 +814,7 @@ fn closing_the_secondary_window_cancels_its_animation_and_forgets_its_layer() {
     main_advance(&state).unwrap();
     assert!(state.secondary().unwrap().is_none());
     assert!(!state.fx.is_window_animating(SIDE));
-    assert_eq!(state.fx.layer(SIDE), crate::window_fx::LayerState::Normal);
+    assert_eq!(state.fx.layer(SIDE), LayerState::Normal);
     let calls = call_count(&ops);
     run_for(&state, 3_000, 100);
     assert_eq!(
@@ -913,11 +822,7 @@ fn closing_the_secondary_window_cancels_its_animation_and_forgets_its_layer() {
         calls,
         "a closed window is never touched again"
     );
-    assert!(
-        ops.effect_diagnostics().is_empty(),
-        "{:?}",
-        ops.effect_diagnostics()
-    );
+    assert!(ops.diagnostics().is_empty(), "{:?}", ops.diagnostics());
 }
 
 #[test]
@@ -947,69 +852,20 @@ fn a_re_pointed_secondary_window_starts_over_on_the_normal_layer() {
         ],
         "the replacement session does not inherit the old window's layer"
     );
-    assert_eq!(state.fx.layer(SIDE), crate::window_fx::LayerState::Normal);
+    assert_eq!(state.fx.layer(SIDE), LayerState::Normal);
 }
 
 #[test]
 fn a_native_window_failure_is_a_diagnostic_and_never_rolls_the_story_back() {
-    let (_directory, ops, state) = state_with(story(
-        "s1",
-        vec![
-            ("s1", say("one", "g")),
-            ("g", geometry(MAIN, Some(center()), None, 0, "s2")),
-            ("s2", say("two", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
+    let (_directory, ops, state) =
+        state_with(after_line(geometry(MAIN, Some(center()), None, 0, "s2")));
     start_game(&state);
-    ops.fail_window_effects.store(true, Ordering::Release);
+    ops.fail_window_effects.set(true);
     let update = main_advance(&state).unwrap();
     assert_eq!(dialogue_text(&update.snapshot.prompt), "two");
     assert!(ops
-        .effect_diagnostics()
+        .diagnostics()
         .iter()
         .any(|message| message.contains("窗口效果未能应用")));
     assert_eq!(ops.frame_of(MAIN), main_frame());
-}
-
-#[test]
-fn a_window_reference_is_clamped_to_the_monitor_it_lands_on() {
-    let (_directory, ops, state) = state_with(story(
-        "open",
-        vec![
-            ("open", open_side("g")),
-            (
-                "g",
-                geometry(
-                    SIDE,
-                    Some(dock_right()),
-                    Some(logical(480.0, 270.0)),
-                    0,
-                    "s1",
-                ),
-            ),
-            ("s1", say("one", "end")),
-            ("end", SceneNode::End),
-        ],
-    ));
-    ops.set_monitors(vec![
-        MonitorInfo {
-            work_area: Rect::new(0, 0, 1920, 1040),
-            scale: 1.0,
-        },
-        MonitorInfo {
-            work_area: Rect::new(1920, 0, 1920, 1040),
-            scale: 1.0,
-        },
-    ]);
-    // The main window ends at 1100 + 1296 = 2396: docking to its right edge puts
-    // the secondary on the second monitor, where it may stay.
-    ops.edit_window(MAIN, |window| window.position = (1100, 100));
-    start_game(&state);
-    assert_eq!(
-        ops.frame_of(SIDE),
-        ((2412, 325), (480, 270)),
-        "{:?}",
-        ops.native_calls()
-    );
 }

@@ -1,0 +1,27 @@
+{
+  "diagnostics": [],
+  "elapsed_ms": 0,
+  "fields": {
+    "pair/args.0": {
+      "latex": "q"
+    }
+  },
+  "locals": {},
+  "nodes": {
+    "pair": {
+      "type": {
+        "latex": "q \\land p",
+        "text": "q ∧ p"
+      }
+    }
+  },
+  "ports": {
+    "goal/in": {
+      "expected": {
+        "latex": "q \\land p",
+        "text": "q ∧ p"
+      }
+    }
+  },
+  "status": "complete"
+}

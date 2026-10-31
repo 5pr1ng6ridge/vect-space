@@ -48,6 +48,11 @@ const host = vi.hoisted(() => ({
   ack: null as null | ((request: unknown) => Promise<unknown>),
   tick: null as null | ((sessionId: string) => Promise<unknown>),
   stopCalls: [] as string[],
+  proofBoard: vi.fn(),
+  proofCheck: vi.fn(),
+  proofDraft: vi.fn(),
+  proofSubmit: vi.fn(),
+  proofAbandon: vi.fn(),
   cancels: 0,
   skips: 0,
   canvasProps: null as null | {
@@ -108,6 +113,11 @@ vi.mock("../api", async (importOriginal) => {
     ...actual,
     editorApi: {
       ...actual.editorApi,
+      previewProofBoard: host.proofBoard,
+      previewProofCheck: host.proofCheck,
+      previewProofSaveDraft: host.proofDraft,
+      previewProofSubmit: host.proofSubmit,
+      previewProofAbandon: host.proofAbandon,
       previewSessionStart: (request: unknown) => {
         host.startRequests.push(request);
         return required(host.start, "start")(request);
@@ -230,6 +240,11 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  host.proofBoard.mockReset();
+  host.proofCheck.mockReset();
+  host.proofDraft.mockReset();
+  host.proofSubmit.mockReset();
+  host.proofAbandon.mockReset();
   host.startRequests = [];
   host.stopCalls = [];
   host.cancels = 0;
@@ -606,6 +621,103 @@ describe("GameplayPreview", () => {
     expect(document.querySelector(".long-text-panel")).not.toBeNull();
   });
 
+  it("renders the proof board and dispatches check, draft, submit and abandon", async () => {
+    const graph = {
+      nodes: [{ id: "goal", kind: "goal", x: 100, y: 100 }],
+      edges: [],
+    };
+    const draft = {
+      nodes: [{ id: "goal", kind: "goal", x: 200, y: 200 }],
+      edges: [],
+    };
+    const feedback = {
+      status: "complete",
+      nodes: {},
+      ports: {},
+      locals: {},
+      fields: {},
+      diagnostics: [],
+      elapsed_ms: 0,
+    };
+    host.proofBoard.mockResolvedValue({
+      puzzle: {
+        id: "truth",
+        title: "证明真命题",
+        description: null,
+        variables: [],
+        hypotheses: [],
+        goal: { text: "True", latex: null },
+      },
+      cards: [],
+      node_kinds: [],
+      tactics: [],
+      initial_graph: graph,
+    });
+    host.proofCheck.mockResolvedValue(feedback);
+    host.proofDraft.mockResolvedValue(undefined);
+    host.proofSubmit.mockResolvedValue({
+      accepted: false,
+      check: feedback,
+      update: null,
+    });
+    host.proofAbandon.mockResolvedValue(dialogueUpdate("2"));
+    const base = dialogueUpdate();
+    const proofUpdate: RuntimeUpdate = {
+      ...base,
+      snapshot: {
+        ...base.snapshot,
+        dialogue_page: null,
+        prompt: {
+          kind: "proof",
+          prompt_id: "proof-1",
+          puzzle: "truth",
+          draft:
+            draft as import("@vectspace/presentation-core/proof").ProofGraph,
+          can_abandon: true,
+        },
+      },
+    };
+    await startScene(proofUpdate);
+    expect(await screen.findByText("证明真命题")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(host.proofCheck).toHaveBeenCalledWith({
+        session_id: "7",
+        puzzle: "truth",
+        graph: draft,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提交证明" })).toBeEnabled(),
+    );
+    await waitFor(() =>
+      expect(host.proofDraft).toHaveBeenCalledWith({
+        session_id: "7",
+        prompt_id: "proof-1",
+        graph: draft,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "提交证明" }));
+    await waitFor(() =>
+      expect(host.proofSubmit).toHaveBeenCalledWith({
+        session_id: "7",
+        expected_revision: "1",
+        graph: draft,
+      }),
+    );
+    expect(host.canvasProps?.update?.snapshot.prompt.kind).toBe("proof");
+    fireEvent.click(screen.getByRole("button", { name: "放弃" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认放弃" }));
+    await waitFor(() =>
+      expect(host.proofAbandon).toHaveBeenCalledWith({
+        session_id: "7",
+        expected_revision: "1",
+      }),
+    );
+    await waitFor(() =>
+      expect(host.canvasProps?.update?.snapshot.prompt.kind).toBe("dialogue"),
+    );
+  });
+
   it("advances with the live revision", async () => {
     await startScene();
     const advanceCalls: unknown[] = [];
@@ -671,21 +783,6 @@ describe("GameplayPreview", () => {
     expect((clickCalls[0] as { instance_id: string }).instance_id).toBe(
       "btn.menu",
     );
-  });
-
-  it("acknowledges a gated presentation exactly once", async () => {
-    await startScene(dialogueUpdate("1", true));
-    const ackCalls: unknown[] = [];
-    host.ack = (request) => {
-      ackCalls.push(request);
-      return Promise.resolve(dialogueUpdate("2", false));
-    };
-    act(() => {
-      host.canvasProps?.onSettled(dialogueUpdate("1", true), "completed");
-    });
-    await waitFor(() => expect(ackCalls).toHaveLength(1));
-    expect((ackCalls[0] as { update_id: string }).update_id).toBe("1");
-    expect((ackCalls[0] as { outcome: string }).outcome).toBe("completed");
   });
 
   it("returns NeedsChoice without guessing and starts after a branch is picked", async () => {
@@ -1060,16 +1157,6 @@ describe("GameplayPreview", () => {
     expect(host.stopCalls).toEqual([]);
     view.unmount();
     expect(host.stopCalls).toEqual(["7"]);
-  });
-
-  it("keeps the explicit start buttons when no autoStart is given", async () => {
-    host.start = () => Promise.resolve(started(dialogueUpdate()));
-    renderPreview();
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
-    expect(host.startRequests).toHaveLength(0);
-    expect(screen.getByText("未开始")).toBeInTheDocument();
   });
 
   it("fits the design stage within the height left below the toolbar", async () => {

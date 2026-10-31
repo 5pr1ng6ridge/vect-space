@@ -1,11 +1,10 @@
 /**
  * Editor content history.
  *
- * The editor document and its Immer-patch undo/redo stack used to live inside
- * `App.tsx`.  Keeping the state machine in its own module lets hosts (and
- * integration tests) drive the exact same history semantics the application
- * uses, without duplicating or mocking them.  The reducer is intentionally
- * pure: every action evaluates its mutation against the latest project, which
+ * The editor document and its Immer-patch undo/redo stack.  Keeping the state
+ * machine apart from `App.tsx` lets hosts (and integration tests) drive the
+ * exact same history semantics the application uses, without duplicating or
+ * mocking them.  The reducer is intentionally pure: every action evaluates its mutation against the latest project, which
  * is why batched pointer/text events stop overwriting each other.
  */
 import {
@@ -19,7 +18,7 @@ import type { EditorProject } from "./types";
 
 enablePatches();
 
-export interface HistoryEntry {
+interface HistoryEntry {
   label: string;
   redo: Patch[];
   undo: Patch[];
@@ -126,7 +125,7 @@ export const INITIAL_EDITOR_STATE: EditorState = {
  * `invalidDrafts` rather than by a typed project value, so silently committing
  * them would make the saved document disagree with what the input displays.
  */
-export function finalizeActiveEdit(state: EditorState): EditorState {
+function finalizeActiveEdit(state: EditorState): EditorState {
   const active = state.activeEdit;
   if (active === null || Object.keys(active.invalidDrafts).length > 0)
     return state;
@@ -375,8 +374,8 @@ export function editorReducer(
       // the toolbar and avoids losing the last keystroke to React batching.
       // With an invalid draft there is no safe typed value to commit; cancel
       // only that active edit and leave older history untouched.  Returning
-      // the state unchanged here used to leave the editor permanently dirty
-      // and made Ctrl+Z appear broken until the user manually fixed the field.
+      // the state unchanged here would leave the editor permanently dirty and
+      // make Ctrl+Z appear broken until the user manually fixed the field.
       if (state.activeEdit !== null) {
         if (Object.keys(state.activeEdit.invalidDrafts).length > 0) {
           return {

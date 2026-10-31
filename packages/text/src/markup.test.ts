@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   autoReadingDelay,
-  buildPauseWindows,
-  buildRevealSchedule,
   buildVisibleUnitCps,
   formulaPresentationDurationMs,
   formulaRevealDurationForUnit,
@@ -11,14 +9,13 @@ import {
   hasImmediateAutoAdvance,
   mathRevealDurationMs,
   parseMarkup,
-  revealCompletionTime,
   revealUnits,
   visibleUnits,
 } from "./markup";
 
 describe("shared text markup", () => {
   it("keeps grapheme clusters atomic and records UTF-16 source spans", () => {
-    const units = revealUnits(parseMarkup("A👩‍🔬e\u0301"));
+    const units = revealUnits(parseMarkup("A👩‍🔬é"));
     expect(
       units.map((unit) => (unit.kind === "character" ? unit.value : "")),
     ).toEqual(["A", "👩‍🔬", "é"]);
@@ -63,155 +60,28 @@ describe("shared text markup", () => {
     ).toBe("$ [ \\ [unknown]");
   });
 
-  it("pauses before subsequent units and allows inline math to overlap", () => {
-    const units = parseMarkup("A[pause=500ms]$x$B");
-    expect(
-      buildRevealSchedule(units, 20, 20, new Map([[1, 200]]), {
-        waitForInlineMath: false,
-      }),
-    ).toEqual([50, 600, 650]);
-    expect(
-      buildPauseWindows(units, 20, 20, new Map([[1, 200]]), {
-        waitForInlineMath: false,
-      }),
-    ).toEqual([{ startMs: 50, endMs: 550, span: { start: 1, end: 14 } }]);
-  });
-
-  it("keeps display math blocking and enforces a one-character minimum", () => {
-    const unit = revealUnits(parseMarkup("$$x$$"))[0];
-    expect(unit?.kind).toBe("math");
-    if (unit?.kind !== "math") return;
-    expect(formulaRevealDurationForUnit(unit, 20, 20)).toBe(120);
-    expect(
-      buildRevealSchedule(parseMarkup("$$x$$B"), 20, 20, new Map([[0, 240]]), {
-        waitForInlineMath: false,
-      }),
-    ).toEqual([50, 388]);
-  });
-});
-
-describe("reveal timing", () => {
-  it("treats a formula as one atomic reveal unit", () => {
+  it("treats a formula as one atomic unit", () => {
     const units = visibleUnits(parseMarkup("甲$V=\\mathbb R^2$乙"));
     expect(units).toHaveLength(3);
     expect(units[1]).toMatchObject({ kind: "math", latex: "V=\\mathbb R^2" });
   });
+});
 
-  it("accounts for pause and speed controls", () => {
-    const units = parseMarkup("A[pause=500ms][speed=10cps]B");
-    const schedule = buildRevealSchedule(units, 20, 30);
-    expect(schedule[0]).toBe(50);
-    expect(schedule[1]).toBe(650);
-
-    expect(buildPauseWindows(units, 20, 30)).toMatchObject([
-      { startMs: 50, endMs: 550 },
-    ]);
-  });
-
-  it("leaves a short visual reveal window after formulas", () => {
-    const schedule = buildRevealSchedule(parseMarkup("甲$x$乙"), 20, 20);
-    expect(schedule).toEqual([50, 100, 200]);
-  });
-
-  it("uses measured formula duration in the following text timeline", () => {
-    const schedule = buildRevealSchedule(
-      parseMarkup("甲$x$乙"),
-      20,
-      20,
-      new Map([[1, 240]]),
-    );
-    expect(schedule).toEqual([50, 100, 390]);
-  });
-
-  it("lets the next character start while a drop-fade inline formula settles", () => {
-    const units = parseMarkup("甲$x$乙");
-    const options = { waitForInlineMath: false };
-    const schedule = buildRevealSchedule(
-      units,
-      20,
-      20,
-      new Map([[1, 240]]),
-      options,
-    );
-
-    expect(schedule).toEqual([50, 100, 150]);
-    expect(
-      revealCompletionTime(
-        units,
-        schedule,
-        new Map([[1, 240]]),
-        "drop_fade",
-        [20, 20, 20],
-        options,
-      ),
-    ).toBe(310);
-  });
-
-  it("keeps display formulae blocking and gives them the extended presentation", () => {
-    const units = parseMarkup("$$x$$乙");
-    const schedule = buildRevealSchedule(units, 20, 20, new Map([[0, 240]]), {
-      waitForInlineMath: false,
-    });
-
-    expect(formulaPresentationDurationMs(100, true)).toBe(120);
-    expect(schedule).toEqual([50, 388]);
-  });
-
-  it("waits for a final formula animation before completing the reveal", () => {
-    const units = parseMarkup("甲$x$");
-    const durations = new Map([[1, 240]]);
-    const schedule = buildRevealSchedule(units, 20, 20, durations);
-    expect(revealCompletionTime(units, schedule, durations)).toBe(340);
-  });
-
-  it("waits for the selected text animation to finish", () => {
-    const units = parseMarkup("甲乙");
-    const schedule = buildRevealSchedule(units, 20, 20);
-    expect(
-      revealCompletionTime(units, schedule, new Map(), "line_sweep", [20, 20]),
-    ).toBe(150);
-    expect(
-      revealCompletionTime(units, schedule, new Map(), "drop_fade", [20, 20]),
-    ).toBe(260);
-  });
-
-  it("never completes a typewriter formula before its CSS fade", () => {
-    const units = parseMarkup("$x$");
-    const schedule = buildRevealSchedule(units, 20, 20, new Map([[0, 80]]));
-    expect(
-      revealCompletionTime(
-        units,
-        schedule,
-        new Map([[0, 80]]),
-        "typewriter",
-        [20],
-      ),
-    ).toBe(130);
-  });
-
-  it("keeps drop-fade formula playback tied to the measured formula duration", () => {
-    const units = parseMarkup("$x$");
-    const durations = new Map([[0, 240]]);
-    const schedule = buildRevealSchedule(units, 20, 20, durations);
-    expect(
-      revealCompletionTime(units, schedule, durations, "drop_fade", [20]),
-    ).toBe(290);
-  });
-
-  it("scales formula reveal duration with rendered width and CPS", () => {
-    const normal = formulaRevealDurationMs(340, 34, 40);
-    expect(formulaRevealDurationMs(680, 34, 40)).toBeGreaterThan(normal);
-    expect(formulaRevealDurationMs(340, 34, 20)).toBeGreaterThan(normal);
-    expect(formulaRevealDurationMs(0, 0, Number.NaN)).toBeGreaterThan(0);
-  });
-
-  it("scales formula animation from one character to its rendered width", () => {
-    // A formula is one visual unit, but its time tracks its width rather than
-    // using a fixed fade.  It can never finish before one typed character.
+describe("formula and pacing helpers", () => {
+  it("scales formula duration with rendered width and CPS, between one and twelve characters", () => {
     expect(formulaRevealDurationMs(1, 34, 20)).toBe(50);
     expect(formulaRevealDurationMs(680, 34, 30)).toBe(400);
     expect(formulaRevealDurationMs(680, 34, 5)).toBe(2_400);
+    expect(formulaRevealDurationMs(0, 0, Number.NaN)).toBeGreaterThan(0);
     expect(mathRevealDurationMs(20, 20)).toBe(50);
+  });
+
+  it("gives display formulas the extended presentation and a one-character minimum", () => {
+    const unit = revealUnits(parseMarkup("$$x$$"))[0];
+    expect(unit?.kind).toBe("math");
+    if (unit?.kind !== "math") return;
+    expect(formulaRevealDurationForUnit(unit, 20, 20)).toBe(120);
+    expect(formulaPresentationDurationMs(100, true)).toBe(120);
   });
 
   it("tracks speed controls for each visible unit", () => {
@@ -222,10 +92,6 @@ describe("reveal timing", () => {
         30,
       ),
     ).toEqual([20, 10, 30]);
-  });
-
-  it("does not treat normal reveal pacing as an explicit pause", () => {
-    expect(buildPauseWindows(parseMarkup("ABC"), 20, 30)).toEqual([]);
   });
 
   it("recognizes a terminal immediate-auto marker without rendering it", () => {

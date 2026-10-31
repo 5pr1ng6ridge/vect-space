@@ -14,8 +14,8 @@ import { assetUrl } from "../api";
 import { AssetChooser } from "./AssetChooser";
 import { escapeTextEntry, isComposing } from "../ui/keyboard";
 import { evaluateChannel } from "@vectspace/presentation-core/timeline";
+import { KeyframeInspector } from "./timeline/KeyframeInspector";
 import {
-  KeyframeInspector,
   TimelineSurface,
   type TimelineSurfaceDocument,
   type TimelineSurfaceSelection,

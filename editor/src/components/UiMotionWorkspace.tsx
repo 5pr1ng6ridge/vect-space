@@ -28,8 +28,8 @@ import {
 import { evaluateChannel } from "@vectspace/presentation-core/timeline";
 import { escapeTextEntry, isComposing } from "../ui/keyboard";
 import { isEditableTarget } from "./nodeDeleteShortcut";
+import { KeyframeInspector } from "./timeline/KeyframeInspector";
 import {
-  KeyframeInspector,
   TimelineSurface,
   type TimelineSurfaceDocument,
   type TimelineSurfaceSelection,

@@ -22,6 +22,7 @@ import type {
   PreviewChoiceDecision,
   ScalarValue,
 } from "../types";
+import { errorMessage } from "./errorMessage";
 
 export interface ChoicePreviewProps {
   /** The current project; its identity changes on every committed edit. */
@@ -280,8 +281,4 @@ function useStageScale(
     return () => observer.disconnect();
   }, [designWidth, ref]);
   return scale;
-}
-
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
 }

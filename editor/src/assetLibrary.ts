@@ -1,3 +1,4 @@
+import { ID_PATTERN } from "./app/ids";
 import type {
   AssetFolderLayout,
   AssetKind,
@@ -21,13 +22,12 @@ import type {
  * an Immer history commit can assign the result and stay undoable.
  *
  * The Rust host mirrors the same defaults and repairs a hand-edited layout
- * (`normalize_asset_layout` in `editor/src-tauri/src/lib.rs`); the helpers
+ * (`normalize_asset_layout` in `editor/src-tauri/src/layout.rs`); the helpers
  * below are the editor's authority for interactive validation.
  */
 
-export const ASSET_FOLDER_NAME_MAX_CHARS = 120;
-export const ASSET_FOLDER_MAX_DEPTH = 16;
-export const ASSET_FOLDER_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const ASSET_FOLDER_NAME_MAX_CHARS = 120;
+const ASSET_FOLDER_MAX_DEPTH = 16;
 
 /**
  * Pinned collator: folder and chooser ordering must not depend on the host
@@ -74,7 +74,7 @@ export interface AssetChoiceOption {
   selected: boolean;
 }
 
-export interface AssetChoiceQuery {
+interface AssetChoiceQuery {
   assets: readonly AssetFileLike[];
   layout: EditorLayout | null | undefined;
   /** Restrict to one kind or a set of kinds.  Omit for every kind. */
@@ -93,26 +93,26 @@ export interface AssetChoiceQuery {
   includeHidden?: boolean;
 }
 
-export type AssetFolderMoveCheck = { ok: true } | { ok: false; reason: string };
+type AssetFolderMoveCheck = { ok: true } | { ok: false; reason: string };
 
-export type AssetFolderCreation =
+type AssetFolderCreation =
   | { ok: true; layout: EditorLayout; folderId: string }
   | { ok: false; reason: string };
 
-export function assetFolderMap(
+function assetFolderMap(
   layout: EditorLayout | null | undefined,
 ): Record<string, AssetFolderLayout> {
   return layout?.asset_folders ?? {};
 }
 
-export function assetMetadataMap(
+function assetMetadataMap(
   layout: EditorLayout | null | undefined,
 ): Record<string, AssetLayoutMetadata> {
   return layout?.asset_metadata ?? {};
 }
 
-export function isValidAssetFolderId(value: string): boolean {
-  return ASSET_FOLDER_ID_PATTERN.test(value);
+function isValidAssetFolderId(value: string): boolean {
+  return ID_PATTERN.test(value);
 }
 
 export function isValidAssetFolderName(value: string): boolean {
@@ -125,7 +125,7 @@ export function isValidAssetFolderName(value: string): boolean {
 }
 
 /** Metadata for one asset, with the empty default materialised. */
-export function assetMetadataFor(
+function assetMetadataFor(
   layout: EditorLayout | null | undefined,
   assetId: string,
 ): AssetLayoutMetadata {
@@ -137,15 +137,6 @@ export function isAssetHidden(
   assetId: string,
 ): boolean {
   return assetMetadataFor(layout, assetId).hidden === true;
-}
-
-export function hiddenAssetIds(
-  assets: readonly { id: string }[],
-  layout: EditorLayout | null | undefined,
-): string[] {
-  return assets
-    .filter((asset) => isAssetHidden(layout, asset.id))
-    .map((asset) => asset.id);
 }
 
 export function assetDisplayName(
@@ -215,7 +206,7 @@ export function folderDisplayPath(
   return folderPathNames(layout, folderId).join("/");
 }
 
-export function folderDepth(
+function folderDepth(
   layout: EditorLayout | null | undefined,
   folderId: string | null,
 ): number {
@@ -231,7 +222,7 @@ export function folderDepth(
  * descendants.  This mirrors the asset manager's “未分组” row: selecting the
  * root must not silently include nested folders.
  */
-export function folderIsWithin(
+function folderIsWithin(
   layout: EditorLayout | null | undefined,
   folderId: string | null,
   candidate: string | null,
@@ -242,7 +233,7 @@ export function folderIsWithin(
 }
 
 /** Direct children of `parentId` (or the roots) in deterministic order. */
-export function folderChildIds(
+function folderChildIds(
   layout: EditorLayout | null | undefined,
   parentId: string | null,
 ): string[] {
@@ -442,24 +433,8 @@ export function renameAssetFolder(
   };
 }
 
-export function setAssetFolderOrder(
-  layout: EditorLayout,
-  folderId: string,
-  order: number,
-): EditorLayout {
-  const folder = assetFolderMap(layout)[folderId];
-  if (folder === undefined || !Number.isFinite(order)) return layout;
-  return {
-    ...layout,
-    asset_folders: {
-      ...assetFolderMap(layout),
-      [folderId]: { ...folder, order },
-    },
-  };
-}
-
 /** Derives a stable, unused folder id from a name (or `folder`). */
-export function deriveAssetFolderId(
+function deriveAssetFolderId(
   layout: EditorLayout | null | undefined,
   name?: string,
 ): string {
@@ -468,7 +443,7 @@ export function deriveAssetFolderId(
     .replace(/[^A-Za-z0-9._-]/g, "_")
     .replace(/^[._-]+/, "")
     .slice(0, 120);
-  const base = ASSET_FOLDER_ID_PATTERN.test(cleaned) ? cleaned : "folder";
+  const base = ID_PATTERN.test(cleaned) ? cleaned : "folder";
   if (folders[base] === undefined) return base;
   for (let index = 2; ; index += 1) {
     const candidate = `${base}_${index}`;
@@ -628,23 +603,6 @@ export function setAssetHidden(
   }));
 }
 
-/**
- * Drop editor-only metadata whose asset no longer exists.  Removal is
- * explicit and never automatic: an old layout that still mentions a removed
- * asset must keep loading, and the host keeps those entries harmless.
- */
-export function pruneAssetLayoutMetadata(
-  layout: EditorLayout,
-  liveAssetIds: ReadonlySet<string>,
-): EditorLayout {
-  const metadata = assetMetadataMap(layout);
-  const kept = Object.fromEntries(
-    Object.entries(metadata).filter(([id]) => liveAssetIds.has(id)),
-  );
-  if (Object.keys(kept).length === Object.keys(metadata).length) return layout;
-  return { ...layout, asset_metadata: kept };
-}
-
 function matchesKinds(
   asset: AssetFileLike,
   kind: AssetKind | readonly AssetKind[] | undefined,
@@ -692,7 +650,7 @@ export function firstVisibleAssetId(
  * Hidden assets are excluded for *new* choices, but a hidden id that is
  * currently selected/picked stays in the list (marked `selectedHidden`) so
  * editing a node can never silently clear its value.  `includeHidden` is the
- * asset-manager mode used to unhide and edit hidden assets.
+ * asset-manager mode that lists hidden assets so they can be unhidden.
  */
 export function assetChoiceOptions(
   input: AssetChoiceQuery,
@@ -771,9 +729,7 @@ export interface PendingAssetImport {
   path: string;
 }
 
-export function pendingImportRecord(
-  imported: ImportedAsset,
-): PendingAssetImport {
+function pendingImportRecord(imported: ImportedAsset): PendingAssetImport {
   return { id: imported.id, kind: imported.kind, path: imported.path };
 }
 
@@ -824,7 +780,7 @@ export function activePendingAssetIds(
     .map(([, record]) => record.id);
 }
 
-export interface StagedAssetDraft {
+interface StagedAssetDraft {
   manifest: ContentManifest;
   assets: EditorAsset[];
 }

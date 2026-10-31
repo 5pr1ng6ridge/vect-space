@@ -1,18 +1,45 @@
 import { describe, expect, it } from "vitest";
 import {
-  copyTimelineKeyframes,
+  copyTimelineKeyframesFrom,
   expandSpriteActionNode,
   expandSpriteActionTrack,
-  pasteTimelineKeyframes,
+  pasteTimelineKeyframesInto,
   snapTimelineTime,
   spriteActionToTimelineNode,
   timelineNodeToSpriteAction,
+  timelineTrackIdentity,
+  type TimelineKeyframeAddress,
+  type TimelineKeyframeClipboard,
 } from "./timeline";
 import type {
   SpriteActionDefinition,
   SpriteSnapshot,
   TimelineNode,
+  TimelineTrack,
 } from "./types";
+
+const copyTimelineKeyframes = (
+  node: TimelineNode,
+  addresses: readonly TimelineKeyframeAddress[],
+) => copyTimelineKeyframesFrom(node.tracks, timelineTrackIdentity, addresses);
+
+const pasteTimelineKeyframes = (
+  node: TimelineNode,
+  clipboard: TimelineKeyframeClipboard,
+  playheadMs: number,
+  snapMs: number,
+) => {
+  const { document, pasted, skipped } = pasteTimelineKeyframesInto(
+    node,
+    timelineTrackIdentity,
+    () => ["x", "y"],
+    (track: TimelineTrack) => track.type !== "video",
+    clipboard,
+    playheadMs,
+    snapMs,
+  );
+  return { node: document, pasted, skipped };
+};
 
 describe("timeline keyframe clipboard", () => {
   const node = (): TimelineNode => ({

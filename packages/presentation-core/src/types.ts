@@ -20,10 +20,20 @@ export interface StoryLocation {
   node_id: string;
 }
 
-import type { CoordinateSpace, SpriteKind, SpriteLayout, SpriteSource } from "./visual";
+import type {
+  CoordinateSpace,
+  SpriteKind,
+  SpriteLayout,
+  SpriteSource,
+} from "./visual";
 import type { TextBlockDefinition } from "./textBlock";
 import type { EmitterSnapshot, ParticleDefinition } from "./particles";
-export type { CoordinateSpace, SpriteKind, SpriteLayout, SpriteSource } from "./visual";
+export type {
+  CoordinateSpace,
+  SpriteKind,
+  SpriteLayout,
+  SpriteSource,
+} from "./visual";
 export type { EmitterSnapshot, ParticleDefinition } from "./particles";
 export type { TextBlockDefinition } from "./textBlock";
 
@@ -449,13 +459,26 @@ export interface ChoicePrompt {
   choices: ChoiceSnapshot[];
 }
 
+export interface ProofPrompt {
+  kind: "proof";
+  prompt_id: string;
+  puzzle: string;
+  draft: import("./proof").ProofGraph | null;
+  can_abandon: boolean;
+}
+
 export interface EndPrompt {
   kind: "end";
   prompt_id: string;
 }
 
 export type PromptSnapshot =
-  EmptyPrompt | DialoguePrompt | LongTextPrompt | ChoicePrompt | EndPrompt;
+  | EmptyPrompt
+  | DialoguePrompt
+  | LongTextPrompt
+  | ChoicePrompt
+  | ProofPrompt
+  | EndPrompt;
 
 export type WindowRole = "main" | "secondary";
 
@@ -550,7 +573,12 @@ export type TimelineTrack =
       remove_at_end: boolean;
       channels: TimelineChannels;
     }
-  | { type: "emitter"; emitter_id: string; remove_at_end: boolean; channels: TimelineChannels }
+  | {
+      type: "emitter";
+      emitter_id: string;
+      remove_at_end: boolean;
+      channels: TimelineChannels;
+    }
   | { type: "camera"; channels: TimelineChannels }
   | { type: "button"; instance_id: string; channels: TimelineChannels }
   | {

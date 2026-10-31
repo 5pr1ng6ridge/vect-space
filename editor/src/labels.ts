@@ -38,8 +38,6 @@ export const VARIABLE_SCOPE_LABELS: Record<VariableScope, string> = {
   profile: "全局（跨存档）",
 };
 
-export const BOOLEAN_LABELS = { true: "是", false: "否" } as const;
-
 export const EASING_LABELS: Record<Exclude<TimelineEasing, object>, string> = {
   step: "阶跃（瞬间跳变）",
   linear: "线性",
@@ -47,10 +45,6 @@ export const EASING_LABELS: Record<Exclude<TimelineEasing, object>, string> = {
   ease_out: "缓出",
   ease_in_out: "缓入缓出",
 };
-
-export function easingLabel(easing: TimelineEasing): string {
-  return typeof easing === "object" ? "自定义曲线" : EASING_LABELS[easing];
-}
 
 /** Keyframe channels across sprites, camera, buttons, video, audio and UI. */
 export const CHANNEL_LABELS: Record<string, string> = {
@@ -68,21 +62,6 @@ export const CHANNEL_LABELS: Record<string, string> = {
   volume: "音量",
   offset_x: "水平偏移",
   offset_y: "垂直偏移",
-};
-
-/** Unit suffix shown next to a channel value. */
-export const CHANNEL_UNITS: Record<string, string> = {
-  x: "px",
-  y: "px",
-  width: "px",
-  height: "px",
-  offset_x: "px",
-  offset_y: "px",
-  rotation_deg: "°",
-  scale: "×",
-  scale_x: "×",
-  scale_y: "×",
-  zoom: "×",
 };
 
 export function channelLabel(channel: string): string {
@@ -123,12 +102,6 @@ export const SPRITE_ACTION_LABELS = {
   hide: "退场",
 } as const;
 
-export const AUDIO_ACTION_LABELS = {
-  play: "播放",
-  start: "开始",
-  stop: "停止",
-} as const;
-
 export const FIT_LABELS = {
   stretch: "拉伸填满",
   contain: "完整显示",
@@ -160,16 +133,8 @@ export const MUTATION_LABELS = {
   toggle: "切换开关",
 } as const;
 
-export const UI_MOTION_TARGET_LABELS: Record<string, string> = {
-  dialogue_root: "对话框整体",
-  dialogue_frame: "对话框底板",
-  dialogue_nameplate: "名牌",
-  dialogue_text: "正文",
-  dialogue_advance_indicator: "继续提示",
-};
-
 /** Broad node families; each has an icon and a colour token. */
-export type NodeCategory =
+type NodeCategory =
   "narrative" | "logic" | "visual" | "audio" | "interaction" | "flow" | "end";
 
 export const NODE_CATEGORY_LABELS: Record<NodeCategory, string> = {
@@ -186,6 +151,7 @@ export const NODE_CATEGORY: Record<NodeType, NodeCategory> = {
   say: "narrative",
   long_text: "narrative",
   long_text_control: "narrative",
+  proof: "interaction",
   choice: "logic",
   condition: "logic",
   set: "logic",

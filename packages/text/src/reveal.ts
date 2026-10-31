@@ -129,14 +129,12 @@ export function createRevealPlan(
   };
 }
 
-export function initialRevealSessionState(
-  plan: RevealPlan,
-): RevealSessionState {
+function initialRevealSessionState(plan: RevealPlan): RevealSessionState {
   return makeState(plan, 0, false, false);
 }
 
 /** Pure state transition: advances virtual presentation time by deltaMs. */
-export function advanceRevealSession(
+function advanceRevealSession(
   plan: RevealPlan,
   state: RevealSessionState,
   deltaMs: number,
@@ -176,10 +174,7 @@ export function advanceRevealSession(
   return makeState(plan, bounded, false, state.restored);
 }
 
-export function pauseRevealSession(
-  _plan: RevealPlan,
-  state: RevealSessionState,
-): RevealSessionState {
+function pauseRevealSession(state: RevealSessionState): RevealSessionState {
   if (
     state.status === "completed" ||
     state.status === "cancelled" ||
@@ -189,7 +184,7 @@ export function pauseRevealSession(
   return { ...state, status: "paused" };
 }
 
-export function resumeRevealSession(
+function resumeRevealSession(
   plan: RevealPlan,
   state: RevealSessionState,
 ): RevealSessionState {
@@ -198,16 +193,14 @@ export function resumeRevealSession(
 }
 
 /** Immediately reveals every unit and clears every pending pause. */
-export function completeRevealSession(
+function completeRevealSession(
   plan: RevealPlan,
   restored = false,
 ): RevealSessionState {
   return makeState(plan, plan.completionMs, true, restored);
 }
 
-export function cancelRevealSession(
-  state: RevealSessionState,
-): RevealSessionState {
+function cancelRevealSession(state: RevealSessionState): RevealSessionState {
   if (state.status === "cancelled") return state;
   return { ...state, status: "cancelled", activePause: null };
 }
@@ -220,7 +213,7 @@ export function cancelRevealSession(
  * the number of units the player has already seen, clamped to the new content;
  * the new plan then continues from the matching moment of its own timeline.
  */
-export function rebaseRevealState(
+function rebaseRevealState(
   plan: RevealPlan,
   state: RevealSessionState,
 ): RevealSessionState {
@@ -280,7 +273,7 @@ export class TextRevealSession {
   pause(): TextRevealSession {
     return TextRevealSession.fromPlan(
       this.plan,
-      pauseRevealSession(this.plan, this.state),
+      pauseRevealSession(this.state),
     );
   }
 

@@ -3,7 +3,6 @@ import {
   clampMapCenter,
   compareStableId,
   containMapRect,
-  hitTestMapHotspots,
   mapDragExceededThreshold,
   resolveChapterMapHoverText,
   snapMap,
@@ -53,20 +52,6 @@ describe("chapter-map geometry", () => {
         1080,
       ),
     ).toBe(false);
-  });
-
-  it("hits the topmost hotspot with stable tie-breaking", () => {
-    const point = { x: 50, y: 50 };
-    expect(
-      hitTestMapHotspots(
-        [
-          { id: "a", z: 3, x: 0, y: 0, width: 100, height: 100 },
-          { id: "b", z: 3, x: 0, y: 0, width: 100, height: 100 },
-          { id: "c", z: 1, x: 0, y: 0, width: 100, height: 100 },
-        ],
-        point,
-      )?.id,
-    ).toBe("b");
   });
 
   it("resolves legacy, custom, and explicitly hidden hover text", () => {

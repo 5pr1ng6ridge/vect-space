@@ -11,46 +11,29 @@ import {
 import "katex/dist/katex.min.css";
 import "./App.css";
 
-import { HistoryPanel } from "./components/HistoryPanel";
 import {
   ButtonLayer,
-  DialogueBox,
-  LongTextPanel,
-  MarkupText,
   SceneCanvas,
-  useTextRevealSession,
   type DialogueBoxHandle,
   type LongTextPanelHandle,
   type SceneCanvasHandle,
 } from "@vectspace/presentation-react/gameplay";
 import type { AnimationMap } from "@vectspace/presentation-core/image-animation";
-import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
-import { resolveTextBlocks, type TextBlockMap } from "@vectspace/presentation-core/text-block";
-import type { ParticleMap } from "@vectspace/presentation-core/particles";
-import { ChoiceLayer } from "@vectspace/presentation-react/choice";
-import { ChapterMapPage } from "./components/ChapterMapPage";
 import {
-  engineApi,
-  resolvedAssetsToAnimations,
-  resolvedAssetsToUrls,
-} from "./engine/api";
+  resolveTextBlocks,
+  type TextBlockMap,
+} from "@vectspace/presentation-core/text-block";
+import type {
+  ProofCheckResult,
+  ProofGraph,
+} from "@vectspace/presentation-core/proof";
+import type { ParticleMap } from "@vectspace/presentation-core/particles";
 import {
   requireSessionId,
   SessionTransitionController,
   type SessionTransitionToken,
 } from "@vectspace/presentation-core/session-transition";
-import {
-  autoReadingDelay,
-  buildVisibleUnitCps,
-  hasImmediateAutoAdvance,
-  parseMarkup,
-} from "@vectspace/text";
-import { canFastForwardPrompt } from "./engine/playback";
-import { RuntimeFeed } from "./engine/runtimeFeed";
-import { StoryPauseSync } from "./engine/storyPause";
-import { useTextOccurrence } from "./engine/textOccurrence";
-import { useLiveUpdate } from "./engine/useLiveUpdate";
-import { AdvanceBlockNotice } from "./components/AdvanceBlockNotice";
+import { autoReadingDelay, hasImmediateAutoAdvance } from "@vectspace/text";
 import {
   activeTimerIds,
   advanceBlockMessages,
@@ -60,20 +43,34 @@ import { UiMotionHost } from "@vectspace/presentation-core/ui-motion";
 import type {
   AdvanceSource,
   AssetUrlMap,
-  BootstrapPayload,
-  DialoguePrompt,
   DialogueHistoryEntry,
-  LongTextPrompt,
   PresentationCue,
   RuntimeUpdate,
   SaveSlotSummary,
   Settings,
   ChapterMapSnapshot,
-  TextRevealAnimation,
 } from "@vectspace/presentation-core/types";
-import { useViewportMetrics } from "./viewport/viewport";
 import { BoundedLedger } from "@vectspace/presentation-core/ledger";
+
+import { errorMessage } from "../shared/commandError";
 import type { WireU64 } from "../shared/generated/WireU64";
+import { AdvanceBlockNotice } from "./components/AdvanceBlockNotice";
+import { ChapterMapPage } from "./components/ChapterMapPage";
+import { HistoryPanel } from "./components/HistoryPanel";
+import { PromptLayers } from "./components/PromptLayers";
+import { SavePanel } from "./components/SavePanel";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { TitleScreen } from "./components/TitleScreen";
+import { engineApi } from "./engine/api";
+import { getInitialAppState } from "./engine/bootstrap";
+import { fastForwardState, isInteractiveTarget } from "./engine/playback";
+import { describePrompt } from "./engine/promptView";
+import { RuntimeFeed } from "./engine/runtimeFeed";
+import { StoryPauseSync } from "./engine/storyPause";
+import { useDefaultFont } from "./engine/useDefaultFont";
+import { useLiveUpdate } from "./engine/useLiveUpdate";
+import { useTextReveal } from "./engine/useTextReveal";
+import { useViewportMetrics } from "./viewport/viewport";
 
 const DEFAULT_SETTINGS: Settings = {
   master_volume: 1,
@@ -89,23 +86,6 @@ const DEFAULT_SETTINGS: Settings = {
 
 type Phase = "booting" | "title" | "chapter_map" | "playing";
 type Panel = "none" | "saves" | "settings" | "history";
-
-interface InitialAppState {
-  bootstrap: BootstrapPayload;
-  settings: Settings;
-  slots: SaveSlotSummary[];
-  assets: AssetUrlMap;
-  animations: AnimationMap;
-}
-
-interface LockedTextSettings {
-  instanceKey: string;
-  defaultCps: number;
-  initialCps: number;
-  animation: TextRevealAnimation;
-}
-
-let initialAppStatePromise: Promise<InitialAppState> | null = null;
 
 export default function App(): ReactElement {
   const { metrics: viewportMetrics, style: viewportStyle } =
@@ -152,8 +132,6 @@ export default function App(): ReactElement {
   const [animations, setAnimations] = useState<AnimationMap>({});
   const [textBlocks, setTextBlocks] = useState<TextBlockMap>({});
   const [particles, setParticles] = useState<ParticleMap>({});
-  const [loadedFontUrl, setLoadedFontUrl] = useState<string | null>(null);
-  const [fontLoadErrorUrl, setFontLoadErrorUrl] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [draftSettings, setDraftSettings] =
     useState<Settings>(DEFAULT_SETTINGS);
@@ -217,7 +195,13 @@ export default function App(): ReactElement {
           }
           setAssets(assets);
           setAnimations(animations);
-          setTextBlocks(resolveTextBlocks(bootstrap.text_blocks ?? {}, assets, bootstrap.default_font));
+          setTextBlocks(
+            resolveTextBlocks(
+              bootstrap.text_blocks ?? {},
+              assets,
+              bootstrap.default_font,
+            ),
+          );
           setParticles(bootstrap.particles ?? {});
           setSettings(loadedSettings);
           setDraftSettings(loadedSettings);
@@ -250,47 +234,8 @@ export default function App(): ReactElement {
     };
   }, [setUpdate]);
 
-  useEffect(() => {
-    const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
-    if (fontUrl === undefined) {
-      return;
-    }
-    let active = true;
-    const face = new FontFace("VECT Pixel", `url("${fontUrl}")`, {
-      display: "swap",
-    });
-    document.fonts.add(face);
-    void face
-      .load()
-      .then(async () => {
-        // FontFace.load() resolves when this face is usable, while the
-        // document-wide promise also accounts for any companion faces that
-        // KaTeX/layout may have queued.  Do not mark the URL ready on a
-        // rejected load: doing so would freeze a fallback-font layout as if it
-        // were authoritative.
-        await document.fonts.ready;
-        if (active) setLoadedFontUrl(fontUrl);
-      })
-      .catch((reason: unknown) => {
-        if (active) {
-          // A font is an enhancement, not a reason to deadlock the story. The
-          // text components keep their system fallback geometry when loading
-          // fails; remember the failed URL so the readiness gate can release.
-          setFontLoadErrorUrl(fontUrl);
-          setError(`中文字体加载失败，已使用系统字体：${errorMessage(reason)}`);
-        }
-      });
-    return () => {
-      active = false;
-      document.fonts.delete(face);
-    };
-  }, [assets, defaultFontId]);
-
   const fontUrl = defaultFontId === null ? undefined : assets[defaultFontId];
-  const fontReady =
-    fontUrl === undefined ||
-    loadedFontUrl === fontUrl ||
-    fontLoadErrorUrl === fontUrl;
+  const fontReady = useDefaultFont(fontUrl, setError);
 
   const refreshSlots = useCallback(async (): Promise<void> => {
     setSaveSlots(await engineApi.listSaveSlots());
@@ -698,6 +643,38 @@ export default function App(): ReactElement {
     );
   };
 
+  const submitProof = async (
+    graph: ProofGraph,
+  ): Promise<{ accepted: boolean; check: ProofCheckResult }> => {
+    const retained = update;
+    const snapshot = retained?.snapshot;
+    if (!retained || snapshot?.prompt.kind !== "proof")
+      throw new Error("当前没有进行中的证明题。");
+    let response: { accepted: boolean; check: ProofCheckResult } | null = null;
+    const applied = await runStoryCommand(async () => {
+      const submitted = await engineApi.proofSubmit(
+        snapshot.revision,
+        graph,
+        activeSessionId.current,
+      );
+      response = submitted;
+      // An incomplete submission leaves the current runtime untouched.
+      return submitted.update ?? retained;
+    });
+    if (!applied || response === null)
+      throw new Error("证明提交失败，请重试。");
+    return response;
+  };
+
+  const abandonProof = (): void => {
+    const snapshot = update?.snapshot;
+    if (snapshot?.prompt.kind !== "proof" || !snapshot.prompt.can_abandon)
+      return;
+    void runStoryCommand(() =>
+      engineApi.proofAbandon(snapshot.revision, activeSessionId.current),
+    );
+  };
+
   const clickButton = useCallback(
     (instanceId: string): void => {
       const snapshot = update?.snapshot;
@@ -896,9 +873,6 @@ export default function App(): ReactElement {
           setError(errorMessage(reason));
           finishSessionTransition(token);
         }
-      } finally {
-        // finishSessionTransition owns cleanup.  Do not release a newer
-        // command's busy lock from this old request.
       }
     })();
     setHistory([]);
@@ -977,11 +951,10 @@ export default function App(): ReactElement {
     setPanel("none");
     setPhase("playing");
     phaseRef.current = "playing";
-    // Keep the complete transition (including the map refresh after a failed
-    // replay start) behind one controller-owned token.  Releasing `busy` as
-    // soon as `start_scene_replay` settles used to expose a blank playing
-    // screen for one async turn, during which a second command could race the
-    // map recovery and overwrite the new page.
+    // The whole transition, including the map refresh after a failed replay
+    // start, stays behind one controller-owned token: releasing `busy` as soon
+    // as `start_scene_replay` settles would expose a blank playing screen in
+    // which a second command could race the map recovery.
     const transition = (async () => {
       try {
         const started = await runStoryCommand(
@@ -1120,128 +1093,32 @@ export default function App(): ReactElement {
     phaseRef.current = "title";
   };
 
-  const dialogue =
-    update?.snapshot.prompt.kind === "dialogue" ? update.snapshot.prompt : null;
-  const longText =
-    update?.snapshot.prompt.kind === "long_text"
-      ? update.snapshot.prompt
-      : null;
-  const textPrompt: DialoguePrompt | LongTextPrompt | null =
-    dialogue ?? longText;
-  const dialoguePage =
-    update?.snapshot.dialogue_page ??
-    (dialogue === null
-      ? null
-      : {
-          page_id: dialogue.prompt_id,
-          speaker: dialogue.speaker,
-          speaker_id: dialogue.speaker_id ?? null,
-          name_color: dialogue.name_color ?? null,
-          text_color: dialogue.text_color ?? null,
-          segments: [dialogue.text],
-        });
-  const hasUiMotionCue =
-    update?.cues.some(
-      (cue) =>
-        cue.type === "dialogue_ui_transition" || cue.type === "ui_motion",
-    ) ?? false;
-  const renderedDialoguePage =
-    longText === null
-      ? (dialoguePage ??
-        (hasUiMotionCue
-          ? {
-              page_id: "ui_motion_preview",
-              speaker: null,
-              speaker_id: null,
-              name_color: null,
-              text_color: null,
-              segments: [""],
-            }
-          : null))
-      : null;
-  const longTextPage = update?.snapshot.long_text_page ?? null;
-  const choice =
-    update?.snapshot.prompt.kind === "choice" ? update.snapshot.prompt : null;
-  // Reveal settings and identity belong to the prompt *occurrence*: they are
-  // decided when it is first shown and survive refreshes of the same prompt.
-  const occurrence = useTextOccurrence(update, textPrompt);
-  const textCueCps = occurrence?.speedCps;
-  const hasTextRevealCue = occurrence?.hasRevealCue ?? false;
-  const cueRevealAnimation = occurrence?.animation ?? null;
-  const textInstanceKey = occurrence?.key ?? null;
+  const view = describePrompt(update);
+  const { longText, textPrompt, timelineCue, runtimeTimelineCue, playback } =
+    view;
+  const reveal = useTextReveal(update, textPrompt, {
+    cps: settings.text_speed_cps,
+    animation: settings.text_reveal_animation,
+  });
+  const textInstanceKey = reveal.instanceKey;
   const advanceBlocked = update !== null && isAdvanceBlocked(update.snapshot);
-  const currentTextSettings = useMemo<LockedTextSettings | null>(() => {
-    if (textPrompt === null) return null;
-    return {
-      instanceKey: textInstanceKey ?? "none",
-      defaultCps: settings.text_speed_cps,
-      initialCps: textCueCps ?? settings.text_speed_cps,
-      animation: cueRevealAnimation ?? settings.text_reveal_animation,
-    };
-  }, [cueRevealAnimation, settings, textCueCps, textInstanceKey, textPrompt]);
-  const [lockedTextSettings, setLockedTextSettings] =
-    useState<LockedTextSettings | null>(null);
-  useEffect(() => {
-    if (currentTextSettings === null) {
-      const frame = requestAnimationFrame(() => setLockedTextSettings(null));
-      return () => cancelAnimationFrame(frame);
-    }
-    const frame = requestAnimationFrame(() => {
-      setLockedTextSettings((previous) =>
-        previous?.instanceKey === currentTextSettings.instanceKey
-          ? previous
-          : currentTextSettings,
-      );
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [currentTextSettings]);
-  const effectiveTextSettings =
-    lockedTextSettings?.instanceKey === currentTextSettings?.instanceKey
-      ? lockedTextSettings
-      : currentTextSettings;
-  const revealCps =
-    effectiveTextSettings?.initialCps ?? settings.text_speed_cps;
-  const revealDefaultCps =
-    effectiveTextSettings?.defaultCps ?? settings.text_speed_cps;
-  const revealAnimation =
-    effectiveTextSettings?.animation ?? settings.text_reveal_animation;
   const runtimeLocked = update?.requires_ack ?? false;
-  const timelineCue = update?.cues.find(
-    (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
-      cue.type === "timeline",
-  );
-  const runtimeTimelineCue = update?.cues.find(
-    (cue): cue is Extract<PresentationCue, { type: "timeline" }> =>
-      cue.type === "timeline" && cue.gate === "runtime",
-  );
-  const playback = update?.snapshot.playback ?? {
-    auto: "normal" as const,
-    ctrl_fast_forward: "allow" as const,
-  };
   const forcedAuto = playback.auto === "forced";
   const immediateAutoAdvance =
     textPrompt !== null && hasImmediateAutoAdvance(textPrompt.text);
-  const ctrlPolicyAllows =
-    !forcedAuto && playback.ctrl_fast_forward === "allow";
-  const fastForwardRequested =
-    ctrlHeld && ctrlPolicyAllows && settings.skip_mode !== "disabled";
-  const fastForwardDialogueAllowed =
-    textPrompt !== null &&
-    (settings.skip_mode === "all" ||
-      (settings.skip_mode === "read_only" && textPrompt.is_read));
-  const fastForwardActive =
-    phase === "playing" &&
-    panel === "none" &&
-    fastForwardRequested &&
-    update !== null &&
-    canFastForwardPrompt(
-      playback,
-      settings.skip_mode,
-      update.snapshot.prompt,
-    ) &&
-    (runtimeTimelineCue === undefined ||
-      settings.skip_mode === "all" ||
-      (settings.skip_mode === "read_only" && runtimeTimelineCue.is_seen));
+  const {
+    requested: fastForwardRequested,
+    dialogueAllowed: fastForwardDialogueAllowed,
+    active: fastForwardActive,
+  } = fastForwardState({
+    ctrlHeld,
+    enabled: phase === "playing" && panel === "none",
+    playback,
+    skipMode: settings.skip_mode,
+    update,
+    textPrompt,
+    runtimeTimelineCue,
+  });
   const autoSlot = saveSlots.find((slot) => slot.slot === "auto");
   const handleTypingChange = useCallback(
     (typing: boolean, cps: number): void => {
@@ -1450,8 +1327,12 @@ export default function App(): ReactElement {
   }, [pageHidden]);
 
   useEffect(() => {
-    pauseRef.current?.set("panel", panel !== "none" && phase === "playing");
-  }, [panel, phase]);
+    pauseRef.current?.set(
+      "panel",
+      (panel !== "none" || update?.snapshot.prompt.kind === "proof") &&
+        phase === "playing",
+    );
+  }, [panel, phase, update?.snapshot.prompt.kind]);
 
   // Opening any in-game panel is a hard input boundary.  In particular a
   // Ctrl key that was held while clicking the toolbar must not resume a
@@ -1513,41 +1394,17 @@ export default function App(): ReactElement {
         )}
 
         {phase === "title" && (
-          <div className="title-screen">
-            <div className="title-card">
-              <p className="eyebrow">A MATHEMATICAL VISUAL NOVEL</p>
-              <h1>VECTSPACE</h1>
-              <p className="title-formula">
-                <MarkupText source="$V=U\oplus W$" />
-              </p>
-              <div className="title-actions">
-                <button disabled={busy} onClick={startNewGame} type="button">
-                  开始演示
-                </button>
-                <button
-                  disabled={!autoSlot?.exists || busy}
-                  onClick={() => load("auto")}
-                  type="button"
-                >
-                  继续
-                </button>
-                <button onClick={() => setPanel("saves")} type="button">
-                  读取存档
-                </button>
-                <button onClick={() => setPanel("settings")} type="button">
-                  设置
-                </button>
-                <button
-                  disabled={!chapterMapAvailable}
-                  onClick={openChapterMap}
-                  type="button"
-                >
-                  章节地图
-                </button>
-              </div>
-              <small>内容版本 {contentVersion || "未载入"}</small>
-            </div>
-          </div>
+          <TitleScreen
+            busy={busy}
+            canContinue={autoSlot?.exists === true}
+            chapterMapAvailable={chapterMapAvailable}
+            contentVersion={contentVersion}
+            onContinue={() => load("auto")}
+            onOpenChapterMap={openChapterMap}
+            onOpenSaves={() => setPanel("saves")}
+            onOpenSettings={() => setPanel("settings")}
+            onStart={startNewGame}
+          />
         )}
 
         {phase === "chapter_map" && chapterMap !== null && (
@@ -1597,93 +1454,28 @@ export default function App(): ReactElement {
               </button>
             </nav>
 
-            {renderedDialoguePage !== null && (
-              <DialogueBox
-                defaultCps={revealDefaultCps}
-                dialogueBoxSource={
-                  resolveImageAsset("gui.dialogue_box", assets, animations) ??
-                  null
-                }
-                disabled={busy || runtimeLocked}
-                initialCps={revealCps}
-                key={textInstanceKey ?? `retained:${update.update_id}`}
-                motionHost={uiMotionHost}
-                nameBoxSource={
-                  resolveImageAsset("gui.name_box", assets, animations) ?? null
-                }
-                onTypingChange={handleTypingChange}
-                onRevealComplete={handleRevealComplete}
-                page={renderedDialoguePage}
-                prompt={dialogue}
-                revealAnimation={revealAnimation}
-                fontReady={fontReady}
-                measurementScale={viewportMetrics.scale}
-                ref={dialogueRef}
-                revealImmediately={dialogue === null || !hasTextRevealCue}
-                sessionKey={
-                  dialogue === null
-                    ? `retained:${renderedDialoguePage.page_id}`
-                    : (textInstanceKey ?? update.update_id)
-                }
-                suspended={panel !== "none" || pageHidden}
-                visible={update.snapshot.world.dialogue_ui_visible}
-              />
-            )}
-
-            {longTextPage !== null && (
-              <LongTextPanel
-                defaultCps={revealDefaultCps}
-                disabled={busy || runtimeLocked || longText === null}
-                fastForward={fastForwardActive}
-                initialCps={revealCps}
-                key={longTextPage.document_id}
-                onRevealComplete={handleRevealComplete}
-                onTypingChange={handleTypingChange}
-                page={longTextPage}
-                paperSource={
-                  longTextPage.paper === null ||
-                  longTextPage.paper === undefined
-                    ? undefined
-                    : (resolveImageAsset(
-                        longTextPage.paper,
-                        assets,
-                        animations,
-                      ) ?? null)
-                }
-                prompt={longText}
-                revealAnimation={revealAnimation}
-                designScale={viewportMetrics.scale}
-                fontReady={fontReady}
-                fontKey={defaultFontId ?? "system"}
-                ref={longTextRef}
-                revealImmediately={!hasTextRevealCue}
-                sessionKey={
-                  longText === null
-                    ? `retained:${longTextPage.document_id}:${longTextPage.active_step_index}`
-                    : (textInstanceKey ?? update.update_id)
-                }
-                suspended={panel !== "none" || pageHidden}
-                visible={longTextPage.visible !== false}
-              />
-            )}
-
-            {choice !== null && (
-              // Keep this component mounted across same-prompt runtime updates.
-              // ChoiceLayer owns the stable prompt-id reset; update_id is a
-              // volatile revision and must not restart focus or artwork loops.
-              <ChoiceLayer
-                animations={animations}
-                assets={assets}
-                disabled={busy || runtimeLocked}
-                onChoose={choose}
-                // A non-fatal presentation problem (missing template/icon,
-                // invalid anchor) is surfaced once instead of locking the
-                // prompt; the resolved fallback skin stays playable.
-                onDiagnostic={(diagnostic) => setError(diagnostic.message)}
-                paused={panel !== "none" || pageHidden}
-                prompt={choice}
-              />
-            )}
+            <PromptLayers
+              animations={animations}
+              assets={assets}
+              designScale={viewportMetrics.scale}
+              dialogueRef={dialogueRef}
+              disabled={busy || runtimeLocked}
+              fastForward={fastForwardActive}
+              fontKey={defaultFontId ?? "system"}
+              fontReady={fontReady}
+              longTextRef={longTextRef}
+              onProofSubmit={submitProof}
+              onProofAbandon={abandonProof}
+              onChoose={choose}
+              onDiagnostic={setError}
+              onRevealComplete={handleRevealComplete}
+              onTypingChange={handleTypingChange}
+              reveal={reveal}
+              suspended={panel !== "none" || pageHidden}
+              uiMotionHost={uiMotionHost}
+              update={update}
+              view={view}
+            />
 
             {update.snapshot.prompt.kind === "end" && (
               <div className="end-card">
@@ -1743,368 +1535,10 @@ export default function App(): ReactElement {
   );
 }
 
-interface SavePanelProps {
-  slots: SaveSlotSummary[];
-  canSave: boolean;
-  onSave(slot: string): void;
-  onLoad(slot: string): void;
-  onClose(): void;
-}
-
-function SavePanel({
-  slots,
-  canSave,
-  onSave,
-  onLoad,
-  onClose,
-}: SavePanelProps): ReactElement {
-  return (
-    <div className="modal-backdrop">
-      <section className="modal-panel save-panel" aria-label="存档">
-        <header>
-          <div>
-            <p className="eyebrow">SNAPSHOT ONLY</p>
-            <h2>存档与读档</h2>
-          </div>
-          <button onClick={onClose} type="button">
-            关闭
-          </button>
-        </header>
-        <div className="slot-grid">
-          {slots.map((slot) => (
-            <article className="save-slot" key={slot.slot}>
-              {slot.thumbnail_data_url !== null ? (
-                <img alt="场景缩略图" src={slot.thumbnail_data_url} />
-              ) : (
-                <div className="empty-thumbnail">NO DATA</div>
-              )}
-              <div className="slot-copy">
-                <strong>
-                  {slot.slot === "auto" ? "自动存档" : `手动槽 ${slot.slot}`}
-                </strong>
-                <span>{formatTimestamp(slot.saved_at_unix_ms)}</span>
-                <p>{slot.prompt_preview ?? "空存档"}</p>
-              </div>
-              <div className="slot-actions">
-                {slot.slot !== "auto" && (
-                  <button
-                    disabled={!canSave}
-                    onClick={() => onSave(slot.slot)}
-                    type="button"
-                  >
-                    保存
-                  </button>
-                )}
-                <button
-                  disabled={!slot.exists}
-                  onClick={() => onLoad(slot.slot)}
-                  type="button"
-                >
-                  读取
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface SettingsPanelProps {
-  settings: Settings;
-  onChange(settings: Settings): void;
-  onSave(): void;
-  onClose(): void;
-}
-
-export function SettingsPanel({
-  settings,
-  onChange,
-  onSave,
-  onClose,
-}: SettingsPanelProps): ReactElement {
-  const [animationPreviewRevision, setAnimationPreviewRevision] = useState(0);
-  const animationPreviewSource = "示例：$A \\cong B$，文字";
-  const animationPreviewUnits = useMemo(
-    () => parseMarkup(animationPreviewSource),
-    [animationPreviewSource],
-  );
-  const animationPreviewCps = useMemo(
-    () =>
-      buildVisibleUnitCps(
-        animationPreviewUnits,
-        settings.text_speed_cps,
-        settings.text_speed_cps,
-      ),
-    [animationPreviewUnits, settings.text_speed_cps],
-  );
-  const previewKey = `${animationPreviewRevision}:${settings.text_reveal_animation}:${settings.text_speed_cps}`;
-  const [previewLineLayoutKey, setPreviewLineLayoutKey] = useState<
-    string | null
-  >(null);
-  const preview = useTextRevealSession({
-    animation: settings.text_reveal_animation,
-    defaultCps: settings.text_speed_cps,
-    initialCps: settings.text_speed_cps,
-    instanceKey: previewKey,
-    ready:
-      settings.text_reveal_animation !== "line_sweep" ||
-      previewLineLayoutKey === previewKey,
-    restorePresentation: false,
-    units: animationPreviewUnits,
-    waitForInlineMath: settings.text_reveal_animation !== "drop_fade",
-  });
-  const rows: {
-    key:
-      | "master_volume"
-      | "bgm_volume"
-      | "ambience_volume"
-      | "sfx_volume"
-      | "video_volume"
-      | "text_speed_cps";
-    label: string;
-    min: number;
-    max: number;
-    step: number;
-  }[] = [
-    { key: "master_volume", label: "主音量", min: 0, max: 1, step: 0.01 },
-    { key: "bgm_volume", label: "BGM", min: 0, max: 1, step: 0.01 },
-    {
-      key: "ambience_volume",
-      label: "环境声",
-      min: 0,
-      max: 1,
-      step: 0.01,
-    },
-    { key: "sfx_volume", label: "音效", min: 0, max: 1, step: 0.01 },
-    { key: "video_volume", label: "视频", min: 0, max: 1, step: 0.01 },
-    { key: "text_speed_cps", label: "文字速度", min: 5, max: 80, step: 1 },
-  ];
-  return (
-    <div className="modal-backdrop">
-      <section className="modal-panel settings-panel" aria-label="设置">
-        <header>
-          <div>
-            <p className="eyebrow">LOCAL SETTINGS</p>
-            <h2>设置</h2>
-          </div>
-          <button onClick={onClose} type="button">
-            关闭
-          </button>
-        </header>
-        {rows.map((row) => {
-          // Settings files written before C1 omit ambience_volume. Keep the
-          // control usable while the compatibility default is supplied by the
-          // runtime and Rust save layer.
-          const value =
-            row.key === "ambience_volume"
-              ? (settings.ambience_volume ?? 0.8)
-              : settings[row.key];
-          return (
-            <label className="setting-row" key={row.key}>
-              <span>{row.label}</span>
-              <input
-                aria-label={row.label}
-                max={row.max}
-                min={row.min}
-                onChange={(event) =>
-                  onChange({
-                    ...settings,
-                    [row.key]: Number(event.currentTarget.value),
-                  })
-                }
-                step={row.step}
-                type="range"
-                value={value}
-              />
-              <output>{formatSetting(value, row.key)}</output>
-            </label>
-          );
-        })}
-        <label className="setting-row">
-          <span>文字动画</span>
-          <select
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                text_reveal_animation: event.currentTarget
-                  .value as TextRevealAnimation,
-              })
-            }
-            value={settings.text_reveal_animation}
-          >
-            <option value="line_sweep">逐行横向渐显</option>
-            <option value="typewriter">逐字 / 公式渐显</option>
-            <option value="drop_fade">下落渐显</option>
-          </select>
-          <output />
-        </label>
-        <div className="text-animation-preview" key={previewKey}>
-          <MarkupText
-            animateMath
-            instantMathReveal={preview.isComplete()}
-            instantReveal={preview.isComplete()}
-            lineSweepElapsedMs={preview.state.elapsedMs}
-            onLineSweepLayoutChange={(ready) =>
-              setPreviewLineLayoutKey(ready ? previewKey : null)
-            }
-            pauseWindows={preview.plan.pauses}
-            revealAnimation={settings.text_reveal_animation}
-            revealClock={preview.clock}
-            revealSchedule={preview.plan.events.map((event) => event.atMs)}
-            source={animationPreviewSource}
-            unitCps={animationPreviewCps}
-            visibleCount={preview.state.revealedCount}
-          />
-          <button
-            onClick={() =>
-              setAnimationPreviewRevision((revision) => revision + 1)
-            }
-            type="button"
-          >
-            重播示例
-          </button>
-        </div>
-        <label className="setting-row">
-          <span>Ctrl 快进</span>
-          <select
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                skip_mode: event.currentTarget.value as Settings["skip_mode"],
-              })
-            }
-            value={settings.skip_mode}
-          >
-            <option value="disabled">关闭快进</option>
-            <option value="read_only">快进已读内容</option>
-            <option value="all">全部快进</option>
-          </select>
-          <output />
-        </label>
-        <label className="setting-row">
-          <span>减弱动态效果</span>
-          <input
-            aria-label="减弱动态效果"
-            checked={settings.reduce_motion ?? false}
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                reduce_motion: event.currentTarget.checked,
-              })
-            }
-            title="降低闪光亮度、震动幅度，以及色差、故障、冲击波等画面特效的强度与跳变速度"
-            type="checkbox"
-          />
-          <output>{settings.reduce_motion === true ? "开启" : "关闭"}</output>
-        </label>
-        <button className="primary-action" onClick={onSave} type="button">
-          保存设置
-        </button>
-      </section>
-    </div>
-  );
-}
-
-function getInitialAppState(): Promise<InitialAppState> {
-  initialAppStatePromise ??= loadInitialAppState().catch((reason: unknown) => {
-    initialAppStatePromise = null;
-    throw reason instanceof Error ? reason : new Error(String(reason));
-  });
-  return initialAppStatePromise;
-}
-
-async function loadInitialAppState(attempt = 1): Promise<InitialAppState> {
-  try {
-    return await withStartupTimeout(loadInitialAppStateAttempt(), 6_000);
-  } catch (reason) {
-    if (attempt >= 3) {
-      throw reason;
-    }
-    await new Promise<void>((resolve) => {
-      window.setTimeout(resolve, attempt * 250);
-    });
-    return loadInitialAppState(attempt + 1);
-  }
-}
-
-async function loadInitialAppStateAttempt(): Promise<InitialAppState> {
-  const [bootstrap, settings, slots] = await Promise.all([
-    engineApi.bootstrap(),
-    engineApi.loadSettings(),
-    engineApi.listSaveSlots(),
-  ]);
-  const resolved = await engineApi.resolveAssets(bootstrap.asset_ids);
-  return {
-    bootstrap,
-    settings,
-    slots,
-    assets: resolvedAssetsToUrls(resolved),
-    animations: resolvedAssetsToAnimations(resolved),
-  };
-}
-
-function withStartupTimeout<T>(
-  promise: Promise<T>,
-  durationMs: number,
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(
-      () => reject(new Error("连接 Rust 运行时超时，正在重试")),
-      durationMs,
-    );
-    promise.then(
-      (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-      (reason: unknown) => {
-        window.clearTimeout(timer);
-        reject(reason instanceof Error ? reason : new Error(String(reason)));
-      },
-    );
-  });
-}
-
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
-}
-
 function runtimeUpdateKey(update: RuntimeUpdate): string {
   return `${update.session_id ?? "0"}:${update.update_id}`;
 }
 
 function runtimeRevisionKey(update: RuntimeUpdate): string {
   return `${update.session_id ?? "0"}:${update.snapshot.revision}`;
-}
-
-function formatTimestamp(value: number | null): string {
-  return value === null
-    ? "—"
-    : new Date(value).toLocaleString("zh-CN", { hour12: false });
-}
-
-function formatSetting(
-  value: number,
-  key:
-    | "master_volume"
-    | "bgm_volume"
-    | "ambience_volume"
-    | "sfx_volume"
-    | "video_volume"
-    | "text_speed_cps",
-): string {
-  return key === "text_speed_cps"
-    ? `${Math.round(value)} cps`
-    : `${Math.round(value * 100)}%`;
-}
-
-function isInteractiveTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      "button, input, select, textarea, a, label, [contenteditable='true'], [data-block-story-advance]",
-    ) !== null
-  );
 }

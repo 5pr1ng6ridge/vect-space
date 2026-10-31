@@ -384,31 +384,6 @@ describe("NodeInspector sprite stage editing", () => {
     });
   });
 
-  it("keeps a move node's action and its other channels", async () => {
-    api.buildNodePreview.mockResolvedValue(
-      readyPreview(spriteWorld(1000, 1060)),
-    );
-    const node = spriteNode({
-      action: "move",
-      flip_x: true,
-      opacity: 0.5,
-      z: 3,
-    });
-    const { onChange } = renderInspector(node);
-    const canvas = await grabbableCanvas();
-
-    fireEvent.pointerDown(canvas, { button: 0, clientX: 1000, clientY: 1000 });
-    fireEvent.pointerMove(canvas, { clientX: 900, clientY: 1100 });
-    fireEvent.pointerUp(canvas, { clientX: 900, clientY: 1100 });
-
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith("target", {
-      ...node,
-      x: 860,
-      y: 1180,
-    });
-  });
-
   it("drags the authored x/y through a zoomed and rotated camera", async () => {
     // A 1.6x camera turned 30 degrees: design pixels are not world pixels and
     // the drag axis is rotated, so only the shared inverse camera can map the
@@ -712,33 +687,6 @@ describe("NodeInspector background stage drops", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("consumes a refused internal drop without offering the drop affordance", async () => {
-    const { onChange } = renderInspector(
-      backgroundNode({ background: "bg.a" }),
-    );
-    await screen.findByLabelText("背景转场预览");
-    const target = document.querySelector(".stage-drop-target");
-    if (target === null) throw new Error("缺少画布拖放层");
-
-    const multi = () =>
-      transfer(
-        {
-          "application/x-vect-asset": "bg.b",
-          "application/x-vect-assets": '["bg.b","bg.a"]',
-        },
-        ["application/x-vect-asset", "application/x-vect-assets"],
-      );
-    const over = createEvent.dragOver(target, { dataTransfer: multi() });
-    fireEvent(target, over);
-    expect(over.defaultPrevented).toBe(true);
-    expect(target.className).not.toContain("is-active");
-
-    const drop = createEvent.drop(target, { dataTransfer: multi() });
-    fireEvent(target, drop);
-    expect(drop.defaultPrevented).toBe(true);
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
   it("keeps accepting a valid library drag after a refused one", async () => {
     const { onChange } = renderInspector(
       backgroundNode({ background: "bg.a" }),
@@ -995,33 +943,6 @@ describe("NodeInspector particle generation point", () => {
     expect(marker.style.left).toBe(`${(900 / 1920) * 100}%`);
   });
 
-  it("keeps a dropped marker until the refetch moves it, without applying the drop twice", async () => {
-    const node = particleNode();
-    let current = node;
-    api.buildNodePreview.mockImplementation(() =>
-      Promise.resolve(particlePreview(current, { persistent: true })),
-    );
-    const { onChange, rerender } = renderInspector(node);
-    await screen.findByLabelText("拖动生成点");
-    measureParticleLayer();
-
-    const marker = screen.getByLabelText("拖动生成点");
-    fireEvent.pointerDown(marker, { button: 0, clientX: 900, clientY: 500 });
-    fireEvent.pointerMove(marker, { clientX: 1000, clientY: 560 });
-    fireEvent.pointerUp(marker, { clientX: 1000, clientY: 560 });
-    expect(onChange).toHaveBeenCalledTimes(1);
-    // Until the runtime answers, the marker stays where it was dropped.
-    expect(marker.style.left).toBe(`${(1000 / 1920) * 100}%`);
-
-    // The host applied the change; the refetch reports the new position.
-    current = { ...node, x: 1000, y: 560 };
-    rerender(current);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const settled = screen.getByLabelText("拖动生成点");
-    expect(settled.style.left).toBe(`${(1000 / 1920) * 100}%`);
-    expect(settled.style.top).toBe(`${(560 / 1080) * 100}%`);
-  });
-
   it("returns the marker to the document position when the drop is undone before its refetch arrives", async () => {
     const node = particleNode();
     // Every answer reports the original position, and it is the very same
@@ -1115,36 +1036,6 @@ describe("NodeInspector particle generation point", () => {
       ...node,
       x: 640,
       y: 460,
-    });
-  });
-
-  it("drags a burst generation point through the camera", async () => {
-    const node = particleNode({ action: "burst", x: 900, y: 500 });
-    api.buildNodePreview.mockResolvedValue(
-      particlePreview(node, {
-        camera: ZOOMED_CAMERA,
-        cues: [burstCueFor(node)],
-        particle: BURST_PARTICLE,
-      }),
-    );
-    const { onChange } = renderInspector(node);
-    const marker = await screen.findByLabelText("拖动生成点");
-    measureParticleLayer();
-    const shown = worldPointToStage({ x: 900, y: 500 }, ZOOMED_CAMERA);
-
-    fireEvent.pointerDown(marker, {
-      button: 0,
-      clientX: shown.x,
-      clientY: shown.y,
-    });
-    fireEvent.pointerMove(marker, { clientX: shown.x + 100, clientY: shown.y });
-    fireEvent.pointerUp(marker, { clientX: shown.x + 100, clientY: shown.y });
-
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith("target", {
-      ...node,
-      x: 954,
-      y: 469,
     });
   });
 

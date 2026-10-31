@@ -41,8 +41,7 @@
     user-select: text;
   }
 
-  input[type="number"],
-  .tabular-nums {
+  input[type="number"] {
     font-variant-numeric: tabular-nums;
   }
 

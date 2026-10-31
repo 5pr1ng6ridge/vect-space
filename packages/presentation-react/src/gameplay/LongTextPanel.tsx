@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -30,6 +31,8 @@ import type { ImageAssetSource } from "@vectspace/presentation-core/image-animat
 import {
   paginateLongTextVisualSteps,
   resolveLongTextPageWindow,
+  type LongTextPageWindow,
+  type LongTextVisualPage,
 } from "./longTextPagination";
 import {
   isValidTextMeasurementScale,
@@ -92,6 +95,36 @@ interface MetricsForInstance {
 }
 
 const EMPTY_MATH_METRICS: ReadonlyMap<number, MathRevealMetric> = new Map();
+const EMPTY_REVEAL_SCHEDULE: readonly number[] = [];
+const EMPTY_PAUSE_WINDOWS: readonly { startMs: number; endMs: number }[] = [];
+const EMPTY_MATH_REVEAL_DURATIONS: ReadonlyMap<number, number> = new Map();
+
+const LongTextMeasureStep = memo(function LongTextMeasureStep({
+  step,
+  fontReady,
+  designScale,
+  onStepLayout,
+}: {
+  step: LongTextPageSnapshot["steps"][number];
+  fontReady: boolean;
+  designScale: number;
+  onStepLayout(stepId: string, snapshot: TextLayoutSnapshot): void;
+}): ReactElement {
+  const handleTextLayout = useCallback(
+    (snapshot: TextLayoutSnapshot): void => onStepLayout(step.step_id, snapshot),
+    [onStepLayout, step.step_id],
+  );
+  return (
+    <div className="long-text-step long-text-measure-step">
+      <MarkupText
+        fontReady={fontReady}
+        measurementScale={designScale}
+        onTextLayout={handleTextLayout}
+        source={step.text}
+      />
+    </div>
+  );
+});
 
 export const LongTextPanel = forwardRef<
   LongTextPanelHandle,
@@ -191,11 +224,13 @@ export const LongTextPanel = forwardRef<
     null,
   );
   const [pageWindow, setPageWindow] = useState({ start: 0, end: 0 });
+  const [fragmentWindow, setFragmentWindow] = useState({ start: 0, end: 0 });
   const [enteredPageKeys, setEnteredPageKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const [appearanceGeneration, setAppearanceGeneration] = useState(0);
   const pageWindowRef = useRef(pageWindow);
+  const fragmentWindowRef = useRef(fragmentWindow);
   const pendingCompleteRef = useRef(false);
   const measuringRootRef = useRef<HTMLDivElement>(null);
   const surfaceStackRef = useRef<HTMLDivElement>(null);
@@ -204,7 +239,11 @@ export const LongTextPanel = forwardRef<
   const scrollStartOffsetRef = useRef(0);
   const scrollTargetRef = useRef(0);
   const [scrollTarget, setScrollTargetState] = useState(0);
-  const appearanceRangeRef = useRef("");
+  const appearanceRangeRef = useRef<{
+    pages: readonly LongTextVisualPage[];
+    start: number;
+    end: number;
+  } | null>(null);
   const manuallyBrowsingRef = useRef(false);
   const pointerDragRef = useRef<{
     pointerId: number;
@@ -379,6 +418,19 @@ export const LongTextPanel = forwardRef<
     }
     return offsets;
   }, [layout.page_gap, page.pagination, pages]);
+  const fragmentGeometry = useMemo(() => {
+    const bounds: { top: number; bottom: number }[] = [];
+    const pageStarts: number[] = [];
+    pages.forEach((paper, pageIndex) => {
+      pageStarts.push(bounds.length);
+      paper.fragments.forEach((fragment) => {
+        const top =
+          (pageOffsets[pageIndex] ?? 0) + layout.padding_y + fragment.top;
+        bounds.push({ top, bottom: top + fragment.height });
+      });
+    });
+    return { bounds, pageStarts };
+  }, [layout.padding_y, pageOffsets, pages]);
   const surfaceHeight = useMemo(
     () =>
       pages.reduce(
@@ -470,12 +522,30 @@ export const LongTextPanel = forwardRef<
         layout.height,
       );
       const current = pageWindowRef.current;
-      if (current.start === next.start && current.end === next.end) return;
-      pageWindowRef.current = next;
-      setPageWindow(next);
+      if (current.start !== next.start || current.end !== next.end) {
+        pageWindowRef.current = next;
+        setPageWindow(next);
+      }
+      const nextFragments = resolveFragmentWindow(
+        fragmentGeometry.bounds,
+        offset,
+        layout.height,
+      );
+      const currentFragments = fragmentWindowRef.current;
+      if (
+        currentFragments.start !== nextFragments.start ||
+        currentFragments.end !== nextFragments.end
+      ) {
+        fragmentWindowRef.current = nextFragments;
+        setFragmentWindow(nextFragments);
+      }
     },
-    [layout.height, pageOffsets, pages],
+    [fragmentGeometry, layout.height, pageOffsets, pages],
   );
+  const effectiveFragmentWindow =
+    fragmentWindow.end === 0 && fragmentGeometry.bounds.length > 0
+      ? resolveFragmentWindow(fragmentGeometry.bounds, 0, layout.height)
+      : fragmentWindow;
   const effectivePageWindow =
     pageWindow.end === 0 && pages.length > 0
       ? resolveLongTextPageWindow(pages, pageOffsets, 0, layout.height)
@@ -526,23 +596,6 @@ export const LongTextPanel = forwardRef<
     () => pages.map((paper, index) => pageAppearanceKey(paper, index)),
     [pageAppearanceKey, pages],
   );
-  const appearanceContentGeneration = useMemo(
-    () =>
-      JSON.stringify(
-        pages.map((paper) =>
-          paper.fragments.map((fragment) => [
-            fragment.step.step_id,
-            fragment.step.text,
-            fragment.sourceTop,
-            fragment.height,
-            fragment.top,
-            fragment.firstLine,
-            fragment.lastLine,
-          ]),
-        ),
-      ),
-    [pages],
-  );
 
   const markVisiblePages = useCallback(
     (offset: number): void => {
@@ -554,9 +607,15 @@ export const LongTextPanel = forwardRef<
         layout.height,
         0,
       );
-      const signature = `${appearanceContentGeneration}:${visibleWindow.start}:${visibleWindow.end}`;
-      if (signature === appearanceRangeRef.current) return;
-      appearanceRangeRef.current = signature;
+      const previous = appearanceRangeRef.current;
+      if (
+        previous?.pages === pages &&
+        previous.start === visibleWindow.start &&
+        previous.end === visibleWindow.end
+      ) {
+        return;
+      }
+      appearanceRangeRef.current = { pages, ...visibleWindow };
       const keys = Array.from(
         { length: Math.max(0, visibleWindow.end - visibleWindow.start) },
         (_value, index) => {
@@ -575,7 +634,6 @@ export const LongTextPanel = forwardRef<
       paperArtworkReady,
       layoutReady,
       visible,
-      appearanceContentGeneration,
       layout.height,
       pageOffsets,
       pageAppearanceKeys,
@@ -704,7 +762,7 @@ export const LongTextPanel = forwardRef<
     if (appearanceChanged) {
       setAppearanceGeneration((current) => current + 1);
       setEnteredPageKeys(new Set());
-      appearanceRangeRef.current = "";
+      appearanceRangeRef.current = null;
     }
     if (!replaced) return;
     manuallyBrowsingRef.current = false;
@@ -723,6 +781,8 @@ export const LongTextPanel = forwardRef<
     const emptyWindow = { start: 0, end: 0 };
     pageWindowRef.current = emptyWindow;
     setPageWindow(emptyWindow);
+    fragmentWindowRef.current = emptyWindow;
+    setFragmentWindow(emptyWindow);
   }, [
     applyScrollOffset,
     instanceKey,
@@ -1049,19 +1109,13 @@ export const LongTextPanel = forwardRef<
         ref={measuringRootRef}
       >
         {measurementBatch.map((step) => (
-          <div
-            className="long-text-step long-text-measure-step"
+          <LongTextMeasureStep
+            designScale={designScale}
+            fontReady={fontReady}
             key={step.step_id}
-          >
-            <MarkupText
-              fontReady={fontReady}
-              measurementScale={designScale}
-              onTextLayout={(layoutSnapshot) =>
-                handleStepLayout(step.step_id, layoutSnapshot)
-              }
-              source={step.text}
-            />
-          </div>
+            onStepLayout={handleStepLayout}
+            step={step}
+          />
         ))}
       </div>
       <div
@@ -1115,8 +1169,18 @@ export const LongTextPanel = forwardRef<
               >
                 <div className="long-text-paper-content-inner">
                   <div className="long-text-paper-content-stage">
-                    {paper.fragments.map((fragment) => {
+                    {paper.fragments.map((fragment, fragmentIndex) => {
                       const current = fragment.step.step_id === activeStepId;
+                      const index =
+                        (fragmentGeometry.pageStarts[paper.index] ?? 0) +
+                        fragmentIndex;
+                      if (
+                        !current &&
+                        (index < effectiveFragmentWindow.start ||
+                          index >= effectiveFragmentWindow.end)
+                      ) {
+                        return null;
+                      }
                       return (
                         <div
                           className="long-text-step-fragment"
@@ -1135,15 +1199,25 @@ export const LongTextPanel = forwardRef<
                             <div className="long-text-step">
                               <MarkupText
                                 animateMath={current}
-                                instantMathReveal={complete}
-                                instantReveal={complete}
+                                instantMathReveal={current ? complete : true}
+                                instantReveal={current ? complete : true}
                                 lineSweepElapsedMs={
                                   current ? session.state.elapsedMs : 0
                                 }
-                                mathRevealDurations={mathRevealDurations}
+                                mathRevealDurations={
+                                  current
+                                    ? mathRevealDurations
+                                    : EMPTY_MATH_REVEAL_DURATIONS
+                                }
                                 revealAnimation={revealAnimation}
-                                revealSchedule={revealSchedule}
-                                pauseWindows={session.plan.pauses}
+                                revealSchedule={
+                                  current ? revealSchedule : EMPTY_REVEAL_SCHEDULE
+                                }
+                                pauseWindows={
+                                  current
+                                    ? session.plan.pauses
+                                    : EMPTY_PAUSE_WINDOWS
+                                }
                                 fontReady={fontReady}
                                 measurementScale={designScale}
                                 source={fragment.step.text}
@@ -1186,6 +1260,31 @@ export const LongTextPanel = forwardRef<
     </section>
   );
 });
+
+function resolveFragmentWindow(
+  bounds: readonly { top: number; bottom: number }[],
+  scrollOffset: number,
+  viewportHeight: number,
+): LongTextPageWindow {
+  const overscan = Math.max(0, viewportHeight) * 2;
+  const lower = Math.max(0, scrollOffset - overscan);
+  const upper = scrollOffset + Math.max(0, viewportHeight) + overscan;
+  let low = 0;
+  let high = bounds.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if ((bounds[middle]?.bottom ?? 0) <= lower) low = middle + 1;
+    else high = middle;
+  }
+  const start = low;
+  high = bounds.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if ((bounds[middle]?.top ?? 0) < upper) low = middle + 1;
+    else high = middle;
+  }
+  return { start, end: low };
+}
 
 function sameTextLayoutSnapshot(
   left: TextLayoutSnapshot,

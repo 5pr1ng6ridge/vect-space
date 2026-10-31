@@ -2,7 +2,7 @@ import { resolveTextBlocks, type TextBlockMap } from "@vectspace/presentation-co
 import type { ParticleMap } from "@vectspace/presentation-core/particles";
 import type { EditorProject, ParticleDefinition, TextBlockDefinition } from "./types";
 
-export interface EditorVisualDefinitions {
+interface EditorVisualDefinitions {
   text_blocks?: Record<string, TextBlockDefinition>;
   particles?: Record<string, ParticleDefinition>;
   font_versions?: Record<string, string>;

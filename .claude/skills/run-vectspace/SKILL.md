@@ -5,7 +5,7 @@ description: Build, run and drive the VECTSPACE Tauri game (main + secondary win
 
 VECTSPACE is a Tauri 2 visual novel: Rust host (`src-tauri`), React WebViews (`src/`), YAML content (`game/`). An agent drives the **real** app through WebView2's DevTools port with `.claude/skills/run-vectspace/driver.mjs`: it launches `npm run tauri dev`, tells the main and secondary WebView apart, reads/clicks the DOM, sends keys, takes screenshots and reads the native window titles. All paths are relative to the repo root.
 
-Verified on Windows 11, Node v24.19.0, PowerShell 7 (`pwsh`), Rust stable, with `node_modules` already installed. No Linux path was tried (WebView2 is Windows-only).
+Requires Windows 11 (WebView2 is Windows-only), Node 24, PowerShell 7 (`pwsh`), Rust stable and installed `node_modules`.
 
 ## Run (agent path)
 
@@ -39,9 +39,9 @@ node $d stop
 | `clips <win> x y w h n ms` | hashes `n` cropped frames (CSS px) — `1 distinct` = static, more = something animates |
 | `eval <win> <js>` | evaluates JS in that WebView and prints the JSON result |
 
-The two-window demo (`game/scenes/window_pair_main.yaml` + `window_pair_side.yaml`, hotspot `window_pair`) exercises titles, cross-window block/unblock/scripted advance, a timer that unlocks a choice after ~3 s, and a repeating bounce. Verified sequence: `replay window_pair` → `key secondary Enter` twice (0.4 s apart) → after ~3 s `state secondary` shows `open` enabled → `choose secondary open` → main is renamed, unblocked and advanced one page; secondary now shows `主窗口正在收尾动画，请稍候……` → `key main Enter` finishes both.
+The two-window demo (`game/scenes/window_pair_main.yaml` + `window_pair_side.yaml`, hotspot `window_pair`) exercises titles, cross-window block/unblock/scripted advance, a timer that unlocks a choice after ~3 s, and a repeating bounce. Sequence: `replay window_pair` → `key secondary Enter` twice (0.4 s apart) → after ~3 s `state secondary` shows `open` enabled → `choose secondary open` → main is renamed, unblocked and advanced one page; secondary now shows `主窗口正在收尾动画，请稍候……` → `key main Enter` finishes both.
 
-Animation check used during verification (main window idle bounce every 1.5 s; this crop covers the sprite at 1280×720 CSS):
+Animation check (main window idle bounce every 1.5 s; this crop covers the sprite at 1280×720 CSS):
 
 ```powershell
 node .claude/skills/run-vectspace/driver.mjs clips main 400 130 240 150 16 150   # "3 distinct of 16" while bouncing, "1 distinct" after the timer stops
@@ -60,14 +60,12 @@ The story editor (`editor/`, its own Tauri app) is not covered by this skill.
 ```powershell
 cargo test --workspace                                # core, host (src-tauri), protocol, editor crate
 cargo clippy --workspace --all-targets -- -D warnings
-npm test                                              # root vitest: 110 files / 1279 tests at time of writing
+npm test                                              # root vitest (src/, packages/, editor/)
 npm run build
-npm --prefix editor test                              # 57 files / 614 tests
+npm --prefix editor test                              # editor vitest only
 npm run codegen:check                                 # generated schemas/bindings are current
 npm run parity:check                                  # real-WebGL shader/presentation parity (needs local Chromium)
 ```
-
-`npm run lint` currently reports one pre-existing error in `editor/src/components/NodeInspector.presentation.test.tsx:378` (`no-unsafe-assignment`).
 
 ## Gotchas
 
@@ -79,7 +77,7 @@ npm run parity:check                                  # real-WebGL shader/presen
 - **A WebView reload does not reset the host.** `location.reload()` shows the title screen while the host still runs the old replay and secondary window; the next `replay` then fails. Use `stop` + `launch`.
 - **Rust edits restart the app by themselves** (`tauri dev` rebuilds, new `vectspace.exe` PID, back at the title screen); frontend edits hot-reload through Vite.
 - **The first `Enter` may only finish the typewriter.** Send two with a short pause; spamming can skip past the page you wanted.
-- **`clips` coordinates are CSS pixels** (main window is 1280×720 CSS); `shot` files are device pixels (2560×1440 main at 200 % scaling here).
+- **`clips` coordinates are CSS pixels** (main window is 1280×720 CSS); `shot` files are device pixels (2560×1440 for the main window at 200 % scaling).
 - **WebView console errors land in the dev log** as `[vite] (client) [console.error] …` — grep `%TEMP%\vectspace-run\tauri-dev.log` after a scenario.
 - **A remounting component is found with a MutationObserver**, e.g. `eval secondary` installing one on `document.body` and logging removed nodes; a flashing `DIV.boot-screen` means the secondary re-bootstrapped.
 - **Tauri 2 `listen()` from `@tauri-apps/api/event` hears events for every target.** Host notices are `emit_to(label, …)`; a per-window listener must pass `{ target: <label> }` (see `src/engine/runtimeFeed.ts`) or each window reacts to the other's notices.
@@ -91,4 +89,3 @@ npm run parity:check                                  # real-WebGL shader/presen
 - **`error: app not running (nothing on CDP port 9333)`**: the app isn't up or was started without the WebView2 flag. Run `launch` (a plain `npm run tauri dev` has no DevTools port).
 - **`replay` fails / secondary missing after a reload**: stale host state from a WebView reload. `stop`, then `launch`.
 - **`launch` times out**: it prints the last 20 log lines; a Rust compile error shows there. A cold build takes several minutes, a warm one ~20 s.
-- **`stop` previously failed with `Command failed: pwsh … Get-NetTCPConnection`** although everything had stopped: that cmdlet sets a failing exit code when nothing listens, even with `-ErrorAction SilentlyContinue`. The driver now ends that script with `exit 0`.

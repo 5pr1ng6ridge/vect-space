@@ -29,7 +29,7 @@ import type {
 } from "./types";
 
 /** World state a node sees when the runtime first arrives at it. */
-export interface StoryVisualState {
+interface StoryVisualState {
   background: string | null;
   curtain: CurtainSnapshot;
 }

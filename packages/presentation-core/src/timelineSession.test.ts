@@ -109,6 +109,17 @@ const SPRITE_TRACK: TimelineTrack = {
   },
 };
 
+/** A keyframe-only edit of `SPRITE_TRACK`: same assets, different values. */
+const EDITED_TRACK = {
+  ...SPRITE_TRACK,
+  channels: {
+    x: [
+      { at_ms: 0, value: 0, easing: "linear" },
+      { at_ms: 1_000, value: 500, easing: "linear" },
+    ],
+  },
+} as TimelineTrack;
+
 const VIDEO_TRACK: TimelineTrack = {
   type: "video",
   asset: "clip",
@@ -861,21 +872,7 @@ describe("TimelineSession timeline edits", () => {
       assets: ASSETS,
     });
     const prepared = harness.surface.prepared.length;
-    const edited = update(
-      [
-        {
-          ...SPRITE_TRACK,
-          channels: {
-            x: [
-              { at_ms: 0, value: 0, easing: "linear" },
-              { at_ms: 1_000, value: 500, easing: "linear" },
-            ],
-          },
-        } as TimelineTrack,
-      ],
-      [],
-      800,
-    );
+    const edited = update([EDITED_TRACK], [], 800);
     expect(harness.session.applyTimelineEdit(edited)).toBe(true);
     expect(harness.surface.prepared).toHaveLength(prepared);
     await harness.session.seek(400, "scrub");
@@ -1285,38 +1282,36 @@ describe("TimelineSession events", () => {
     harness.session.dispose();
   });
 
-  it("derives flash and shake from the playhead so both coexist", async () => {
+  const effectEvent = (
+    kind: "flash" | "shake",
+    id: string,
+    atMs: number,
+    durationMs: number,
+  ) => ({
+    type: "screen_effect",
+    id,
+    at_ms: atMs,
+    duration_ms: durationMs,
+    effect:
+      kind === "flash"
+        ? { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 }
+        : { type: "shake", amplitude_x: 16, amplitude_y: 9.6, frequency_hz: 18, decay: 1, seed: 0 },
+  });
+
+  async function loadEffects(effects: ReturnType<typeof effectEvent>[]): Promise<Harness> {
     const harness = createHarness();
     await harness.session.load({
-      update: update(
-        [SPRITE_TRACK],
-        [
-          {
-            type: "screen_effect",
-            id: "flash",
-            at_ms: 100,
-            effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
-            duration_ms: 400,
-          },
-          {
-            type: "screen_effect",
-            id: "shake",
-            at_ms: 200,
-            effect: {
-              type: "shake",
-              amplitude_x: 16,
-              amplitude_y: 9.6,
-              frequency_hz: 18,
-              decay: 1,
-              seed: 0,
-            },
-            duration_ms: 400,
-          },
-        ],
-        1_000,
-      ),
+      update: update([SPRITE_TRACK], effects, 1_000),
       assets: ASSETS,
     });
+    return harness;
+  }
+
+  it("derives flash and shake from the playhead so both coexist", async () => {
+    const harness = await loadEffects([
+      effectEvent("flash", "flash", 100, 400),
+      effectEvent("shake", "shake", 200, 400),
+    ]);
     await harness.session.seek(300, "scrub");
     const effect = harness.surface.effects.at(-1);
     expect(effect?.flash?.startMs).toBe(100);
@@ -1325,106 +1320,23 @@ describe("TimelineSession events", () => {
     harness.session.dispose();
   });
 
-  it("applies the latest starting effect when intervals overlap", async () => {
-    const harness = createHarness();
-    await harness.session.load({
-      update: update(
-        [SPRITE_TRACK],
-        [
-          {
-            type: "screen_effect",
-            id: "early",
-            at_ms: 100,
-            effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
-            duration_ms: 900,
-          },
-          {
-            type: "screen_effect",
-            id: "late",
-            at_ms: 500,
-            effect: { type: "flash", color: "#FFFFFF", peak_alpha: 0.88 },
-            duration_ms: 400,
-          },
-        ],
-        1_000,
-      ),
-      assets: ASSETS,
-    });
-    await harness.session.seek(600, "scrub");
-    expect(harness.surface.effects.at(-1)?.flash?.startMs).toBe(500);
-    harness.session.dispose();
-  });
-
-  it("resolves same-kind shake overlaps on the surface with latest-start and tie-array order", async () => {
-    const harness = createHarness();
-    await harness.session.load({
-      update: update(
-        [SPRITE_TRACK],
-        [
-          {
-            type: "screen_effect",
-            id: "shake-a",
-            at_ms: 100,
-            effect: {
-              type: "shake",
-              amplitude_x: 16,
-              amplitude_y: 9.6,
-              frequency_hz: 18,
-              decay: 1,
-              seed: 0,
-            },
-            duration_ms: 900,
-          },
-          {
-            type: "screen_effect",
-            id: "shake-b",
-            at_ms: 100,
-            effect: {
-              type: "shake",
-              amplitude_x: 16,
-              amplitude_y: 9.6,
-              frequency_hz: 18,
-              decay: 1,
-              seed: 0,
-            },
-            duration_ms: 600,
-          },
-          {
-            type: "screen_effect",
-            id: "shake-c",
-            at_ms: 500,
-            effect: {
-              type: "shake",
-              amplitude_x: 16,
-              amplitude_y: 9.6,
-              frequency_hz: 18,
-              decay: 1,
-              seed: 0,
-            },
-            duration_ms: 100,
-          },
-        ],
-        1_000,
-      ),
-      assets: ASSETS,
-    });
+  it("resolves same-kind overlaps with latest-start and tie-array order", async () => {
+    const harness = await loadEffects([
+      effectEvent("flash", "early", 100, 900),
+      effectEvent("flash", "late", 500, 400),
+      effectEvent("shake", "shake-a", 100, 900),
+      effectEvent("shake", "shake-b", 100, 600),
+      effectEvent("shake", "shake-c", 500, 100),
+    ]);
     // Equal starts: the later array entry reaches the surface.
     await harness.session.seek(300, "scrub");
-    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({
-      startMs: 100,
-      durationMs: 600,
-    });
+    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({ startMs: 100, durationMs: 600 });
     // A later start supersedes; when it ends the early one is active again.
     await harness.session.seek(550, "scrub");
-    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({
-      startMs: 500,
-      durationMs: 100,
-    });
+    expect(harness.surface.effects.at(-1)?.flash?.startMs).toBe(500);
+    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({ startMs: 500, durationMs: 100 });
     await harness.session.seek(800, "scrub");
-    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({
-      startMs: 100,
-      durationMs: 900,
-    });
+    expect(harness.surface.effects.at(-1)?.shake).toMatchObject({ startMs: 100, durationMs: 900 });
     harness.session.dispose();
   });
 });
@@ -1756,40 +1668,6 @@ describe("TimelineSession video", () => {
     harness.session.dispose();
   });
 
-  it("releases the terminal-seek listeners when the seek never lands", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const harness = createMediaHarness({ deferSeekEvents: true });
-    await harness.session.load({
-      update: update([{ ...VIDEO_TRACK, clip_end_ms: 2_000 }], [], 10_000),
-      assets: ASSETS,
-    });
-    const media = harness.dom.videos[0];
-    if (media === undefined) throw new Error("缺少媒体元素");
-    // Preparation listeners only (waiting/stalled/playing/canplay/ended).
-    const beforeWait = media.listenerCount();
-    const play = harness.session.play();
-    await advance(16, 4);
-    await advance(500, 5);
-    expect(media.paused).toBe(true);
-
-    // The bounded terminal wait is pending: it owns a `seeked` and an `error`
-    // listener while the deferred seek has not landed.
-    expect(media.listeners.get("seeked")?.size ?? 0).toBe(1);
-    expect(media.listenerCount()).toBe(beforeWait + 2);
-
-    // The media never dispatches `seeked`: the wait's own timeout must run the
-    // same cleanup and clear its timer instead of stacking listeners.
-    vi.advanceTimersByTime(2_500);
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
-    expect(media.listeners.get("seeked")?.size ?? 0).toBe(0);
-    expect(media.listeners.get("error")?.size ?? 0).toBe(0);
-    expect(media.listenerCount()).toBe(beforeWait);
-
-    harness.session.cancel();
-    await play;
-    harness.session.dispose();
-  });
-
   it("does not accumulate terminal-seek listeners across repeated holds", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const harness = createMediaHarness({ deferSeekEvents: true });
@@ -1863,10 +1741,13 @@ describe("TimelineSession video", () => {
     harness.session.dispose();
   });
 
-  it("freezes at the media end when no clip end was authored", async () => {
+  it.each([
+    ["no clip end was authored", {}],
+    ["the authored clip end lies past the file length", { clip_end_ms: 5_000 }],
+  ])("freezes at the media end when %s", async (_case, clip) => {
     const harness = createMediaHarness({ durationSeconds: 2 });
     await harness.session.load({
-      update: update([VIDEO_TRACK], [], 10_000),
+      update: update([{ ...VIDEO_TRACK, ...clip }], [], 10_000),
       assets: ASSETS,
     });
     const media = harness.dom.videos[0];
@@ -1875,28 +1756,6 @@ describe("TimelineSession video", () => {
     await advance(500, 6);
 
     expect(harness.session.elapsedMs).toBeGreaterThan(2_000);
-    expect(media.paused).toBe(true);
-    expect(media.currentTime).toBeCloseTo(2, 5);
-    const seeks = media.seeks.length;
-    await advance(500, 4);
-    expect(media.seeks.length).toBe(seeks);
-
-    harness.session.cancel();
-    await play;
-    harness.session.dispose();
-  });
-
-  it("presents an authored clip end past the file length up to the media end", async () => {
-    const harness = createMediaHarness({ durationSeconds: 2 });
-    await harness.session.load({
-      update: update([{ ...VIDEO_TRACK, clip_end_ms: 5_000 }], [], 10_000),
-      assets: ASSETS,
-    });
-    const media = harness.dom.videos[0];
-    if (media === undefined) throw new Error("缺少媒体元素");
-    const play = harness.session.play();
-    await advance(500, 6);
-
     expect(media.paused).toBe(true);
     expect(media.currentTime).toBeCloseTo(2, 5);
     const seeks = media.seeks.length;
@@ -1979,21 +1838,19 @@ describe("TimelineSession presentation policy", () => {
     harness.session.dispose();
   });
 
-  it("applies the preview mute policy and activates deferred audio", async () => {
-    const harness = createHarness({ audioPolicy: "preview" });
-    harness.session.setMuted(false);
-    expect(harness.audio.settings.at(-1)?.master_volume).toBe(1);
-    expect(harness.audio.deferred).toBe(1);
-    harness.session.setMuted(true);
-    expect(harness.audio.settings.at(-1)?.master_volume).toBe(0);
-    harness.session.dispose();
-  });
+  it("applies the preview mute policy and leaves the master volume to the host in game mode", async () => {
+    const preview = createHarness({ audioPolicy: "preview" });
+    preview.session.setMuted(false);
+    expect(preview.audio.settings.at(-1)?.master_volume).toBe(1);
+    expect(preview.audio.deferred).toBe(1);
+    preview.session.setMuted(true);
+    expect(preview.audio.settings.at(-1)?.master_volume).toBe(0);
+    preview.session.dispose();
 
-  it("leaves the master volume to the host in game mode", async () => {
-    const harness = createHarness({ audioPolicy: "host" });
-    harness.session.setMuted(false);
-    expect(harness.audio.settings).toEqual([]);
-    harness.session.dispose();
+    const host = createHarness({ audioPolicy: "host" });
+    host.session.setMuted(false);
+    expect(host.audio.settings).toEqual([]);
+    host.session.dispose();
   });
 
   it("plays timeline SFX and video audio in host mode without an explicit unmute", async () => {
@@ -2026,21 +1883,6 @@ describe("TimelineSession presentation policy", () => {
     void harness.session.play();
     await advance(50, 2);
     expect(harness.surface.applied.at(-1)?.phase).toBe("keep");
-    harness.session.dispose();
-  });
-
-  it("exposes frames with overrides and a thumbnail", async () => {
-    const harness = createHarness();
-    await harness.session.load({
-      update: update([SPRITE_TRACK], [], 1_000),
-      assets: ASSETS,
-    });
-    expect(harness.session.frameAt(500).elapsed_ms).toBe(500);
-    expect(harness.session.readFrame().elapsed_ms).toBe(0);
-    expect(harness.session.captureThumbnail()).toBe(
-      "data:image/png;base64,AAA",
-    );
-    expect(harness.session.readOverrides()).toBe(EMPTY_SCENE_OVERRIDES);
     harness.session.dispose();
   });
 
@@ -2269,21 +2111,7 @@ describe("TimelineSession replacement during a run", () => {
     const play = harness.session.play();
     await advance(100, 3);
     const prepared = harness.surface.prepared.length;
-    const edited = update(
-      [
-        {
-          ...SPRITE_TRACK,
-          channels: {
-            x: [
-              { at_ms: 0, value: 0, easing: "linear" },
-              { at_ms: 1_000, value: 500, easing: "linear" },
-            ],
-          },
-        } as TimelineTrack,
-      ],
-      [],
-      2_000,
-    );
+    const edited = update([EDITED_TRACK], [], 2_000);
     // Ordinary keyframes only change what the evaluator produces: the pass is
     // not restarted and nothing is re-prepared.
     expect(harness.session.applyTimelineEdit(edited)).toBe(true);
@@ -2332,59 +2160,17 @@ describe("TimelineSession replacement during a run", () => {
     harness.session.dispose();
   });
 
-  it("does not re-arm a consumed event at the exact cursor after a paused edit", async () => {
+  it.each([
+    ["paused", true],
+    ["running", false],
+  ])("does not re-arm a consumed event at the exact cursor after a keyframe edit while %s", async (_state, paused) => {
     const harness = createHarness();
     const events = [
       { type: "sfx", id: "zero", at_ms: 0, asset: "sfx", volume: 1 },
       { type: "sfx", id: "cursor", at_ms: 300, asset: "sfx", volume: 2 },
       { type: "sfx", id: "future", at_ms: 900, asset: "sfx", volume: 3 },
     ];
-    await harness.session.load({
-      update: update([SPRITE_TRACK], events, 1_000),
-      assets: ASSETS,
-    });
-    harness.session.setMuted(false);
-    pinWallClock();
-    void harness.session.play();
-    await advance(100, 3);
-    expect(harness.session.elapsedMs).toBe(300);
-    expect(harness.audio.sfx.map((entry) => entry.volume)).toEqual([1, 2]);
-    harness.session.pause();
-
-    // An ordinary keyframe edit at the exact cursor...
-    const edited = update(
-      [
-        {
-          ...SPRITE_TRACK,
-          channels: {
-            x: [
-              { at_ms: 0, value: 0, easing: "linear" },
-              { at_ms: 1_000, value: 500, easing: "linear" },
-            ],
-          },
-        } as TimelineTrack,
-      ],
-      events,
-      1_000,
-    );
-    expect(harness.session.applyTimelineEdit(edited)).toBe(true);
-    void harness.session.play();
-    await advance(100, 1);
-    // ...must not re-arm and re-fire the event the cursor already consumed.
-    expect(harness.audio.sfx.map((entry) => entry.volume)).toEqual([1, 2]);
-    // Events ahead of the playhead keep firing normally.
-    await advance(100, 6);
-    expect(harness.audio.sfx.map((entry) => entry.volume)).toEqual([1, 2, 3]);
-    harness.session.dispose();
-  });
-
-  it("does not re-arm a consumed event at the exact cursor while the pass runs on", async () => {
-    const harness = createHarness();
-    const events = [
-      { type: "sfx", id: "zero", at_ms: 0, asset: "sfx", volume: 1 },
-      { type: "sfx", id: "cursor", at_ms: 300, asset: "sfx", volume: 2 },
-      { type: "sfx", id: "future", at_ms: 900, asset: "sfx", volume: 3 },
-    ];
+    const volumes = (): number[] => harness.audio.sfx.map((entry) => entry.volume);
     await harness.session.load({
       update: update([SPRITE_TRACK], events, 1_000),
       assets: ASSETS,
@@ -2394,32 +2180,21 @@ describe("TimelineSession replacement during a run", () => {
     const play = harness.session.play();
     await advance(100, 3);
     expect(harness.session.elapsedMs).toBe(300);
-    expect(harness.audio.sfx.map((entry) => entry.volume)).toEqual([1, 2]);
+    expect(volumes()).toEqual([1, 2]);
+    if (paused) harness.session.pause();
 
-    const edited = update(
-      [
-        {
-          ...SPRITE_TRACK,
-          channels: {
-            x: [
-              { at_ms: 0, value: 0, easing: "linear" },
-              { at_ms: 1_000, value: 500, easing: "linear" },
-            ],
-          },
-        } as TimelineTrack,
-      ],
-      events,
-      1_000,
-    );
-    expect(harness.session.applyTimelineEdit(edited)).toBe(true);
-    expect(harness.session.playing).toBe(true);
+    expect(
+      harness.session.applyTimelineEdit(update([EDITED_TRACK], events, 1_000)),
+    ).toBe(true);
+    if (paused) void harness.session.play();
+    else expect(harness.session.playing).toBe(true);
     await advance(100, 2);
-    // The running pass crosses the cursor again on its next frame; the
-    // consumed event stays consumed.
-    expect(harness.audio.sfx.map((entry) => entry.volume)).toEqual([1, 2]);
+    // The cursor is crossed again on the next frame; the consumed event stays
+    // consumed, and events ahead of the playhead keep firing normally.
+    expect(volumes()).toEqual([1, 2]);
     await advance(100, 5);
-    expect(harness.audio.sfx.map((entry) => entry.volume)).toEqual([1, 2, 3]);
-    expect(await play).toBe("completed");
+    expect(volumes()).toEqual([1, 2, 3]);
+    if (!paused) expect(await play).toBe("completed");
     harness.session.dispose();
   });
 

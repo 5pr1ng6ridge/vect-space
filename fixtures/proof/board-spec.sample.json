@@ -1,0 +1,159 @@
+{
+  "cards": [
+    {
+      "conclusion": {
+        "latex": "p \\land q",
+        "text": "p ∧ q"
+      },
+      "description": null,
+      "id": "and_intro",
+      "name": "合取引入",
+      "params": [
+        {
+          "name": "p",
+          "type": {
+            "latex": "\\mathrm{Prop}",
+            "text": "Prop"
+          }
+        },
+        {
+          "name": "q",
+          "type": {
+            "latex": "\\mathrm{Prop}",
+            "text": "Prop"
+          }
+        }
+      ],
+      "premises": [
+        {
+          "latex": "p",
+          "text": "p"
+        },
+        {
+          "latex": "q",
+          "text": "q"
+        }
+      ]
+    },
+    {
+      "conclusion": {
+        "latex": "p",
+        "text": "p"
+      },
+      "description": null,
+      "id": "and_left",
+      "name": "合取左取",
+      "params": [
+        {
+          "name": "p",
+          "type": {
+            "latex": "\\mathrm{Prop}",
+            "text": "Prop"
+          }
+        },
+        {
+          "name": "q",
+          "type": {
+            "latex": "\\mathrm{Prop}",
+            "text": "Prop"
+          }
+        }
+      ],
+      "premises": [
+        {
+          "latex": "p \\land q",
+          "text": "p ∧ q"
+        }
+      ]
+    },
+    {
+      "conclusion": {
+        "latex": "q",
+        "text": "q"
+      },
+      "description": null,
+      "id": "and_right",
+      "name": "合取右取",
+      "params": [
+        {
+          "name": "p",
+          "type": {
+            "latex": "\\mathrm{Prop}",
+            "text": "Prop"
+          }
+        },
+        {
+          "name": "q",
+          "type": {
+            "latex": "\\mathrm{Prop}",
+            "text": "Prop"
+          }
+        }
+      ],
+      "premises": [
+        {
+          "latex": "p \\land q",
+          "text": "p ∧ q"
+        }
+      ]
+    }
+  ],
+  "initial_graph": {
+    "edges": [],
+    "nodes": [
+      {
+        "hypothesis": "h",
+        "id": "given-0",
+        "kind": "given",
+        "x": 80.0,
+        "y": 80.0
+      },
+      {
+        "id": "goal",
+        "kind": "goal",
+        "x": 960.0,
+        "y": 220.0
+      }
+    ]
+  },
+  "node_kinds": [
+    "card",
+    "claim"
+  ],
+  "puzzle": {
+    "description": "已知两个命题同时成立，交换它们的顺序。",
+    "goal": {
+      "latex": "q \\land p",
+      "text": "q ∧ p"
+    },
+    "hypotheses": [
+      {
+        "label": "已知合取",
+        "name": "h",
+        "statement": {
+          "latex": "p \\land q",
+          "text": "p ∧ q"
+        }
+      }
+    ],
+    "id": "and_comm",
+    "title": "合取交换",
+    "variables": [
+      {
+        "name": "p",
+        "type": {
+          "latex": "\\mathrm{Prop}",
+          "text": "Prop"
+        }
+      },
+      {
+        "name": "q",
+        "type": {
+          "latex": "\\mathrm{Prop}",
+          "text": "Prop"
+        }
+      }
+    ]
+  },
+  "tactics": []
+}

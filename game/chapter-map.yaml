@@ -185,3 +185,18 @@ hotspots:
   replay:
     mode: always
   variable_overrides: {}
+- id: proof-lab
+  scene_id: proof_lab
+  title: 证明实验室
+  hover_text: 用定理卡和推理节点拼出证明，由 Lean 4 检验。
+  x: 1380
+  "y": 140
+  width: 300
+  height: 180
+  z: 2
+  asset: gui.name_box
+  reveal:
+    mode: always
+  replay:
+    mode: always
+  variable_overrides: {}

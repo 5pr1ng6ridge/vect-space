@@ -6,8 +6,8 @@ import { SpriteSourceFields } from "./SpriteSourceFields";
 import { AMBIENCE_SLOT_LABELS, FIT_LABELS } from "../labels";
 import { defaultFlashEffect } from "../presentationDefaults";
 import { timelineTrackIdentity } from "../timeline";
+import { KeyframeInspector } from "./timeline/KeyframeInspector";
 import {
-  KeyframeInspector,
   TimelineSurface,
   type TimelineSurfaceDocument,
   type TimelineSurfaceEventSelection,

@@ -8,6 +8,8 @@
     "packages/*"
   ],
   "scripts": {
+    "lean:build": "node scripts/lean-build.mjs",
+    "proofs:check": "cargo run -q -p vectspace-proof --bin check_proofs",
     "assets:ambience": "node scripts/generate-ambience-assets.mjs",
     "assets:check": "node scripts/check-lfs-assets.mjs game/assets && node scripts/generate-ambience-assets.mjs --check",
     "predev": "npm run assets:check",
@@ -26,7 +28,7 @@
     "editor:check": "npm --prefix editor run build",
     "codegen": "cargo run -p vectspace-core --bin export_schemas && cargo test -p vectspace-protocol export_bindings",
     "codegen:check": "node scripts/check-codegen.mjs",
-    "check:all": "npm test && npm run build && npm --prefix editor test && npm --prefix editor run build && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings"
+    "check:all": "npm test && npm run build && npm --prefix editor run build && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

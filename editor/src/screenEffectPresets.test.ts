@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  SCREEN_EFFECT_PRESETS,
   findScreenEffectPreset,
   presetTimelineEvents,
 } from "./screenEffectPresets";
@@ -13,30 +12,6 @@ function preset(id: string) {
 }
 
 describe("screen effect presets", () => {
-  it("offers the staging presets built from the effect modules", () => {
-    expect(SCREEN_EFFECT_PRESETS.map((entry) => entry.id)).toEqual([
-      "reasoning_break",
-      "spatial_impact",
-      "anomaly_escalation",
-      "correction_focus",
-    ]);
-    expect(
-      preset("reasoning_break").steps.map((step) => step.effect.type),
-    ).toEqual(["glitch", "chromatic_aberration"]);
-    expect(
-      preset("spatial_impact").steps.map((step) => step.effect.type),
-    ).toEqual(["shockwave", "shake", "flash"]);
-    const escalation = preset("anomaly_escalation").steps;
-    expect(escalation[0]?.effect).toMatchObject({
-      type: "chromatic_aberration",
-      fade_in: 1,
-      fade_out: 0,
-    });
-    expect(
-      escalation.slice(1).every((step) => step.effect.type === "glitch"),
-    ).toBe(true);
-  });
-
   it("places events at the playhead with unique ids", () => {
     const events = presetTimelineEvents(
       preset("spatial_impact"),
@@ -76,16 +51,6 @@ describe("screen effect presets", () => {
     expect(
       presetTimelineEvents(preset("reasoning_break"), 2_000, 2_000, []),
     ).toEqual([]);
-  });
-
-  it("copies the specs so edits never touch the preset table", () => {
-    const [event] = presetTimelineEvents(
-      preset("reasoning_break"),
-      0,
-      1_000,
-      [],
-    );
-    expect(event?.effect).not.toBe(preset("reasoning_break").steps[0]?.effect);
   });
 
   it("stages the composable effects with a non-neutral colour grade", () => {

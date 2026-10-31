@@ -1,5 +1,6 @@
+import { cleanup, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveTextLayoutLineGroups } from "@vectspace/text";
 
 import { parseMarkup, visibleUnits } from "@vectspace/text";
@@ -12,6 +13,62 @@ import {
 } from "./visualLineGroups";
 
 describe("MarkupText math reveal", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps default layout inputs stable across reveal updates", () => {
+    const requestFrame = vi
+      .spyOn(globalThis, "requestAnimationFrame")
+      .mockReturnValue(1);
+    vi.spyOn(globalThis, "cancelAnimationFrame").mockImplementation(() => {});
+    const onTextLayout = vi.fn();
+    const { rerender } = render(
+      <MarkupText source="abc" visibleCount={1} onTextLayout={onTextLayout} />,
+    );
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <MarkupText source="abc" visibleCount={2} onTextLayout={onTextLayout} />,
+    );
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("measures formulas once across visibility changes and reports reveal indices", () => {
+    const computedStyle = vi.spyOn(globalThis, "getComputedStyle");
+    const onMathMetrics = vi.fn();
+    const { rerender } = render(
+      <MarkupText
+        animateMath
+        source={"a\n$x$bc"}
+        visibleCount={1}
+        onMathMetrics={onMathMetrics}
+      />,
+    );
+    expect(computedStyle).toHaveBeenCalledTimes(1);
+    expect(onMathMetrics).toHaveBeenCalledTimes(1);
+    // The hard break has a layout index but consumes no reveal index.
+    expect(onMathMetrics).toHaveBeenCalledWith(
+      1,
+      expect.any(Number),
+      expect.any(Number),
+    );
+
+    for (const visibleCount of [2, 3, 4]) {
+      rerender(
+        <MarkupText
+          animateMath
+          source={"a\n$x$bc"}
+          visibleCount={visibleCount}
+          onMathMetrics={onMathMetrics}
+        />,
+      );
+    }
+    expect(computedStyle).toHaveBeenCalledTimes(1);
+    expect(onMathMetrics).toHaveBeenCalledTimes(1);
+  });
+
   it("does not start the post-pause segment when the visual row starts", () => {
     const segments = splitLinesAtPauses(
       [[0, 1, 2, 3]],

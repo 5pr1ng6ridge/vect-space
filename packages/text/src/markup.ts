@@ -75,10 +75,6 @@ export interface RevealTimingOptions {
   waitForInlineMath?: boolean;
 }
 
-export interface RevealScheduleOptions extends RevealTimingOptions {
-  mathRevealDurations?: ReadonlyMap<number, number>;
-}
-
 const OPEN_FX = /^\[fx=(shake|wave|glow)\]/;
 const CLOSE_FX = /^\[\/fx\]/;
 const PAUSE = /^\[pause=(\d+)ms\]/;
@@ -238,133 +234,6 @@ export function buildVisibleUnitCps(
   return result;
 }
 
-/**
- * Returns one start time per reveal unit.  The time is the point at which the
- * unit becomes visible; a blocking formula adds its measured animation time.
- */
-export function buildRevealSchedule(
-  units: MarkupUnit[],
-  initialCps: number,
-  defaultCps: number,
-  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
-  options: RevealTimingOptions = {},
-): number[] {
-  const schedule: number[] = [];
-  let elapsed = 0;
-  let cps = validCps(initialCps, defaultCps);
-  let revealIndex = 0;
-  for (const unit of units) {
-    if (unit.kind === "pause") {
-      if (unit.durationMs > 0) elapsed += unit.durationMs;
-    } else if (unit.kind === "speed") {
-      cps =
-        unit.cps === null
-          ? validCps(defaultCps, 30)
-          : validCps(unit.cps, defaultCps);
-    } else if (unit.kind === "character" || unit.kind === "math") {
-      elapsed += 1_000 / cps;
-      schedule.push(elapsed);
-      if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
-        elapsed += formulaRevealDurationForUnit(
-          unit,
-          mathRevealDurations.get(revealIndex),
-          cps,
-        );
-      }
-      revealIndex += 1;
-    }
-  }
-  return schedule;
-}
-
-export function buildPauseWindows(
-  units: MarkupUnit[],
-  initialCps: number,
-  defaultCps: number,
-  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
-  options: RevealTimingOptions = {},
-): PauseWindow[] {
-  const windows: PauseWindow[] = [];
-  let elapsed = 0;
-  let cps = validCps(initialCps, defaultCps);
-  let revealIndex = 0;
-  for (const unit of units) {
-    if (unit.kind === "pause") {
-      if (unit.durationMs <= 0) continue;
-      windows.push({
-        startMs: elapsed,
-        endMs: elapsed + unit.durationMs,
-        span: unit.span,
-      });
-      elapsed += unit.durationMs;
-    } else if (unit.kind === "speed") {
-      cps =
-        unit.cps === null
-          ? validCps(defaultCps, 30)
-          : validCps(unit.cps, defaultCps);
-    } else if (unit.kind === "character" || unit.kind === "math") {
-      elapsed += 1_000 / cps;
-      if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
-        elapsed += formulaRevealDurationForUnit(
-          unit,
-          mathRevealDurations.get(revealIndex),
-          cps,
-        );
-      }
-      revealIndex += 1;
-    }
-  }
-  return windows;
-}
-
-export function revealCompletionTime(
-  units: MarkupUnit[],
-  schedule: readonly number[],
-  mathRevealDurations: ReadonlyMap<number, number> = new Map(),
-  animation: "line_sweep" | "typewriter" | "drop_fade" = "typewriter",
-  unitCps: readonly number[] = [],
-  options: RevealTimingOptions = {},
-): number {
-  const visible = revealUnits(units);
-  if (visible.length === 0) return 0;
-  const finalIndex = visible.length - 1;
-  const finalUnit = visible[finalIndex];
-  const finalAt = schedule[finalIndex] ?? 0;
-  const formulaBlocks =
-    finalUnit?.kind === "math" && shouldWaitForMath(finalUnit, options);
-  const animationMs =
-    finalUnit?.kind === "math" && formulaBlocks
-      ? formulaRevealDurationForUnit(
-          finalUnit,
-          mathRevealDurations.get(finalIndex),
-          unitCps[finalIndex] ?? 30,
-        )
-      : animation === "drop_fade"
-        ? 160
-        : animation === "line_sweep"
-          ? characterRevealDuration(unitCps[finalIndex] ?? 30)
-          : 0;
-  const lastBlockingMathEnd = visible.reduce((latest, unit, index) => {
-    if (unit.kind !== "math" || !shouldWaitForMath(unit, options))
-      return latest;
-    const at = schedule[index] ?? 0;
-    return Math.max(
-      latest,
-      at +
-        formulaRevealDurationForUnit(
-          unit,
-          mathRevealDurations.get(index),
-          unitCps[index] ?? 30,
-        ),
-    );
-  }, 0);
-  return Math.max(
-    finalAt + animationMs,
-    lastBlockingMathEnd,
-    totalTimelineMs(units, schedule, mathRevealDurations, options, unitCps),
-  );
-}
-
 export function formulaRevealDurationMs(
   widthPx: number,
   fontSizePx: number,
@@ -428,35 +297,6 @@ export function autoReadingDelay(source: string): number {
   );
 }
 
-function totalTimelineMs(
-  units: MarkupUnit[],
-  schedule: readonly number[],
-  durations: ReadonlyMap<number, number>,
-  options: RevealTimingOptions,
-  unitCps: readonly number[],
-): number {
-  let elapsed = 0;
-  let revealIndex = 0;
-  for (const unit of units) {
-    if (unit.kind === "pause") {
-      if (unit.durationMs > 0) elapsed += unit.durationMs;
-      continue;
-    }
-    if (unit.kind === "speed") continue;
-    if (unit.kind !== "character" && unit.kind !== "math") continue;
-    elapsed = Math.max(elapsed, schedule[revealIndex] ?? elapsed);
-    if (unit.kind === "math" && shouldWaitForMath(unit, options)) {
-      elapsed += formulaRevealDurationForUnit(
-        unit,
-        durations.get(revealIndex),
-        unitCps[revealIndex] ?? 30,
-      );
-    }
-    revealIndex += 1;
-  }
-  return Math.max(elapsed, schedule[schedule.length - 1] ?? 0);
-}
-
 function validMathRevealDuration(
   value: number | undefined,
   cps: number,
@@ -477,13 +317,6 @@ function validMathRevealDuration(
 
 function characterRevealDuration(cps: number): number {
   return 1_000 / validCps(cps, 30);
-}
-
-function shouldWaitForMath(
-  unit: MathUnit,
-  options: RevealTimingOptions,
-): boolean {
-  return unit.display || options.waitForInlineMath !== false;
 }
 
 function character(

@@ -16,20 +16,27 @@
 //! [`WindowEffect`]s.  They are *applied* only by the native stage after the
 //! commit (see `window_fx.rs`), so a rolled-back pair never moves a window.
 
-use std::collections::VecDeque;
-use std::ops::Deref;
+use std::{collections::VecDeque, ops::Deref};
 
 use vectspace_core::{
+    content::ContentCatalog,
     interaction::{
         WindowControlAction, WindowReference, WindowRequest, WindowRole, WindowTitles,
         DEFAULT_SECONDARY_TITLE,
     },
-    model::{AdvanceSource, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate},
+    model::{
+        AdvanceSource, CueGate, PresentationCueKind, PromptSnapshot, RuntimeSnapshot, RuntimeUpdate,
+    },
     runtime::RuntimeEngine,
 };
+use vectspace_protocol::{WireCommandError, WireCommandErrorCode};
 
-use super::window_fx::WindowEffect;
-use super::*;
+use crate::{
+    native_plan::SecondaryPlan,
+    secondary::{SecondaryOwner, SecondarySession, SECONDARY_ID_STRIDE},
+    state::EngineState,
+    window_fx::WindowEffect,
+};
 
 /// Bound for one transaction's chain of host-control steps.  Reaching it means
 /// the authored content ping-pongs control nodes between the windows forever.
@@ -470,6 +477,55 @@ impl Pair {
         }
         Ok(())
     }
+}
+
+/// Consume the host control cues from an update.  The cue is a host instruction,
+/// not a presentation instruction: it must never reach a WebView, and it must be
+/// consumed exactly once so a frontend retry cannot re-trigger the side effect.
+///
+/// One update can carry several requests because the runtime keeps going past
+/// every `open_window` node, and a repeated `open_window` replaces the single
+/// slot: the **last** request in the update is therefore the one that decides
+/// what the window shows.  The intermediate requests are deliberately not
+/// played — no intermediate secondary runtime is ever created.
+///
+/// The acknowledgement requirement is recomputed from the cues that remain,
+/// because the runtime derives it from its own (pre-strip) cue list: an
+/// `open_window` followed by a runtime-gated node such as `wait` is a valid
+/// authored combination, and it must keep exactly the acknowledgement its
+/// remaining presentation still needs.
+pub(crate) fn take_open_window_request(update: &mut RuntimeUpdate) -> Option<String> {
+    let mut requested = None;
+    let requires_ack_before = update.requires_ack;
+    update.cues.retain(|cue| {
+        if let PresentationCueKind::OpenWindow { scene } = &cue.kind {
+            requested = Some(scene.clone());
+            false
+        } else {
+            true
+        }
+    });
+    let requires_ack = update.cues.iter().any(|cue| cue.gate == CueGate::Runtime);
+    debug_assert!(
+        !requires_ack_before || requires_ack || requested.is_none(),
+        "stripping a control cue must not drop the acknowledgement a remaining presentation needs"
+    );
+    update.requires_ack = requires_ack;
+    requested
+}
+
+/// The host-only window cue must never survive into an update that a WebView
+/// receives.  Every host path that returns an update asserts this in debug
+/// builds, so a new producer that forgets to consume the cue fails loudly in
+/// tests instead of silently turning the node into a no-op at the wire boundary.
+pub(crate) fn debug_assert_no_window_cue(update: &RuntimeUpdate) {
+    debug_assert!(
+        !update
+            .cues
+            .iter()
+            .any(|cue| matches!(cue.kind, PresentationCueKind::OpenWindow { .. })),
+        "宿主控制提示必须在下发到 WebView 之前被消费"
+    );
 }
 
 /// Snapshot equality that ignores everything that is *not* player-visible

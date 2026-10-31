@@ -22,7 +22,7 @@ const LIMIT = 40;
 /** The author-visible text of a node, for matching. */
 function searchableText(node: SceneNode, project: EditorProject): string {
   const parts: string[] = [];
-  const { title, summary } = describeNode(node, { manifest: project.manifest });
+  const { title, summary } = describeNode(node, { manifest: project.manifest, proofs: project.proofs });
   if (title !== null) parts.push(title);
   parts.push(summary);
   if (node.type === "say") {
@@ -66,7 +66,7 @@ export function searchProject(
       )
         continue;
       const { title, summary } = describeNode(node, {
-        manifest: project.manifest,
+        manifest: project.manifest, proofs: project.proofs,
       });
       results.push({
         key: `node:${sceneId}:${nodeId}`,

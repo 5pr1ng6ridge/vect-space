@@ -2,11 +2,10 @@
  * Generates the small loop-animation fixture images used by the presentation
  * showcase scene.
  *
- * The milestone requires every frame of one animation to share a pixel size,
- * and none of the copied demo art happens to have two same-size variants.
- * Generating them keeps the fixture reproducible and dependency free: this
- * script writes plain RGBA PNGs with Node's own zlib, so no image library is
- * needed to regenerate or review the fixture.
+ * Every frame of one animation must share a pixel size, and none of the demo art
+ * has two same-size variants.  The frames are generated so the fixture stays
+ * reproducible and dependency free: the script writes plain RGBA PNGs with
+ * Node's own zlib, so no image library is needed to regenerate or review it.
  *
  *   node scripts/make-animation-fixture.mjs
  */

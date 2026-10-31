@@ -28,10 +28,10 @@ export const MAX_WAVEFORM_BYTES = 24 * 1024 * 1024;
 /** Longest media the editor will draw a waveform for. */
 export const MAX_WAVEFORM_DURATION_MS = 20 * 60 * 1000;
 /** Decoded float32 PCM cap used to reject a costly decode before it runs. */
-export const MAX_DECODED_PCM_BYTES = 256 * 1024 * 1024;
+const MAX_DECODED_PCM_BYTES = 256 * 1024 * 1024;
 /** Bound for the `loadedmetadata` duration preflight. */
-export const METADATA_PROBE_TIMEOUT_MS = 3_000;
-export const WAVEFORM_BUCKETS = 480;
+const METADATA_PROBE_TIMEOUT_MS = 3_000;
+const WAVEFORM_BUCKETS = 480;
 
 /** Decoded bytes per second of one float32 channel. */
 const DECODED_BYTES_PER_SAMPLE = 4;
@@ -43,7 +43,7 @@ export interface WaveformPeaks {
   peaks: number[];
 }
 
-export type WaveformFailureReason =
+type WaveformFailureReason =
   "decode" | "fetch" | "too-large" | "too-long" | "unsupported";
 
 export class WaveformUnavailableError extends Error {
@@ -56,7 +56,7 @@ export class WaveformUnavailableError extends Error {
   }
 }
 
-export interface WaveformDecodeOptions {
+interface WaveformDecodeOptions {
   buckets?: number;
   /**
    * Host `channels` metadata.  Required: a missing, non-positive or non-finite

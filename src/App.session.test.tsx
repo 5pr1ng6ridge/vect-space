@@ -11,7 +11,6 @@ import type {
   ButtonSnapshot,
   ResolvedAsset,
   RuntimeUpdate,
-  Settings,
 } from "@vectspace/presentation-core/types";
 import type { SceneCanvasHandle } from "@vectspace/presentation-react/gameplay";
 
@@ -236,7 +235,6 @@ vi.mock("@tauri-apps/api/core", () => ({
       host.failures[command] = forced - 1;
       throw new Error(`forced failure: ${command}`);
     }
-    if (command === "clear_dialogue_history") return;
     if (command === "choose") {
       // The real host gives every update its own id.
       host.updateId++;
@@ -337,7 +335,8 @@ function resolvedChoiceAssets(): ResolvedAsset[] {
   ];
 }
 
-import App, { SettingsPanel } from "./App";
+import App from "./App";
+
 afterEach(async () => {
   cleanup();
   // Drain in-flight mocked host commands and frame-scheduled transitions so
@@ -359,35 +358,6 @@ beforeEach(() => {
   host.failures = {};
   host.alignFailures = 0;
   host.mode = "story";
-});
-
-it("edits ambience volume through the settings control", () => {
-  const settings: Settings = {
-    master_volume: 1,
-    bgm_volume: 0.7,
-    sfx_volume: 0.8,
-    video_volume: 1,
-    ambience_volume: 0.8,
-    text_speed_cps: 30,
-    text_reveal_animation: "typewriter",
-    skip_mode: "read_only",
-  };
-  const onChange = vi.fn();
-  render(
-    <SettingsPanel
-      onChange={onChange}
-      onClose={() => undefined}
-      onSave={() => undefined}
-      settings={settings}
-    />,
-  );
-
-  fireEvent.change(screen.getByLabelText("环境声"), {
-    target: { value: "0.37" },
-  });
-  expect(onChange).toHaveBeenLastCalledWith(
-    expect.objectContaining({ ambience_volume: 0.37 }),
-  );
 });
 
 it("retains host identity across title, load and repeated replay transitions", async () => {
@@ -558,78 +528,72 @@ async function enterReplayThroughMap(): Promise<void> {
 }
 
 /**
- * The three same-session recovery paths that keep the retained update visible
- * after a failed host command.  They used to be wrapped in a full
- * cover/align/reveal session curtain (~500ms of black for a switch that never
- * happened); they must stay an instant hard align plus a forced reveal.
+ * The same-session recovery paths that keep the retained update visible after
+ * a failed host command: an instant hard align plus a forced reveal, never a
+ * cover/align/reveal session curtain (~500ms of black for a switch that did
+ * not happen).
  */
-it("hard-aligns and forces a reveal when returning to the title fails", async () => {
-  render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "开始演示" }));
-  await screen.findByRole("button", { name: "结束重演" });
-  host.failures.invalidate_session = 1;
+it.each([
+  {
+    name: "returning to the title",
+    failing: "invalidate_session",
+    // Only the new-game boundary used the curtain.
+    curtains: 1,
+    retained: "结束重演",
+    start: async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "开始演示" }));
+      await screen.findByRole("button", { name: "结束重演" });
+    },
+    trigger: "标题",
+  },
+  {
+    name: "leaving a replay to the title",
+    failing: "exit_scene_replay",
+    // New game + replay start boundaries.
+    curtains: 2,
+    retained: "结束重演",
+    start: enterReplayThroughMap,
+    trigger: "标题",
+  },
+  {
+    // The replay's end prompt schedules `finishSceneReplay` on the next frame.
+    name: "finishing a replay",
+    failing: "exit_scene_replay",
+    curtains: 2,
+    retained: null,
+    start: enterReplayThroughMap,
+    trigger: "结束重演",
+  },
+])(
+  "hard-aligns and forces a reveal when $name fails",
+  async ({ failing, curtains, retained, start, trigger }) => {
+    render(<App />);
+    await start();
+    host.failures[failing] = 1;
 
-  fireEvent.click(screen.getByRole("button", { name: "标题" }));
-  await screen.findByRole("alert");
-  expect(screen.getByRole("alert").textContent).toContain(
-    "forced failure: invalidate_session",
-  );
+    fireEvent.click(screen.getByRole("button", { name: trigger }));
+    await screen.findByRole("alert");
+    expect(screen.getByRole("alert").textContent).toContain(
+      `forced failure: ${failing}`,
+    );
+    expectHardAlignedThenRevealed();
+    expect(
+      host.calls.filter((call) => call === "applySessionSnapshot"),
+    ).toHaveLength(curtains);
+    // The retained update stays interactive for a retry.
+    if (retained !== null) {
+      expect(screen.getByRole("button", { name: retained })).toBeDefined();
+    }
+  },
+);
+
+function expectHardAlignedThenRevealed(): void {
   const alignIndex = host.calls.indexOf("applySnapshotImmediately");
   const revealIndex = host.calls.indexOf("revealSession");
   expect(alignIndex).toBeGreaterThanOrEqual(0);
   expect(revealIndex).toBeGreaterThan(alignIndex);
   expect(host.calls.filter((call) => call === "coverSession")).toHaveLength(0);
-  // Only the new-game boundary used the session curtain; the failed recovery
-  // did not add a second one.
-  expect(
-    host.calls.filter((call) => call === "applySessionSnapshot"),
-  ).toHaveLength(1);
-  // The retained update stays interactive for a retry.
-  expect(screen.getByRole("button", { name: "结束重演" })).toBeDefined();
-});
-
-it("hard-aligns and forces a reveal when leaving a replay to the title fails", async () => {
-  render(<App />);
-  await enterReplayThroughMap();
-  host.failures.exit_scene_replay = 1;
-
-  fireEvent.click(screen.getByRole("button", { name: "标题" }));
-  await screen.findByRole("alert");
-  expect(screen.getByRole("alert").textContent).toContain(
-    "forced failure: exit_scene_replay",
-  );
-  const alignIndex = host.calls.indexOf("applySnapshotImmediately");
-  const revealIndex = host.calls.indexOf("revealSession");
-  expect(alignIndex).toBeGreaterThanOrEqual(0);
-  expect(revealIndex).toBeGreaterThan(alignIndex);
-  expect(host.calls.filter((call) => call === "coverSession")).toHaveLength(0);
-  // New game + replay start boundaries; the recovery added no third curtain.
-  expect(
-    host.calls.filter((call) => call === "applySessionSnapshot"),
-  ).toHaveLength(2);
-  expect(screen.getByRole("button", { name: "结束重演" })).toBeDefined();
-});
-
-it("hard-aligns and forces a reveal when finishing a replay fails", async () => {
-  render(<App />);
-  await enterReplayThroughMap();
-  host.failures.exit_scene_replay = 1;
-
-  // The replay's end prompt schedules `finishSceneReplay` on the next frame.
-  fireEvent.click(screen.getByRole("button", { name: "结束重演" }));
-  await screen.findByRole("alert");
-  expect(screen.getByRole("alert").textContent).toContain(
-    "forced failure: exit_scene_replay",
-  );
-  const alignIndex = host.calls.indexOf("applySnapshotImmediately");
-  const revealIndex = host.calls.indexOf("revealSession");
-  expect(alignIndex).toBeGreaterThanOrEqual(0);
-  expect(revealIndex).toBeGreaterThan(alignIndex);
-  expect(host.calls.filter((call) => call === "coverSession")).toHaveLength(0);
-  expect(
-    host.calls.filter((call) => call === "applySessionSnapshot"),
-  ).toHaveLength(2);
-});
+}
 
 it("still forces a reveal when the hard alignment itself fails", async () => {
   render(<App />);
@@ -653,11 +617,7 @@ it("still forces a reveal when the hard alignment itself fails", async () => {
   expect(captured.map((reason) => (reason as Error).message)).toContain(
     "forced alignment failure",
   );
-  const alignIndex = host.calls.indexOf("applySnapshotImmediately");
-  const revealIndex = host.calls.indexOf("revealSession");
-  expect(alignIndex).toBeGreaterThanOrEqual(0);
-  expect(revealIndex).toBeGreaterThan(alignIndex);
-  expect(host.calls.filter((call) => call === "coverSession")).toHaveLength(0);
+  expectHardAlignedThenRevealed();
 });
 
 /**

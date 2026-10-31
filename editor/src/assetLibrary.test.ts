@@ -15,7 +15,6 @@ import {
   isAssetHidden,
   moveAssetFolder,
   moveAssetToFolder,
-  pruneAssetLayoutMetadata,
   registerPendingImports,
   renameAssetFolder,
   setAssetDisplayName,
@@ -244,24 +243,6 @@ describe("editor-only asset metadata", () => {
     expect(setAssetDisplayName(named, "bg.room", null)).toEqual(layout);
     expect(setAssetDisplayName(layout, "missing", null)).toBe(layout);
     expect(setAssetDisplayName(layout, "bg.room", "a\u0000b")).toBe(layout);
-  });
-
-  it("keeps orphan metadata harmless until it is explicitly pruned", () => {
-    const layout = layoutWith(
-      {},
-      {
-        "bg.room": { hidden: true },
-        "bg.gone": { display_name: "旧素材", hidden: true },
-      },
-    );
-    expect(isAssetHidden(layout, "bg.gone")).toBe(true);
-    const pruned = pruneAssetLayoutMetadata(layout, new Set(["bg.room"]));
-    expect(pruned.asset_metadata).toEqual({
-      "bg.room": { hidden: true },
-    });
-    expect(
-      pruneAssetLayoutMetadata(layout, new Set(["bg.room", "bg.gone"])),
-    ).toBe(layout);
   });
 });
 

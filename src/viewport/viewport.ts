@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
-export const DESIGN_WIDTH = 1920 as const;
-export const DESIGN_HEIGHT = 1080 as const;
+const DESIGN_WIDTH = 1920 as const;
+const DESIGN_HEIGHT = 1080 as const;
 
 export interface ViewportMetrics {
   designWidth: typeof DESIGN_WIDTH;
@@ -9,11 +9,6 @@ export interface ViewportMetrics {
   scale: number;
   offsetX: number;
   offsetY: number;
-}
-
-export interface DesignPoint {
-  x: number;
-  y: number;
 }
 
 export function calculateViewportMetrics(
@@ -30,17 +25,6 @@ export function calculateViewportMetrics(
     scale,
     offsetX: (windowWidth - DESIGN_WIDTH * scale) / 2,
     offsetY: (windowHeight - DESIGN_HEIGHT * scale) / 2,
-  };
-}
-
-export function screenToDesign(
-  clientX: number,
-  clientY: number,
-  metrics: ViewportMetrics,
-): DesignPoint {
-  return {
-    x: (clientX - metrics.offsetX) / metrics.scale,
-    y: (clientY - metrics.offsetY) / metrics.scale,
   };
 }
 

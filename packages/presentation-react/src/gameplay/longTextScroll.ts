@@ -89,22 +89,6 @@ export function longTextMaxScroll(
   );
 }
 
-/** Frame-rate-independent, bounded first-order follower. */
-export function advanceLongTextScroll(
-  current: number,
-  target: number,
-  elapsedMs: number,
-  fastForward: boolean,
-): number {
-  const dt = Math.min(50, Math.max(0, elapsedMs)) / 1_000;
-  const halfLife = fastForward ? 0.025 : 0.16;
-  const maximumSpeed = fastForward ? 12_000 : 2_400;
-  const alpha = 1 - Math.pow(0.5, dt / halfLife);
-  const desired = (target - current) * alpha;
-  const maximumDelta = maximumSpeed * dt;
-  return current + clamp(desired, -maximumDelta, maximumDelta);
-}
-
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

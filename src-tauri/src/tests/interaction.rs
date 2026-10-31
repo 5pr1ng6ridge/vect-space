@@ -1,157 +1,17 @@
-//! Host-level tests of the atomic two-window transactions: shared state and
-//! derived-state refresh, ordered window-control nodes, titles, scene timers,
-//! pause, delivery sequence numbers and save/restore.  Every test runs against
-//! in-memory content and the recording native seam; nothing needs a WebView.
+//! The atomic two-window transactions: shared state and derived-state refresh,
+//! ordered window-control nodes, titles, scene timers, pause, delivery sequence
+//! numbers and save/restore.
 
-use super::pair::Produced;
 use super::*;
-use vectspace_core::{
-    interaction::{TimerAction, UpdateKind, WindowControlAction},
-    model::{
-        ChoiceDefinition, ConditionExpression, LiteralOperand, PromptSnapshot, ValueOperand,
-        VariableOperand,
-    },
+use crate::{
+    pair::Produced,
+    save::{LoadedSlot, SecondaryState, SlotDocument},
 };
-
-pub(super) fn say(text: &str, next: &str) -> SceneNode {
-    replay_say(text, next)
-}
-
-pub(super) fn scene(
-    role: WindowRole,
-    id: &str,
-    entry: &str,
-    nodes: Vec<(&str, SceneNode)>,
-) -> SceneDefinition {
-    SceneDefinition {
-        window_role: role,
-        schema_version: 1,
-        id: id.to_owned(),
-        entry: entry.to_owned(),
-        nodes: nodes
-            .into_iter()
-            .map(|(id, node)| (id.to_owned(), node))
-            .collect(),
-    }
-}
-
-pub(super) fn open_side(next: &str) -> SceneNode {
-    SceneNode::OpenWindow {
-        scene: "ambience_lab".to_owned(),
-        next: next.to_owned(),
-    }
-}
-
-pub(super) fn set_score(op: VariableOperation, value: i64, next: &str) -> SceneNode {
-    SceneNode::Set {
-        variable: "score".to_owned(),
-        op,
-        value: Some(MutationValue::Literal(ScalarValue::Integer(value))),
-        next: next.to_owned(),
-    }
-}
-
-pub(super) fn title(target: WindowRole, text: &str, next: &str) -> SceneNode {
-    SceneNode::WindowTitle {
-        target,
-        title: text.to_owned(),
-        next: next.to_owned(),
-    }
-}
-
-fn control(target: WindowRole, action: WindowControlAction, id: &str, next: &str) -> SceneNode {
-    SceneNode::WindowControl {
-        target,
-        action,
-        id: id.to_owned(),
-        message: if action == WindowControlAction::Block {
-            "locked".to_owned()
-        } else {
-            String::new()
-        },
-        next: next.to_owned(),
-    }
-}
-
-/// Replace the entry Scene (`prologue`, Main) and the secondary Scene
-/// (`ambience_lab`) with the given nodes.
-pub(super) fn content_with(
-    main: (&str, Vec<(&str, SceneNode)>),
-    side: (&str, Vec<(&str, SceneNode)>),
-) -> ContentCatalog {
-    let mut content = secondary_test_catalog();
-    content.scenes.insert(
-        "prologue".to_owned(),
-        scene(WindowRole::Main, "prologue", main.0, main.1),
-    );
-    content.scenes.insert(
-        "ambience_lab".to_owned(),
-        scene(WindowRole::Secondary, "ambience_lab", side.0, side.1),
-    );
-    content
-}
-
-pub(super) fn state_with(
-    content: ContentCatalog,
-) -> (tempfile::TempDir, Arc<RecordingWindowOps>, EngineState) {
-    let directory = tempdir().unwrap();
-    let ops = Arc::new(RecordingWindowOps::default());
-    let state = secondary_state_with_content(&directory, content, ops.clone());
-    (directory, ops, state)
-}
-
-/// What the `start_new_game` command does.
-pub(super) fn start_game(state: &EngineState) -> WireRuntimeUpdate {
-    let _gate = state.session_gate().unwrap();
-    state.set_title_screen(false);
-    let committed = state
-        .transact_runtime_forced(|runtime| runtime.start_new_game(&state.content), true)
-        .unwrap();
-    state.bump_session_id().unwrap();
-    state.deliver(committed, WindowRole::Main).unwrap()
-}
-
-pub(super) fn main_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireCommandError> {
-    let revision = state.runtime().unwrap().snapshot().revision;
-    let session = WireU64::from(state.current_session_id());
-    state.transact_active_runtime(Some(&session), |runtime| {
-        runtime.advance(&state.content, revision, AdvanceSource::Manual)
-    })
-}
-
-pub(super) fn secondary_advance(state: &EngineState) -> Result<WireRuntimeUpdate, WireCommandError> {
-    let _gate = state.session_gate().unwrap();
-    let token = state.secondary().unwrap().as_ref().unwrap().token;
-    let (committed, _) = state.transact_secondary(Some(&WireU64::from(token)), |runtime| {
-        let revision = runtime.snapshot().revision;
-        runtime.advance(&state.content, revision, AdvanceSource::Manual)
-    })?;
-    state.deliver(committed, WindowRole::Secondary)
-}
-
-pub(super) fn dialogue_text(prompt: &PromptSnapshot) -> String {
-    match prompt {
-        PromptSnapshot::Dialogue { text, .. } | PromptSnapshot::LongText { text, .. } => {
-            text.clone()
-        }
-        other => panic!("expected a dialogue prompt, got {other:?}"),
-    }
-}
-
-pub(super) fn secondary_snapshot(state: &EngineState) -> vectspace_core::model::RuntimeSnapshot {
-    state
-        .secondary()
-        .unwrap()
-        .as_ref()
-        .expect("a live secondary")
-        .runtime
-        .snapshot()
-        .clone()
-}
-
-pub(super) fn main_snapshot(state: &EngineState) -> vectspace_core::model::RuntimeSnapshot {
-    state.runtime().unwrap().snapshot().clone()
-}
+use vectspace_core::{
+    interaction::{TimerAction, UpdateKind},
+    model::{ChoiceDefinition, ConditionExpression, LiteralOperand, ValueOperand, VariableOperand},
+};
+use vectspace_protocol::WirePauseReason;
 
 fn choice_ids(prompt: &PromptSnapshot) -> Vec<String> {
     match prompt {
@@ -251,7 +111,7 @@ fn a_failed_native_title_rolls_back_the_whole_command_and_publishes_nothing() {
     start_game(&state);
     let before = main_snapshot(&state);
     let seq_before = state.latest_seq(WindowRole::Main).unwrap();
-    ops.fail_title.store(true, Ordering::Release);
+    ops.fail_title.set(true);
     let error = main_advance(&state).unwrap_err();
     assert!(error.message.contains("标题"), "{}", error.message);
     // Memory, the outbox and the notifications all stay where they were.
@@ -264,7 +124,7 @@ fn a_failed_native_title_rolls_back_the_whole_command_and_publishes_nothing() {
         .iter()
         .all(|(_, seq)| seq.parse::<u64>().unwrap() <= seq_before));
     // The retry succeeds and drives the native title.
-    ops.fail_title.store(false, Ordering::Release);
+    ops.fail_title.set(false);
     let update = main_advance(&state).unwrap();
     assert_eq!(dialogue_text(&update.snapshot.prompt), "two Renamed");
     assert_eq!(ops.last_title(WindowRole::Main).as_deref(), Some("Renamed"));
@@ -490,28 +350,7 @@ fn a_scripted_advance_does_not_wait_for_a_future_page_or_pick_a_choice() {
     );
 }
 
-#[test]
-fn a_title_for_a_window_that_does_not_exist_is_a_clear_error_and_changes_nothing() {
-    let (_directory, _ops, state) = state_with(content_with(
-        (
-            "s1",
-            vec![
-                ("s1", say("one", "t")),
-                ("t", title(WindowRole::Secondary, "x", "s2")),
-                ("s2", say("two", "end")),
-                ("end", SceneNode::End),
-            ],
-        ),
-        ("x", vec![("x", SceneNode::End)]),
-    ));
-    start_game(&state);
-    let before = main_snapshot(&state);
-    let error = main_advance(&state).unwrap_err();
-    assert!(error.message.contains("副窗口不存在"), "{}", error.message);
-    assert_eq!(main_snapshot(&state), before);
-}
-
-fn timer_content() -> ContentCatalog {
+pub(super) fn timer_content() -> ContentCatalog {
     content_with(
         (
             "tstart",
@@ -574,7 +413,7 @@ fn a_timer_effect_runs_without_moving_the_story_and_is_published_as_an_effect() 
 }
 
 #[test]
-fn timers_stand_still_while_paused_and_never_replay_the_paused_time() {
+fn timers_stand_still_while_paused_or_on_the_title_screen_and_never_replay_the_paused_time() {
     let (_directory, _ops, state) = state_with(timer_content());
     start_game(&state);
     assert!(state.next_timer_wait().is_some());
@@ -600,6 +439,22 @@ fn timers_stand_still_while_paused_and_never_replay_the_paused_time() {
         100
     );
     assert!(state.next_timer_wait().is_some());
+
+    // The title screen has no running story: nothing is credited at all.
+    {
+        let _gate = state.session_gate().unwrap();
+        state.close_secondary().unwrap();
+        state.bump_session_id().unwrap();
+        state.set_title_screen(true);
+    }
+    let seq = state.latest_seq(WindowRole::Main).unwrap();
+    state.timer_step(10_000).unwrap();
+    assert_eq!(
+        main_snapshot(&state).variables["score"],
+        ScalarValue::Integer(0)
+    );
+    assert_eq!(state.latest_seq(WindowRole::Main).unwrap(), seq);
+    assert!(state.next_timer_wait().is_none());
 }
 
 #[test]
@@ -670,7 +525,7 @@ fn a_timer_whose_host_request_fails_is_stopped_with_a_diagnostic() {
     start_game(&state);
     state.timer_step(20).unwrap();
     assert!(main_snapshot(&state).interaction.timers.is_empty());
-    let diagnostics = ops.diagnostics.lock().unwrap().clone();
+    let diagnostics = ops.diagnostics();
     assert!(
         diagnostics
             .iter()
@@ -680,27 +535,7 @@ fn a_timer_whose_host_request_fails_is_stopped_with_a_diagnostic() {
     // No error storm: nothing is left to fail again.
     let count = diagnostics.len();
     state.timer_step(1_000).unwrap();
-    assert_eq!(ops.diagnostics.lock().unwrap().len(), count);
-}
-
-#[test]
-fn the_title_screen_has_no_running_timers() {
-    let (_directory, _ops, state) = state_with(timer_content());
-    start_game(&state);
-    {
-        let _gate = state.session_gate().unwrap();
-        state.close_secondary().unwrap();
-        state.bump_session_id().unwrap();
-        state.set_title_screen(true);
-    }
-    let seq = state.latest_seq(WindowRole::Main).unwrap();
-    state.timer_step(10_000).unwrap();
-    assert_eq!(
-        main_snapshot(&state).variables["score"],
-        ScalarValue::Integer(0)
-    );
-    assert_eq!(state.latest_seq(WindowRole::Main).unwrap(), seq);
-    assert!(state.next_timer_wait().is_none());
+    assert_eq!(ops.diagnostics().len(), count);
 }
 
 #[test]
@@ -780,81 +615,6 @@ fn a_bootstrap_never_reuses_an_update_id_of_the_next_real_update() {
     assert_ne!(boot.update_id, next.update_id);
     assert_eq!(boot.seq, WireU64::from(1));
     assert_eq!(next.seq, WireU64::from(2));
-}
-
-#[test]
-fn replay_isolates_the_window_pair_and_the_story_returns_without_the_closed_windows_effects() {
-    let mut content = content_with(
-        (
-            "open",
-            vec![
-                ("open", open_side("say")),
-                ("say", say("A", "end")),
-                ("end", SceneNode::End),
-            ],
-        ),
-        (
-            "lock",
-            vec![
-                (
-                    "lock",
-                    control(
-                        WindowRole::Main,
-                        WindowControlAction::Block,
-                        "side_lock",
-                        "rename",
-                    ),
-                ),
-                ("rename", title(WindowRole::Secondary, "Mine", "s1")),
-                ("s1", say("side1", "s_end")),
-                ("s_end", SceneNode::End),
-            ],
-        ),
-    );
-    content.chapter_map = Some(ChapterMapDefinition {
-        schema_version: 1,
-        width: 1920,
-        height: 1080,
-        view_x: 0,
-        view_y: 0,
-        background: None,
-        decorations: Vec::new(),
-        hotspots: vec![replay_hotspot("prologue")],
-    });
-    let (_directory, ops, state) = state_with(content);
-    start_game(&state);
-    // The story's secondary blocked the main window and renamed itself.
-    let story_before = main_snapshot(&state);
-    assert_eq!(story_before.interaction.blocks.len(), 1);
-    assert_eq!(story_before.interaction.titles.secondary, "Mine");
-    assert_eq!(
-        ops.last_title(WindowRole::Secondary).as_deref(),
-        Some("Mine")
-    );
-    {
-        let _gate = state.session_gate().unwrap();
-        state.enter_replay("prologue").unwrap();
-    }
-    // The replay re-points the one window; the story-owned window is closed, so
-    // its block and title no longer apply to the suspended story.
-    assert!(matches!(
-        state.secondary().unwrap().as_ref().unwrap().owner,
-        SecondaryOwner::Replay { .. }
-    ));
-    let story_during = main_snapshot(&state);
-    assert!(story_during.interaction.blocks.is_empty());
-    assert_eq!(story_during.interaction.titles.secondary, "");
-    assert_eq!(story_during.location, story_before.location);
-    {
-        let _gate = state.session_gate().unwrap();
-        state.exit_replay().unwrap();
-    }
-    assert!(state.secondary().unwrap().is_none());
-    assert_eq!(
-        state.desired_titles().unwrap(),
-        ("VECTSPACE".to_owned(), None)
-    );
-    assert_eq!(main_snapshot(&state).location, story_before.location);
 }
 
 #[test]
@@ -993,64 +753,16 @@ fn loading_a_slot_whose_block_source_does_not_exist_is_refused_as_a_whole() {
 }
 
 #[test]
-fn a_secondary_scene_is_never_a_valid_story_or_replay_entry_in_the_host() {
-    let mut content = block_content();
-    content.chapter_map = Some(ChapterMapDefinition {
-        schema_version: 1,
-        width: 1920,
-        height: 1080,
-        view_x: 0,
-        view_y: 0,
-        background: None,
-        decorations: Vec::new(),
-        hotspots: vec![replay_hotspot("ambience_lab")],
-    });
-    let (_directory, _ops, state) = state_with(content);
-    let _gate = state.session_gate().unwrap();
-    let error = state.enter_replay("ambience_lab").unwrap_err();
-    assert!(error.message.contains("副窗口专用"), "{}", error.message);
-    assert!(state.replay().unwrap().is_none());
-    assert!(state.pause_state().unwrap().title, "a failed entry stays on the chapter map");
-}
-
-#[test]
-fn a_replay_entered_from_the_chapter_map_runs_its_titles_and_timers_until_it_exits() {
-    let mut content = timer_content();
-    let prologue = content.scenes.get_mut("prologue").unwrap();
-    prologue.entry = "rename".to_owned();
-    prologue
-        .nodes
-        .insert("rename".to_owned(), title(WindowRole::Main, "Replay", "tstart"));
-    content.chapter_map = Some(ChapterMapDefinition {
-        schema_version: 1,
-        width: 1920,
-        height: 1080,
-        view_x: 0,
-        view_y: 0,
-        background: None,
-        decorations: Vec::new(),
-        hotspots: vec![replay_hotspot("prologue")],
-    });
-    // The chapter map is part of the title screen: no story was started.
-    let (_directory, ops, state) = state_with(content);
-    assert!(state.pause_state().unwrap().title);
-    {
-        let _gate = state.session_gate().unwrap();
-        state.enter_replay("prologue").unwrap();
-    }
-    assert_eq!(ops.last_title(WindowRole::Main).as_deref(), Some("Replay"));
-    assert!(state.next_timer_wait().is_some(), "the replay's timer is live");
-    state.timer_step(150).unwrap();
-    let replay_score = state.replay().unwrap().as_ref().unwrap().runtime.snapshot().variables
-        ["score"]
-        .clone();
-    assert_eq!(replay_score, ScalarValue::Integer(1));
-
-    {
-        let _gate = state.session_gate().unwrap();
-        state.exit_replay().unwrap();
-    }
-    assert!(state.pause_state().unwrap().title, "back on the chapter map");
-    assert_eq!(ops.last_title(WindowRole::Main).as_deref(), Some("VECTSPACE"));
-    assert!(state.next_timer_wait().is_none());
+fn a_request_from_an_older_session_is_stale() {
+    let (_directory, _ops, state) = state_with(secondary_test_catalog());
+    let stale = |request: Option<u64>| {
+        state
+            .check_session(request.map(WireU64::from).as_ref())
+            .map_err(|error| error.code)
+    };
+    assert_eq!(stale(Some(1)), Ok(()));
+    assert_eq!(stale(None), Err(WireCommandErrorCode::StaleSession));
+    state.bump_session_id().unwrap();
+    assert_eq!(stale(Some(1)), Err(WireCommandErrorCode::StaleSession));
+    assert_eq!(stale(Some(2)), Ok(()));
 }

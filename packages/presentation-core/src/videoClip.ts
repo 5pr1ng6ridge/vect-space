@@ -1,6 +1,5 @@
 /**
- * Pure media-window math shared by the runtime `TimelineSession` and the
- * editor's standalone HTML preview stage.
+ * Pure media-window math of `TimelineSession`.
  *
  * A video track presents a window of one media element:
  *
@@ -9,11 +8,6 @@
  *   duration does,
  * - `loop: true` wraps the playhead inside the window; `loop: false` freezes
  *   at the effective end.
- *
- * Two implementations of this arithmetic drifted apart (the session clamped a
- * non-loop playhead at `clip_end_ms` while continuing to play and re-seek the
- * element forever; the standalone stage ignored both the clip end and the loop
- * flag), so the editor and the shared runtime now import this one function.
  *
  * `atEnd` exists so the session can tell "the non-loop playhead consumed the
  * whole window" apart from "still inside it": that is the boundary where it

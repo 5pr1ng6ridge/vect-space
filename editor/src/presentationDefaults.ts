@@ -34,7 +34,7 @@ export function defaultFlashEffect(): ScreenEffectSpec {
 }
 
 /** Default shake parameters: 16×9.6, 18 Hz, decay 1, seed 0. */
-export function defaultShakeEffect(): ScreenEffectSpec {
+function defaultShakeEffect(): ScreenEffectSpec {
   return {
     type: "shake",
     amplitude_x: 16,

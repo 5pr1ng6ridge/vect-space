@@ -1,0 +1,96 @@
+schema_version: 2
+id: proof_lab
+entry: background_start
+nodes:
+  background_start:
+    type: background
+    background: bg.vector_space
+    transition:
+      type: cross_fade
+    duration_ms: 600
+    easing: ease_in_out
+    await: false
+    next: intro
+  intro:
+    type: say
+    speaker: alli
+    text: 这里是证明实验室。把定理卡和推理节点连起来，拼成一条完整的证明；每一步都会交给 Lean 检验。
+    mode: start
+    speed_cps: null
+    next: intro_hint
+  intro_hint:
+    type: say
+    speaker: alli
+    text: 从右边的目标往回想：它需要什么？黄色的端口表示还缺一个证明，红色表示连上的东西不对。
+    mode: start
+    speed_cps: null
+    next: pick
+  pick:
+    type: choice
+    choices:
+    - id: and_comm
+      label: 合取交换：由 $p \land q$ 得到 $q \land p$
+      next: proof_and_comm
+    - id: or_comm
+      label: 析取交换：$p \lor q \Rightarrow q \lor p$
+      next: proof_or_comm
+    - id: le_chain
+      label: 不等式链：$a \le b \le c \le d$
+      next: proof_le_chain
+    - id: exists_double
+      label: 构造见证：$\forall n,\ \exists m,\ m = n + n$
+      next: proof_exists_double
+    - id: zero_add
+      label: 数学归纳：$\forall n,\ 0 + n = n$
+      next: proof_zero_add
+    - id: leave
+      label: 离开实验室
+      next: farewell
+  proof_and_comm:
+    type: proof
+    puzzle: and_comm
+    next: solved
+    abandon: gave_up
+  proof_or_comm:
+    type: proof
+    puzzle: or_comm
+    next: solved
+    abandon: gave_up
+  proof_le_chain:
+    type: proof
+    puzzle: le_chain
+    next: solved
+    abandon: gave_up
+  proof_exists_double:
+    type: proof
+    puzzle: exists_double
+    next: solved
+    abandon: gave_up
+  proof_zero_add:
+    type: proof
+    puzzle: zero_add
+    next: solved
+    abandon: gave_up
+  solved:
+    type: say
+    speaker: alli
+    text: Lean 接受了这个证明。再试一题？
+    mode: start
+    speed_cps: null
+    next: pick
+  gave_up:
+    type: say
+    speaker: alli
+    text: 没关系，先放一放。换一题，或者之后再回来。
+    mode: start
+    speed_cps: null
+    next: pick
+  farewell:
+    type: say
+    speaker: alli
+    text: 下次见。
+    mode: start
+    speed_cps: null
+    next: end
+  end:
+    type: end

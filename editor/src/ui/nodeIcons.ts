@@ -10,7 +10,6 @@ import {
   Clock,
   FileText,
   GitBranch,
-  GitFork,
   Image,
   Layers,
   ListChecks,
@@ -44,6 +43,7 @@ export const NODE_ICONS: Record<NodeType, LucideIcon> = {
   say: MessageSquareText,
   long_text: BookOpenText,
   long_text_control: FileText,
+  proof: ListChecks,
   choice: ListChecks,
   condition: GitBranch,
   set: Variable,
@@ -79,4 +79,3 @@ export const NODE_ICONS: Record<NodeType, LucideIcon> = {
 
 /** Fallback when a scene contains a node type this editor does not know. */
 export const UNKNOWN_NODE_ICON: LucideIcon = Layers;
-export const JUMP_ICON: LucideIcon = GitFork;

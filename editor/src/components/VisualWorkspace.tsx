@@ -18,6 +18,7 @@ import { CuePreview, type BurstCue, type CuePreviewEnvironment, type DecorationT
 import { ColorField, DeferredTextArea, Field, NumberField } from "./Fields";
 import { clampToStage, roundedPosition } from "./particleAreaGeometry";
 import { ParticleGizmo } from "./ParticleGizmo";
+import { errorMessage } from "./errorMessage";
 
 const PREVIEW_ID = "visual.preview";
 const CAMERA = { x: 0, y: 0, zoom: 1, rotation_deg: 0 };
@@ -38,7 +39,7 @@ function problem(check: () => void): string | null {
     check();
     return null;
   } catch (reason) {
-    return reason instanceof Error ? reason.message : String(reason);
+    return errorMessage(reason);
   }
 }
 
@@ -134,7 +135,7 @@ export function VisualWorkspace({
         transport: { durationMs: Math.max(1000, Math.ceil(particle.lifetime_ms.max * 2)) },
       };
     } catch (reason) {
-      return { error: reason instanceof Error ? reason.message : String(reason) };
+      return { error: errorMessage(reason) };
     }
   }, [definition, invalid, kind, mode, previewCenter, project.assets, project.fingerprint, project.manifest.default_font]);
 

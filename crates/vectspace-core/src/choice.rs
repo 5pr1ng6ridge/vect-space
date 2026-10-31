@@ -254,8 +254,8 @@ mod tests {
 
     #[test]
     fn anchors_are_design_pixels_not_normalized_fractions() {
-        // A 0.5 anchor used to mean the stage centre; in design pixels it
-        // means half a pixel from the top-left corner.
+        // A 0.5 anchor is half a design pixel from the top-left corner, not
+        // the stage centre.
         let result = layout_choice_items(
             ChoiceFlowDirection::Vertical,
             0.5,
@@ -272,29 +272,6 @@ mod tests {
                 height: 10.0,
             }
         );
-    }
-
-    #[test]
-    fn legacy_anchor_keeps_the_shipped_css_panel_origin() {
-        // Presentation-less nodes keep the CSS panel at left 470/top 360 and
-        // report the equivalent centre anchor so the rects stay reproducible.
-        let sizes = [(980.0, 92.0), (980.0, 92.0)];
-        let (anchor_x, anchor_y) =
-            legacy_choice_anchor(ChoiceFlowDirection::Vertical, 20.0, &sizes);
-        assert_eq!((anchor_x, anchor_y), (960.0, 462.0));
-        let result = layout_choice_items(
-            ChoiceFlowDirection::Vertical,
-            anchor_x,
-            anchor_y,
-            20.0,
-            &sizes,
-        );
-        assert_eq!(
-            (result.x, result.y, result.width, result.height),
-            (470.0, 360.0, 980.0, 204.0)
-        );
-        assert_eq!(result.items[0].y, 360.0);
-        assert_eq!(result.items[1].y, 472.0);
     }
 
     #[test]

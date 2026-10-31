@@ -1,6 +1,8 @@
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LongTextPageSnapshot } from "@vectspace/presentation-core/types";
 
 import { LongTextPanel, type LongTextPanelHandle } from "./LongTextPanel";
 import {
@@ -8,7 +10,6 @@ import {
   resolveLongTextPageWindow,
 } from "./longTextPagination";
 import {
-  advanceLongTextScroll,
   hasReachedLongTextRevealThreshold,
   LONG_TEXT_BOTTOM_BROWSING_SPACE,
   longTextFollowTarget,
@@ -16,7 +17,126 @@ import {
   longTextParagraphTarget,
 } from "./longTextScroll";
 
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
 describe("LongTextPanel", () => {
+  it("windows continuous fragments while keeping the active step mounted", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: Element): DOMRect {
+        const height = this.closest(".long-text-measure-step") ? 800 : 0;
+        return {
+          x: 0,
+          y: 0,
+          top: 0,
+          bottom: height,
+          left: 0,
+          right: 400,
+          height,
+          width: 400,
+          toJSON: () => ({}),
+        };
+      },
+    );
+    const page: LongTextPageSnapshot = {
+      document_id: "continuous-document",
+      paper: null,
+      pagination: "continuous",
+      font_size: 32,
+      text_color: "#212533",
+      layout: {
+        x: 0,
+        y: 0,
+        width: 600,
+        height: 1_000,
+        padding_x: 100,
+        padding_y: 100,
+        page_height: 1_200,
+        page_gap: 92,
+      },
+      active_step_index: 0,
+      steps: Array.from({ length: 18 }, (_, index) => ({
+        step_id: `step-${index}`,
+        text: `Fragment ${index}`,
+        page_break_before: false,
+      })),
+    };
+    const view = render(
+      <LongTextPanel
+        defaultCps={180}
+        disabled={false}
+        fastForward={false}
+        initialCps={180}
+        onRevealComplete={vi.fn()}
+        onTypingChange={vi.fn()}
+        page={page}
+        prompt={{
+          kind: "long_text",
+          prompt_id: "continuous-document/step-0",
+          document_id: page.document_id,
+          step_id: "step-0",
+          step_index: 0,
+          text: page.steps[0]?.text ?? "",
+          is_read: false,
+        }}
+        revealImmediately
+        suspended
+      />,
+    );
+    const mountedText = () =>
+      Array.from(
+        view.container.querySelectorAll(".long-text-step-fragment"),
+        (fragment) => fragment.textContent,
+      );
+    await waitFor(() => {
+      expect(view.container.querySelector(".long-text-measure-step")).toBeNull();
+    });
+    expect(view.container.querySelectorAll(".long-text-paper")).toHaveLength(1);
+    expect(mountedText()).toEqual([
+      "Fragment 0",
+      "Fragment 1",
+      "Fragment 2",
+      "Fragment 3",
+    ]);
+
+    const panel = view.getByRole("region");
+    fireEvent.wheel(panel, {
+      deltaY: 8_000,
+    });
+    await waitFor(() => {
+      expect(mountedText()).toEqual([
+        "Fragment 0",
+        "Fragment 7",
+        "Fragment 8",
+        "Fragment 9",
+        "Fragment 10",
+        "Fragment 11",
+        "Fragment 12",
+        "Fragment 13",
+      ]);
+    });
+    expect(
+      view.container
+        .querySelectorAll(".long-text-step-fragment")[1]
+        ?.getAttribute("style"),
+    ).toContain("top: 5796px");
+
+    fireEvent.wheel(panel, {
+      deltaY: -8_000,
+    });
+    await waitFor(() => expect(mountedText()).toHaveLength(4));
+    expect(mountedText()).toContain("Fragment 0");
+    expect(mountedText()).not.toContain("Fragment 7");
+  });
+
   it("keeps revealed steps on paper and starts a new paper at manual breaks", () => {
     const html = renderToStaticMarkup(
       <LongTextPanel
@@ -135,7 +255,7 @@ describe("LongTextPanel", () => {
     expect(LONG_TEXT_BOTTOM_BROWSING_SPACE).toBeGreaterThan(70);
   });
 
-  it("keeps the new follower bounded through a stalled frame and resumes from manual positions", () => {
+  it("places the follow target relative to the cursor", () => {
     expect(
       longTextFollowTarget({
         cursorY: 821,
@@ -143,12 +263,6 @@ describe("LongTextPanel", () => {
         maxScroll: 2_000,
       }),
     ).toBeCloseTo(151.4);
-    expect(
-      advanceLongTextScroll(320, 1_800, 2_000, false) - 320,
-    ).toBeLessThanOrEqual(120);
-    expect(
-      advanceLongTextScroll(320, 1_800, 2_000, true) - 320,
-    ).toBeLessThanOrEqual(600);
   });
 
   it("places each paragraph once before reveal and keeps already fitting text still", () => {

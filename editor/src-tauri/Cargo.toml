@@ -25,7 +25,7 @@ mp4parse = "0.17"
 ttf-parser = "0.25"
 tauri = { version = "2", features = ["protocol-asset"] }
 rfd = "0.16"
-thiserror = "2"
+vectspace-proof.workspace = true
 vectspace-core.workspace = true
 vectspace-protocol.workspace = true
 

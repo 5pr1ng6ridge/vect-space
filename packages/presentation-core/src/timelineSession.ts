@@ -10,7 +10,7 @@
  * - the game loads a cue on top of the live scene (`world: "continue"`),
  * - the editor restores a start snapshot first (`world: "restore"`).
  *
- * Agreed semantics the migration unifies:
+ * Semantics:
  *
  * - `play()` settles only at the end, on skip, cancel or failure,
  * - scrubbing is silent and deterministic; playback consumes crossed events,
@@ -25,6 +25,7 @@
  *   on and being re-seeked; a looping window wraps and survives its own EOF.
  */
 
+import { errorMessage } from "./errorMessage";
 import {
   evaluateActiveScreenEffects,
   evaluateTimelineFrame,
@@ -37,6 +38,15 @@ import {
   type SceneSpriteGeometry,
 } from "./sceneFrame";
 import { TimelineClock, type TimelineOutcome } from "./timeline";
+import {
+  releaseElement,
+  seekElement,
+  VIDEO_LOAD_SEEK_TIMEOUT_MS,
+  VIDEO_SCRUB_TIMEOUT_MS,
+  waitForPresentedFrame,
+  waitForSeeked,
+  waitForVideoMetadata,
+} from "./timelineVideo";
 import { evaluateVideoClip, type VideoClipPosition } from "./videoClip";
 import { spriteTrackState, spriteResourceId } from "./visual";
 import type { AudioDiagnostics } from "./audio";
@@ -79,11 +89,6 @@ export type TimelineSeekMode = "scrub" | "playback";
 
 /** Drift above which continuous playback re-seeks the media element. */
 export const VIDEO_DRIFT_THRESHOLD_MS = 50;
-/** Diagnostic bound for a scrub seek on the media element. */
-const VIDEO_SCRUB_TIMEOUT_MS = 2_000;
-const VIDEO_METADATA_TIMEOUT_MS = 15_000;
-const VIDEO_LOAD_SEEK_TIMEOUT_MS = 8_000;
-const PRESENTED_FRAME_TIMEOUT_MS = 250;
 const MAX_TIMELINE_RATE = 8;
 
 export type VideoTrack = Extract<TimelineTrack, { type: "video" }>;
@@ -1447,201 +1452,4 @@ function isCurrentSeek(
   disposed: boolean,
 ): boolean {
   return !disposed && !signal.aborted && current === generation;
-}
-
-function releaseElement(element: HTMLVideoElement): void {
-  element.removeAttribute("src");
-  element.load();
-}
-
-function waitForVideoMetadata(
-  element: HTMLVideoElement,
-  signal: AbortSignal,
-): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
-    return Promise.resolve();
-  }
-  return withTimeout(
-    new Promise<void>((resolve, reject) => {
-      const cleanup = (): void => {
-        element.removeEventListener("loadedmetadata", loaded);
-        element.removeEventListener("error", failed);
-        signal.removeEventListener("abort", aborted);
-      };
-      const loaded = (): void => {
-        cleanup();
-        resolve();
-      };
-      const failed = (): void => {
-        cleanup();
-        reject(new Error(videoErrorMessage(element, "视频元数据加载失败")));
-      };
-      const aborted = (): void => {
-        cleanup();
-        resolve();
-      };
-      element.addEventListener("loadedmetadata", loaded, { once: true });
-      element.addEventListener("error", failed, { once: true });
-      signal.addEventListener("abort", aborted, { once: true });
-      element.load();
-    }),
-    VIDEO_METADATA_TIMEOUT_MS,
-    "视频元数据加载超时",
-  );
-}
-
-function seekElement(
-  element: HTMLVideoElement,
-  targetSeconds: number,
-  signal: AbortSignal,
-  timeoutMs: number,
-): Promise<void> {
-  const target = Math.max(0, targetSeconds);
-  if (signal.aborted) return Promise.resolve();
-  if (Math.abs(element.currentTime - target) < 0.001) return Promise.resolve();
-  return withTimeout(
-    new Promise<void>((resolve, reject) => {
-      const cleanup = (): void => {
-        element.removeEventListener("seeked", seeked);
-        element.removeEventListener("error", failed);
-        signal.removeEventListener("abort", aborted);
-      };
-      const seeked = (): void => {
-        cleanup();
-        resolve();
-      };
-      const failed = (): void => {
-        cleanup();
-        reject(new Error(videoErrorMessage(element, "视频定位失败")));
-      };
-      const aborted = (): void => {
-        cleanup();
-        resolve();
-      };
-      element.addEventListener("seeked", seeked, { once: true });
-      element.addEventListener("error", failed, { once: true });
-      signal.addEventListener("abort", aborted, { once: true });
-      element.currentTime = target;
-    }),
-    timeoutMs,
-    "视频定位超时",
-  );
-}
-
-function waitForPresentedFrame(
-  element: HTMLVideoElement,
-  signal: AbortSignal,
-): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  if (typeof element.requestVideoFrameCallback === "function") {
-    return withTimeout(
-      new Promise<void>((resolve) => {
-        let handle = 0;
-        const finish = (): void => {
-          if (typeof element.cancelVideoFrameCallback === "function") {
-            element.cancelVideoFrameCallback(handle);
-          }
-          signal.removeEventListener("abort", finish);
-          resolve();
-        };
-        handle = element.requestVideoFrameCallback(() => finish());
-        signal.addEventListener("abort", finish, { once: true });
-      }),
-      PRESENTED_FRAME_TIMEOUT_MS,
-      "视频帧呈现超时",
-    ).catch(() => undefined);
-  }
-  if (element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-    return Promise.resolve();
-  }
-  return withTimeout(
-    new Promise<void>((resolve) => {
-      const finish = (): void => {
-        element.removeEventListener("seeked", finish);
-        element.removeEventListener("canplay", finish);
-        signal.removeEventListener("abort", finish);
-        resolve();
-      };
-      element.addEventListener("seeked", finish, { once: true });
-      element.addEventListener("canplay", finish, { once: true });
-      signal.addEventListener("abort", finish, { once: true });
-    }),
-    PRESENTED_FRAME_TIMEOUT_MS,
-    "视频帧呈现超时",
-  ).catch(() => undefined);
-}
-
-function videoErrorMessage(element: HTMLVideoElement, prefix: string): string {
-  const code = element.error?.code;
-  return code === undefined
-    ? prefix
-    : `${prefix}（MediaError ${code}: ${element.error?.message ?? ""}）`;
-}
-
-/**
- * Resolves once a seek lands (`seeked`), the element errors, the wait is
- * aborted, or the scrub timeout elapses — whichever happens first.
- *
- * The wait owns its timeout instead of wrapping the listener promise in
- * `withTimeout`: every exit path runs the same cleanup, so a timeout removes
- * the `seeked`/`error`/`abort` listeners and clears the timer.  Wrapping it
- * would leave those listeners attached to a media element that never settles,
- * and repeated terminal holds would accumulate them.
- *
- * The caller must attach this *before* assigning `currentTime`: a seek that
- * lands synchronously (a cached or already-presented frame) would otherwise
- * fire before the listener exists and this wait would hang until the timeout.
- * The wait never rejects; after a timeout the caller still presents the best
- * available frame.
- */
-function waitForSeeked(
-  element: HTMLVideoElement,
-  signal: AbortSignal,
-): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    let settled = false;
-    let timer: number | null = null;
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== null) window.clearTimeout(timer);
-      element.removeEventListener("error", finish);
-      element.removeEventListener("seeked", finish);
-      signal.removeEventListener("abort", finish);
-      resolve();
-    };
-    timer = window.setTimeout(finish, VIDEO_SCRUB_TIMEOUT_MS);
-    element.addEventListener("seeked", finish);
-    element.addEventListener("error", finish);
-    signal.addEventListener("abort", finish);
-  });
-}
-
-function withTimeout<T>(
-  promise: Promise<T>,
-  durationMs: number,
-  message: string,
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(
-      () => reject(new Error(message)),
-      durationMs,
-    );
-    promise.then(
-      (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-      (reason: unknown) => {
-        window.clearTimeout(timer);
-        reject(reason instanceof Error ? reason : new Error(String(reason)));
-      },
-    );
-  });
-}
-
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
 }

@@ -28,9 +28,10 @@ export interface NodeDescription {
   summary: string;
 }
 
-export interface DescribeContext {
+interface DescribeContext {
   /** Only the character table is needed (for speaker display names). */
   manifest?: Pick<ContentManifest, "characters">;
+  proofs?: import("./types").ProofFile[];
 }
 
 function scalar(value: ScalarValue): string {
@@ -46,7 +47,7 @@ function mutationValue(value: MutationValue | undefined): string {
   return scalar(value);
 }
 
-export function describeCondition(condition: ConditionExpression): string {
+function describeCondition(condition: ConditionExpression): string {
   switch (condition.op) {
     case "eq":
     case "ne":
@@ -72,7 +73,7 @@ export function describeCondition(condition: ConditionExpression): string {
 }
 
 /** Display name of a speaker id: character name, temporary name or 旁白. */
-export function speakerName(
+function speakerName(
   speaker: string | null,
   manifest: Pick<ContentManifest, "characters"> | undefined,
 ): string {
@@ -101,6 +102,13 @@ export function describeNode(
     case "long_text_control":
       return plain(
         `${node.action === "show" ? "显示" : node.action === "hide" ? "隐藏" : "关闭"}文稿 ${node.document}`,
+      );
+    case "proof":
+      return plain(
+        context.proofs
+          ?.flatMap((file) => file.definition.puzzles ?? [])
+          .find((puzzle) => puzzle.id === node.puzzle)?.title ??
+          (node.puzzle || "（未选择证明题）"),
       );
     case "choice":
       return plain(
@@ -173,7 +181,9 @@ export function describeNode(
         `${SPRITE_ACTION_LABELS[node.action]} ${node.sprite_id}${node.asset ? ` · ${node.asset}` : ""}`,
       );
     case "particle":
-      return plain(`${node.action === "start" ? "持续发射" : node.action === "stop" ? "清除发射器" : "单次爆发"} ${node.emitter_id}${node.particle ? ` · ${node.particle}` : ""}`);
+      return plain(
+        `${node.action === "start" ? "持续发射" : node.action === "stop" ? "清除发射器" : "单次爆发"} ${node.emitter_id}${node.particle ? ` · ${node.particle}` : ""}`,
+      );
     case "clear":
       return plain(`清除画面 · ${node.duration_ms} ms`);
     case "wait":

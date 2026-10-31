@@ -1,20 +1,16 @@
 /* global URL, WebSocket, process, console */
 
-// Real-WebGL parity entry for the SceneSurface migration baseline.
+// Real-WebGL parity entry.
 //
-// It generates the frozen fixture payloads from the real runtime
+// It generates the fixture payloads from the real runtime
 // (`export_parity_fixture`), serves the `parity/` harness page plus the game
 // assets through Vite, drives a locally installed Chrome/Edge over the
 // DevTools protocol, and writes full-size screenshots plus a JSON report to
 // `.parity-output/`.  The command deliberately does not assert that the game
-// and editor surfaces are pixel-equal: confirmed differences are recorded in
-// `docs/scene-surface-migration-baseline.md`, never frozen as desired
-// behaviour.  A non-zero exit means the harness itself failed (missing
-// browser, payload export error, page exception, screenshot failure) or one of
-// the in-page real-WebGL assertions failed: the video fixture, the four-slot
-// ambience diagnostics, the ChoiceLayer layout probe and the composable-shader
-// pixel probe (each pass isolated by diffing the authored frame against the
-// same timeline with that pass zeroed/removed).
+// and editor surfaces are pixel-equal.  A non-zero exit means the harness
+// itself failed (missing browser, payload export error, page exception,
+// screenshot failure) or one of the in-page assertions checked by
+// `check-parity-report.mjs` failed.
 //
 // Usage:
 //   npm run parity:check
@@ -48,6 +44,7 @@ import { clearTimeout, setTimeout } from "node:timers";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
+import { checkReport } from "./check-parity-report.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const targetsFile = join(root, "parity", "targets.json");
@@ -519,349 +516,15 @@ async function main() {
     );
     await writeFile(join(options.output, "fixtures.json"), fixturesText);
 
-    const errors = Array.isArray(report.errors) ? report.errors : [];
-    console.log(
-      `parity: ${report.targets?.length ?? 0} 个目标 / ${captures.length} 张截图 / ${errors.length} 个步骤错误`,
-    );
-    console.log(`输出目录：${relative(root, options.output)}`);
-    if (pageErrors.length > 0) {
-      console.error(`页面异常 ${pageErrors.length} 条：`);
-      for (const error of pageErrors) console.error(`  - ${error}`);
-    }
-    for (const error of errors) {
-      console.error(`步骤错误 ${error.step}: ${error.message}`);
-    }
-    // The report must contain exactly the targets the list asked for: a
-    // checker pointed at an OS-temp list must fail instead of silently
-    // accepting a fixture set built from a different file.
-    const reportTargetIds = (
-      Array.isArray(report.targets) ? report.targets : []
-    ).map((target) => target.id);
-    const reportIds = new Set(reportTargetIds);
-    const targetProblems = [];
-    for (const id of targets.ids) {
-      if (!reportIds.has(id)) targetProblems.push(`报告缺少目标 ${id}`);
-    }
-    for (const id of reportIds) {
-      if (!targets.ids.has(id))
-        targetProblems.push(`报告出现清单外的目标 ${id}`);
-    }
-    if (reportIds.size !== reportTargetIds.length) {
-      targetProblems.push(
-        `报告目标 id 重复（${reportTargetIds.length} 个目标 / ${reportIds.size} 个 id）`,
-      );
-    }
-    const matchedTargetCount = [...targets.ids].filter((id) =>
-      reportIds.has(id),
-    ).length;
-    console.log(
-      `目标清单：${relative(root, targets.path)}，报告 ${matchedTargetCount}/${targets.ids.size} 个目标匹配`,
-    );
-    if (targetProblems.length > 0) {
-      console.error(`目标清单与报告不一致：${targetProblems.length} 处：`);
-      for (const problem of targetProblems) console.error(`  - ${problem}`);
-    }
-    // Diagnostics never fail the entry; they are recorded so a reviewer can
-    // see whether a visual difference came with a host warning.
-    const diagnostics = Array.isArray(report.diagnostics)
-      ? report.diagnostics
-      : [];
-    if (diagnostics.length > 0) {
-      console.log(`诊断 ${diagnostics.length} 条：`);
-      for (const message of diagnostics) console.log(`  - ${message}`);
-    }
-    if (report.capturePolicy?.editor !== "deterministic-seek") {
-      console.error(
-        "harness 报告缺少确定性 seek 策略标记；无法判定媒体定位断言。",
-      );
-      process.exitCode = 1;
-    }
-    // The shared ChoiceLayer also gets a real-browser computed-layout probe.
-    // This is intentionally separate from screenshot parity: an image that
-    // happens to look plausible can still be intrinsically sized or stacked
-    // above the label.  Every host/mode pair must report exact button-box
-    // artwork geometry and content above the artwork stack.
-    const choiceLayoutCases = Array.isArray(report.choiceLayout?.cases)
-      ? report.choiceLayout.cases
-      : [];
-    const choiceLayoutProblems = [];
-    const expectedChoiceLayoutCases = new Set([
-      "game/separate",
-      "game/overlay",
-      "editor/separate",
-      "editor/overlay",
-    ]);
-    const actualChoiceLayoutCases = new Set();
-    for (const probe of choiceLayoutCases) {
-      const key = `${probe.host}/${probe.mode}`;
-      if (actualChoiceLayoutCases.has(key)) {
-        choiceLayoutProblems.push(`${key}: 探针结果重复`);
-      }
-      actualChoiceLayoutCases.add(key);
-      if (probe.imageBoxesMatchButton !== true) {
-        choiceLayoutProblems.push(`${key}: artwork 未与按钮解析盒一致`);
-      }
-      if (probe.fallbackHeightMatches !== true) {
-        choiceLayoutProblems.push(
-          `${key}: 80px fallback 高度未按解析按钮盒呈现`,
-        );
-      }
-      if (probe.contentOverlaysArtwork !== true) {
-        choiceLayoutProblems.push(
-          `${key}: icon/KaTeX content 未叠加在 artwork 上`,
-        );
-      }
-    }
-    for (const key of expectedChoiceLayoutCases) {
-      if (!actualChoiceLayoutCases.has(key)) {
-        choiceLayoutProblems.push(
-          `${key}: 缺少真实浏览器 ChoiceLayer 探针结果`,
-        );
-      }
-    }
-    console.log(
-      `Choice 布局：${choiceLayoutCases.length}/${expectedChoiceLayoutCases.size} 个 host/mode 探针通过`,
-    );
-    if (choiceLayoutProblems.length > 0) {
-      console.error(`Choice 布局探针失败：${choiceLayoutProblems.length} 处：`);
-      for (const problem of choiceLayoutProblems)
-        console.error(`  - ${problem}`);
-    }
-
-    // A deterministically scrubbed video must land on the time the playhead
-    // targets, within the shared 50 ms drift threshold.  Playback-mode seeks
-    // are checked by the real-video fixture block below; timelines without a
-    // video track record `media: null` and assert nothing here.
-    const scrubMediaProblems = [];
-    for (const target of Array.isArray(report.targets) ? report.targets : []) {
-      for (const frame of target.editor?.frames ?? []) {
-        const media = frame.media;
-        if (media === null || media === undefined) continue;
-        if (frame.mode !== "scrub") continue;
-        const drift = Math.abs(media.currentTime - media.targetTime);
-        if (!(drift <= 0.05)) {
-          scrubMediaProblems.push(
-            `${target.id} @${frame.elapsed_ms}ms: currentTime=${media.currentTime} target=${media.targetTime} drift=${drift.toFixed(3)}s`,
-          );
-        }
-      }
-    }
-    if (scrubMediaProblems.length > 0) {
-      console.error(`视频定位超过 50ms：${scrubMediaProblems.length} 处：`);
-      for (const problem of scrubMediaProblems) console.error(`  - ${problem}`);
-    }
-
-    // Real-video fixture: the browser entry drives a video-bearing target on
-    // both shared hosts and records nonzero media observations plus in-page
-    // assertions.  A run without any such target (or without any observation)
-    // fails here instead of silently skipping the video checks.
-    const videoTargets = (
-      Array.isArray(report.targets) ? report.targets : []
-    ).filter((target) => target.video?.fixture === true);
-    const videoProblems = [];
-    let videoChecks = 0;
-    let videoChecksFailed = 0;
-    let videoObservations = 0;
-    if (videoTargets.length === 0) {
-      videoProblems.push(
-        "没有任何目标包含视频轨：浏览器视频断言为空（夹具缺失，不得静默跳过）",
-      );
-    }
-    for (const target of videoTargets) {
-      const video = target.video;
-      const checks = Array.isArray(video.checks) ? video.checks : [];
-      const observations = Array.isArray(video.observations)
-        ? video.observations
-        : [];
-      videoChecks += checks.length;
-      videoObservations += observations.length;
-      if (checks.length === 0) {
-        videoProblems.push(`${target.id}: 没有执行任何视频断言`);
-        continue;
-      }
-      const failed = checks.filter((check) => check.ok !== true);
-      videoChecksFailed += failed.length;
-      for (const check of failed) {
-        videoProblems.push(`${target.id}/${check.name}: ${check.detail}`);
-      }
-      if (observations.length < 6) {
-        videoProblems.push(
-          `${target.id}: 真实视频观测不足（${observations.length} < 6）`,
-        );
-      }
-      for (const host of ["game", "editor"]) {
-        const hostObservations = observations.filter(
-          (observation) =>
-            observation.host === host && observation.media !== null,
-        );
-        if (hostObservations.length === 0) {
-          videoProblems.push(`${target.id}: ${host} 端没有真实媒体观测`);
-        }
-      }
-      const scrubObservations = observations.filter(
-        (observation) =>
-          observation.mode === "scrub" && observation.media !== null,
-      );
-      if (scrubObservations.length < 3) {
-        videoProblems.push(
-          `${target.id}: scrub 媒体观测不足（${scrubObservations.length} < 3）`,
-        );
-      }
-      const playbackObservations = observations.filter(
-        (observation) =>
-          observation.mode === "playback" && observation.media !== null,
-      );
-      if (playbackObservations.length < 2) {
-        videoProblems.push(
-          `${target.id}: 连续播放媒体观测不足（${playbackObservations.length} < 2）`,
-        );
-      }
-    }
-    console.log(
-      `视频：${videoTargets.length} 个目标 / ${videoObservations} 个真实观测 / ${videoChecks} 项检查（失败 ${videoChecksFailed}）`,
-    );
-    if (videoProblems.length > 0) {
-      console.error(`真实视频夹具断言失败：${videoProblems.length} 处：`);
-      for (const problem of videoProblems) console.error(`  - ${problem}`);
-    }
-    // Four-slot ambience fixture: the browser harness reads the same
-    // read-only AudioDiagnostics seam from the game controller and editor
-    // TimelineSession. A report without observations or checks must fail
-    // rather than silently treating ambience parity as optional.
-    const ambienceProblems = [];
-    for (const target of Array.isArray(report.targets) ? report.targets : []) {
-      const ambience = target.ambience;
-      if (ambience?.fixture !== true) continue;
-      const observations = Array.isArray(ambience.observations)
-        ? ambience.observations
-        : [];
-      const checks = Array.isArray(ambience.checks) ? ambience.checks : [];
-      if (checks.length === 0) {
-        ambienceProblems.push(`${target.id}: 没有执行四槽位环境声断言`);
-      }
-      for (const check of checks) {
-        if (check.ok !== true) {
-          ambienceProblems.push(`${target.id}/${check.name}: ${check.detail}`);
-        }
-      }
-      for (const host of ["game", "editor"]) {
-        const hostObservation = observations.find(
-          (observation) => observation.host === host,
-        );
-        if (hostObservation === undefined) {
-          ambienceProblems.push(`${target.id}: ${host} 端没有环境声诊断观测`);
-        }
-      }
-    }
-    console.log(
-      `环境声：${
-        (Array.isArray(report.targets) ? report.targets : []).filter(
-          (target) => target.ambience?.fixture === true,
-        ).length
-      } 个目标 / ${ambienceProblems.length} 个问题`,
-    );
-    if (ambienceProblems.length > 0) {
-      console.error(`四槽位环境声断言失败：${ambienceProblems.length} 处：`);
-      for (const problem of ambienceProblems) console.error(`  - ${problem}`);
-    }
-
-    // Real-WebGL shader assertions: the harness isolates each composable pass
-    // by pixel-diffing the authored frame against the same timeline with that
-    // pass zeroed (and removed), so a new pass that is visually inert, wrongly
-    // anchored under a camera transform, or not identical at zero strength
-    // fails here instead of only leaving a plausible screenshot.  A target
-    // list without the shader fixture, or a fixture target whose probe
-    // produced no checks, fails rather than silently skipping the new effects.
-    const shaderProblems = [];
-    let shaderChecks = 0;
-    const shaderTargets = (
-      Array.isArray(report.targets) ? report.targets : []
-    ).filter((target) => target.shader?.fixture === true);
-    const expectedShaderTargets = [...targets.ids].filter((id) =>
-      id.startsWith("shader-"),
-    );
-    if (shaderTargets.length === 0) {
-      shaderProblems.push(
-        "没有任何目标执行着色器像素断言（夹具缺失，不得静默跳过）",
-      );
-    }
-    for (const target of shaderTargets) {
-      const checks = Array.isArray(target.shader.checks)
-        ? target.shader.checks
-        : [];
-      if (checks.length === 0) {
-        shaderProblems.push(`${target.id}: 没有执行任何着色器像素断言`);
-        continue;
-      }
-      shaderChecks += checks.length;
-      for (const check of checks) {
-        if (check.ok !== true) {
-          shaderProblems.push(`${target.id}/${check.name}: ${check.detail}`);
-        }
-      }
-    }
-    for (const id of expectedShaderTargets) {
-      if (!shaderTargets.some((target) => target.id === id)) {
-        shaderProblems.push(`${id}: 缺少着色器像素断言`);
-      }
-    }
-    console.log(
-      `着色器：${shaderTargets.length} 个目标 / ${shaderChecks} 项像素断言`,
-    );
-    if (shaderProblems.length > 0) {
-      console.error(`着色器像素断言失败：${shaderProblems.length} 处：`);
-      for (const problem of shaderProblems) console.error(`  - ${problem}`);
-    }
-
-    // Browser-driven lifecycle: a cancelled game presentation must settle
-    // `failed`, a cancelled/reset editor session must reload to exactly the
-    // same deterministic frame, and a cancel must have released any media.
-    const lifecycleProblems = [];
-    for (const target of Array.isArray(report.targets) ? report.targets : []) {
-      if (target.game?.cancelledOutcome !== "failed") {
-        lifecycleProblems.push(
-          `${target.id}: cancelCurrentPresentation settled ${target.game?.cancelledOutcome}`,
-        );
-      }
-      const baseline = target.thumbnails?.["editor-0000"]?.sha256;
-      for (const name of ["editor-cancelled-reload", "editor-reset-reload"]) {
-        const signature = target.thumbnails?.[name]?.sha256;
-        if (baseline === undefined || signature === undefined) {
-          lifecycleProblems.push(`${target.id}: missing ${name} capture`);
-        } else if (signature !== baseline) {
-          lifecycleProblems.push(
-            `${target.id}: ${name} does not reproduce editor-0000 (${signature.slice(0, 12)} != ${baseline.slice(0, 12)})`,
-          );
-        }
-      }
-      const hasMedia = (target.editor?.frames ?? []).some(
-        (frame) => frame.media !== null && frame.media !== undefined,
-      );
-      if (hasMedia && target.cancelledMedia !== null) {
-        lifecycleProblems.push(
-          `${target.id}: cancel kept a media element (${JSON.stringify(target.cancelledMedia)})`,
-        );
-      }
-    }
-    if (lifecycleProblems.length > 0) {
-      console.error(`生命周期断言失败：${lifecycleProblems.length} 处：`);
-      for (const problem of lifecycleProblems) console.error(`  - ${problem}`);
-    } else {
-      console.log("生命周期：取消/重置后重载逐字节复现，取消结果 failed。");
-    }
-    if (
-      errors.length > 0 ||
-      pageErrors.length > 0 ||
-      targetProblems.length > 0 ||
-      choiceLayoutProblems.length > 0 ||
-      scrubMediaProblems.length > 0 ||
-      videoProblems.length > 0 ||
-      ambienceProblems.length > 0 ||
-      shaderProblems.length > 0 ||
-      lifecycleProblems.length > 0
-    ) {
-      process.exitCode = 1;
-    }
+    const failed = checkReport({
+      report,
+      targets,
+      pageErrors,
+      captureCount: captures.length,
+      outputDir: options.output,
+      root,
+    });
+    if (failed) process.exitCode = 1;
   } finally {
     if (client !== null) {
       await client.send("Browser.close").catch(() => undefined);

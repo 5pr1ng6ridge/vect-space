@@ -5,13 +5,17 @@ import type {
   DialogueHistoryEntry,
   AdvanceSource,
   ResolvedAsset,
-  RuntimeSnapshot,
   RuntimeUpdate,
   SaveSlotSummary,
   Settings,
   PresentationOutcome,
   ChapterMapSnapshot,
 } from "@vectspace/presentation-core/types";
+import type {
+  ProofBoardSpec,
+  ProofCheckResult,
+  ProofGraph,
+} from "@vectspace/presentation-core/proof";
 import type { UpdateBatch } from "@vectspace/presentation-core/update-sequencer";
 import type { WireU64 } from "../../shared/generated/WireU64";
 import type { AnimationSource } from "@vectspace/presentation-core/image-animation";
@@ -116,6 +120,31 @@ export const engineApi = {
       expectedRevision,
       expectedSessionId,
     }),
+  proofBoard: (puzzle: string) =>
+    command<ProofBoardSpec>("proof_board", { puzzle }),
+  proofCheck: (puzzle: string, graph: ProofGraph) =>
+    command<ProofCheckResult>("proof_check", { puzzle, graph }),
+  proofSaveDraft: (
+    promptId: string,
+    graph: ProofGraph,
+    expectedSessionId: WireU64,
+  ) =>
+    command<null>("proof_save_draft", { promptId, graph, expectedSessionId }),
+  proofSubmit: (
+    expectedRevision: WireU64,
+    graph: ProofGraph,
+    expectedSessionId: WireU64,
+  ) =>
+    command<{
+      accepted: boolean;
+      check: ProofCheckResult;
+      update: RuntimeUpdate | null;
+    }>("proof_submit", { expectedRevision, graph, expectedSessionId }),
+  proofAbandon: (expectedRevision: WireU64, expectedSessionId: WireU64) =>
+    command<RuntimeUpdate>("proof_abandon", {
+      expectedRevision,
+      expectedSessionId,
+    }),
   clickButton: (
     instanceId: string,
     expectedRevision: WireU64,
@@ -136,7 +165,6 @@ export const engineApi = {
       outcome,
       expectedSessionId,
     }),
-  getSnapshot: () => command<RuntimeSnapshot>("get_snapshot"),
   /** Committed updates after `afterSeq`; the host's bounded buffer is the source. */
   syncUpdates: (expectedSessionId: WireU64, afterSeq: WireU64) =>
     command<UpdateBatch>("sync_updates", { expectedSessionId, afterSeq }),
@@ -152,10 +180,6 @@ export const engineApi = {
     }),
   getDialogueHistory: () =>
     command<DialogueHistoryEntry[]>("get_dialogue_history"),
-  clearDialogueHistory: (expectedSessionId: WireU64) =>
-    command<unknown>("clear_dialogue_history", {
-      expectedSessionId,
-    }),
   getChapterMap: () => command<ChapterMapSnapshot | null>("get_chapter_map"),
   startSceneReplay: (sceneId: string, expectedSessionId: WireU64) =>
     command<RuntimeUpdate>("start_scene_replay", {
@@ -195,7 +219,6 @@ export const engineApi = {
   // only: the secondary has no save, settings, history, chapter-map or replay
   // transport at all.
   secondaryBootstrap: () => command<BootstrapPayload>("secondary_bootstrap"),
-  secondarySnapshot: () => command<RuntimeSnapshot>("secondary_snapshot"),
   secondarySyncUpdates: (expectedSessionId: WireU64, afterSeq: WireU64) =>
     command<UpdateBatch>("secondary_sync_updates", {
       expectedSessionId,
