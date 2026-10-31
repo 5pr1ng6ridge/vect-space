@@ -42,3 +42,6 @@ game/.vectspace/tmp/
 *.njsproj
 *.sln
 *.sw?
+
+# Sketch UI contact sheets (review only; regenerate with --sheets)
+art/ui-sketch/sheets/

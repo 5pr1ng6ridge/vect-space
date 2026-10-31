@@ -4,6 +4,7 @@ src-tauri/gen/schemas/
 editor/src-tauri/gen/schemas/
 crates/vectspace-core/tests/fixtures/
 game/
+art/ui-sketch/
 target/
 dist/
 editor/dist/

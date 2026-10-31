@@ -1,0 +1,1358 @@
+[
+  {
+    "id": "gui.sketch_continue_a",
+    "path": "sketch/hud/continue_a.png",
+    "size": [
+      64,
+      64
+    ],
+    "note": "Alternate opacity only; no movement between frames."
+  },
+  {
+    "id": "gui.sketch_continue_b",
+    "path": "sketch/hud/continue_b.png",
+    "size": [
+      64,
+      64
+    ],
+    "note": "Alternate opacity only; no movement between frames."
+  },
+  {
+    "id": "gui.sketch_dialogue_box",
+    "path": "sketch/hud/dialogue_box.png",
+    "size": [
+      1920,
+      387
+    ],
+    "textBox": [
+      176,
+      103,
+      1572,
+      239
+    ],
+    "note": "Place at screen bottom. Overlay name_box at x=100, y=-139; tape stays clear of that plate."
+  },
+  {
+    "id": "gui.sketch_dialogue_box_grid",
+    "path": "sketch/hud/dialogue_box_grid.png",
+    "size": [
+      1920,
+      387
+    ],
+    "textBox": [
+      176,
+      103,
+      1572,
+      239
+    ],
+    "note": "Graph-paper alternative; same name plate placement and text bounds as dialogue_box."
+  },
+  {
+    "id": "gui.sketch_end_card",
+    "path": "sketch/hud/end_card.png",
+    "size": [
+      520,
+      360
+    ],
+    "textBox": [
+      48,
+      48,
+      424,
+      180
+    ],
+    "note": "Place a runtime 360x64 button at [80,260]; no lettering or button is baked in."
+  },
+  {
+    "id": "gui.sketch_long_text_page",
+    "path": "sketch/hud/long_text_page.png",
+    "size": [
+      1400,
+      980
+    ],
+    "textBox": [
+      110,
+      90,
+      1180,
+      800
+    ]
+  },
+  {
+    "id": "gui.sketch_name_box",
+    "path": "sketch/hud/name_box.png",
+    "size": [
+      364,
+      243
+    ],
+    "textBox": [
+      54,
+      78,
+      246,
+      44
+    ],
+    "note": "Draw above dialogue at x=100, y=-139. Bottom tape bridges the plate and dialogue paper; centre the 29px speaker name."
+  },
+  {
+    "id": "gui.sketch_notice_strip",
+    "path": "sketch/hud/notice_strip.png",
+    "size": [
+      1100,
+      80
+    ],
+    "textBox": [
+      40,
+      16,
+      1020,
+      48
+    ],
+    "slice": [
+      16,
+      36,
+      16,
+      36
+    ],
+    "note": "Advance-block message. Keep fixed height; stretch only the horizontal centre band."
+  },
+  {
+    "id": "gui.sketch_scratch_paper",
+    "path": "sketch/hud/scratch_paper.png",
+    "size": [
+      480,
+      360
+    ],
+    "slice": [
+      50,
+      60,
+      50,
+      60
+    ],
+    "note": "Blank overlay scrap; keep labels within [50,50,380,260]. Stretchable with fixed corner folds."
+  },
+  {
+    "id": "gui.sketch_toast_error",
+    "path": "sketch/hud/toast_error.png",
+    "size": [
+      900,
+      120
+    ],
+    "textBox": [
+      44,
+      26,
+      700,
+      68
+    ],
+    "slice": [
+      50,
+      150,
+      24,
+      40
+    ],
+    "note": "Reserve x=750..900 for the runtime close button; paper there is undecorated. Stretch horizontally."
+  },
+  {
+    "id": "gui.sketch_toast_info",
+    "path": "sketch/hud/toast_info.png",
+    "size": [
+      900,
+      120
+    ],
+    "textBox": [
+      44,
+      26,
+      700,
+      68
+    ],
+    "slice": [
+      50,
+      150,
+      24,
+      40
+    ],
+    "note": "Reserve x=750..900 for the runtime close button; paper there is undecorated. Stretch horizontally."
+  },
+  {
+    "id": "gui.sketch_tool_auto",
+    "path": "sketch/hud/tool_auto.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_tool_back_active",
+    "path": "sketch/hud/tool_back_active.png",
+    "size": [
+      72,
+      72
+    ]
+  },
+  {
+    "id": "gui.sketch_tool_back_hover",
+    "path": "sketch/hud/tool_back_hover.png",
+    "size": [
+      72,
+      72
+    ]
+  },
+  {
+    "id": "gui.sketch_tool_hide",
+    "path": "sketch/hud/tool_hide.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_tool_history",
+    "path": "sketch/hud/tool_history.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_tool_load",
+    "path": "sketch/hud/tool_load.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_tool_menu",
+    "path": "sketch/hud/tool_menu.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_tool_save",
+    "path": "sketch/hud/tool_save.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_tool_settings",
+    "path": "sketch/hud/tool_settings.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_tool_skip",
+    "path": "sketch/hud/tool_skip.png",
+    "size": [
+      72,
+      72
+    ],
+    "note": "Transparent graphite icon; overlay on tool_back_hover or tool_back_active at the same origin."
+  },
+  {
+    "id": "gui.sketch_map_background",
+    "path": "sketch/map/map_background.png",
+    "size": [
+      1920,
+      1080
+    ],
+    "note": "Opaque graph-paper map. Suggested 240x150 card centres: (320,690), (780,490), (1260,350), (1740,290), (980,820), (1480,700). No chapter text."
+  },
+  {
+    "id": "gui.sketch_map_hover_card",
+    "path": "sketch/map/map_hover_card.png",
+    "size": [
+      480,
+      220
+    ],
+    "textBox": [
+      24,
+      40,
+      432,
+      160
+    ],
+    "slice": [
+      40,
+      24,
+      20,
+      24
+    ],
+    "note": "Top-centre pointer at x240. Horizontal 9-slice also scales the notch; keep native width when possible."
+  },
+  {
+    "id": "gui.sketch_map_node_cleared",
+    "path": "sketch/map/map_node_cleared.png",
+    "size": [
+      240,
+      150
+    ],
+    "textBox": [
+      20,
+      20,
+      200,
+      110
+    ],
+    "slice": [
+      20,
+      58,
+      56,
+      24
+    ],
+    "note": "Inventory textBox retained; locked/cleared badges occupy [182,96,44,43] inside its lower-right corner. Keep live text clear of that badge area. Stretch only modestly."
+  },
+  {
+    "id": "gui.sketch_map_node_current",
+    "path": "sketch/map/map_node_current.png",
+    "size": [
+      240,
+      150
+    ],
+    "textBox": [
+      20,
+      20,
+      200,
+      110
+    ],
+    "slice": [
+      20,
+      58,
+      56,
+      24
+    ],
+    "note": "Inventory textBox retained; locked/cleared badges occupy [182,96,44,43] inside its lower-right corner. Keep live text clear of that badge area. Stretch only modestly."
+  },
+  {
+    "id": "gui.sketch_map_node_locked",
+    "path": "sketch/map/map_node_locked.png",
+    "size": [
+      240,
+      150
+    ],
+    "textBox": [
+      20,
+      20,
+      200,
+      110
+    ],
+    "slice": [
+      20,
+      58,
+      56,
+      24
+    ],
+    "note": "Inventory textBox retained; locked/cleared badges occupy [182,96,44,43] inside its lower-right corner. Keep live text clear of that badge area. Stretch only modestly."
+  },
+  {
+    "id": "gui.sketch_map_node_open",
+    "path": "sketch/map/map_node_open.png",
+    "size": [
+      240,
+      150
+    ],
+    "textBox": [
+      20,
+      20,
+      200,
+      110
+    ],
+    "slice": [
+      20,
+      58,
+      56,
+      24
+    ],
+    "note": "Inventory textBox retained; locked/cleared badges occupy [182,96,44,43] inside its lower-right corner. Keep live text clear of that badge area. Stretch only modestly."
+  },
+  {
+    "id": "gui.sketch_map_pin",
+    "path": "sketch/map/map_pin.png",
+    "size": [
+      64,
+      80
+    ],
+    "note": "Pushpin tip anchor at (28,65)."
+  },
+  {
+    "id": "gui.sketch_button_disabled",
+    "path": "sketch/menu/button_disabled.png",
+    "size": [
+      360,
+      64
+    ],
+    "textBox": [
+      24,
+      10,
+      312,
+      44
+    ],
+    "slice": [
+      9,
+      24,
+      9,
+      24
+    ],
+    "note": "Centred label; stretch the quiet middle bands. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_button_hover",
+    "path": "sketch/menu/button_hover.png",
+    "size": [
+      360,
+      64
+    ],
+    "textBox": [
+      24,
+      10,
+      312,
+      44
+    ],
+    "slice": [
+      9,
+      24,
+      9,
+      24
+    ],
+    "note": "Centred label; stretch the quiet middle bands. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_button_normal",
+    "path": "sketch/menu/button_normal.png",
+    "size": [
+      360,
+      64
+    ],
+    "textBox": [
+      24,
+      10,
+      312,
+      44
+    ],
+    "slice": [
+      9,
+      24,
+      9,
+      24
+    ],
+    "note": "Centred label; stretch the quiet middle bands. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_button_pressed",
+    "path": "sketch/menu/button_pressed.png",
+    "size": [
+      360,
+      64
+    ],
+    "textBox": [
+      24,
+      10,
+      312,
+      44
+    ],
+    "slice": [
+      9,
+      24,
+      9,
+      24
+    ],
+    "note": "Centred label; stretch the quiet middle bands. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_checkbox_off",
+    "path": "sketch/menu/checkbox_off.png",
+    "size": [
+      44,
+      44
+    ]
+  },
+  {
+    "id": "gui.sketch_checkbox_on",
+    "path": "sketch/menu/checkbox_on.png",
+    "size": [
+      44,
+      44
+    ]
+  },
+  {
+    "id": "gui.sketch_choice_icon_check",
+    "path": "sketch/menu/choice_icon_check.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_choice_icon_lemma",
+    "path": "sketch/menu/choice_icon_lemma.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_choice_icon_lock",
+    "path": "sketch/menu/choice_icon_lock.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_choice_icon_question",
+    "path": "sketch/menu/choice_icon_question.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_choice_icon_star",
+    "path": "sketch/menu/choice_icon_star.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_choice_icon_warning",
+    "path": "sketch/menu/choice_icon_warning.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_choice_primary_disabled",
+    "path": "sketch/menu/choice_primary_disabled.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Ruled reference family. Optional 56px icon at x=32; label starts at x=106. Pressed paper moves down 2px."
+  },
+  {
+    "id": "gui.sketch_choice_primary_hover",
+    "path": "sketch/menu/choice_primary_hover.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Ruled reference family. Optional 56px icon at x=32; label starts at x=106. Pressed paper moves down 2px."
+  },
+  {
+    "id": "gui.sketch_choice_primary_normal",
+    "path": "sketch/menu/choice_primary_normal.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Ruled reference family. Optional 56px icon at x=32; label starts at x=106. Pressed paper moves down 2px."
+  },
+  {
+    "id": "gui.sketch_choice_primary_pressed",
+    "path": "sketch/menu/choice_primary_pressed.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Ruled reference family. Optional 56px icon at x=32; label starts at x=106. Pressed paper moves down 2px."
+  },
+  {
+    "id": "gui.sketch_choice_secondary_disabled",
+    "path": "sketch/menu/choice_secondary_disabled.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Kraft rim with a light writing field; same icon and label placement as primary."
+  },
+  {
+    "id": "gui.sketch_choice_secondary_hover",
+    "path": "sketch/menu/choice_secondary_hover.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Kraft rim with a light writing field; same icon and label placement as primary."
+  },
+  {
+    "id": "gui.sketch_choice_secondary_normal",
+    "path": "sketch/menu/choice_secondary_normal.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Kraft rim with a light writing field; same icon and label placement as primary."
+  },
+  {
+    "id": "gui.sketch_choice_secondary_pressed",
+    "path": "sketch/menu/choice_secondary_pressed.png",
+    "size": [
+      980,
+      92
+    ],
+    "textBox": [
+      32,
+      14,
+      916,
+      64
+    ],
+    "note": "Kraft rim with a light writing field; same icon and label placement as primary."
+  },
+  {
+    "id": "gui.sketch_close_hover",
+    "path": "sketch/menu/close_hover.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_close_normal",
+    "path": "sketch/menu/close_normal.png",
+    "size": [
+      56,
+      56
+    ]
+  },
+  {
+    "id": "gui.sketch_select_box",
+    "path": "sketch/menu/select_box.png",
+    "size": [
+      320,
+      56
+    ],
+    "textBox": [
+      18,
+      8,
+      250,
+      40
+    ],
+    "note": "Arrow lies outside the label area. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_slider_fill",
+    "path": "sketch/menu/slider_fill.png",
+    "size": [
+      420,
+      32
+    ],
+    "note": "Track centre y=16; clip the full-width fill from the left to the current value, without rescaling it."
+  },
+  {
+    "id": "gui.sketch_slider_knob",
+    "path": "sketch/menu/slider_knob.png",
+    "size": [
+      40,
+      40
+    ],
+    "note": "Centre at (20,20); place over the slider track centre."
+  },
+  {
+    "id": "gui.sketch_slider_track",
+    "path": "sketch/menu/slider_track.png",
+    "size": [
+      420,
+      32
+    ],
+    "note": "Track centre y=16; clip the full-width fill from the left to the current value, without rescaling it."
+  },
+  {
+    "id": "gui.sketch_tab_active",
+    "path": "sketch/menu/tab_active.png",
+    "size": [
+      220,
+      60
+    ],
+    "textBox": [
+      20,
+      10,
+      180,
+      40
+    ],
+    "note": "Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_tab_normal",
+    "path": "sketch/menu/tab_normal.png",
+    "size": [
+      220,
+      60
+    ],
+    "textBox": [
+      20,
+      10,
+      180,
+      40
+    ],
+    "note": "Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_title_button_disabled",
+    "path": "sketch/menu/title_button_disabled.png",
+    "size": [
+      482,
+      60
+    ],
+    "textBox": [
+      20,
+      8,
+      442,
+      44
+    ],
+    "note": "Left-aligned label; torn index-card strip. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_title_button_hover",
+    "path": "sketch/menu/title_button_hover.png",
+    "size": [
+      482,
+      60
+    ],
+    "textBox": [
+      20,
+      8,
+      442,
+      44
+    ],
+    "note": "Left-aligned label; torn index-card strip. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_title_button_normal",
+    "path": "sketch/menu/title_button_normal.png",
+    "size": [
+      482,
+      60
+    ],
+    "textBox": [
+      20,
+      8,
+      442,
+      44
+    ],
+    "note": "Left-aligned label; torn index-card strip. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_title_button_pressed",
+    "path": "sketch/menu/title_button_pressed.png",
+    "size": [
+      482,
+      60
+    ],
+    "textBox": [
+      20,
+      8,
+      442,
+      44
+    ],
+    "note": "Left-aligned label; torn index-card strip. Compact inventory textBox requires less than 12px paper clearance; tight shadows stay inside the canvas."
+  },
+  {
+    "id": "gui.sketch_empty_thumbnail",
+    "path": "sketch/panel/empty_thumbnail.png",
+    "size": [
+      240,
+      135
+    ],
+    "note": "Inset placeholder photo; composite in save-slot thumbnail window."
+  },
+  {
+    "id": "gui.sketch_history_rule",
+    "path": "sketch/panel/history_rule.png",
+    "size": [
+      1272,
+      28
+    ],
+    "slice": [
+      0,
+      32,
+      0,
+      32
+    ],
+    "note": "Transparent divider; horizontal stretch only."
+  },
+  {
+    "id": "gui.sketch_modal_backdrop",
+    "path": "sketch/panel/modal_backdrop.png",
+    "size": [
+      1920,
+      1080
+    ],
+    "note": "Warm grey dim: centre alpha .48, edges up to .60. Composite over the running game."
+  },
+  {
+    "id": "gui.sketch_modal_panel",
+    "path": "sketch/panel/modal_panel.png",
+    "size": [
+      1380,
+      900
+    ],
+    "textBox": [
+      54,
+      46,
+      1272,
+      808
+    ],
+    "slice": [
+      44,
+      44,
+      44,
+      50
+    ],
+    "note": "Plain notebook interior. Binding holes stay in corner slices; rules are deliberately faint."
+  },
+  {
+    "id": "gui.sketch_panel_title_tab",
+    "path": "sketch/panel/panel_title_tab.png",
+    "size": [
+      360,
+      84
+    ],
+    "textBox": [
+      32,
+      24,
+      296,
+      36
+    ],
+    "slice": [
+      24,
+      80,
+      24,
+      80
+    ],
+    "note": "Heading centred in the chosen textBox; tape stays in top corners."
+  },
+  {
+    "id": "gui.sketch_save_slot_empty",
+    "path": "sketch/panel/save_slot_empty.png",
+    "size": [
+      627,
+      200
+    ],
+    "textBox": [
+      278,
+      18,
+      331,
+      164
+    ],
+    "slice": [
+      18,
+      18,
+      30,
+      274
+    ],
+    "note": "Thumbnail at [18,18,240,135]; use empty_thumbnail for empty state. Thumbnail and photo corners remain in left slice."
+  },
+  {
+    "id": "gui.sketch_save_slot_hover",
+    "path": "sketch/panel/save_slot_hover.png",
+    "size": [
+      627,
+      200
+    ],
+    "textBox": [
+      278,
+      18,
+      331,
+      164
+    ],
+    "slice": [
+      18,
+      18,
+      30,
+      274
+    ],
+    "note": "Thumbnail at [18,18,240,135]; use empty_thumbnail for empty state. Thumbnail and photo corners remain in left slice."
+  },
+  {
+    "id": "gui.sketch_save_slot_normal",
+    "path": "sketch/panel/save_slot_normal.png",
+    "size": [
+      627,
+      200
+    ],
+    "textBox": [
+      278,
+      18,
+      331,
+      164
+    ],
+    "slice": [
+      18,
+      18,
+      30,
+      274
+    ],
+    "note": "Thumbnail at [18,18,240,135]; use empty_thumbnail for empty state. Thumbnail and photo corners remain in left slice."
+  },
+  {
+    "id": "gui.sketch_settings_row",
+    "path": "sketch/panel/settings_row.png",
+    "size": [
+      1272,
+      76
+    ],
+    "slice": [
+      14,
+      24,
+      14,
+      24
+    ],
+    "note": "Faint light-paper row, all content remains UI text/controls."
+  },
+  {
+    "id": "gui.sketch_proof_background",
+    "path": "sketch/proof/proof_background.png",
+    "size": [
+      1920,
+      1080
+    ],
+    "note": "Opaque desk sheet. Header y<150; palette x<300; diagnostics x>1620. Calm 32px grid in the working canvas."
+  },
+  {
+    "id": "gui.sketch_proof_canvas_controls",
+    "path": "sketch/proof/proof_canvas_controls.png",
+    "size": [
+      1296,
+      64
+    ],
+    "slice": [
+      22,
+      50,
+      22,
+      50
+    ],
+    "note": "Horizontal stretch only. UI controls occupy x=52..1244, y=18..44; grip marks stay in end caps."
+  },
+  {
+    "id": "gui.sketch_proof_goal_plate",
+    "path": "sketch/proof/proof_goal_plate.png",
+    "size": [
+      820,
+      88
+    ],
+    "textBox": [
+      24,
+      14,
+      772,
+      60
+    ],
+    "note": "KaTeX goal formula stays on unruled light paper between blue brackets."
+  },
+  {
+    "id": "gui.sketch_proof_header",
+    "path": "sketch/proof/proof_header.png",
+    "size": [
+      1920,
+      150
+    ],
+    "textBox": [
+      30,
+      25,
+      1860,
+      100
+    ]
+  },
+  {
+    "id": "gui.sketch_proof_node_complete",
+    "path": "sketch/proof/proof_node_complete.png",
+    "size": [
+      300,
+      240
+    ],
+    "textBox": [
+      16,
+      8,
+      268,
+      32
+    ],
+    "slice": [
+      56,
+      24,
+      24,
+      24
+    ],
+    "note": "Header fixed through y=48; stretch body vertically. Bottom-right 24px corner reserved for state mark. Ports are separate 28px overlays."
+  },
+  {
+    "id": "gui.sketch_proof_node_error",
+    "path": "sketch/proof/proof_node_error.png",
+    "size": [
+      300,
+      240
+    ],
+    "textBox": [
+      16,
+      8,
+      268,
+      32
+    ],
+    "slice": [
+      56,
+      24,
+      24,
+      24
+    ],
+    "note": "Header fixed through y=48; stretch body vertically. Bottom-right 24px corner reserved for state mark. Ports are separate 28px overlays."
+  },
+  {
+    "id": "gui.sketch_proof_node_header_conclusion",
+    "path": "sketch/proof/proof_node_header_conclusion.png",
+    "size": [
+      300,
+      52
+    ],
+    "note": "Overlay at node origin beneath its UI label; category accent sits below label y=40."
+  },
+  {
+    "id": "gui.sketch_proof_node_header_lemma",
+    "path": "sketch/proof/proof_node_header_lemma.png",
+    "size": [
+      300,
+      52
+    ],
+    "note": "Overlay at node origin beneath its UI label; category accent sits below label y=40."
+  },
+  {
+    "id": "gui.sketch_proof_node_header_premise",
+    "path": "sketch/proof/proof_node_header_premise.png",
+    "size": [
+      300,
+      52
+    ],
+    "note": "Overlay at node origin beneath its UI label; category accent sits below label y=40."
+  },
+  {
+    "id": "gui.sketch_proof_node_header_rule",
+    "path": "sketch/proof/proof_node_header_rule.png",
+    "size": [
+      300,
+      52
+    ],
+    "note": "Overlay at node origin beneath its UI label; category accent sits below label y=40."
+  },
+  {
+    "id": "gui.sketch_proof_node_normal",
+    "path": "sketch/proof/proof_node_normal.png",
+    "size": [
+      300,
+      240
+    ],
+    "textBox": [
+      16,
+      8,
+      268,
+      32
+    ],
+    "slice": [
+      56,
+      24,
+      24,
+      24
+    ],
+    "note": "Header fixed through y=48; stretch body vertically. Bottom-right 24px corner reserved for state mark. Ports are separate 28px overlays."
+  },
+  {
+    "id": "gui.sketch_proof_node_selected",
+    "path": "sketch/proof/proof_node_selected.png",
+    "size": [
+      300,
+      240
+    ],
+    "textBox": [
+      16,
+      8,
+      268,
+      32
+    ],
+    "slice": [
+      56,
+      24,
+      24,
+      24
+    ],
+    "note": "Header fixed through y=48; stretch body vertically. Bottom-right 24px corner reserved for state mark. Ports are separate 28px overlays."
+  },
+  {
+    "id": "gui.sketch_proof_palette_card_disabled",
+    "path": "sketch/proof/proof_palette_card_disabled.png",
+    "size": [
+      264,
+      96
+    ],
+    "textBox": [
+      12,
+      12,
+      240,
+      72
+    ],
+    "note": "Compact shadow preserves the inventory text box; label and rule description are rendered by UI."
+  },
+  {
+    "id": "gui.sketch_proof_palette_card_hover",
+    "path": "sketch/proof/proof_palette_card_hover.png",
+    "size": [
+      264,
+      96
+    ],
+    "textBox": [
+      12,
+      12,
+      240,
+      72
+    ],
+    "note": "Compact shadow preserves the inventory text box; label and rule description are rendered by UI."
+  },
+  {
+    "id": "gui.sketch_proof_palette_card_normal",
+    "path": "sketch/proof/proof_palette_card_normal.png",
+    "size": [
+      264,
+      96
+    ],
+    "textBox": [
+      12,
+      12,
+      240,
+      72
+    ],
+    "note": "Compact shadow preserves the inventory text box; label and rule description are rendered by UI."
+  },
+  {
+    "id": "gui.sketch_proof_panel_left",
+    "path": "sketch/proof/proof_panel_left.png",
+    "size": [
+      300,
+      930
+    ],
+    "slice": [
+      68,
+      76,
+      42,
+      76
+    ],
+    "note": "Stretch the blank middle vertically; tape stays in top corners. Suggested content inset 28px."
+  },
+  {
+    "id": "gui.sketch_proof_panel_right",
+    "path": "sketch/proof/proof_panel_right.png",
+    "size": [
+      300,
+      930
+    ],
+    "slice": [
+      68,
+      76,
+      42,
+      76
+    ],
+    "note": "Stretch the blank middle vertically; tape stays in top corners. Suggested content inset 28px."
+  },
+  {
+    "id": "gui.sketch_proof_port_connected",
+    "path": "sketch/proof/proof_port_connected.png",
+    "size": [
+      28,
+      28
+    ],
+    "note": "Socket centre [14,14], ring radius 9.3px; no paper shadow on this small icon."
+  },
+  {
+    "id": "gui.sketch_proof_port_local",
+    "path": "sketch/proof/proof_port_local.png",
+    "size": [
+      28,
+      28
+    ],
+    "note": "Socket centre [14,14], ring radius 9.3px; no paper shadow on this small icon."
+  },
+  {
+    "id": "gui.sketch_proof_port_mismatch",
+    "path": "sketch/proof/proof_port_mismatch.png",
+    "size": [
+      28,
+      28
+    ],
+    "note": "Socket centre [14,14], ring radius 9.3px; no paper shadow on this small icon."
+  },
+  {
+    "id": "gui.sketch_proof_port_open",
+    "path": "sketch/proof/proof_port_open.png",
+    "size": [
+      28,
+      28
+    ],
+    "note": "Socket centre [14,14], ring radius 9.3px; no paper shadow on this small icon."
+  },
+  {
+    "id": "gui.sketch_proof_qed_stamp",
+    "path": "sketch/proof/proof_qed_stamp.png",
+    "size": [
+      240,
+      240
+    ],
+    "note": "Transparent ink-blue QED seal with filled ∎; rotated -3 degrees within the image."
+  },
+  {
+    "id": "gui.sketch_proof_status_complete",
+    "path": "sketch/proof/proof_status_complete.png",
+    "size": [
+      240,
+      64
+    ],
+    "textBox": [
+      16,
+      10,
+      208,
+      44
+    ],
+    "note": "Status lettering supplied by UI. Border ink carries status; keep label centred."
+  },
+  {
+    "id": "gui.sketch_proof_status_incomplete",
+    "path": "sketch/proof/proof_status_incomplete.png",
+    "size": [
+      240,
+      64
+    ],
+    "textBox": [
+      16,
+      10,
+      208,
+      44
+    ],
+    "note": "Status lettering supplied by UI. Border ink carries status; keep label centred."
+  },
+  {
+    "id": "gui.sketch_proof_status_unavailable",
+    "path": "sketch/proof/proof_status_unavailable.png",
+    "size": [
+      240,
+      64
+    ],
+    "textBox": [
+      16,
+      10,
+      208,
+      44
+    ],
+    "note": "Status lettering supplied by UI. Border ink carries status; keep label centred."
+  },
+  {
+    "id": "gui.sketch_loader_a",
+    "path": "sketch/title/loader_a.png",
+    "size": [
+      96,
+      96
+    ],
+    "note": "Play a–d at 8 fps; fixed centre (48,48)."
+  },
+  {
+    "id": "gui.sketch_loader_b",
+    "path": "sketch/title/loader_b.png",
+    "size": [
+      96,
+      96
+    ],
+    "note": "Play a–d at 8 fps; fixed centre (48,48)."
+  },
+  {
+    "id": "gui.sketch_loader_c",
+    "path": "sketch/title/loader_c.png",
+    "size": [
+      96,
+      96
+    ],
+    "note": "Play a–d at 8 fps; fixed centre (48,48)."
+  },
+  {
+    "id": "gui.sketch_loader_d",
+    "path": "sketch/title/loader_d.png",
+    "size": [
+      96,
+      96
+    ],
+    "note": "Play a–d at 8 fps; fixed centre (48,48)."
+  },
+  {
+    "id": "gui.sketch_title_background",
+    "path": "sketch/title/title_background.png",
+    "size": [
+      1920,
+      1080
+    ],
+    "note": "Opaque sketchbook spread. Quiet area x136–746/y94–734 for title_card; logo is composited separately."
+  },
+  {
+    "id": "gui.sketch_title_card",
+    "path": "sketch/title/title_card.png",
+    "size": [
+      610,
+      640
+    ],
+    "textBox": [
+      64,
+      58,
+      482,
+      524
+    ]
+  },
+  {
+    "id": "gui.sketch_title_logo",
+    "path": "sketch/title/title_logo.png",
+    "size": [
+      1000,
+      260
+    ],
+    "note": "Approved reference lettering with yellow highlighter swipe."
+  }
+]
