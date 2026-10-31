@@ -849,6 +849,34 @@
         {
           "type": "object",
           "properties": {
+            "abandon": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "next": {
+              "type": "string"
+            },
+            "puzzle": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "proof"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "puzzle",
+            "next"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "await": {
               "type": "boolean",
               "default": false

@@ -8,6 +8,8 @@ import {
   type ReactElement,
 } from "react";
 
+import { PreviewProofPrompt } from "./PreviewProofPrompt";
+import type { ProofGraph } from "@vectspace/presentation-core/proof";
 import { resolveImageAsset } from "@vectspace/presentation-core/image-animation";
 import {
   ArrowLeft,
@@ -51,7 +53,11 @@ import {
   previewAssetsToUrls,
 } from "../api";
 import { projectRequest } from "../story";
-import { buildEditorVisualResources, EMPTY_EDITOR_VISUALS, type EditorVisualResources } from "../visualResources";
+import {
+  buildEditorVisualResources,
+  EMPTY_EDITOR_VISUALS,
+  type EditorVisualResources,
+} from "../visualResources";
 import { sceneRole, WINDOW_ROLE_LABELS } from "../windowInteraction";
 import type {
   EditorProject,
@@ -187,7 +193,8 @@ export function GameplayPreview({
   const [windowNotes, setWindowNotes] = useState<string[]>([]);
   const [assets, setAssets] = useState<AssetUrlMap>({});
   const [animations, setAnimations] = useState<AnimationMap>({});
-  const [visuals, setVisuals] = useState<EditorVisualResources>(EMPTY_EDITOR_VISUALS);
+  const [visuals, setVisuals] =
+    useState<EditorVisualResources>(EMPTY_EDITOR_VISUALS);
   const [needsChoice, setNeedsChoice] = useState<NeedsChoiceState | null>(null);
   const [unreachable, setUnreachable] = useState<string | null>(null);
   const [branchDecisions, setBranchDecisions] = useState<
@@ -447,7 +454,11 @@ export function GameplayPreview({
         // must still stop the runtime the host just installed.
         sessionRef.current = result.session_id;
         const resolvedUrls = previewAssetsToUrls(result.assets);
-        const visualResources = buildEditorVisualResources(project, resolvedUrls, result);
+        const visualResources = buildEditorVisualResources(
+          project,
+          resolvedUrls,
+          result,
+        );
         setSessionId(result.session_id);
         setVisuals(visualResources);
         setAssets(resolvedUrls);
@@ -459,7 +470,8 @@ export function GameplayPreview({
         if (generation === generationRef.current) {
           const failedSession = sessionRef.current;
           sessionRef.current = null;
-          if (failedSession !== null) void editorApi.previewSessionStop(failedSession);
+          if (failedSession !== null)
+            void editorApi.previewSessionStop(failedSession);
           setStatus("idle");
           onError(errorMessage(reason));
         }
@@ -673,6 +685,57 @@ export function GameplayPreview({
     [runCommand, update],
   );
 
+  const submitProof = useCallback(
+    async (graph: ProofGraph) => {
+      const session = sessionRef.current;
+      const generation = generationRef.current;
+      if (
+        session === null ||
+        busyRef.current ||
+        update === null ||
+        update.requires_ack
+      )
+        throw new Error("预览正忙");
+      busyRef.current = true;
+      setBusy(true);
+      try {
+        await tickRef.current;
+        const revision = liveRef.current?.revision;
+        if (
+          revision === undefined ||
+          generation !== generationRef.current ||
+          sessionRef.current !== session
+        )
+          throw new Error("预览会话已过期");
+        const result = await editorApi.previewProofSubmit({
+          session_id: session,
+          expected_revision: revision,
+          graph,
+        });
+        if (
+          generation !== generationRef.current ||
+          sessionRef.current !== session
+        )
+          throw new Error("预览会话已过期");
+        if (result.update !== null) applyStory(result.update);
+        return result;
+      } finally {
+        release(generation);
+      }
+    },
+    [applyStory, release, update],
+  );
+
+  const abandonProof = useCallback(() => {
+    if (update === null || update.requires_ack) return;
+    void runCommand((session, revision) =>
+      editorApi.previewProofAbandon({
+        session_id: session,
+        expected_revision: revision,
+      }),
+    );
+  }, [runCommand, update]);
+
   const clickButton = useCallback(
     (instanceId: string): void => {
       if (update === null || update.requires_ack) return;
@@ -776,6 +839,7 @@ export function GameplayPreview({
     snapshot !== null && snapshot.prompt.kind === "choice"
       ? snapshot.prompt
       : null;
+  const proof = snapshot?.prompt.kind === "proof" ? snapshot.prompt : null;
   const dialoguePage: DialoguePageSnapshot | null =
     snapshot?.dialogue_page ?? null;
   const longTextPage: LongTextPageSnapshot | null =
@@ -1095,6 +1159,16 @@ export function GameplayPreview({
                 prompt={choice}
               />
             )}
+            {proof !== null && sessionId !== null && status === "playing" && (
+              <PreviewProofPrompt
+                key={`${sessionId}:${proof.prompt_id}`}
+                prompt={proof}
+                sessionId={sessionId}
+                onSubmit={submitProof}
+                onAbandon={abandonProof}
+                onError={onError}
+              />
+            )}
             {endPrompt && status === "playing" && (
               <div className="gameplay-preview-end">场景结束</div>
             )}
@@ -1114,4 +1188,3 @@ export function GameplayPreview({
     </section>
   );
 }
-

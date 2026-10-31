@@ -1,3 +1,4 @@
+mod proof;
 mod animation;
 mod documents;
 mod effects;
@@ -55,6 +56,7 @@ fn validate_fixture_scenes(
         &catalog.ui_motions,
         &catalog.buttons,
         &catalog.actions,
+        &catalog.proofs,
     )
 }
 

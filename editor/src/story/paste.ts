@@ -122,6 +122,7 @@ export function preparePastedNode(
   };
 
   if ("next" in node) node.next = "";
+  if (node.type === "proof") delete node.abandon;
   switch (node.type) {
     case "background":
       if (node.background !== null && !hasAsset(node.background, "background"))

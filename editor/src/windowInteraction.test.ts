@@ -117,6 +117,7 @@ describe("timer targets", () => {
     expect(timerTargetProblem(awaited)).toMatch(/等待完成/);
     for (const type of [
       "say",
+      "proof",
       "choice",
       "jump",
       "wait",

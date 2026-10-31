@@ -5,6 +5,7 @@
 //! topic and reach the fixtures through `use super::*`.
 
 mod commands;
+mod proof;
 mod interaction;
 mod replay;
 mod secondary;

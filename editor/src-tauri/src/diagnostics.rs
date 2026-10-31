@@ -191,6 +191,9 @@ fn successors(scene_id: &str, node: &SceneNode) -> Vec<(String, String)> {
         // A non-blocking host request: control continues to `next` in the same
         // Scene. The named window Scene is a reference, not a flow successor.
         SceneNode::OpenWindow { next, .. } => vec![local(next)],
+        SceneNode::Proof { next, abandon, .. } => {
+            std::iter::once(next).chain(abandon.iter()).map(|target| local(target)).collect()
+        }
         SceneNode::Choice { choices, .. } => {
             choices.iter().map(|choice| local(&choice.next)).collect()
         }
@@ -212,6 +215,7 @@ fn is_immediate(node: &SceneNode) -> bool {
         SceneNode::Say { .. }
         | SceneNode::LongText { .. }
         | SceneNode::Choice { .. }
+        | SceneNode::Proof { .. }
         | SceneNode::Wait { .. }
         | SceneNode::End => false,
         SceneNode::Background {

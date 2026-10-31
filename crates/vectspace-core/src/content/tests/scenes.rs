@@ -248,6 +248,7 @@ fn ambience_nodes_validate_kind_asset_loop_volume_and_timeline_slots() {
             &catalog.ui_motions,
             &catalog.buttons,
             &catalog.actions,
+        &catalog.proofs,
         )
     };
     validate(ambience(&[])).expect("a fully specified ambience node is valid");

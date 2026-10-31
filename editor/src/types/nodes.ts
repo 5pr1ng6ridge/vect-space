@@ -194,6 +194,12 @@ export interface ChoiceNode {
   choices: ChoiceDefinition[];
 }
 
+export interface ProofNode extends NextNode {
+  type: "proof";
+  puzzle: string;
+  abandon?: string | null;
+}
+
 export interface SetNode extends NextNode {
   type: "set";
   variable: string;
@@ -483,6 +489,7 @@ export type SceneNode =
   | LongTextNode
   | LongTextControlNode
   | ChoiceNode
+  | ProofNode
   | SetNode
   | ConditionNode
   | PlaybackNode

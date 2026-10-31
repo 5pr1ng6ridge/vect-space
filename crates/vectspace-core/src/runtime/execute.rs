@@ -45,7 +45,7 @@ impl RuntimeEngine {
                 RuntimeError::Content(format!("节点不存在: {scene_id}/{node_id}"))
             })?;
 
-            if matches!(node, SceneNode::Say { .. } | SceneNode::LongText { .. } | SceneNode::Choice { .. }) {
+            if matches!(node, SceneNode::Say { .. } | SceneNode::LongText { .. } | SceneNode::Choice { .. } | SceneNode::Proof { .. }) {
                 self.mark_prompt_source(&scene_id, &node_id);
             }
             if self.execute_node(content, &scene_id, &node_id, node, &mut cues, false)? {
@@ -442,6 +442,13 @@ impl RuntimeEngine {
                     LongTextControlAction::Close => self.snapshot.long_text_page = None,
                 }
                 if !effect_only { self.snapshot.location.node_id = next; }
+            }
+            SceneNode::Proof { puzzle, abandon, .. } => {
+                self.snapshot.dialogue_page = None;
+                self.snapshot.prompt = PromptSnapshot::Proof {
+                    prompt_id: format!("{scene_id}/{node_id}"), puzzle, draft: None, can_abandon: abandon.is_some(),
+                };
+                return Ok(true);
             }
             SceneNode::Choice { presentation, choices } => {
                 self.snapshot.dialogue_page = None;

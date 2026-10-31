@@ -11,6 +11,11 @@ import type {
   PresentationOutcome,
   ChapterMapSnapshot,
 } from "@vectspace/presentation-core/types";
+import type {
+  ProofBoardSpec,
+  ProofCheckResult,
+  ProofGraph,
+} from "@vectspace/presentation-core/proof";
 import type { UpdateBatch } from "@vectspace/presentation-core/update-sequencer";
 import type { WireU64 } from "../../shared/generated/WireU64";
 import type { AnimationSource } from "@vectspace/presentation-core/image-animation";
@@ -112,6 +117,31 @@ export const engineApi = {
   ) =>
     command<RuntimeUpdate>("choose", {
       choiceId,
+      expectedRevision,
+      expectedSessionId,
+    }),
+  proofBoard: (puzzle: string) =>
+    command<ProofBoardSpec>("proof_board", { puzzle }),
+  proofCheck: (puzzle: string, graph: ProofGraph) =>
+    command<ProofCheckResult>("proof_check", { puzzle, graph }),
+  proofSaveDraft: (
+    promptId: string,
+    graph: ProofGraph,
+    expectedSessionId: WireU64,
+  ) =>
+    command<null>("proof_save_draft", { promptId, graph, expectedSessionId }),
+  proofSubmit: (
+    expectedRevision: WireU64,
+    graph: ProofGraph,
+    expectedSessionId: WireU64,
+  ) =>
+    command<{
+      accepted: boolean;
+      check: ProofCheckResult;
+      update: RuntimeUpdate | null;
+    }>("proof_submit", { expectedRevision, graph, expectedSessionId }),
+  proofAbandon: (expectedRevision: WireU64, expectedSessionId: WireU64) =>
+    command<RuntimeUpdate>("proof_abandon", {
       expectedRevision,
       expectedSessionId,
     }),

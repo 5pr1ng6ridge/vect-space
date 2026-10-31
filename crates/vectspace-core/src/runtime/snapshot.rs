@@ -337,6 +337,18 @@ pub(super) fn validate_snapshot(
             }
         }
     }
+    if let PromptSnapshot::Proof { prompt_id, puzzle, draft, can_abandon } = &snapshot.prompt {
+        let valid = matches!(scene.nodes.get(&snapshot.location.node_id),
+            Some(SceneNode::Proof { puzzle: expected, abandon, .. })
+            if expected == puzzle && *can_abandon == abandon.is_some())
+            && *prompt_id == format!("{}/{}", scene.id, snapshot.location.node_id)
+            && scene.window_role == crate::interaction::WindowRole::Main
+            && content.proofs.puzzle(puzzle).is_some();
+        if !valid { return Err(RuntimeError::InvalidSnapshot("Proof prompt does not match its story node".to_owned())); }
+        if let Some(graph) = draft {
+            vectspace_proof::library::validate_draft_shape(graph).map_err(RuntimeError::InvalidSnapshot)?;
+        }
+    }
     // After the prompt/location checks so their more specific errors win.
     validate_interaction_snapshot(content, snapshot)?;
     let mut referenced_assets = Vec::new();

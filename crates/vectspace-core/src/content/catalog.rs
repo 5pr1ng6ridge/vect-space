@@ -48,6 +48,7 @@ pub struct ContentCatalog {
     pub actions: BTreeMap<String, SpriteActionDefinition>,
     pub text_blocks: BTreeMap<String, TextBlockDefinition>,
     pub particles: BTreeMap<String, ParticleDefinition>,
+    pub proofs: vectspace_proof::library::ProofLibrary,
     /// Geometry measured once while the catalog was built.  The shared image
     /// resolver needs a stable layout size per animation so switching frames
     /// can never move or resize an object, and re-probing headers on every
@@ -94,6 +95,7 @@ impl ContentCatalog {
         let actions = load_actions(&root, &manifest.actions)?;
         validate_action_namespace(&actions, &manifest.assets, &animations)?;
         let text_blocks = visuals::documents(&root, &manifest.text_blocks, None, |value: &TextBlockDefinition| &value.id)?;
+        let proofs = super::proofs::load(&root, &manifest.proofs)?;
         let particles = visuals::documents(&root, &manifest.particles, None, |value: &ParticleDefinition| &value.id)?;
         visuals::validate_documents(&manifest, &text_blocks, &particles, &assets_root, &BTreeMap::new(), &animations, &actions)?;
 
@@ -142,6 +144,7 @@ impl ContentCatalog {
             &ui_motions,
             &buttons,
             &actions,
+            &proofs,
         )?;
         visuals::validate_scenes(&scenes, &manifest.assets, &text_blocks, &particles)?;
         let chapter_map = load_chapter_map(
@@ -164,6 +167,7 @@ impl ContentCatalog {
             actions,
             text_blocks,
             particles,
+            proofs,
             animation_metrics,
         })
     }
@@ -290,6 +294,7 @@ impl ContentCatalog {
         };
         validate_action_namespace(&actions, &manifest.assets, &animations)?;
         let text_blocks = visuals::documents(&root, &manifest.text_blocks, text_files, |value: &TextBlockDefinition| &value.id)?;
+        let proofs = super::proofs::load(&root, &manifest.proofs)?;
         let particles = visuals::documents(&root, &manifest.particles, particle_files, |value: &ParticleDefinition| &value.id)?;
         visuals::validate_documents(&manifest, &text_blocks, &particles, &assets_root, asset_overrides, &animations, &actions)?;
         visuals::validate_scenes(&scenes, &manifest.assets, &text_blocks, &particles)?;
@@ -329,6 +334,7 @@ impl ContentCatalog {
             &ui_motions,
             &buttons,
             &actions,
+            &proofs,
         )?;
         if manifest.chapter_map.is_some() != chapter_map.is_some() {
             return Err(ContentError::Validation(
@@ -351,6 +357,7 @@ impl ContentCatalog {
             actions,
             text_blocks,
             particles,
+            proofs,
             animation_metrics,
         })
     }
@@ -518,6 +525,7 @@ impl ContentCatalog {
         )?;
         write_schema(&target.join("text-block.schema.json"), &schema_for!(TextBlockDefinition))?;
         write_schema(&target.join("particle.schema.json"), &schema_for!(ParticleDefinition))?;
+        write_schema(&target.join("proof.schema.json"), &schema_for!(vectspace_proof::model::ProofDocument))?;
         Ok(())
     }
 }

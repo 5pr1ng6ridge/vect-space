@@ -1,0 +1,12 @@
+name = "vectproof"
+defaultTargets = ["VectProof", "vectproofd"]
+
+[[lean_lib]]
+name = "VectProof"
+
+# Persistent checker: imports `VectProof` once, then elaborates one generated
+# proof source per stdin line. See `VectProofServer.lean`.
+[[lean_exe]]
+name = "vectproofd"
+root = "VectProofServer"
+supportInterpreter = true

@@ -20,6 +20,7 @@ use super::ui::{validate_button_action, validate_button_assets, validate_ui_moti
 
 const MAX_LONG_TEXT_STEPS: usize = 1_024;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn validate_scenes(
     scenes: &BTreeMap<String, SceneDefinition>,
     assets: &BTreeMap<String, AssetDefinition>,
@@ -28,6 +29,7 @@ pub(super) fn validate_scenes(
     ui_motions: &BTreeMap<String, UiMotionPreset>,
     buttons: &BTreeMap<String, ButtonTemplate>,
     actions: &BTreeMap<String, SpriteActionDefinition>,
+    proofs: &vectspace_proof::library::ProofLibrary,
 ) -> Result<(), ContentError> {
     #[derive(Clone)]
     struct LongTextPresentation {
@@ -367,6 +369,16 @@ pub(super) fn validate_scenes(
                         return node_error(scene_id, node_id, "文稿控制引用了未知文稿");
                     }
                     require_node(scene, next, scene_id, node_id)?;
+                }
+                SceneNode::Proof { puzzle, next, abandon } => {
+                    if scene.window_role != crate::interaction::WindowRole::Main {
+                        return node_error(scene_id, node_id, "proof nodes are supported only in main-window scenes");
+                    }
+                    if proofs.puzzle(puzzle).is_none() {
+                        return node_error(scene_id, node_id, &format!("unknown proof puzzle: {puzzle}"));
+                    }
+                    require_node(scene, next, scene_id, node_id)?;
+                    if let Some(target) = abandon { require_node(scene, target, scene_id, node_id)?; }
                 }
                 SceneNode::Choice { choices, .. } => {
                     if choices.is_empty() {

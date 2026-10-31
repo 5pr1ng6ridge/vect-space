@@ -231,6 +231,35 @@ export interface ActionFile {
   definition: SpriteActionDefinition;
 }
 
+/** Read-only authored proof content, loaded by the editor host. */
+export interface ProofFile {
+  path: string;
+  definition: {
+    cards?: {
+      id: string;
+      name: string;
+      description?: string | null;
+      params?: { name: string; type: string }[];
+      premises?: string[];
+      conclusion: string;
+      lean: string;
+    }[];
+    puzzles?: {
+      id: string;
+      title: string;
+      description?: string | null;
+      variables?: { name: string; type: string }[];
+      hypotheses?: { name: string; statement: string; label?: string | null }[];
+      goal: string;
+      cards?: string[];
+      nodes?:
+        import("@vectspace/presentation-core/proof").ProofNodeKind[] | null;
+      tactics?: string[];
+      solution?: import("@vectspace/presentation-core/proof").ProofGraph | null;
+    }[];
+  };
+}
+
 export interface ContentManifest {
   schema_version: number;
   content_version: string;
@@ -247,6 +276,7 @@ export interface ContentManifest {
   actions?: string[];
   text_blocks?: string[];
   particles?: string[];
+  proofs?: string[];
   ui_motion_defaults: UiMotionBindings;
   chapter_map?: string | null;
 }

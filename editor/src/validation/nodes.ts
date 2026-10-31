@@ -187,6 +187,19 @@ export function validateNode(
   };
 
   switch (node.type) {
+    case "proof":
+      if (!node.puzzle.trim()) issue("missing_proof_puzzle", "必须选择证明题");
+      else if (
+        !(project.proofs ?? []).some((file) =>
+          (file.definition.puzzles ?? []).some(
+            (puzzle) => puzzle.id === node.puzzle,
+          ),
+        )
+      )
+        issue("unknown_proof_puzzle", `证明题未登记：${node.puzzle}`);
+      if (scene?.definition.window_role === "secondary")
+        issue("secondary_proof", "副窗口场景不支持证明节点");
+      break;
     case "background":
       checkAsset(node.background, "background", false);
       checkDuration(node.duration_ms);

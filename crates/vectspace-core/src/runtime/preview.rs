@@ -76,7 +76,7 @@ fn preview_successor(scene_id: &str, node: &SceneNode) -> Option<StoryLocation> 
             scene_id: scene.clone().unwrap_or_else(|| scene_id.to_owned()),
             node_id: target.clone(),
         }),
-        SceneNode::Choice { .. } | SceneNode::Condition { .. } | SceneNode::End => None,
+        SceneNode::Proof { .. } | SceneNode::Choice { .. } | SceneNode::Condition { .. } | SceneNode::End => None,
     }
 }
 
@@ -181,6 +181,9 @@ impl RuntimeEngine {
                         }
                         update =
                             self.choose(content, &decision.choice_id, self.snapshot.revision)?;
+                    }
+                    PromptSnapshot::Proof { .. } => {
+                        return Err(RuntimeError::Content("Preview traversal is blocked by a proof activity".to_owned()));
                     }
                     PromptSnapshot::End { .. } => {
                         return Err(RuntimeError::Content(format!(

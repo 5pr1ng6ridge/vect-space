@@ -377,6 +377,7 @@ export function createNodeActions(ctx: NodeActionContext) {
             type,
             fallback,
             base.scenes.map((scene) => scene.definition),
+            base.proofs,
           );
           ensureSceneLayout(base.layout, activeSceneId).nodes[insertedId] = {
             x: Math.round(position.x / 16) * 16,

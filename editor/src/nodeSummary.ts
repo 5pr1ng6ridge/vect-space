@@ -31,6 +31,7 @@ export interface NodeDescription {
 interface DescribeContext {
   /** Only the character table is needed (for speaker display names). */
   manifest?: Pick<ContentManifest, "characters">;
+  proofs?: import("./types").ProofFile[];
 }
 
 function scalar(value: ScalarValue): string {
@@ -101,6 +102,13 @@ export function describeNode(
     case "long_text_control":
       return plain(
         `${node.action === "show" ? "显示" : node.action === "hide" ? "隐藏" : "关闭"}文稿 ${node.document}`,
+      );
+    case "proof":
+      return plain(
+        context.proofs
+          ?.flatMap((file) => file.definition.puzzles ?? [])
+          .find((puzzle) => puzzle.id === node.puzzle)?.title ??
+          (node.puzzle || "（未选择证明题）"),
       );
     case "choice":
       return plain(
@@ -173,7 +181,9 @@ export function describeNode(
         `${SPRITE_ACTION_LABELS[node.action]} ${node.sprite_id}${node.asset ? ` · ${node.asset}` : ""}`,
       );
     case "particle":
-      return plain(`${node.action === "start" ? "持续发射" : node.action === "stop" ? "清除发射器" : "单次爆发"} ${node.emitter_id}${node.particle ? ` · ${node.particle}` : ""}`);
+      return plain(
+        `${node.action === "start" ? "持续发射" : node.action === "stop" ? "清除发射器" : "单次爆发"} ${node.emitter_id}${node.particle ? ` · ${node.particle}` : ""}`,
+      );
     case "clear":
       return plain(`清除画面 · ${node.duration_ms} ms`);
     case "wait":

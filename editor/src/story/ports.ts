@@ -10,6 +10,20 @@ interface OutputPort {
 
 export function outputPorts(node: SceneNode): OutputPort[] {
   switch (node.type) {
+    case "proof":
+      return [
+        { id: "next", label: "证明完成", target: node.next, targetScene: null },
+        ...(node.abandon
+          ? [
+              {
+                id: "abandon",
+                label: "放弃",
+                target: node.abandon,
+                targetScene: null,
+              },
+            ]
+          : []),
+      ];
     case "choice":
       return node.choices.map((choice) => ({
         id: `choice:${choice.id}`,
@@ -50,6 +64,8 @@ export function setPortTarget(
   handle: string,
   target: string,
 ): SceneNode {
+  if (node.type === "proof" && handle === "abandon")
+    return { ...node, abandon: target || null };
   if (handle === "next" && "next" in node) {
     return { ...node, next: target };
   }

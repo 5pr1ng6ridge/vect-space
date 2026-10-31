@@ -1,3 +1,4 @@
+import { proofFields } from "./nodeFields/proof";
 import type { ReactNode } from "react";
 import type { SceneNode } from "../../types";
 import type { FieldsContext } from "./fieldsContext";
@@ -45,6 +46,8 @@ import {
 
 export function renderFields(node: SceneNode, ctx: FieldsContext): ReactNode {
   switch (node.type) {
+    case "proof":
+      return proofFields(node, ctx);
     case "background":
       return backgroundFields(node, ctx);
     case "curtain":

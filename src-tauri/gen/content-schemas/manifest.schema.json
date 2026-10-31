@@ -71,6 +71,13 @@
         "type": "string"
       }
     },
+    "proofs": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "scenes": {
       "type": "array",
       "items": {

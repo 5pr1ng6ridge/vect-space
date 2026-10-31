@@ -90,6 +90,8 @@ pub struct ContentManifest {
     pub text_blocks: Vec<String>,
     #[serde(default)]
     pub particles: Vec<String>,
+    #[serde(default)]
+    pub proofs: Vec<String>,
     /// Optional author-authored room map used as the chapter selector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_map: Option<String>,

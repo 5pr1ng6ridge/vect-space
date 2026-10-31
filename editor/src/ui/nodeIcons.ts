@@ -43,6 +43,7 @@ export const NODE_ICONS: Record<NodeType, LucideIcon> = {
   say: MessageSquareText,
   long_text: BookOpenText,
   long_text_control: FileText,
+  proof: ListChecks,
   choice: ListChecks,
   condition: GitBranch,
   set: Variable,

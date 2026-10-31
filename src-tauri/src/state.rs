@@ -28,6 +28,7 @@ use crate::{
 
 pub(crate) struct EngineState {
     pub(crate) content: ContentCatalog,
+    pub(crate) proof_checker: Arc<Mutex<vectspace_proof::check::ProofChecker>>,
     pub(crate) runtime: Mutex<RuntimeEngine>,
     pub(crate) replay: Mutex<Option<ReplaySession>>,
     /// The single secondary game window's runtime.  `None` means no secondary is
@@ -85,6 +86,7 @@ impl EngineState {
         profile: ProfileManager,
     ) -> Self {
         Self {
+            proof_checker: Arc::new(Mutex::new(vectspace_proof::check::ProofChecker::new(None))),
             content,
             runtime: Mutex::new(runtime),
             replay: Mutex::new(None),

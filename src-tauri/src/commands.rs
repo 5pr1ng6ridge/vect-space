@@ -34,7 +34,7 @@ fn window_role(window: &tauri::WebviewWindow) -> Option<WindowRole> {
 
 /// Every main-only command denies all non-main labels, including an unknown
 /// label, so a future window can never inherit main authority by accident.
-fn require_main(window: &tauri::WebviewWindow) -> Result<(), WireCommandError> {
+pub(crate) fn require_main(window: &tauri::WebviewWindow) -> Result<(), WireCommandError> {
     if window_role(window) == Some(WindowRole::Main) {
         return Ok(());
     }

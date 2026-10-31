@@ -289,6 +289,10 @@ pub enum WireCommandErrorCode {
     Validation,
     StaleProject,
     StaleSession,
+    UnknownProof,
+    ProofNotAllowed,
+    ProofAbandonNotAllowed,
+    InvalidProofDraft,
     Io,
     Asset,
     PreviewUnreachable,
@@ -358,6 +362,9 @@ impl From<RuntimeError> for WireCommandError {
             RuntimeError::Content(_) | RuntimeError::InvalidSnapshot(_) => {
                 WireCommandErrorCode::Validation
             }
+            RuntimeError::ProofNotAllowed => WireCommandErrorCode::ProofNotAllowed,
+            RuntimeError::ProofAbandonNotAllowed => WireCommandErrorCode::ProofAbandonNotAllowed,
+            RuntimeError::InvalidProofDraft(_) => WireCommandErrorCode::InvalidProofDraft,
             RuntimeError::StaleRevision { .. } => WireCommandErrorCode::Runtime,
             _ => WireCommandErrorCode::Runtime,
         };

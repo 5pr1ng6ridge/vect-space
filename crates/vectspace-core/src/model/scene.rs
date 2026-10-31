@@ -30,6 +30,12 @@ pub struct SceneDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SceneNode {
+    Proof {
+        puzzle: String,
+        next: String,
+        #[serde(default)]
+        abandon: Option<String>,
+    },
     Background {
         background: Option<String>,
         #[serde(default)]

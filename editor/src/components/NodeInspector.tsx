@@ -127,7 +127,7 @@ export function NodeInspector({
           nodeId={nodeId}
           onChangeType={(type) =>
             update(
-              defaultNode(type, fallback, scenes.length > 0 ? scenes : [scene]),
+              defaultNode(type, fallback, scenes.length > 0 ? scenes : [scene], previewProject?.proofs),
             )
           }
           onConvertActionToTimeline={

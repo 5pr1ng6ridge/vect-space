@@ -55,7 +55,7 @@ pub(crate) fn demo_wire_project() -> serde_json::Value {
     let payload = project_payload(&root, &catalog, EditorLayout::default(), fingerprint).unwrap();
     let mut project = serde_json::to_value(&payload).unwrap();
     let object = project.as_object_mut().unwrap();
-    for host_only in ["root", "assets", "diagnostics"] {
+    for host_only in ["root", "assets", "diagnostics", "proofs"] {
         object.remove(host_only);
     }
     let fingerprint = object.remove("fingerprint").unwrap();

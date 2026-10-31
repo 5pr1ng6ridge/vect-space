@@ -65,6 +65,9 @@ pub(super) fn validate_interaction_snapshot(
                 && *prompt_id == format!("{}/{}", source.scene_id, source.node_id),
             PromptSnapshot::LongText { .. } => matches!(node, Some(SceneNode::LongText { .. }))
                 && source == &snapshot.location,
+            PromptSnapshot::Proof { prompt_id, .. } => matches!(node, Some(SceneNode::Proof { .. }))
+                && source == &snapshot.location
+                && *prompt_id == format!("{}/{}", source.scene_id, source.node_id),
             PromptSnapshot::Choice { prompt_id, .. } => matches!(node, Some(SceneNode::Choice { .. }))
                 && source == &snapshot.location
                 && *prompt_id == format!("{}/{}", source.scene_id, source.node_id),
@@ -185,7 +188,7 @@ impl RuntimeEngine {
         }
         let source = self.snapshot.interaction.prompt_source.clone().or_else(|| {
             match &self.snapshot.prompt {
-                PromptSnapshot::Choice { .. } | PromptSnapshot::LongText { .. } => Some(self.snapshot.location.clone()),
+                PromptSnapshot::Proof { .. } | PromptSnapshot::Choice { .. } | PromptSnapshot::LongText { .. } => Some(self.snapshot.location.clone()),
                 PromptSnapshot::Dialogue { prompt_id, .. } => prompt_id.split_once('/').map(|(scene, node)| StoryLocation {
                     scene_id: scene.to_owned(), node_id: node.to_owned(),
                 }),

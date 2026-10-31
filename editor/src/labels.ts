@@ -151,6 +151,7 @@ export const NODE_CATEGORY: Record<NodeType, NodeCategory> = {
   say: "narrative",
   long_text: "narrative",
   long_text_control: "narrative",
+  proof: "interaction",
   choice: "logic",
   condition: "logic",
   set: "logic",

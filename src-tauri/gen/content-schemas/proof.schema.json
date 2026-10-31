@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProofDocument",
+  "description": "One `proofs/*.yaml` document. Card and puzzle ids are unique across all\nproof documents of a project; a puzzle may use cards from any document.",
+  "type": "object",
+  "properties": {
+    "cards": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CardDefinition"
+      }
+    },
+    "puzzles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PuzzleDefinition"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "AutoTactic": {
+      "description": "Automation recipes an `auto` node may run (`docs/proof-system.md` §5).",
+      "type": "string",
+      "enum": [
+        "omega",
+        "decide",
+        "rfl",
+        "simp",
+        "exact",
+        "contradiction"
+      ]
+    },
+    "CardDefinition": {
+      "type": "object",
+      "properties": {
+        "conclusion": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "lean": {
+          "description": "Trusted Lean term proving `conclusion`, with params and premises\n`p0, p1, …` in scope. The only Lean text not generated from an AST.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params": {
+          "description": "Explicit parameters, in order. The player may fill each one.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NamedType"
+          }
+        },
+        "premises": {
+          "description": "Formulas over `params`; premise `i` is input port `p{i}`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "conclusion",
+        "lean"
+      ]
+    },
+    "HypothesisDefinition": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "statement": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "statement"
+      ]
+    },
+    "NamedType": {
+      "description": "A declared name and its type, both in the formula language.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "ProofGraph": {
+      "type": "object",
+      "properties": {
+        "edges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProofGraphEdge"
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProofGraphNode"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProofGraphEdge": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "from_port": {
+          "description": "`out`, or a local `l0`, `l1`, … of the source node.",
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "to_port": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "from_port",
+        "to",
+        "to_port"
+      ]
+    },
+    "ProofGraphNode": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "description": "`card`: one formula per card parameter; empty = let Lean infer it.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "binders": {
+          "description": "`intro`: introduced names (≥ 1); `exists_elim`: `[x]`; `induction`: `[k]`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "card": {
+          "description": "`card`: the card id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hypothesis": {
+          "description": "`given`: the puzzle hypothesis this node stands for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProofNodeKind"
+        },
+        "statement": {
+          "description": "Proposition the node proves (required for `claim`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tactic": {
+          "description": "`auto`: the recipe.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutoTactic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "term": {
+          "description": "`inst` / `exists_intro`: the term to substitute or the witness.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x": {
+          "description": "Board position; UI only, ignored by verification.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "y": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind"
+      ]
+    },
+    "ProofNodeKind": {
+      "type": "string",
+      "enum": [
+        "given",
+        "goal",
+        "card",
+        "mp",
+        "inst",
+        "intro",
+        "cases",
+        "exists_intro",
+        "exists_elim",
+        "induction",
+        "claim",
+        "auto"
+      ]
+    },
+    "PuzzleDefinition": {
+      "type": "object",
+      "properties": {
+        "cards": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "goal": {
+          "type": "string"
+        },
+        "hypotheses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HypothesisDefinition"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "nodes": {
+          "description": "Allowed node kinds besides `given`/`goal`; `None` = every kind except\n`auto` (see [`PuzzleDefinition::allowed_kinds`]).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProofNodeKind"
+          }
+        },
+        "solution": {
+          "description": "Reference solution, verified by `npm run proofs:check`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProofGraph"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tactics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutoTactic"
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "variables": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NamedType"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "goal"
+      ]
+    }
+  }
+}

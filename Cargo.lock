@@ -4642,6 +4642,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "vectspace-core",
+ "vectspace-proof",
  "vectspace-protocol",
  "webview2-com",
  "windows",
@@ -4656,6 +4657,18 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
+ "vectspace-proof",
+]
+
+[[package]]
+name = "vectspace-proof"
+version = "0.1.0"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -4687,6 +4700,7 @@ dependencies = [
  "tempfile",
  "ttf-parser",
  "vectspace-core",
+ "vectspace-proof",
  "vectspace-protocol",
  "webview2-com",
  "windows",

@@ -9,6 +9,7 @@ import {
 } from "@vectspace/text";
 import {
   memo,
+  useCallback,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -37,6 +38,9 @@ import {
 } from "./visualLineGroups";
 
 const EMPTY_MATH_REVEAL_DURATIONS: ReadonlyMap<number, number> = new Map();
+const EMPTY_UNIT_CPS: readonly number[] = [];
+const EMPTY_REVEAL_SCHEDULE: readonly number[] = [];
+const EMPTY_PAUSE_WINDOWS: readonly { startMs: number; endMs: number }[] = [];
 
 interface MarkupTextProps {
   source: string;
@@ -74,21 +78,25 @@ export const MarkupText = memo(function MarkupText({
   className,
   animateMath = false,
   instantMathReveal = false,
-  unitCps = [],
+  unitCps = EMPTY_UNIT_CPS,
   onMathMetrics,
   revealAnimation = "typewriter",
   fontReady = true,
   onLineSweepLayoutChange,
   onTextLayout,
-  revealSchedule = [],
+  revealSchedule = EMPTY_REVEAL_SCHEDULE,
   mathRevealDurations = EMPTY_MATH_REVEAL_DURATIONS,
-  pauseWindows = [],
+  pauseWindows = EMPTY_PAUSE_WINDOWS,
   lineSweepElapsedMs = 0,
   instantReveal = false,
   revealClock,
   measurementScale = 1,
 }: MarkupTextProps): ReactElement {
   const units = useMemo(() => visibleUnits(parseMarkup(source)), [source]);
+  const paintableUnitCount = useMemo(
+    () => units.filter((unit) => !isHardLineBreak(unit)).length,
+    [units],
+  );
   // Reveal plans deliberately omit hard breaks: they take no time, but remain
   // mounted so that hidden text still reserves its final wrapping geometry.
   const revealIndexByLayoutIndex = useMemo(() => {
@@ -142,6 +150,13 @@ export const MarkupText = memo(function MarkupText({
     fontReady &&
     (lineSweepRequested || onTextLayout !== undefined);
   const unitElementsRef = useRef(new Map<number, HTMLElement>());
+  const registerElement = useCallback(
+    (index: number, element: HTMLElement | null): void => {
+      if (element === null) unitElementsRef.current.delete(index);
+      else unitElementsRef.current.set(index, element);
+    },
+    [],
+  );
   const rootRef = useRef<HTMLSpanElement>(null);
   const [lineGroups, setLineGroups] = useState<{
     source: string;
@@ -190,9 +205,6 @@ export const MarkupText = memo(function MarkupText({
         (total, group) => total + group.length,
         0,
       );
-      const paintableUnitCount = units.filter(
-        (unit) => !isHardLineBreak(unit),
-      ).length;
       if (measuredUnitCount !== paintableUnitCount) return;
       const geometry = lineSweepRequested
         ? buildLineSweepGeometry(
@@ -246,6 +258,7 @@ export const MarkupText = memo(function MarkupText({
     lineSweepRequested,
     measurementRequested,
     measurementScale,
+    paintableUnitCount,
     pauseWindows,
     source,
     units,
@@ -259,9 +272,6 @@ export const MarkupText = memo(function MarkupText({
     lineGroups?.source === source ? lineGroups.featherPx : 51;
   const groupedUnitCount =
     activeLineGroups?.reduce((total, group) => total + group.length, 0) ?? 0;
-  const paintableUnitCount = units.filter(
-    (unit) => !isHardLineBreak(unit),
-  ).length;
   const lineSweepReady =
     !lineSweepMode ||
     (validMeasurementScale &&
@@ -302,15 +312,21 @@ export const MarkupText = memo(function MarkupText({
       for (const [index, timing] of lineSweepTimings) {
         const element = unitElementsRef.current.get(index);
         if (element === undefined) continue;
-        element.style.setProperty(
-          "--line-sweep-mask-position",
-          `${lineSweepMaskPositionPx(
-            timing,
-            elapsedMs,
-            pauseWindows,
-            lineSweepFeatherPx,
-          )}px`,
-        );
+        const maskPosition = `${lineSweepMaskPositionPx(
+          timing,
+          elapsedMs,
+          pauseWindows,
+          lineSweepFeatherPx,
+        )}px`;
+        if (
+          element.style.getPropertyValue("--line-sweep-mask-position") !==
+          maskPosition
+        ) {
+          element.style.setProperty(
+            "--line-sweep-mask-position",
+            maskPosition,
+          );
+        }
       }
     };
     updateMaskPositions(revealClock.getElapsedMs());
@@ -332,98 +348,6 @@ export const MarkupText = memo(function MarkupText({
     onTextLayout?.(lineGroups.layout);
   }, [lineGroups, onTextLayout, source, validMeasurementScale]);
 
-  const renderUnit = (
-    unit: (typeof units)[number],
-    index: number,
-    revealIndex: number | undefined,
-    visible: boolean,
-    lineSweepTiming: LineSweepUnitTiming | undefined,
-  ): ReactElement => {
-    // A visible unit must inherit the visibility of its presentation
-    // surface.  Writing `visibility: visible` here would opt the unit back
-    // into rendering when the dialogue/long-text container is hidden (the
-    // reveal renderer keeps every unit mounted for stable layout).  Hidden
-    // units still get an explicit value so the typewriter can reserve their
-    // final geometry without painting them.
-    const style = {
-      visibility: visible ? "inherit" : "hidden",
-      "--unit-index": index,
-      ...(lineSweepTiming === undefined
-        ? {}
-        : {
-            "--line-sweep-duration": `${lineSweepTiming.durationMs}ms`,
-            "--line-sweep-width": `${lineSweepTiming.lineWidthPx}px`,
-            "--line-sweep-offset": `${lineSweepTiming.unitOffsetPx}px`,
-            "--line-sweep-feather": `${lineSweepFeatherPx}px`,
-            "--line-sweep-mask-position": `${lineSweepMaskPositionPx(
-              lineSweepTiming,
-              lineSweepElapsedMs,
-              pauseWindows,
-              lineSweepFeatherPx,
-            )}px`,
-          }),
-    } as CSSProperties;
-    const revealClass =
-      visible && visibleCount !== Number.POSITIVE_INFINITY
-        ? ` is-reveal-${revealAnimation}`
-        : "";
-    const instantClass = instantReveal && visible ? " is-reveal-instant" : "";
-    const effectClass = unit.effect === null ? "" : ` text-fx-${unit.effect}`;
-    const registerElement = (element: HTMLElement | null): void => {
-      if (element === null) unitElementsRef.current.delete(index);
-      else unitElementsRef.current.set(index, element);
-    };
-    if (unit.kind === "math") {
-      return (
-        <MathMarkupUnit
-          animate={animateMath}
-          cps={unitCps[revealIndex ?? 0] ?? 30}
-          effectClass={effectClass}
-          index={index}
-          instant={instantMathReveal || instantReveal}
-          key={`${index}-math-${unit.latex}`}
-          onMetrics={
-            revealIndex === undefined || onMathMetrics === undefined
-              ? undefined
-              : (_unitIndex, widthPx, fontSizePx) =>
-                  onMathMetrics(revealIndex, widthPx, fontSizePx)
-          }
-          registerElement={registerElement}
-          revealActive={visible && visibleCount !== Number.POSITIVE_INFINITY}
-          style={style}
-          unit={unit}
-          visible={visible}
-          revealAnimation={revealAnimation}
-          fontReady={fontReady}
-        />
-      );
-    }
-    if (isHardLineBreak(unit)) {
-      return (
-        <span
-          aria-hidden="true"
-          className="markup-unit character-unit line-break-unit"
-          key={`${index}-line-break`}
-          style={style}
-        >
-          <br />
-        </span>
-      );
-    }
-    return (
-      <span
-        aria-hidden="true"
-        className={`markup-unit character-unit${effectClass}${revealClass}${instantClass}`}
-        key={`${index}-${unit.value}`}
-        ref={registerElement}
-        style={style}
-      >
-        <span className="markup-reveal-content">{unit.value}</span>
-        <wbr />
-      </span>
-    );
-  };
-
   return (
     <span className={className} aria-label={source} ref={rootRef}>
       {units.map((unit, index) => {
@@ -439,43 +363,200 @@ export const MarkupText = memo(function MarkupText({
             ? (revealIndex ?? Number.POSITIVE_INFINITY) < visibleCount
             : (lineStartRevealIndex ?? Number.POSITIVE_INFINITY) <
               visibleCount);
-        return renderUnit(unit, index, revealIndex, visible, timing);
+        const maskPositionPx =
+          timing === undefined
+            ? undefined
+            : lineSweepMaskPositionPx(
+                timing,
+                lineSweepElapsedMs,
+                pauseWindows,
+                lineSweepFeatherPx,
+              );
+        if (unit.kind === "math") {
+          return (
+            <MathMarkupUnit
+              animate={animateMath}
+              cps={unitCps[revealIndex ?? 0] ?? 30}
+              effectClass={
+                unit.effect === null ? "" : ` text-fx-${unit.effect}`
+              }
+              index={index}
+              instant={instantMathReveal || instantReveal}
+              key={`${index}-math-${unit.latex}`}
+              onMathMetrics={onMathMetrics}
+              revealIndex={revealIndex}
+              registerElement={registerElement}
+              revealActive={
+                visible && visibleCount !== Number.POSITIVE_INFINITY
+              }
+              lineSweepTiming={timing}
+              lineSweepFeatherPx={lineSweepFeatherPx}
+              maskPositionPx={maskPositionPx}
+              unit={unit}
+              visible={visible}
+              revealAnimation={revealAnimation}
+              fontReady={fontReady}
+            />
+          );
+        }
+        const hardLineBreak = isHardLineBreak(unit);
+        return (
+          <CharacterMarkupUnit
+            index={index}
+            value={unit.value}
+            effect={unit.effect}
+            hardLineBreak={hardLineBreak}
+            key={
+              hardLineBreak ? `${index}-line-break` : `${index}-${unit.value}`
+            }
+            visible={visible}
+            revealAnimation={revealAnimation}
+            revealActive={visibleCount !== Number.POSITIVE_INFINITY}
+            instantReveal={instantReveal}
+            lineSweepTiming={timing}
+            lineSweepFeatherPx={lineSweepFeatherPx}
+            maskPositionPx={maskPositionPx}
+            registerElement={registerElement}
+          />
+        );
       })}
     </span>
   );
 });
 
-function MathMarkupUnit({
+interface UnitPresentationProps {
+  index: number;
+  visible: boolean;
+  lineSweepTiming: LineSweepUnitTiming | undefined;
+  lineSweepFeatherPx: number;
+  maskPositionPx: number | undefined;
+  registerElement(index: number, element: HTMLElement | null): void;
+}
+
+function unitStyle(
+  index: number,
+  visible: boolean,
+  lineSweepTiming: LineSweepUnitTiming | undefined,
+  lineSweepFeatherPx: number,
+  maskPositionPx: number | undefined,
+): CSSProperties {
+  // Inherit the surface visibility while reserving hidden units' geometry.
+  // Explicit `visibility: visible` would paint units on a hidden surface.
+  return {
+    visibility: visible ? "inherit" : "hidden",
+    "--unit-index": index,
+    ...(lineSweepTiming === undefined
+      ? {}
+      : {
+          "--line-sweep-duration": `${lineSweepTiming.durationMs}ms`,
+          "--line-sweep-width": `${lineSweepTiming.lineWidthPx}px`,
+          "--line-sweep-offset": `${lineSweepTiming.unitOffsetPx}px`,
+          "--line-sweep-feather": `${lineSweepFeatherPx}px`,
+          "--line-sweep-mask-position": `${maskPositionPx}px`,
+        }),
+  } as CSSProperties;
+}
+
+const CharacterMarkupUnit = memo(function CharacterMarkupUnit({
+  index,
+  value,
+  effect,
+  hardLineBreak,
+  visible,
+  revealAnimation,
+  revealActive,
+  instantReveal,
+  lineSweepTiming,
+  lineSweepFeatherPx,
+  maskPositionPx,
+  registerElement,
+}: UnitPresentationProps & {
+  value: string;
+  effect: MathUnit["effect"];
+  hardLineBreak: boolean;
+  revealAnimation: TextRevealAnimation;
+  revealActive: boolean;
+  instantReveal: boolean;
+}): ReactElement {
+  const elementRef = useCallback(
+    (element: HTMLSpanElement | null): void => registerElement(index, element),
+    [index, registerElement],
+  );
+  const style = unitStyle(
+    index,
+    visible,
+    lineSweepTiming,
+    lineSweepFeatherPx,
+    maskPositionPx,
+  );
+  if (hardLineBreak) {
+    return (
+      <span
+        aria-hidden="true"
+        className="markup-unit character-unit line-break-unit"
+        style={style}
+      >
+        <br />
+      </span>
+    );
+  }
+  const revealClass =
+    visible && revealActive ? ` is-reveal-${revealAnimation}` : "";
+  const instantClass = instantReveal && visible ? " is-reveal-instant" : "";
+  const effectClass = effect === null ? "" : ` text-fx-${effect}`;
+  return (
+    <span
+      aria-hidden="true"
+      className={`markup-unit character-unit${effectClass}${revealClass}${instantClass}`}
+      ref={elementRef}
+      style={style}
+    >
+      <span className="markup-reveal-content">{value}</span>
+      <wbr />
+    </span>
+  );
+});
+
+const MathMarkupUnit = memo(function MathMarkupUnit({
   animate,
   cps,
   effectClass,
   index,
   instant,
-  onMetrics,
+  onMathMetrics,
+  revealIndex,
   registerElement,
   revealActive,
-  style,
+  lineSweepTiming,
+  lineSweepFeatherPx,
+  maskPositionPx,
   unit,
   visible,
   revealAnimation,
   fontReady,
-}: {
+}: UnitPresentationProps & {
   animate: boolean;
   cps: number;
   effectClass: string;
-  index: number;
   instant: boolean;
-  onMetrics:
-    | ((unitIndex: number, widthPx: number, fontSizePx: number) => void)
-    | undefined;
-  registerElement(element: HTMLSpanElement | null): void;
+  onMathMetrics: MarkupTextProps["onMathMetrics"];
+  revealIndex: number | undefined;
   revealActive: boolean;
-  style: CSSProperties;
   unit: MathUnit;
-  visible: boolean;
   revealAnimation: TextRevealAnimation;
   fontReady: boolean;
 }): ReactElement {
+  const elementRef = useCallback(
+    (element: HTMLSpanElement | null): void => registerElement(index, element),
+    [index, registerElement],
+  );
+  const style = unitStyle(
+    index,
+    visible,
+    lineSweepTiming,
+    lineSweepFeatherPx,
+    maskPositionPx,
+  );
   const contentRef = useRef<HTMLSpanElement>(null);
   const html = useMemo(
     () =>
@@ -514,20 +595,22 @@ function MathMarkupUnit({
         unit.display,
       );
       content.style.setProperty("--math-reveal-duration", `${duration}ms`);
-      onMetrics?.(index, width, fontSize);
+      if (revealIndex !== undefined) {
+        onMathMetrics?.(revealIndex, width, fontSize);
+      }
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(katexElement);
     return () => observer.disconnect();
-  }, [animate, cps, fontReady, html, index, onMetrics, unit.display]);
+  }, [animate, cps, fontReady, html, onMathMetrics, revealIndex, unit.display]);
 
   return (
     <span
       aria-hidden="true"
       className={`markup-unit math-unit${unit.display ? " display-math" : ""}${effectClass}${animate && visible ? " is-math-revealed" : ""}${revealActive ? ` is-reveal-${revealAnimation}` : ""}${instant ? " is-math-instant is-reveal-instant" : ""}`}
-      ref={registerElement}
+      ref={elementRef}
       style={style}
     >
       <span
@@ -542,7 +625,7 @@ function MathMarkupUnit({
       />
     </span>
   );
-}
+});
 
 function sameLineGroups(
   left: readonly (readonly number[])[] | null,

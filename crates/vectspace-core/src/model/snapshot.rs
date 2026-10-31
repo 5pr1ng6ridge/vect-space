@@ -330,6 +330,13 @@ impl Default for CameraSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PromptSnapshot {
+    Proof {
+        prompt_id: String,
+        puzzle: String,
+        #[serde(default)]
+        draft: Option<vectspace_proof::graph::ProofGraph>,
+        can_abandon: bool,
+    },
     #[default]
     None,
     Dialogue {

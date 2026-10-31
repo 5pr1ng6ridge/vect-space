@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./proof": "./src/proof/ProofBoard.tsx",
+    "./proof.css": "./src/proof/proof.css",
     "./animated-image": "./src/animated-image.ts",
     "./gameplay": "./src/gameplay/index.ts",
     "./gameplay.css": "./src/gameplay/gameplay.css",

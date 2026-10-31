@@ -17,6 +17,7 @@ mod effects;
 mod manifest;
 mod markup;
 mod scenes;
+mod proofs;
 mod timeline;
 mod ui;
 mod visuals;

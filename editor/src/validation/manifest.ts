@@ -159,6 +159,7 @@ export function validateManagedDocumentPaths(
       "text_block",
       path,
     ]),
+    ...(project.manifest.proofs ?? []).map((path): [string, string] => ["proof", path]),
     ...(project.manifest.particles ?? []).map((path): [string, string] => [
       "particle",
       path,

@@ -65,6 +65,7 @@ pub(crate) fn manifest_document_paths(manifest: &ContentManifest) -> impl Iterat
         .chain(&manifest.actions)
         .chain(&manifest.text_blocks)
         .chain(&manifest.particles)
+        .chain(&manifest.proofs)
         .chain(&manifest.chapter_map)
 }
 
@@ -242,6 +243,7 @@ pub(crate) fn managed_deletions(
         .map(|path| path_reservation_key(path))
         .collect::<BTreeSet<_>>();
     manifest_document_paths(previous)
+        .filter(|path| !previous.proofs.contains(path))
         .filter(|path| !next_keys.contains(&path_reservation_key(path)))
         .filter_map(|path| {
             safe_relative_path(path).ok()?;
@@ -399,6 +401,7 @@ pub(crate) fn project_payload(
         actions: read_files(root, &manifest.actions)?,
         text_blocks: read_files(root, &manifest.text_blocks)?,
         particles: read_files(root, &manifest.particles)?,
+        proofs: read_files(root, &manifest.proofs)?,
         chapter_map: read_files(root, manifest.chapter_map.as_slice())?.pop(),
         layout,
         assets: editor_assets(catalog, &BTreeMap::new())?,
@@ -426,6 +429,7 @@ pub(crate) fn project_payload_from_request(
         actions: request.actions.clone(),
         text_blocks: request.text_blocks.clone(),
         particles: request.particles.clone(),
+        proofs: read_files(root, &request.manifest.proofs)?,
         chapter_map: request.chapter_map.clone(),
         layout: request.layout.clone(),
         assets: editor_assets(catalog, published_asset_paths)?,
@@ -444,6 +448,40 @@ mod tests {
     use crate::test_support::{
         asset_session, minimal_manifest, seed_asset_project, write_batch, write_test_png,
     };
+
+    #[test]
+    fn proof_documents_remain_read_only_while_manifest_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        seed_asset_project(root);
+        fs::create_dir_all(root.join("proofs")).unwrap();
+        let original = b"# preserve this comment\npuzzles:\n  - id: truth\n    title: Truth\n    goal: True\n";
+        // Formula strings must stay strings under strict YAML parsing.
+        let original = String::from_utf8(original.to_vec()).unwrap().replace("goal: True", "goal: 'True'");
+        fs::write(root.join("proofs/basics.yaml"), &original).unwrap();
+        let mut manifest = minimal_manifest();
+        manifest.proofs = vec!["proofs/basics.yaml".to_owned()];
+        let mut request = visual_save_request(root, manifest, Vec::new(), Vec::new());
+        let catalog = draft(root, &request).unwrap();
+        let payload = project_payload(root, &catalog, EditorLayout::default(), String::new()).unwrap();
+        assert_eq!(payload.proofs[0].definition.puzzles[0].id, "truth");
+        let before = project_fingerprint(root, &request.manifest).unwrap();
+        request.manifest.content_version = "edited".to_owned();
+        let writes = serialize_project(root, &request).unwrap();
+        assert!(!paths(&writes).contains(&root.join("proofs/basics.yaml")));
+        write_batch(root, &writes, &[]);
+        let reopened = ContentCatalog::from_root(root.to_path_buf()).unwrap();
+        assert_eq!(reopened.manifest.proofs, vec!["proofs/basics.yaml"]);
+        assert!(reopened.proofs.puzzle("truth").is_some());
+        assert_eq!(fs::read_to_string(root.join("proofs/basics.yaml")).unwrap(), original);
+        let mut removed = request.manifest.clone();
+        removed.proofs.clear();
+        assert!(managed_deletions(root, &request.manifest, &removed).is_empty());
+        let fingerprint = project_fingerprint(root, &request.manifest).unwrap();
+        fs::write(root.join("proofs/basics.yaml"), format!("{original}# external edit\n")).unwrap();
+        assert_ne!(fingerprint, project_fingerprint(root, &request.manifest).unwrap());
+        assert_ne!(before, fingerprint);
+    }
 
     fn visual_file<T>(path: &str, definition: T) -> EditorFile<T> {
         EditorFile {

@@ -12,6 +12,7 @@ export function describePrompt(update: RuntimeUpdate | null) {
   const prompt = update?.snapshot.prompt;
   const dialogue = prompt?.kind === "dialogue" ? prompt : null;
   const longText = prompt?.kind === "long_text" ? prompt : null;
+  const proof = prompt?.kind === "proof" ? prompt : null;
   const choice = prompt?.kind === "choice" ? prompt : null;
   const textPrompt: DialoguePrompt | LongTextPrompt | null =
     dialogue ?? longText;
@@ -51,6 +52,7 @@ export function describePrompt(update: RuntimeUpdate | null) {
     dialogue,
     longText,
     choice,
+    proof,
     textPrompt,
     renderedDialoguePage,
     longTextPage: update?.snapshot.long_text_page ?? null,

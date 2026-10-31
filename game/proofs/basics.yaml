@@ -1,0 +1,172 @@
+cards:
+  - id: and_intro
+    name: 合取引入
+    params: [{name: p, type: Prop}, {name: q, type: Prop}]
+    premises: [p, q]
+    conclusion: p ∧ q
+    lean: "⟨p0, p1⟩"
+  - id: and_left
+    name: 合取左取
+    params: [{name: p, type: Prop}, {name: q, type: Prop}]
+    premises: [p ∧ q]
+    conclusion: p
+    lean: p0.1
+  - id: and_right
+    name: 合取右取
+    params: [{name: p, type: Prop}, {name: q, type: Prop}]
+    premises: [p ∧ q]
+    conclusion: q
+    lean: p0.2
+  - id: or_inl
+    name: 析取左引入
+    params: [{name: p, type: Prop}, {name: q, type: Prop}]
+    premises: [p]
+    conclusion: p ∨ q
+    lean: Or.inl p0
+  - id: or_inr
+    name: 析取右引入
+    params: [{name: p, type: Prop}, {name: q, type: Prop}]
+    premises: [q]
+    conclusion: p ∨ q
+    lean: Or.inr p0
+  - id: false_elim
+    name: 矛盾消去
+    params: [{name: p, type: Prop}]
+    premises: [False]
+    conclusion: p
+    lean: False.elim p0
+  - id: le_refl
+    name: 小于等于自反
+    params: [{name: a, type: Nat}]
+    conclusion: a ≤ a
+    lean: Nat.le_refl a
+  - id: le_trans
+    name: 小于等于传递
+    params: [{name: a, type: Nat}, {name: b, type: Nat}, {name: c, type: Nat}]
+    premises: [a ≤ b, b ≤ c]
+    conclusion: a ≤ c
+    lean: Nat.le_trans p0 p1
+  - id: lt_of_le_of_lt
+    name: 不等式传递
+    params: [{name: a, type: Nat}, {name: b, type: Nat}, {name: c, type: Nat}]
+    premises: [a ≤ b, b < c]
+    conclusion: a < c
+    lean: Nat.lt_of_le_of_lt p0 p1
+  - id: add_comm
+    name: 加法交换
+    params: [{name: a, type: Nat}, {name: b, type: Nat}]
+    conclusion: a + b = b + a
+    lean: Nat.add_comm a b
+  - id: eq_refl
+    name: 等式自反
+    params: [{name: a, type: Nat}]
+    conclusion: a = a
+    lean: Eq.refl a
+  - id: eq_symm
+    name: 等式对称
+    params: [{name: a, type: Nat}, {name: b, type: Nat}]
+    premises: [a = b]
+    conclusion: b = a
+    lean: Eq.symm p0
+  - id: succ_congr
+    name: 后继保持相等
+    params: [{name: a, type: Nat}, {name: b, type: Nat}]
+    premises: [a = b]
+    conclusion: a + 1 = b + 1
+    lean: congrArg Nat.succ p0
+puzzles:
+  - id: and_comm
+    title: 合取交换
+    description: 已知两个命题同时成立，交换它们的顺序。
+    variables: [{name: p, type: Prop}, {name: q, type: Prop}]
+    hypotheses: [{name: h, statement: p ∧ q, label: 已知合取}]
+    goal: q ∧ p
+    cards: [and_intro, and_left, and_right]
+    nodes: [card, claim]
+    solution:
+      nodes:
+        - {id: given-0, kind: given, hypothesis: h, x: 80, y: 80}
+        - {id: left, kind: card, card: and_left, args: [p, q], x: 400, y: 220}
+        - {id: right, kind: card, card: and_right, args: [p, q], x: 400, y: 80}
+        - {id: pair, kind: card, card: and_intro, args: [q, p], x: 750, y: 150}
+        - {id: goal, kind: goal, x: 1100, y: 150}
+      edges:
+        - {from: given-0, from_port: out, to: left, to_port: p0}
+        - {from: given-0, from_port: out, to: right, to_port: p0}
+        - {from: right, from_port: out, to: pair, to_port: p0}
+        - {from: left, from_port: out, to: pair, to_port: p1}
+        - {from: pair, from_port: out, to: goal, to_port: in}
+  - id: or_comm
+    title: 析取交换
+    variables: [{name: p, type: Prop}, {name: q, type: Prop}]
+    goal: p ∨ q → q ∨ p
+    cards: [or_inl, or_inr]
+    nodes: [intro, cases, card]
+    solution:
+      nodes:
+        - {id: intro, kind: intro, binders: [h], x: 850, y: 150}
+        - {id: split, kind: cases, x: 600, y: 150}
+        - {id: left, kind: card, card: or_inr, args: [q, p], x: 350, y: 80}
+        - {id: right, kind: card, card: or_inl, args: [q, p], x: 350, y: 280}
+        - {id: goal, kind: goal, x: 1100, y: 150}
+      edges:
+        - {from: intro, from_port: l0, to: split, to_port: or}
+        - {from: split, from_port: l0, to: left, to_port: p0}
+        - {from: split, from_port: l1, to: right, to_port: p0}
+        - {from: left, from_port: out, to: split, to_port: left}
+        - {from: right, from_port: out, to: split, to_port: right}
+        - {from: split, from_port: out, to: intro, to_port: body}
+        - {from: intro, from_port: out, to: goal, to_port: in}
+  - id: le_chain
+    title: 不等式接龙
+    variables: [{name: a, type: Nat}, {name: b, type: Nat}, {name: c, type: Nat}, {name: d, type: Nat}]
+    hypotheses: [{name: hab, statement: a ≤ b}, {name: hbc, statement: b ≤ c}, {name: hcd, statement: c ≤ d}]
+    goal: a ≤ d
+    cards: [le_trans]
+    nodes: [card]
+    solution:
+      nodes:
+        - {id: given-0, kind: given, hypothesis: hab, x: 80, y: 80}
+        - {id: given-1, kind: given, hypothesis: hbc, x: 80, y: 220}
+        - {id: given-2, kind: given, hypothesis: hcd, x: 80, y: 360}
+        - {id: abbc, kind: card, card: le_trans, args: [a, b, c], x: 400, y: 150}
+        - {id: accd, kind: card, card: le_trans, args: [a, c, d], x: 750, y: 220}
+        - {id: goal, kind: goal, x: 1100, y: 220}
+      edges:
+        - {from: given-0, from_port: out, to: abbc, to_port: p0}
+        - {from: given-1, from_port: out, to: abbc, to_port: p1}
+        - {from: abbc, from_port: out, to: accd, to_port: p0}
+        - {from: given-2, from_port: out, to: accd, to_port: p1}
+        - {from: accd, from_port: out, to: goal, to_port: in}
+  - id: exists_double
+    title: 构造二倍数
+    goal: "∀ n : Nat, ∃ m : Nat, m = n + n"
+    cards: []
+    nodes: [intro, exists_intro, auto]
+    tactics: [rfl]
+    solution:
+      nodes:
+        - {id: intro, kind: intro, binders: [n], x: 850, y: 150}
+        - {id: witness, kind: exists_intro, term: n + n, x: 600, y: 150}
+        - {id: refl, kind: auto, tactic: rfl, x: 350, y: 150}
+        - {id: goal, kind: goal, x: 1100, y: 150}
+      edges:
+        - {from: refl, from_port: out, to: witness, to_port: proof}
+        - {from: witness, from_port: out, to: intro, to_port: body}
+        - {from: intro, from_port: out, to: goal, to_port: in}
+  - id: zero_add
+    title: 零加自然数
+    goal: "∀ n : Nat, 0 + n = n"
+    cards: [eq_refl, succ_congr]
+    nodes: [induction, card]
+    solution:
+      nodes:
+        - {id: induction, kind: induction, binders: [k], x: 850, y: 150}
+        - {id: base, kind: card, card: eq_refl, args: ['0'], x: 350, y: 80}
+        - {id: step, kind: card, card: succ_congr, args: [0 + k, k], x: 350, y: 280}
+        - {id: goal, kind: goal, x: 1100, y: 150}
+      edges:
+        - {from: base, from_port: out, to: induction, to_port: base}
+        - {from: induction, from_port: l1, to: step, to_port: p0}
+        - {from: step, from_port: out, to: induction, to_port: step}
+        - {from: induction, from_port: out, to: goal, to_port: in}

@@ -1,3 +1,4 @@
+mod proof;
 mod audio;
 mod dialogue;
 mod preview;

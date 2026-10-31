@@ -550,6 +550,7 @@ function EditorApp(): ReactElement {
             diagnostics={diagnostics}
             layout={project.layout.scenes[activeSceneId]}
             manifest={project.manifest}
+            proofs={project.proofs}
             onAddNode={nodes.addNode}
             onDuplicate={nodes.duplicateNode}
             onDuplicateSelection={nodes.duplicateGraphSelection}

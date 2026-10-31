@@ -1,3 +1,8 @@
+import type {
+  ProofBoardSpec,
+  ProofCheckResult,
+  ProofGraph,
+} from "@vectspace/presentation-core/proof";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   EditorDiagnostic,
@@ -95,6 +100,40 @@ export const editorApi = {
   previewSessionStart,
   previewSessionAdvance,
   previewSessionChoose,
+  previewProofBoard: (request: { session_id: string; puzzle: string }) =>
+    command<ProofBoardSpec>("preview_proof_board", { request }),
+  previewProofCheck: (request: {
+    session_id: string;
+    puzzle: string;
+    graph: ProofGraph;
+  }) => command<ProofCheckResult>("preview_proof_check", { request }),
+  previewProofSaveDraft: async (request: {
+    session_id: string;
+    prompt_id: string;
+    graph: ProofGraph;
+  }): Promise<void> => {
+    await command<null>("preview_proof_save_draft", { request });
+  },
+  previewProofSubmit: (request: {
+    session_id: string;
+    expected_revision: string;
+    graph: ProofGraph;
+  }) =>
+    command<unknown>("preview_proof_submit", { request }).then(
+      (value) =>
+        decodeWireValue(value) as {
+          accepted: boolean;
+          check: ProofCheckResult;
+          update: RuntimeUpdate | null;
+        },
+    ),
+  previewProofAbandon: (request: {
+    session_id: string;
+    expected_revision: string;
+  }) =>
+    command<unknown>("preview_proof_abandon", { request }).then(
+      (value) => decodeWireValue(value) as RuntimeUpdate,
+    ),
   previewSessionClickButton,
   previewSessionPresentationComplete,
   previewSessionTick,

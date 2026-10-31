@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use vectspace_core::content::ContentCatalog;
 use vectspace_protocol::WireCommandError;
@@ -12,8 +12,8 @@ use crate::assets::{InspectedImport, StagedImport};
 use crate::error::{internal_command_error, validation_command_error};
 use crate::preview::session::LivePreviewSession;
 
-#[derive(Default)]
 pub(crate) struct EditorState {
+    pub(crate) proof_checker: Arc<Mutex<vectspace_proof::ProofChecker>>,
     pub(crate) session: Mutex<Option<ProjectSession>>,
     /// Asset imports are staged outside the managed content tree until the
     /// user saves the project.  Keeping the records in the host (rather than
@@ -29,6 +29,22 @@ pub(crate) struct EditorState {
     /// across a presentation await.
     pub(crate) preview: Mutex<Option<LivePreviewSession>>,
     pub(crate) preview_ids: AtomicU64,
+}
+
+impl Default for EditorState {
+    fn default() -> Self {
+        let lean = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lean");
+        Self {
+            session: Mutex::default(),
+            imports: Mutex::default(),
+            inspections: Mutex::default(),
+            preview: Mutex::default(),
+            preview_ids: AtomicU64::default(),
+            proof_checker: Arc::new(Mutex::new(vectspace_proof::ProofChecker::new(
+                vectspace_proof::LeanConfig::discover(&lean).ok(),
+            ))),
+        }
+    }
 }
 
 pub(crate) struct ProjectSession {

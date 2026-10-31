@@ -17,6 +17,11 @@ import type {
   RuntimeUpdate,
 } from "@vectspace/presentation-core/types";
 
+import { ProofPromptLayer } from "./ProofPromptLayer";
+import type {
+  ProofCheckResult,
+  ProofGraph,
+} from "@vectspace/presentation-core/proof";
 import type { PromptView } from "../engine/promptView";
 import type { TextRevealState } from "../engine/useTextReveal";
 
@@ -39,6 +44,10 @@ interface PromptLayersProps {
   longTextRef: RefObject<LongTextPanelHandle | null>;
   onTypingChange(typing: boolean, cps: number): void;
   onRevealComplete(instanceKey: string): void;
+  onProofSubmit?(
+    graph: ProofGraph,
+  ): Promise<{ accepted: boolean; check: ProofCheckResult }>;
+  onProofAbandon?(): void;
   onChoose(choiceId: string): void;
   onDiagnostic(message: string): void;
 }
@@ -61,6 +70,8 @@ export function PromptLayers({
   longTextRef,
   onTypingChange,
   onRevealComplete,
+  onProofSubmit,
+  onProofAbandon,
   onChoose,
   onDiagnostic,
 }: PromptLayersProps): ReactElement {
@@ -133,6 +144,19 @@ export function PromptLayers({
         />
       )}
 
+      {view.proof !== null &&
+        onProofSubmit &&
+        onProofAbandon &&
+        update.session_id !== undefined && (
+          <ProofPromptLayer
+            key={view.proof.prompt_id}
+            prompt={view.proof}
+            sessionId={update.session_id}
+            onSubmit={onProofSubmit}
+            onAbandon={onProofAbandon}
+            onDiagnostic={onDiagnostic}
+          />
+        )}
       {choice !== null && (
         // Keep this component mounted across same-prompt runtime updates.
         // ChoiceLayer owns the stable prompt-id reset; update_id is a volatile

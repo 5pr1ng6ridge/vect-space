@@ -2,6 +2,7 @@
 members = [
   "crates/vectspace-core",
   "crates/vectspace-protocol",
+  "crates/vectspace-proof",
   "src-tauri",
   "editor/src-tauri",
 ]
@@ -20,3 +21,4 @@ thiserror = "2"
 ts-rs = { version = "12", features = ["serde-compat"] }
 vectspace-core = { path = "crates/vectspace-core" }
 vectspace-protocol = { path = "crates/vectspace-protocol" }
+vectspace-proof = { path = "crates/vectspace-proof" }

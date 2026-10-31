@@ -17,6 +17,7 @@ export const NODE_TYPES: { type: NodeType; label: string; group: string }[] = [
   { type: "say", label: "对话", group: "叙事" },
   { type: "long_text", label: "长文本", group: "叙事" },
   { type: "long_text_control", label: "文稿控制", group: "叙事" },
+  { type: "proof", label: "证明", group: "交互" },
   { type: "choice", label: "选择", group: "逻辑" },
   { type: "condition", label: "条件分支", group: "逻辑" },
   { type: "playback", label: "播放控制", group: "流程" },
@@ -58,6 +59,7 @@ export function defaultNode(
   type: NodeType,
   fallback: string,
   scenes: readonly SceneDefinition[] = [],
+  proofs: readonly import("../types").ProofFile[] = [],
 ): SceneNode {
   switch (type) {
     case "background":
@@ -175,6 +177,13 @@ export function defaultNode(
         type,
         document: "lecture",
         action: "show",
+        next: fallback,
+      };
+    case "proof":
+      return {
+        type,
+        puzzle:
+          proofs.flatMap((file) => file.definition.puzzles ?? [])[0]?.id ?? "",
         next: fallback,
       };
     case "choice":

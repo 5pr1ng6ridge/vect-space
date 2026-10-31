@@ -73,6 +73,7 @@ export function insertNode(
     type,
     originalTarget,
     updated.scenes.map((scene) => scene.definition),
+    updated.proofs,
   );
   const templatePorts = outputPorts(template);
   if (templatePorts.length === 0 && !(side === "right" && type === "end")) {

@@ -202,7 +202,7 @@ impl RuntimeEngine {
         Ok(self.finish_update(cues, true))
     }
 
-    fn ensure_interactive(&self, expected_revision: u64) -> Result<(), RuntimeError> {
+    pub(super) fn ensure_interactive(&self, expected_revision: u64) -> Result<(), RuntimeError> {
         if !self.started {
             return Err(RuntimeError::NotStarted);
         }

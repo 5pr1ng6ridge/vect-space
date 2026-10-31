@@ -1,5 +1,6 @@
 schema_version: 2
 content_version: demo-2
+proofs: [proofs/basics.yaml]
 entry_scene: prologue
 default_locale: zh-CN
 variables:
@@ -354,6 +355,7 @@ scenes:
 - scenes/window_pair_main.yaml
 - scenes/window_pair_side.yaml
 - scenes/visual_showcase.yaml
+- scenes/proof_lab.yaml
 ui_motions:
 - ui/motions/dialogue_slide_in.yaml
 - ui/motions/dialogue_slide_out.yaml

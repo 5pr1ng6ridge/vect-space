@@ -23,6 +23,10 @@ import {
   resolveTextBlocks,
   type TextBlockMap,
 } from "@vectspace/presentation-core/text-block";
+import type {
+  ProofCheckResult,
+  ProofGraph,
+} from "@vectspace/presentation-core/proof";
 import type { ParticleMap } from "@vectspace/presentation-core/particles";
 import {
   requireSessionId,
@@ -636,6 +640,38 @@ export default function App(): ReactElement {
     }
     void runStoryCommand(() =>
       engineApi.choose(choiceId, snapshot.revision, activeSessionId.current),
+    );
+  };
+
+  const submitProof = async (
+    graph: ProofGraph,
+  ): Promise<{ accepted: boolean; check: ProofCheckResult }> => {
+    const retained = update;
+    const snapshot = retained?.snapshot;
+    if (!retained || snapshot?.prompt.kind !== "proof")
+      throw new Error("当前没有进行中的证明题。");
+    let response: { accepted: boolean; check: ProofCheckResult } | null = null;
+    const applied = await runStoryCommand(async () => {
+      const submitted = await engineApi.proofSubmit(
+        snapshot.revision,
+        graph,
+        activeSessionId.current,
+      );
+      response = submitted;
+      // An incomplete submission leaves the current runtime untouched.
+      return submitted.update ?? retained;
+    });
+    if (!applied || response === null)
+      throw new Error("证明提交失败，请重试。");
+    return response;
+  };
+
+  const abandonProof = (): void => {
+    const snapshot = update?.snapshot;
+    if (snapshot?.prompt.kind !== "proof" || !snapshot.prompt.can_abandon)
+      return;
+    void runStoryCommand(() =>
+      engineApi.proofAbandon(snapshot.revision, activeSessionId.current),
     );
   };
 
@@ -1291,8 +1327,12 @@ export default function App(): ReactElement {
   }, [pageHidden]);
 
   useEffect(() => {
-    pauseRef.current?.set("panel", panel !== "none" && phase === "playing");
-  }, [panel, phase]);
+    pauseRef.current?.set(
+      "panel",
+      (panel !== "none" || update?.snapshot.prompt.kind === "proof") &&
+        phase === "playing",
+    );
+  }, [panel, phase, update?.snapshot.prompt.kind]);
 
   // Opening any in-game panel is a hard input boundary.  In particular a
   // Ctrl key that was held while clicking the toolbar must not resume a
@@ -1424,6 +1464,8 @@ export default function App(): ReactElement {
               fontKey={defaultFontId ?? "system"}
               fontReady={fontReady}
               longTextRef={longTextRef}
+              onProofSubmit={submitProof}
+              onProofAbandon={abandonProof}
               onChoose={choose}
               onDiagnostic={setError}
               onRevealComplete={handleRevealComplete}

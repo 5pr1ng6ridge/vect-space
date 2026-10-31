@@ -8,6 +8,8 @@
 //! world.  The lock is only held for synchronous runtime work, never across a
 //! presentation await.
 
+pub(crate) mod proof;
+
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -581,7 +583,7 @@ mod tests {
         serde_json::to_value(value).unwrap()
     }
 
-    fn request<T: serde::de::DeserializeOwned>(value: Value) -> T {
+    pub(super) fn request<T: serde::de::DeserializeOwned>(value: Value) -> T {
         serde_json::from_value(value).unwrap()
     }
 
@@ -602,7 +604,7 @@ mod tests {
         }))
     }
 
-    fn start_preview(
+    pub(super) fn start_preview(
         state: &EditorState,
         project: &Value,
         scene_id: &str,
@@ -675,7 +677,7 @@ mod tests {
         (demo_state(), project)
     }
 
-    fn demo_project_with_scene(scene: Value) -> (EditorState, Value) {
+    pub(super) fn demo_project_with_scene(scene: Value) -> (EditorState, Value) {
         demo_project_with_scenes(&[scene], json!({}))
     }
 

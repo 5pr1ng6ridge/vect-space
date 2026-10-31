@@ -114,6 +114,7 @@ pub(super) fn validate_manifest_paths(manifest: &ContentManifest) -> Result<(), 
     }
     for path in &manifest.text_blocks { register("text_block", path)?; }
     for path in &manifest.particles { register("particle", path)?; }
+    for path in &manifest.proofs { register("proof", path)?; }
     if let Some(path) = &manifest.chapter_map {
         register("chapter_map", path)?;
     }

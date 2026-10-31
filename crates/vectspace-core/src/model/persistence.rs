@@ -18,6 +18,8 @@ pub struct ProfileState {
     pub seen_presentations: BTreeSet<String>,
     #[serde(default)]
     pub completed_scenes: BTreeSet<String>,
+    #[serde(default)]
+    pub solved_proofs: BTreeSet<String>,
     /// Persisted storage for the active Scene's dialogue history. The runtime
     /// clears it whenever a new Scene/session becomes the owner.
     #[serde(default)]

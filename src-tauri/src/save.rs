@@ -150,6 +150,8 @@ struct ProfileFile {
     read_content_version: String,
     read_dialogues: std::collections::BTreeSet<String>,
     seen_presentations: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    solved_proofs: std::collections::BTreeSet<String>,
     /// Kept as a raw JSON value so one malformed history item does not discard
     /// otherwise valid profile variables and completion flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -360,6 +362,7 @@ impl ProfileManager {
                                 read_content_version: file.read_content_version,
                                 read_dialogues: file.read_dialogues,
                                 seen_presentations: file.seen_presentations,
+                                solved_proofs: file.solved_proofs,
                                 completed_scenes: file.completed_scenes,
                                 dialogue_history,
                             },
@@ -433,6 +436,7 @@ impl ProfileManager {
             read_content_version: self.content_version.clone(),
             read_dialogues: Default::default(),
             seen_presentations: Default::default(),
+            solved_proofs: Default::default(),
             completed_scenes: Default::default(),
             dialogue_history: Default::default(),
         })
@@ -583,6 +587,7 @@ impl ProfileManager {
             read_content_version: state.read_content_version.clone(),
             read_dialogues: state.read_dialogues.clone(),
             seen_presentations: state.seen_presentations.clone(),
+            solved_proofs: state.solved_proofs.clone(),
             dialogue_history: Some(
                 serde_json::to_value(&state.dialogue_history)
                     .map_err(|error| SaveError::InvalidData(error.to_string()))?,
@@ -908,6 +913,7 @@ fn prompt_preview(snapshot: &RuntimeSnapshot) -> Option<String> {
             combined_dialogue.as_ref().unwrap_or(text)
         }
         PromptSnapshot::LongText { text, .. } => text,
+        PromptSnapshot::Proof { puzzle, .. } => puzzle,
         PromptSnapshot::Choice { choices, .. } => choices.first().map(|choice| &choice.label)?,
         PromptSnapshot::None | PromptSnapshot::End { .. } => return None,
     };
@@ -1125,6 +1131,7 @@ mod tests {
                 read_content_version: "demo-c1".to_owned(),
                 read_dialogues: Default::default(),
                 seen_presentations: Default::default(),
+                solved_proofs: Default::default(),
                 completed_scenes: Default::default(),
                 dialogue_history: Default::default(),
             },
@@ -1244,6 +1251,7 @@ mod tests {
         profile
             .seen_presentations
             .insert("prologue/timeline_showcase".to_owned());
+        profile.solved_proofs.insert("identity".to_owned());
         profile.dialogue_history.push(DialogueHistoryEntry {
             speaker_id: Some("alice".to_owned()),
             speaker: Some("爱丽丝".to_owned()),
@@ -1265,6 +1273,7 @@ mod tests {
         assert!(changed.read_dialogues.is_empty());
         assert!(changed.seen_presentations.is_empty());
         assert!(changed.dialogue_history.is_empty());
+        assert_eq!(changed.solved_proofs, profile.solved_proofs);
     }
 
     #[test]

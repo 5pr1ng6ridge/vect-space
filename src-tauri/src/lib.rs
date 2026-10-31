@@ -2,6 +2,7 @@
 //! serves the frontends through the Tauri commands in [`commands`].
 
 mod commands;
+mod proof;
 mod native_plan;
 mod native_window;
 mod pair;
@@ -87,7 +88,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error>> {
         Some(story_locations(&content)),
     )?;
     let runtime = RuntimeEngine::with_profile(&content, profile_state)?;
-    app.manage(EngineState::new(
+    let mut engine = EngineState::new(
         content,
         runtime,
         Arc::new(TauriWindowOps {
@@ -98,7 +99,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error>> {
         }),
         saves,
         profile,
-    ));
+    );
+    let lean_dir = if cfg!(debug_assertions) {
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../lean"))
+    } else {
+        app.path().resolve("lean", BaseDirectory::Resource).ok().filter(|path| path.is_dir())
+    };
+    let lean = lean_dir.and_then(|path| vectspace_proof::check::LeanConfig::discover(&path).ok());
+    engine.proof_checker = Arc::new(Mutex::new(vectspace_proof::check::ProofChecker::new(lean)));
+    app.manage(engine);
     // Story timers run on a host thread with a monotonic clock; the WebViews
     // never own an authoritative timer.
     let wake = timers::spawn_timer_scheduler(app.handle().clone());
@@ -162,6 +171,11 @@ pub fn run() {
             commands::start_new_game,
             commands::advance,
             commands::choose,
+            proof::proof_board,
+            proof::proof_check,
+            proof::proof_save_draft,
+            proof::proof_submit,
+            proof::proof_abandon,
             commands::click_button,
             commands::presentation_complete,
             commands::secondary_advance,

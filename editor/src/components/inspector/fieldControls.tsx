@@ -326,6 +326,7 @@ export function BooleanField({
 }
 
 export function TargetSelect({
+  emptyLabel,
   label,
   onChange,
   targets,
@@ -335,6 +336,7 @@ export function TargetSelect({
   onChange(value: string): void;
   targets: string[];
   value: string;
+  emptyLabel?: string;
 }): ReactElement {
   const context = useContext(InspectorSceneContext);
   const optionLabel = (id: string): string => {
@@ -355,7 +357,8 @@ export function TargetSelect({
           value={value}
           onChange={(event) => onChange(event.currentTarget.value)}
         >
-          {!targets.includes(value) && (
+          {emptyLabel !== undefined && <option value="">{emptyLabel}</option>}
+          {!targets.includes(value) && !(value === "" && emptyLabel !== undefined) && (
             <option value={value}>{value || "— 缺少目标 —"}</option>
           )}
           {targets.map((target) => (

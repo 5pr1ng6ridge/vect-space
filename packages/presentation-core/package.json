@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./proof": "./src/proof.ts",
     "./audio": "./src/audio.ts",
     "./timeline": "./src/timeline.ts",
     "./ledger": "./src/ledger.ts",

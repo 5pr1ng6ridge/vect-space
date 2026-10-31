@@ -17,6 +17,7 @@ mod dialogue;
 mod execute;
 mod interaction;
 mod preview;
+mod proof;
 mod snapshot;
 mod timeline;
 mod variables;
@@ -53,6 +54,12 @@ pub enum RuntimeError {
     AdvanceNotAllowed,
     #[error("当前不是选择状态")]
     ChoiceNotAllowed,
+    #[error("The current prompt is not a proof activity")]
+    ProofNotAllowed,
+    #[error("This proof activity cannot be abandoned")]
+    ProofAbandonNotAllowed,
+    #[error("Invalid proof draft: {0}")]
+    InvalidProofDraft(String),
     #[error("选项不可用或不存在: {0}")]
     UnknownChoice(String),
     #[error("按钮不可用或不存在: {0}")]
@@ -78,6 +85,7 @@ pub struct RuntimeEngine {
     seen_presentations: std::collections::BTreeSet<String>,
     dialogue_history: Vec<DialogueHistoryEntry>,
     completed_scenes: std::collections::BTreeSet<String>,
+    solved_proofs: std::collections::BTreeSet<String>,
     started: bool,
     next_update_id: u64,
     next_cue_id: u64,
@@ -120,6 +128,7 @@ impl RuntimeEngine {
                 read_content_version: content.manifest.content_version.clone(),
                 read_dialogues: Default::default(),
                 seen_presentations: Default::default(),
+                solved_proofs: Default::default(),
                 completed_scenes: Default::default(),
                 dialogue_history: Default::default(),
             },
@@ -141,6 +150,7 @@ impl RuntimeEngine {
             snapshot,
             profile_variables: profile.variables,
             read_dialogues: profile.read_dialogues,
+            solved_proofs: profile.solved_proofs,
             seen_presentations: profile.seen_presentations,
             dialogue_history: profile.dialogue_history,
             completed_scenes: profile.completed_scenes,
@@ -224,6 +234,7 @@ impl RuntimeEngine {
                 read_content_version: content.manifest.content_version.clone(),
                 read_dialogues: Default::default(),
                 seen_presentations: Default::default(),
+                solved_proofs: Default::default(),
                 completed_scenes: Default::default(),
                 dialogue_history: Default::default(),
             },
@@ -276,6 +287,7 @@ impl RuntimeEngine {
                 variables: profile_defaults(content)?,
                 read_content_version: content.manifest.content_version.clone(),
                 read_dialogues: profile.read_dialogues,
+                solved_proofs: profile.solved_proofs,
                 seen_presentations: profile.seen_presentations,
                 completed_scenes: Default::default(),
                 // Replay is isolated: retain read/seen flags for skip
@@ -374,6 +386,7 @@ impl RuntimeEngine {
             read_content_version: content.manifest.content_version.clone(),
             read_dialogues: self.read_dialogues.clone(),
             seen_presentations: self.seen_presentations.clone(),
+            solved_proofs: self.solved_proofs.clone(),
             completed_scenes: self.completed_scenes.clone(),
             dialogue_history: self.dialogue_history.clone(),
         }

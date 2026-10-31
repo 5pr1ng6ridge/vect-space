@@ -141,6 +141,7 @@ export interface EditorProject {
   actions?: ActionFile[];
   text_blocks?: TextBlockFile[];
   particles?: ParticleFile[];
+  proofs?: import("./content").ProofFile[];
   chapter_map?: ChapterMapFile | null;
   layout: EditorLayout;
   assets: EditorAsset[];

@@ -8,6 +8,8 @@
     "packages/*"
   ],
   "scripts": {
+    "lean:build": "node scripts/lean-build.mjs",
+    "proofs:check": "cargo run -q -p vectspace-proof --bin check_proofs",
     "assets:ambience": "node scripts/generate-ambience-assets.mjs",
     "assets:check": "node scripts/check-lfs-assets.mjs game/assets && node scripts/generate-ambience-assets.mjs --check",
     "predev": "npm run assets:check",
